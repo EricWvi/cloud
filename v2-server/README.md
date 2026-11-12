@@ -16,22 +16,24 @@ Cloud v2 的**临时**单体后端：一个进程、一个 PostgreSQL 库，实�
 
 ```sh
 docker compose -p cloud up -d --wait   # 在仓库根目录
-go run .                               # 监听 127.0.0.1:8090
+V2_LOGIN=email go run .                # 开发模式，监听 127.0.0.1:8090
 ```
 
 收到 SIGTERM 或中断信号时，进程会取消 HTTP 请求上下文，让保持打开的对话 SSE 关闭观察并等待其读取协程退出，再结束 HTTP、公共执行服务和数据库。关闭浏览器或单条 SSE 只停止对应观察者，不取消执行 worker；进程退出时的执行停止与完整终态保存仍由公共执行服务负责。
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
+| `V2_LOGIN` | 必填 | `email` 仅开发；`idaas` 为部署模式，当前构建不提供 IDaaS 登录并拒绝启动 |
+| `V2_FRONTEND_DIR` | 未设置 | 前端构建目录；未设置保留 API-only |
 | `V2_ADDR` | `127.0.0.1:8090` | 监听地址 |
 | `V2_DATABASE_URL` | `postgres://ora:ora-local@127.0.0.1:55432/ora_v2?sslmode=disable` | PostgreSQL |
 | `V2_DATA_DIR` | `$HOME/.ora-v2` | 仓库 mirror、marketplace checkout、Node 与对话目录；同一目录只允许一个进程持有，使用短路径以满足 Unix socket 长度限制；用 release 构建的 Node 时，它和各级父目录都不能组可写或其他人可写（不能放在 `/tmp` 下），否则启动时报错退出 |
 | `V2_USERS_FILE` | `users.json` | 启动时预置的账号文件（相对进程工作目录）：`users` 里的 `email`、可选的 `displayName`、`role`（`owner` / `member`）；`retired` 里列出要从成员页移除的旧预置 `email`。`users` 幂等写入，已存在的账号只更新名字和角色；不在 `users` 里的账号默认保留，只有 `retired` 中的地址会在首次启动时软删除。文件缺失、没有 owner、邮箱重复或 `users` 与 `retired` 重叠时拒绝启动 |
-| `V2_PLUGIN_MARKETPLACE_URL` | `https://github.com/ora-space/marketplace` | 插件市场 Git HTTPS 地址；禁止携带凭据、query 或 fragment。离线测试直接构造 Syncer 使用本地仓库 |
+| `V2_PLUGIN_MARKETPLACE_URL` | `https://github.com/ora-space/marketplace` | 未设置使用开发默认，显式空字符串关闭官方源；插件市场 Git HTTPS 地址；禁止携带凭据、query 或 fragment。离线测试直接构造 Syncer 使用本地仓库 |
 | `V2_PLUGIN_MARKETPLACE_BRANCH` | `main` | 市场同步分支；启动时浅克隆并拉取，之后按间隔快进工作副本 |
 | `V2_PLUGIN_MARKETPLACE_INTERVAL` | `5m` | 市场刷新间隔；必须为正 duration。失败时保留上一版 PostgreSQL 快照 |
 | `V2_MARKET_SOCKS_PROXY` | 未设置 | 自定义来源启用代理时使用的部署级 SOCKS5 地址；Git 与 Skill 包下载都使用，客户端只把已校验的公网 IP 交给代理 |
-| `V2_MARKET_CREDENTIAL_KEY` | 未设置 | 来源凭据和租户 MCP 设置的 AES-256-GCM 密钥（Base64 编码的 32 字节），保存 MCP 设置、S3 来源或 Git 认证时必须持久提供 |
+| `V2_MARKET_CREDENTIAL_KEY` | 未设置 | 来源凭据、租户 MCP 设置与私有项目仓库令牌的 AES-256-GCM 密钥（Base64 编码的 32 字节）；保存 MCP 设置、启用 S3 来源、自定义来源 Git 认证或私有项目仓库令牌时必须持久提供 |
 | `V2_NODE_ASSETS_DIR` | 未设置 | `task v2:node:prepare` 生成的固定 Node、reaper、Deno、OpenCode 和 Claude Code 资源；未设置时只启用纯模型路径 |
 | `V2_MODEL_BASE_URL` / `V2_MODEL_API_KEY` / `V2_MODEL_NAME` | 未设置 | 可选的一组 HTTPS OpenAI 兼容 provider；必须同时设置，OpenCode 与纯模型共用，清单只公开模型名称与版本 |
 | `V2_ANTHROPIC_MODEL_BASE_URL` / `V2_ANTHROPIC_MODEL_API_KEY` / `V2_ANTHROPIC_MODEL_NAME` | 未设置 | 可选的一组 HTTPS Anthropic 兼容 provider（Messages API，base URL 写到 `/v1`，如 `https://api.anthropic.com/v1`）；必须同时提供地址、凭据和模型名，只供 Claude Code 使用。使用 Bearer 网关时以 `V2_ANTHROPIC_MODEL_AUTH_TOKEN` 代替 `V2_ANTHROPIC_MODEL_API_KEY`，二者不能同时配置；Claude Code 的 base URL 若以 `/compatible` 结尾，这里填 `/compatible/v1` |
@@ -652,7 +654,7 @@ fixture 只替代模型，Git、Node、OpenCode / Claude Code 与 shell 工具�
 ```sh
 # 在仓库根目录准备资源，随后到 v2-server；资源和数据目录均使用 Linux 原生磁盘。
 task v2:node:prepare
-V2_NODE_ASSETS_DIR=/absolute/path/to/assets go run . -fixture-check
+V2_LOGIN=email V2_NODE_ASSETS_DIR=/absolute/path/to/assets go run . -fixture-check
 # 公共 Service 的真实工具写入、End 和 PostgreSQL 重启读取
 V2_NODE_ASSETS_DIR=/absolute/path/to/assets TEST_DATABASE_URL='postgres://ora:ora-local@127.0.0.1:55432/ora?sslmode=disable' go test -race -count=1 -run TestReal -v ./internal/executionruntime
 ```
@@ -661,7 +663,7 @@ V2_NODE_ASSETS_DIR=/absolute/path/to/assets TEST_DATABASE_URL='postgres://ora:or
 首次安装要解压和校验，明显慢于之后的启动；安装结果留在 `V2_DATA_DIR` 的项目 Node 目录里，
 之后重启服务再用只需约一秒。演示前先在每个演示项目里跑一轮 Claude Code，可避开这次等待。
 
-End 和重启不自动删除目录。停止服务后 `go run . -cleanup` 只删除确认停止后的登记 Node 与对话目录，
+End 和重启不自动删除目录。停止服务后 `V2_LOGIN=email go run . -cleanup` 只删除确认停止后的登记 Node 与对话目录，
 保留项目 mirror 和数据库历史；命令拒绝与持有同一数据目录的服务并行运行。
 外部 provider 的显式验收入口与配置见执行服务包 README；默认 skip 不代表外部 provider 验收通过。
 
@@ -869,3 +871,15 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 `form` 负责冻结证据并等待确认，`createTasks` 根据确认结果创建或关联任务；二者使用 `workflows.openapi.json` 中的 v2 契约。表单的 GET/PUT/POST `/api/v2/tenants/{tid}/workflow-runs/{rid}/form` 与 POST `…/form/retry` 属于正式 Cloud 尚未提供的候选接口。行为、权限、幂等、去重与恢复边界见 [动态表单说明](internal/workflowforms/README.md)。等待确认的轮次不占用下一晚的自动执行资格，但仍保留未完成状态和终态跟踪。DTS 只有前端演示回执，不代表外部工单已提交。
 
 任务时间轴中的 `TaskRun.demoSeed` 明确区分未执行的预置历史样例。它依据 seed 专用会话身份与启动键的一致关系投影，既有样例也会标记，不需要数据迁移；实际运行即使使用 fixture 模型也为 false。团队概览排除这类样例的运行数和 Agent 产出，会话分析仍保留样例以供检查。
+
+## 内网部署
+
+首次部署构建和长期安装/升级步骤见 [部署说明](docs/deployment.md)（[English](docs/deployment.en.md)）。
+直接开发启动须显式设置 `V2_LOGIN=email`；demo/开发 task 已设置。部署选择 `V2_LOGIN=idaas`，
+当前构建不提供 IDaaS 登录，在任何数据操作前明确拒绝启动，不得回落 email。`V2_FRONTEND_DIR` 指向前端构建目录，空值保留 API-only。
+`V2_PLUGIN_MARKETPLACE_URL` 未设置保留开发默认，显式空字符串关闭官方同步和目录，保留自定义源；`V2_MARKET_CREDENTIAL_KEY` 同步保护自定义市场 S3/Git 凭据、租户 MCP 设置与私有项目仓库令牌。
+
+部署边界依据：[Cloud 单进程（A1）](https://github.com/ora-space/specs/blob/main/decisions/cloud/lifecycle/0-single-process-cloud-on-enterprise-intranet.md) 和[登录与会话（A6）](https://github.com/ora-space/specs/blob/main/decisions/cloud/login/0-idaas-or-email-login-with-shared-web-and-desktop-sessions.md)。
+
+来源列表候选契约 `market-sources.openapi.json` 的 `officialEnabled` 返回部署是否启用官方来源，
+不依赖同步结果或目录条目；`items` 仍只列空间自定义来源，不将官方来源作为可编辑条目。
