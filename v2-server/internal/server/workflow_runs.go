@@ -25,6 +25,12 @@ type WorkflowRunStore interface {
 	DeleteWorkflowRun(context.Context, string, string) error
 }
 
+// workflowStarterStore reads who started a run. It is optional so read-only test stores need not
+// implement it; they report no starter. Callers have already authorized the run in the tenant.
+type workflowStarterStore interface {
+	WorkflowStarter(ctx context.Context, runID string) (string, error)
+}
+
 type workflowRunView struct {
 	ID         string  `json:"id"`
 	WorkflowID string  `json:"workflowId"`
@@ -299,6 +305,19 @@ func (h *handler) getWorkflowRun(w http.ResponseWriter, r *http.Request, a acces
 		workflowRunFault(w, err, "get workflow run failed attempts")
 		return
 	}
+	// The starter is the only member who can talk to or complete an interactive node (its session
+	// is theirs), so the page needs it to decide whether to offer those actions.
+	var startedBy *string
+	if starters, ok := s.(workflowStarterStore); ok {
+		id, err := starters.WorkflowStarter(r.Context(), runID)
+		if err != nil {
+			workflowRunFault(w, err, "get workflow run starter")
+			return
+		}
+		if id != "" {
+			startedBy = &id
+		}
+	}
 	nodeViews := make([]workflowNodeRunView, 0, len(nodes))
 	for _, node := range nodes {
 		nodeViews = append(nodeViews, toWorkflowNodeRunView(node))
@@ -315,6 +334,7 @@ func (h *handler) getWorkflowRun(w http.ResponseWriter, r *http.Request, a acces
 		"iterationConditionDecisions": payloadDecisions(run.RuntimePayload, "iterationConditionDecisions"),
 		"variables":                   workflowRunVariables(run.RuntimePayload),
 		"failedAttempts":              workflowFailedAttempts(failed),
+		"startedBy":                   startedBy,
 	})
 }
 

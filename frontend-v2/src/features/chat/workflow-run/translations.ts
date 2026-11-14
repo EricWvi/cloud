@@ -51,6 +51,9 @@ export const workflowRunTranslations = {
     "errors.workflow_node_not_found": "未找到该工作流节点。",
     "errors.workflow_node_not_awaiting_input":
       "该节点当前不在等待人工输入，无法完成。",
+    "errors.run_owned": "只有发起这次运行的人可以操作这个节点。",
+    "errors.workflow_node_session_ended": "这个节点的会话已经结束，不能继续对话。",
+    "errors.workflow_node_turn_not_running": "这个节点现在没有正在执行的一轮。",
     "errors.workflow_node_incomplete":
       "本轮尚未完成，不能直接完成当前节点；请继续当前步骤或显式强制完成。",
     "errors.workflow_node_turn_changed":
@@ -481,6 +484,25 @@ export const workflowRunTranslations = {
     "workflowRun.v2.setting.mcp": "MCP",
     "workflowRun.v2.setting.retry": "自动重试",
     "workflowRun.v2.setting.interactive": "交互模式",
+    "workflowRun.v2.interactive.awaitingBadge": "等待输入",
+    "workflowRun.v2.interactive.openHint": "等待输入：打开会话继续对话，或完成这一步",
+    "workflowRun.v2.interactive.partialNote":
+      "当前为简化版：由发起人确认完成。停止本轮会结束这个节点的会话，停止后不能继续对话。",
+    "workflowRun.v2.interactive.readOnly":
+      "只有发起这次运行的人可以继续对话、停止或完成这一步，你可以查看。",
+    "workflowRun.v2.interactive.composerLabel": "回复 Agent",
+    "workflowRun.v2.interactive.composerPlaceholder": "继续告诉 Agent 要怎么改，Enter 发送，Shift+Enter 换行",
+    "workflowRun.v2.interactive.send": "发送",
+    "workflowRun.v2.interactive.stop": "停止本轮",
+    "workflowRun.v2.interactive.complete": "完成",
+    "workflowRun.v2.interactive.sessionEnded":
+      "本轮已停止，会话已结束，不能继续对话；可以用最后一次正常结束的回答完成这一步。",
+    "workflowRun.v2.interactive.blocker.no_completed_turn":
+      "还没有正常结束的回答，不能完成这一步；只能停止整个运行。",
+    "workflowRun.v2.interactive.blocker.turn_not_completed":
+      "上一轮没有正常结束，请继续对话让 Agent 给出完整回答后再完成。",
+    "workflowRun.v2.interactive.blocker.structured_output":
+      "回答不符合这个节点要求的结构化输出，请继续对话让 Agent 按格式回答后再完成。",
     "workflowRun.v2.sessionWaiting": "正在等待 Agent 的会话…",
     "workflowRun.v2.sessionRefused":
       "只有启动这次运行的人能查看实时会话；节点完成后会显示任务和回答。",
@@ -545,6 +567,9 @@ export const workflowRunTranslations = {
     "errors.workflow_node_not_found": "Workflow node not found.",
     "errors.workflow_node_not_awaiting_input":
       "This node is not awaiting input and cannot be completed.",
+    "errors.run_owned": "Only the person who started this run can act on this node.",
+    "errors.workflow_node_session_ended": "This node's session has ended; the conversation cannot continue.",
+    "errors.workflow_node_turn_not_running": "This node is not running a turn right now.",
     "errors.workflow_node_incomplete":
       "This turn is incomplete. Continue it or complete it with an explicit force.",
     "errors.workflow_node_turn_changed":
@@ -1018,6 +1043,25 @@ export const workflowRunTranslations = {
     "workflowRun.v2.setting.mcp": "MCP",
     "workflowRun.v2.setting.retry": "Automatic retry",
     "workflowRun.v2.setting.interactive": "Interactive mode",
+    "workflowRun.v2.interactive.awaitingBadge": "Awaiting input",
+    "workflowRun.v2.interactive.openHint": "Awaiting input: open the session to reply or complete this step",
+    "workflowRun.v2.interactive.partialNote":
+      "Simplified for now: the starter confirms completion. Stopping a turn ends this node's session, so the conversation cannot continue afterwards.",
+    "workflowRun.v2.interactive.readOnly":
+      "Only the person who started this run can continue, stop or complete this step; you can read it.",
+    "workflowRun.v2.interactive.composerLabel": "Reply to the agent",
+    "workflowRun.v2.interactive.composerPlaceholder": "Tell the agent what to change. Enter sends, Shift+Enter adds a line",
+    "workflowRun.v2.interactive.send": "Send",
+    "workflowRun.v2.interactive.stop": "Stop this turn",
+    "workflowRun.v2.interactive.complete": "Complete",
+    "workflowRun.v2.interactive.sessionEnded":
+      "The turn was stopped and the session has ended, so the conversation cannot continue. You can complete the step with the last answer that ended normally.",
+    "workflowRun.v2.interactive.blocker.no_completed_turn":
+      "No answer ended normally yet, so this step cannot complete; only stopping the whole run is left.",
+    "workflowRun.v2.interactive.blocker.turn_not_completed":
+      "The last turn did not end normally. Continue the conversation until the agent gives a complete answer.",
+    "workflowRun.v2.interactive.blocker.structured_output":
+      "The answer does not match this node's structured output. Continue the conversation until the agent answers in that format.",
     "workflowRun.v2.sessionWaiting": "Waiting for the Agent's session…",
     "workflowRun.v2.sessionRefused":
       "Only whoever started this run can follow its live session; the task and answer show once the node finishes.",

@@ -26,8 +26,7 @@ type unappliedRule func(config object, at placement) []string
 // unappliedAgentSettings is the single decision on which configured Agent settings a run saves
 // but does not apply. Node.Agent records its result in the attempt payload and AnalyzeWorkflow
 // reports it to the editor; both pass the node's placement, so a rule that depends on where the
-// node sits reads the same inputs on both paths, even while no current rule reads it. The order
-// is the payload's order.
+// node sits reads the same inputs on both paths. The order is the payload's order.
 func unappliedAgentSettings(config object, at placement) []string {
 	var unapplied []string
 	if role, _ := config["roleId"].(string); strings.TrimSpace(role) != "" {
@@ -37,7 +36,9 @@ func unappliedAgentSettings(config object, at placement) []string {
 		unapplied = append(unapplied, "mcp")
 	}
 	interactive, _ := config["interactive"].(bool)
-	if interactive {
+	// v2 parks a root-graph interactive Agent for its starter; a Loop member runs automatically
+	// (desktop would park it). Publication rejects interactive Iteration members, so they never run.
+	if interactive && at.loop != "" {
 		unapplied = append(unapplied, "interactive")
 	}
 	// v2 never retries, so retry is unapplied wherever desktop would retry. Desktop never retries

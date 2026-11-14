@@ -35,8 +35,9 @@ export function useUpdateWorkflowRunInput() {
 }
 
 /**
- * Answers a human-in-the-loop gate. v2 executes no interactive node, so no gate ever opens; the
- * hook refuses instead of pretending an answer reached a run.
+ * Answers a human-in-the-loop gate. v2 opens no such gate (interactive Agent nodes take turns
+ * through their session actions instead), so the hook refuses instead of pretending an answer
+ * reached a run.
  */
 export function useSubmitGraphWorkflowHitl() {
   return useMutation({

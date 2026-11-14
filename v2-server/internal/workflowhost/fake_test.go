@@ -27,6 +27,11 @@ type fakeExecution struct {
 	ended    []string
 	cancels  []execution.Ref
 	next     int
+	// closed sessions accept no Append: End and Cancel (which ends an Agent session) close one.
+	closed   map[string]bool
+	appended []execution.AppendRequest
+	// appendedCh receives each accepted Append's session ID.
+	appendedCh chan string
 
 	// beforeStart runs before a Start is accepted; a non-nil error refuses it.
 	beforeStart func(execution.StartRequest) error
@@ -44,7 +49,7 @@ type fakeSession struct {
 }
 
 func newFakeExecution() *fakeExecution {
-	f := &fakeExecution{sessions: map[string]*fakeSession{}, startedCh: make(chan string, 16)}
+	f := &fakeExecution{sessions: map[string]*fakeSession{}, startedCh: make(chan string, 16), closed: map[string]bool{}, appendedCh: make(chan string, 16)}
 	f.ListExecutorsFunc = func(context.Context, execution.Scope) ([]execution.Executor, error) {
 		return []execution.Executor{
 			{ID: "opencode:fixture", AgentID: "official/ora-space.opencode", AgentName: "OpenCode", PluginVersion: "0.6.11", Model: execution.Model{ID: "fixture", Name: "Fixture"}},
@@ -59,8 +64,10 @@ func newFakeExecution() *fakeExecution {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.ended = append(f.ended, id)
+		f.closed[id] = true
 		return nil
 	}
+	f.AppendFunc = f.appendTurn
 	f.ReadAttemptFunc = func(_ context.Context, _ execution.Scope, c execution.Caller) (execution.Turn, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -143,6 +150,51 @@ func (f *fakeExecution) finish(id string, r execution.Result) {
 	s.events <- execution.Event{Ref: s.ref, Kind: execution.EventTurnEnded, Result: &r}
 }
 
+// appendTurn opens the session's next turn, as the real service's Append on a live session.
+func (f *fakeExecution) appendTurn(_ context.Context, _ execution.Scope, req execution.AppendRequest) (execution.Ref, error) {
+	f.mu.Lock()
+	s := f.sessions[req.SessionID]
+	switch {
+	case s == nil:
+		f.mu.Unlock()
+		return execution.Ref{}, execution.ErrNotFound
+	case f.closed[req.SessionID]:
+		f.mu.Unlock()
+		return execution.Ref{}, execution.ErrSessionEnded
+	case s.caller.AttemptID == req.Caller.AttemptID:
+		f.mu.Unlock()
+		return s.ref, nil
+	case s.result == nil:
+		f.mu.Unlock()
+		return execution.Ref{}, execution.ErrWorkspaceBusy
+	}
+	f.next++
+	s.ref = execution.Ref{SessionID: req.SessionID, TurnID: fmt.Sprintf("turn-%d", f.next)}
+	s.caller, s.result = req.Caller, nil
+	f.appended = append(f.appended, req)
+	f.mu.Unlock()
+	f.appendedCh <- req.SessionID
+	return s.ref, nil
+}
+
+// awaitAppend returns the session of the next accepted follow-up turn.
+func (f *fakeExecution) awaitAppend(t *testing.T) string {
+	t.Helper()
+	select {
+	case id := <-f.appendedCh:
+		return id
+	case <-time.After(5 * time.Second):
+		t.Fatal("no follow-up turn appended")
+		return ""
+	}
+}
+
+func (f *fakeExecution) isClosed(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closed[id]
+}
+
 func (f *fakeExecution) cancel(_ context.Context, _ execution.Scope, ref execution.Ref) (execution.Result, error) {
 	f.mu.Lock()
 	f.cancels = append(f.cancels, ref)
@@ -152,6 +204,9 @@ func (f *fakeExecution) cancel(_ context.Context, _ execution.Scope, ref executi
 			return execution.Result{}, err
 		}
 	}
+	f.mu.Lock()
+	f.closed[ref.SessionID] = true
+	f.mu.Unlock()
 	r := execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}
 	f.finish(ref.SessionID, r)
 	return r, nil

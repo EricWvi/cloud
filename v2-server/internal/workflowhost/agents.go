@@ -49,12 +49,24 @@ func (h *Host) work(runID string, st *runState) {
 	defer h.workers.Done()
 	for {
 		st.mu.Lock()
-		if len(st.queue) == 0 || h.ctx.Err() != nil {
+		if (len(st.queue) == 0 && len(st.turns) == 0) || h.ctx.Err() != nil {
 			st.queue = nil
+			st.turns = nil
 			st.working = false
 			st.mu.Unlock()
 			h.forgetFinished(runID, st)
 			return
+		}
+		if len(st.turns) != 0 {
+			// A human is waiting on a follow-up turn; it shares the run's single turn slot.
+			f := st.turns[0]
+			st.turns = st.turns[1:]
+			cancelling := st.cancelling
+			st.mu.Unlock()
+			if !cancelling {
+				h.runFollowUp(st, f)
+			}
+			continue
 		}
 		d := st.queue[0]
 		st.queue = st.queue[1:]
@@ -77,10 +89,11 @@ func (h *Host) forgetFinished(runID string, st *runState) {
 	if err != nil || c.Run.Status == workflow.StatusRunning {
 		return
 	}
+	h.releaseOrphans(st, runID)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	st.mu.Lock()
-	idle := !st.working && st.starters == 0 && st.starting == nil && st.active == nil
+	idle := !st.working && st.starters == 0 && st.starting == nil && st.active == nil && len(st.interactive) == 0
 	st.mu.Unlock()
 	if idle && h.runs[runID] == st {
 		delete(h.runs, runID)
@@ -147,8 +160,12 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch) {
 		Skills: skills, Caller: caller, Target: execution.Target{ProjectID: d.ProjectID},
 		ExecutorID: executor.executor.ID, Prompt: agentPrompt(d, task),
 	}
+	// Interactive mode applies to root-scope nodes only. Desktop rejects it inside Iterations (graph
+	// validation already does here) but parks Loop members too; v2 does not, so a Loop member runs
+	// as an automatic node, and the workflow package's unapplied rule lists it for that member.
+	interactive := cfg.Interactive && d.ScopeID == "" && d.Iteration == nil
 
-	if !st.beginStart(d.ScopeID) {
+	if !st.beginStart(d.ScopeID, d.NodeRunID) {
 		return
 	}
 	ref, err := h.start(st.scope, request)
@@ -176,6 +193,13 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch) {
 	}
 	h.hub.Publish(d.RunID)
 
+	if interactive {
+		// Desktop parks an interactive node after its first turn instead of ending the session.
+		n := st.track(&interactiveNode{d: d, executor: executor, cfg: cfg, task: task, session: ref.SessionID, phase: phaseTurn})
+		result, err := h.awaitTurn(st.scope, ref, caller)
+		h.settleInteractiveTurn(st, n, result, err)
+		return
+	}
 	result, err := h.awaitTurn(st.scope, ref, caller)
 	endErr := h.end(st.scope, ref.SessionID)
 	if st.endTurn(endErr) {
@@ -192,8 +216,9 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch) {
 	h.settle(d, result, executor, cfg, task)
 }
 
-// beginStart reserves the start slot, or reports false once cancellation was requested.
-func (st *runState) beginStart(scopeID string) bool {
+// beginStart reserves the start slot for one attempt's turn, or reports false once cancellation
+// was requested.
+func (st *runState) beginStart(scopeID, nodeRunID string) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if st.cancelling || st.closedScopes[scopeID] {
@@ -202,6 +227,7 @@ func (st *runState) beginStart(scopeID string) bool {
 	st.starting = make(chan struct{})
 	st.turnDone = make(chan struct{})
 	st.activeScope = scopeID
+	st.activeNodeRun = nodeRunID
 	return true
 }
 
@@ -216,6 +242,7 @@ func (st *runState) endStart(ref execution.Ref, err error) bool {
 		close(st.turnDone)
 		st.turnDone = nil
 		st.activeScope = ""
+		st.activeNodeRun = ""
 	}
 	close(st.starting)
 	st.starting = nil
@@ -234,6 +261,7 @@ func (st *runState) endTurn(endErr error) bool {
 		st.scopeCleanupErrors[st.activeScope] = endErr
 	}
 	st.activeScope = ""
+	st.activeNodeRun = ""
 	if st.turnDone != nil {
 		close(st.turnDone)
 		st.turnDone = nil

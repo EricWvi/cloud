@@ -5,12 +5,15 @@ import { useMemo } from 'react'
 import {
   analyzeWorkflow,
   cancelWorkflowRun,
+  completeWorkflowNode,
   createWorkflowRun,
   deleteWorkflowRun,
   getWorkflowRun,
   getWorkflowRunSnapshot,
   listWorkflowRuns,
+  sendWorkflowNodeTurn,
   startWorkflowRun,
+  stopWorkflowNodeTurn,
   updateWorkflowRunInput,
   type WorkflowRunSummary,
   type WorkflowAnalysis,
@@ -280,6 +283,27 @@ export async function updateRunInput(tenantId: string, runId: string, prompt: st
 export async function cancelRun(tenantId: string, runId: string): Promise<void> {
   if (isCdaseRun(runId)) { endCdaseRun(tenantId, runId, false); return }
   await call(() => cancelWorkflowRun(tenantId, runId))
+}
+
+/**
+ * Sends the starter's next message to a parked interactive node; it runs in the node's own
+ * session, whose events stream carries the answer.
+ */
+export async function sendNodeTurn(tenantId: string, runId: string, nodeId: string, content: string): Promise<void> {
+  await call(() => sendWorkflowNodeTurn(tenantId, runId, nodeId, { content }))
+}
+
+/**
+ * Stops the turn an interactive node is executing. The pinned Node stops a turn only by ending the
+ * node's session, so the node then waits to be completed and takes no further message.
+ */
+export async function stopNodeTurn(tenantId: string, runId: string, nodeId: string): Promise<void> {
+  await call(() => stopWorkflowNodeTurn(tenantId, runId, nodeId))
+}
+
+/** Completes a parked interactive node with the last answer that ended normally (no forced completion). */
+export async function completeNode(tenantId: string, runId: string, nodeId: string): Promise<void> {
+  await call(() => completeWorkflowNode(tenantId, runId, nodeId, { force: false, requester: 'human' }))
 }
 
 /** Deletes a finished run with its node rows. */

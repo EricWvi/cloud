@@ -33,6 +33,7 @@ var (
 	_ taskStore             = (*store.Store)(nil)
 	_ workspaceStore        = (*store.Store)(nil)
 	_ WorkflowRunStore      = (*store.Store)(nil)
+	_ workflowStarterStore  = (*store.Store)(nil)
 	_ WorkflowStore         = (*store.Store)(nil)
 )
 

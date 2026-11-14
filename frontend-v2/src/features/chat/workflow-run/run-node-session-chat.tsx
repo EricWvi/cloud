@@ -7,6 +7,7 @@ import { useRunTenant } from './run-tenant'
 import { nodeConversationTurns } from './conversation-turns'
 import { useNodeSession } from './node-session'
 import { isNodeWorking } from './run-status-style'
+import { RunNodeSessionActions, type InteractiveNodeTarget } from './run-node-session-actions'
 
 // A node session has nothing to ask permission for, so answering is never offered.
 const noAnswer = () => {}
@@ -16,7 +17,8 @@ const noAnswer = () => {}
  * thinking and tool rows as a chat session. As desktop shows the node's real session here, the
  * attempt's session is followed over v2-server's node events stream; until it can be read, or when
  * it cannot, the task and answer the run recorded stand in. While a working node waits for its first
- * turn the session's preparation stages show, as on the chat page.
+ * turn the session's preparation stages show, as on the chat page. An interactive node adds the
+ * starter's composer, stop and complete controls below the thread.
  */
 export function RunNodeSessionChat({
   conversation,
@@ -24,6 +26,7 @@ export function RunNodeSessionChat({
   errorMessage,
   sessionActions,
   session,
+  interactive,
 }: {
   conversation: WorkflowNodeConversationItem[]
   status: GraphWorkflowNodeStatus
@@ -31,6 +34,8 @@ export function RunNodeSessionChat({
   sessionActions?: ReactNode
   /** The attempt whose session to follow; absent before it was dispatched. */
   session?: { runId: string; nodeRunId: string }
+  /** An interactive node's identity and session summary; absent for automatic nodes. */
+  interactive?: InteractiveNodeTarget
 }) {
   const { t } = useTranslation()
   const tenantId = useRunTenant()
@@ -50,6 +55,11 @@ export function RunNodeSessionChat({
           <p className="flex flex-1 items-center justify-center px-4 text-center text-sm text-muted-foreground">{t(refused ? 'workflowRun.v2.sessionRefused' : 'workflowRun.v2.sessionWaiting')}</p>
         )}
       </div>
+      {interactive && (interactive.status === 'running' || interactive.status === 'awaiting_input') && (
+        <div className="shrink-0">
+          <RunNodeSessionActions target={interactive} />
+        </div>
+      )}
       {sessionActions && <div className="flex shrink-0 items-center pt-1">{sessionActions}</div>}
     </div>
   )

@@ -595,6 +595,41 @@
           "503": {"$ref": "#/components/responses/WorkflowError"}
         }
       }
+    },
+    "/api/v2/tenants/{tid}/workflow-runs/{rid}/nodes/{nodeId}/turns": {
+      "parameters": [{"$ref": "#/components/parameters/Tenant"}, {"$ref": "#/components/parameters/Run"}, {"$ref": "#/components/parameters/NodeId"}],
+      "post": {
+        "operationId": "sendWorkflowNodeTurn",
+        "tags": ["workflowRuns"],
+        "description": "v2-only: queues a human turn on a parked interactive root-scope Agent node, in the node's own session. Only the run's starter may send (409 run_owned); a node whose session was stopped returns 409 workflow_node_session_ended. The answer arrives over the node's session events; the node runs during the turn and parks again after it.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WorkflowNodeTurn"}}}},
+        "responses": {
+          "200": {"description": "Response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WorkflowRunActionResponse"}}}},
+          "400": {"$ref": "#/components/responses/WorkflowError"},
+          "401": {"$ref": "#/components/responses/WorkflowError"},
+          "404": {"$ref": "#/components/responses/WorkflowError"},
+          "409": {"$ref": "#/components/responses/WorkflowError"},
+          "500": {"$ref": "#/components/responses/WorkflowError"},
+          "503": {"$ref": "#/components/responses/WorkflowError"}
+        }
+      }
+    },
+    "/api/v2/tenants/{tid}/workflow-runs/{rid}/nodes/{nodeId}/stop": {
+      "parameters": [{"$ref": "#/components/parameters/Tenant"}, {"$ref": "#/components/parameters/Run"}, {"$ref": "#/components/parameters/NodeId"}],
+      "post": {
+        "operationId": "stopWorkflowNodeTurn",
+        "tags": ["workflowRuns"],
+        "description": "v2-only: stops the turn an interactive root-scope Agent node is executing. The pinned Node stops a turn only by ending its session, so afterwards the node waits for completion and accepts no further turns; the run keeps running. Only the run's starter may stop (409 run_owned); without a turn in flight it returns 409 workflow_node_turn_not_running.",
+        "responses": {
+          "200": {"description": "Response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WorkflowRunActionResponse"}}}},
+          "400": {"$ref": "#/components/responses/WorkflowError"},
+          "401": {"$ref": "#/components/responses/WorkflowError"},
+          "404": {"$ref": "#/components/responses/WorkflowError"},
+          "409": {"$ref": "#/components/responses/WorkflowError"},
+          "500": {"$ref": "#/components/responses/WorkflowError"},
+          "503": {"$ref": "#/components/responses/WorkflowError"}
+        }
+      }
     }
   },
   "components": {
@@ -1242,6 +1277,14 @@
           "requester": {"type": "string", "enum": ["human"]}
         }
       },
+      "WorkflowNodeTurn": {
+        "type": "object",
+        "required": ["content"],
+        "additionalProperties": false,
+        "properties": {
+          "content": {"type": "string", "minLength": 1, "maxLength": 16000}
+        }
+      },
       "WorkflowNodeRun": {
         "type": "object",
         "required": ["id", "runId", "scopeId", "nodeId", "nodeType", "sessionId", "status", "input", "output", "error", "payload", "iteration", "startedAt", "finishedAt", "createdAt", "updatedAt"],
@@ -1322,7 +1365,7 @@
       },
       "WorkflowRunDetail": {
         "type": "object",
-        "required": ["run", "nodes", "scopes", "conditionDecisions", "iterationConditionDecisions", "variables", "failedAttempts"],
+        "required": ["run", "nodes", "scopes", "conditionDecisions", "iterationConditionDecisions", "variables", "failedAttempts", "startedBy"],
         "additionalProperties": false,
         "properties": {
           "run": {"$ref": "#/components/schemas/WorkflowRun"},
@@ -1339,7 +1382,8 @@
             "additionalProperties": {"type": "string"}
           },
           "variables": {"type": "array", "items": {"$ref": "#/components/schemas/WorkflowRunVariable"}, "description": "The root variable pool, from the run payload; empty until the run starts."},
-          "failedAttempts": {"type": "array", "items": {"$ref": "#/components/schemas/WorkflowNodeFailedAttempt"}, "description": "Earlier failed attempts, oldest first; nodes holds only each node's latest attempt."}
+          "failedAttempts": {"type": "array", "items": {"$ref": "#/components/schemas/WorkflowNodeFailedAttempt"}, "description": "Earlier failed attempts, oldest first; nodes holds only each node's latest attempt."},
+          "startedBy": {"type": "string", "nullable": true, "description": "v2-only: the user who started the run, null before it started. Only they can send turns to, stop or complete an interactive node."}
         }
       }
     }

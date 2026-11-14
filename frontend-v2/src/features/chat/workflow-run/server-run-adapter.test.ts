@@ -45,6 +45,7 @@ function detail(over: Partial<WorkflowRunDetail['run']>, nodes: WorkflowNodeRun[
     variables: [],
     failedAttempts: [],
     iterationConditionDecisions: {},
+    startedBy: null,
   }
 }
 
@@ -107,6 +108,19 @@ describe('toGraphWorkflowRun', () => {
       ['user', '起草：需求'],
       ['assistant', '初稿'],
     ])
+  })
+
+  it('reads a parked interactive node\'s session summary, its answer so far and the starter', () => {
+    const payload = JSON.stringify({
+      task: '起草：支付', interactive: { turns: 2, session_ended: true, completable: false, blocker: { reason: 'no_completed_turn', detail: '没有回答' }, answer: '初稿' },
+    })
+    const run = toGraphWorkflowRun({ ...detail({ status: 'awaitingInput' }, [nodeRun({ id: 'nr-a', nodeId: 'a', nodeType: 'agent', status: 'pending', sessionId: 's', finishedAt: null, payload })]), startedBy: 'user-1' }, definition)
+    const a = run.nodeStates.a!
+    expect(run.startedBy).toBe('user-1')
+    expect(a.status).toBe('awaiting_input')
+    expect(a.interactiveSession).toEqual({ turns: 2, sessionEnded: true, completable: false, blocker: { reason: 'no_completed_turn', detail: '没有回答' }, answer: '初稿' })
+    expect(a.conversation?.map((item) => item.kind === 'message' && [item.role, item.markdown])).toEqual([['user', '起草：支付'], ['assistant', '初稿']])
+    expect(run.nodeStates.start!.interactiveSession).toBeUndefined()
   })
 
   it('reads a failure detail written with the engine\'s snake_case keys', () => {

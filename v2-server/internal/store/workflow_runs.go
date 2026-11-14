@@ -136,6 +136,11 @@ const workflowNodeRunColumns = `id, tenant_id, run_id, scope_id, node_id, node_t
 const workflowScopeColumns = `id, tenant_id, run_id, parent_loop_node_run_id, round_index, status,
 	state, created_at, updated_at`
 
+// WorkflowRunAwaitingInput is the public status a running run with a pending node reads as. It is
+// never stored: tenant-scoped run reads derive it, so callers deciding whether a run is still live
+// must treat it as running.
+const WorkflowRunAwaitingInput = "awaitingInput"
+
 // derivedRunStatus projects a stored status plus pending nodes into the public status. `awaitingInput`
 // is not a lifecycle state the engine can commit; it is how a paused interactive run is read.
 const derivedRunStatus = `CASE WHEN r.status = 'running' AND EXISTS (

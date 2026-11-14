@@ -71,7 +71,10 @@ interface RunTheaterActCardProps {
   onConversationOpenChange?: (open: boolean) => void;
   /** Lets the workspace move an open session dock after interactive completion. */
   onNodeCompleted?: (nodeId: string) => void;
-  /** Direct successor titles shown by the parked step card in the session dock. */
+  /**
+   * Direct successor titles for desktop's parked step card. v2 completes interactive nodes with
+   * its own session actions and does not show the card, so the titles are unused.
+   */
   nextNodeTitles?: string[];
 }
 
@@ -97,7 +100,6 @@ export function RunTheaterActCard({
   conversationOpen: conversationOpenProp,
   onConversationOpenChange,
   showCompletedOutput = false,
-  nextNodeTitles = [],
 }: RunTheaterActCardProps) {
   const { i18n, t } = useTranslation();
   const locale =
@@ -133,12 +135,20 @@ export function RunTheaterActCard({
       ? { sessionId: state.sessionId }
       : null;
   const interactive = data.agentConfig?.interactive === true;
+  // v2 records its own session summary instead of desktop's completion snapshot: an interactive
+  // node it parked waits for the starter's input, which the badge says instead of desktop's
+  // paused/waiting labels. Loop members run as automatic nodes in v2 and never park.
+  const awaitingInput =
+    interactive &&
+    state.status === "awaiting_input" &&
+    state.interactiveSession !== undefined;
   // A parked interactive turn without a settled completion preview is paused: the previous turn
   // did not settle normally, or an older node run has no snapshot yet. A provisional snapshot is
   // not paused: the step card invites the ordinary completion and the backend re-checks it, so the
   // act card must not label the same state differently.
   const paused =
     interactive &&
+    !awaitingInput &&
     state.status === "awaiting_input" &&
     state.completion?.ready !== true &&
     state.completion?.provisional !== true;
@@ -150,10 +160,10 @@ export function RunTheaterActCard({
       ? {
           runId,
           nodeId,
-          ...(state.completion !== undefined
-            ? { completion: state.completion }
+          status: state.status,
+          ...(state.interactiveSession !== undefined
+            ? { session: state.interactiveSession }
             : {}),
-          nextNodeTitles,
         }
       : undefined;
   const hasHitl = interaction !== undefined;
@@ -178,6 +188,11 @@ export function RunTheaterActCard({
       {retryWait !== undefined && (
         <p className="text-[11px] font-medium tabular-nums text-caution">
           <RunRetryWaitLabel wait={retryWait} />
+        </p>
+      )}
+      {awaitingInput && (
+        <p className="text-[11px] font-medium text-warning">
+          {t("workflowRun.v2.interactive.openHint")}
         </p>
       )}
       {timingRange !== null && (
@@ -287,9 +302,11 @@ export function RunTheaterActCard({
           <RunStatusBadge
             status={state.status}
             live={emphasized && isNodeWorking(state.status)}
-            {...(paused
-              ? { labelKey: "workflowRun.stepCard.pausedBadge" }
-              : {})}
+            {...(awaitingInput
+              ? { labelKey: "workflowRun.v2.interactive.awaitingBadge" }
+              : paused
+                ? { labelKey: "workflowRun.stepCard.pausedBadge" }
+                : {})}
           />
           {state.stopReason === "loop_exit" && (
             <span className="text-[10px] text-muted-foreground">
@@ -448,6 +465,7 @@ export function RunTheaterActCard({
                     ? { runId, nodeRunId: state.nodeRunId }
                     : undefined
                 }
+                interactive={sessionInteraction}
               />
             ) : (
               <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted-foreground">

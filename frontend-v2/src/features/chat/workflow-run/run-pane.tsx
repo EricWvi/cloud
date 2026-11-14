@@ -1,6 +1,6 @@
 import { QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import { MapIcon, MessageSquareIcon, PlayIcon, RotateCcwIcon, SquareIcon, TheaterIcon, WorkflowIcon } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { I18nextProvider, useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -30,6 +30,8 @@ import { RunOverviewCanvas } from './run-overview-canvas'
 import { runStatusLabel, runStatusTone } from './run-status-style'
 import { RunTenantContext } from './run-tenant'
 import { RunAnalyzedUnappliedContext } from './run-analysis-context'
+import { RunStarterContext, startedRun } from './run-starter'
+import { UserContext } from '@/app/auth/user'
 import { RunTheater } from './run-theater'
 import { workflowRunTranslations } from './translations'
 import { WorkflowRunStartDialog } from './workflow-run-start-dialog'
@@ -122,6 +124,9 @@ function RunWorkspace({ tenantId, run, readOnly, hostedWorkspace, leading, refre
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const conversations = useMemo(() => runConversations(run), [run])
+  // Only the run's starter owns its node sessions; the user is absent outside the signed-in shell.
+  const viewer = useContext(UserContext)
+  const isStarter = startedRun(viewer, run, readOnly)
   const artifacts = noArtifacts
   const revealedArtifactId: string | null = null
   const selectRun = useChatStore((s) => s.selectRun)
@@ -385,6 +390,7 @@ function RunWorkspace({ tenantId, run, readOnly, hostedWorkspace, leading, refre
               还没开始：点右上角「启动」，填写输入后运行
             </p>
           )}
+          <RunStarterContext.Provider value={isStarter}>
           {viewMode === 'theater' ? (
             <RunTheater
               tenantId={tenantId}
@@ -413,6 +419,7 @@ function RunWorkspace({ tenantId, run, readOnly, hostedWorkspace, leading, refre
           ) : (
             <RunOverviewCanvas run={run} focusedNodeId={stageFocusNodeId} onFocusNode={focusNodeFromOverview} artifacts={artifacts} fitRequestKey={overviewFitRequestKey} />
           )}
+          </RunStarterContext.Provider>
         </div>
       </WorkspaceSplit>
       <WorkflowRunStartDialog
