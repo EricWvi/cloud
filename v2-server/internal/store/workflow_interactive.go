@@ -11,11 +11,13 @@ import (
 // MoveWorkflowEngineNode moves one attempt of a running run between running and pending, merging
 // merge's result into its payload in the same transaction. An interactive Agent node parks
 // (running → pending) after each turn and takes a human turn (pending → running); the payload
-// keys describing the park travel with the status flip so a pending row always carries them. It
+// keys describing the park travel with the status flip so a pending row always carries them.
+// Moving a node to the status it has (pending or running) refreshes its keys in place. It
 // returns false, changing nothing, when the run is no longer running or the attempt is not in
 // from, so a park racing a cancellation or a completion never resurrects the node.
 func (s *Store) MoveWorkflowEngineNode(ctx context.Context, runID, nodeRunID, from, to string, merge func(node []byte) ([]byte, error)) (bool, error) {
-	if !(from == WorkflowStatusRunning && to == WorkflowStatusPending) && !(from == WorkflowStatusPending && to == WorkflowStatusRunning) {
+	live := func(status string) bool { return status == WorkflowStatusRunning || status == WorkflowStatusPending }
+	if !live(from) || !live(to) {
 		return false, fmt.Errorf("move workflow node from %s to %s: %w", from, to, ErrWorkflowNodeRunState)
 	}
 	moved := false

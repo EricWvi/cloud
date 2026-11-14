@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
 
@@ -140,19 +141,29 @@ func (h *Host) finishCancel(st *runState, runID string) {
 // the session and report the outcome to the engine.
 func (h *Host) runAgent(st *runState, d workflow.AgentDispatch) {
 	cfg := d.Node.Agent()
+	// Interactive mode applies to root-scope nodes only. Desktop rejects it inside Iterations (graph
+	// validation already does here) but parks Loop members too; v2 does not, so a Loop member runs
+	// as an automatic node, and the workflow package's unapplied rule lists it for that member.
+	interactive := cfg.Interactive && d.ScopeID == "" && d.Iteration == nil
+	fail := func(f workflow.Failure) {
+		if interactive {
+			f = f.Interactive() // a person drives the node: it never fails as auto-retryable
+		}
+		h.fail(d, f)
+	}
 	skills, err := h.store.ResolveWorkflowSkills(h.ctx, st.scope, d.ProjectID, cfg.Skills)
 	if err != nil {
-		h.fail(d, workflow.Failure{Kind: workflow.FailureMissingAgentConfig, Message: err.Error()})
+		fail(workflow.Failure{Kind: workflow.FailureMissingAgentConfig, Message: err.Error()})
 		return
 	}
 	executor, failure := h.resolveExecutor(st.scope, cfg)
 	if failure != nil {
-		h.fail(d, *failure)
+		fail(*failure)
 		return
 	}
 	task, err := workflow.RenderTemplate(cfg.Prompt, &d.Pool)
 	if err != nil {
-		h.fail(d, workflow.Failure{Kind: workflow.FailurePromptTemplate, Message: err.Error()})
+		fail(workflow.Failure{Kind: workflow.FailurePromptTemplate, Message: err.Error()})
 		return
 	}
 	caller := execution.Caller{Kind: execution.CallerWorkflow, ID: d.RunID, NodeID: d.Node.ID, AttemptID: d.NodeRunID}
@@ -160,11 +171,10 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch) {
 		Skills: skills, Caller: caller, Target: execution.Target{ProjectID: d.ProjectID},
 		ExecutorID: executor.executor.ID, Prompt: agentPrompt(d, task),
 	}
-	// Interactive mode applies to root-scope nodes only. Desktop rejects it inside Iterations (graph
-	// validation already does here) but parks Loop members too; v2 does not, so a Loop member runs
-	// as an automatic node, and the workflow package's unapplied rule lists it for that member.
-	interactive := cfg.Interactive && d.ScopeID == "" && d.Iteration == nil
-
+	if interactive {
+		// The session outlives its turns until completion, a stop or the run's end ends it.
+		request.Lifetime = execution.LifetimeHeld
+	}
 	if !st.beginStart(d.ScopeID, d.NodeRunID) {
 		return
 	}
@@ -175,9 +185,12 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch) {
 			h.finishCancel(st, d.RunID)
 			return
 		}
-		h.fail(d, workflow.Failure{Kind: workflow.FailureSession, Message: "execution refused to start the Agent: " + publicReason(err)})
+		fail(workflow.Failure{Kind: workflow.FailureSession, Message: "execution refused to start the Agent: " + publicReason(err)})
 		return
 	}
+
+	// Starting this session ended the run's previous one (one Agent session per checkout).
+	h.sessionsReplaced(st, d.NodeRunID)
 
 	// Desktop publishes the binding only after the owning prompt is accepted; Start returning a
 	// Ref is that acceptance here. A refused binding (the attempt was cancelled or already
@@ -188,7 +201,7 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch) {
 			h.finishCancel(st, d.RunID)
 			return
 		}
-		h.fail(d, workflow.Failure{Kind: workflow.FailureSessionBindingRejected, Message: "the attempt refused its session binding"})
+		fail(workflow.Failure{Kind: workflow.FailureSessionBindingRejected, Message: "the attempt refused its session binding"})
 		return
 	}
 	h.hub.Publish(d.RunID)
@@ -196,6 +209,7 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch) {
 	if interactive {
 		// Desktop parks an interactive node after its first turn instead of ending the session.
 		n := st.track(&interactiveNode{d: d, executor: executor, cfg: cfg, task: task, session: ref.SessionID, phase: phaseTurn})
+		h.refreshSummary(st, n, store.WorkflowStatusRunning) // the starter can stop the first turn too
 		result, err := h.awaitTurn(st.scope, ref, caller)
 		h.settleInteractiveTurn(st, n, result, err)
 		return
@@ -210,7 +224,7 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch) {
 		if h.ctx.Err() != nil {
 			return // shutting down; the next start interrupts the run
 		}
-		h.fail(d, workflow.Failure{Kind: workflow.FailureSession, Message: "lost the Agent turn: " + publicReason(err)})
+		fail(workflow.Failure{Kind: workflow.FailureSession, Message: "lost the Agent turn: " + publicReason(err)})
 		return
 	}
 	h.settle(d, result, executor, cfg, task)

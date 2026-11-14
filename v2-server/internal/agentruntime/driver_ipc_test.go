@@ -201,13 +201,19 @@ func historyLine(sequence int, kind string, extra map[string]any) json.RawMessag
 }
 func (f *fakeNodeIPC) finishTurn(t *testing.T, command node.Message, turnID, answer string) {
 	t.Helper()
+	f.finishTurnAs(t, command, turnID, answer, "end_turn")
+}
+
+// finishTurnAs settles the turn with Node's stop reason stop.
+func (f *fakeNodeIPC) finishTurnAs(t *testing.T, command node.Message, turnID, answer, stop string) {
+	t.Helper()
 	lines := f.history[command.ExecutionID]
 	if len(lines) == 0 {
 		lines = append(lines, historyLine(0, "meta", map[string]any{"sessionId": command.ExecutionID, "schemaVersion": 2}))
 	}
 	lines = append(lines, historyLine(len(lines), "update", map[string]any{"update": map[string]any{"sessionUpdate": "user_message_chunk", "content": map[string]string{"type": "text", "text": "prompt"}}}))
 	lines = append(lines, historyLine(len(lines), "update", map[string]any{"update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]string{"type": "text", "text": answer}}}))
-	end := historyLine(len(lines), "turnEnded", map[string]any{"stop_reason": "end_turn"})
+	end := historyLine(len(lines), "turnEnded", map[string]any{"stop_reason": stop})
 	lines = append(lines, end)
 	f.history[command.ExecutionID] = lines
 	path := filepath.Join(f.project.root, "w", "n", "sessions", command.ExecutionID[:2], command.ExecutionID[2:4], command.ExecutionID+".jsonl")
@@ -315,6 +321,34 @@ func TestDriverIPCFullTurnPublicationAppendAndEnd(t *testing.T) {
 	}
 	if err := h.driver.End(ctx, session.ID); err != nil {
 		t.Fatalf("End is not idempotent: %v", err)
+	}
+}
+
+// A turn the Agent ended without completing (a refusal) reports no error and leaves the physical
+// Agent ready for the next turn, so a held workflow session can keep talking. A session that ends
+// while a turn runs reports the turn as AgentLost with ErrSessionEnded, so nobody keeps it.
+func TestDriverIPCAgentEndedTurnKeepsTheAgentButALostSessionDoesNot(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	session := h.session("session", "workspace")
+	done := startIPCRun(h, ctx, session, "first", discardIPCEvent)
+	f := receiveIPC(t, h.created)
+	start := nextIPCCommand(t, f, "start_agent_session")
+	f.finishTurnAs(t, start, "first", "I cannot", "refusal")
+	first := receiveIPC(t, done)
+	if first.err != nil || first.result.Status != execution.StatusFailed || first.result.FailureCode != "agent_turn_incomplete" || first.result.AgentLost {
+		t.Fatalf("refused turn: %+v", first)
+	}
+	receiveIPC(t, f.acked)
+	secondDone := startIPCRun(h, ctx, session, "second", discardIPCEvent)
+	appendCommand := nextIPCCommand(t, f, "submit_user_turn")
+	if appendCommand.ExecutionID != start.ExecutionID {
+		t.Fatal("the turn after a refusal replaced the physical Agent")
+	}
+	f.terminal(appendCommand)
+	second := receiveIPC(t, secondDone)
+	if !errors.Is(second.err, execution.ErrSessionEnded) || !second.result.AgentLost || second.result.Status != execution.StatusCancelled {
+		t.Fatalf("turn of a session that ended under it: %+v", second)
 	}
 }
 

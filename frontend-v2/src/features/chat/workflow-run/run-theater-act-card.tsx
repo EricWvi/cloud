@@ -135,13 +135,13 @@ export function RunTheaterActCard({
       ? { sessionId: state.sessionId }
       : null;
   const interactive = data.agentConfig?.interactive === true;
-  // v2 records its own session summary instead of desktop's completion snapshot: an interactive
-  // node it parked waits for the starter's input, which the badge says instead of desktop's
-  // paused/waiting labels. Loop members run as automatic nodes in v2 and never park.
-  const awaitingInput =
-    interactive &&
-    state.status === "awaiting_input" &&
-    state.interactiveSession !== undefined;
+  // v2 records its own session summary instead of desktop's completion snapshot, from the node's
+  // first turn on, and only for a node it runs as an interactive session: the server decides,
+  // not agentConfig.interactive, since a Loop member with that flag runs automatically in v2.
+  const serverSession = state.interactiveSession !== undefined;
+  // A parked session waits for the starter's input, which the badge says instead of desktop's
+  // paused/waiting labels.
+  const awaitingInput = serverSession && state.status === "awaiting_input";
   // A parked interactive turn without a settled completion preview is paused: the previous turn
   // did not settle normally, or an older node run has no snapshot yet. A provisional snapshot is
   // not paused: the step card invites the ordinary completion and the backend re-checks it, so the
@@ -154,7 +154,7 @@ export function RunTheaterActCard({
     state.completion?.provisional !== true;
   const sessionInteraction =
     sessionChatIdentity !== null &&
-    interactive &&
+    serverSession &&
     runId !== undefined &&
     nodeId !== undefined
       ? {

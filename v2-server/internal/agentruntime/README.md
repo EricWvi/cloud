@@ -18,7 +18,9 @@ err = driver.Close(ctx)
 
 ## 项目与会话
 
-每项目一个 Node、一组 Git/插件/模型服务和一个 IPC Receive dispatcher。不同 `WorkspaceID` 对应不同 clone 执行和 checkout；同 workflow run 由上层给相同 WorkspaceID。Node 可并发接收 clone，实际 Git 步骤串行；不同 checkout 的 Agent session 可以同时运行。相同 checkout 的前一 session 必须 End 后才可交给下一 session，不能把两者同时派发到同一目录。
+每项目一个 Node、一组 Git/插件/模型服务和一个 IPC Receive dispatcher。不同 `WorkspaceID` 对应不同 clone 执行和 checkout；同 workflow run 由上层给相同 WorkspaceID。Node 可并发接收 clone，实际 Git 步骤串行；不同 checkout 的 Agent session 可以同时运行。相同 checkout 的前一 session 必须 End 后才可交给下一 session，不能把两者同时派发到同一目录：固定 Node 拒绝同一 `checkout_execution_id` 上的第二个未结束 Agent 会话（`resource ownership conflict`），并关闭整个控制会话，连同第一个会话的 Agent。
+
+Agent 自己结束的一轮（`end_turn` 之外的停止原因）不返回错误，物理会话仍可接 `submit_user_turn`；会话在轮次中结束（`agent_session_ended`）时返回 `ErrSessionEnded`，结果带 `AgentLost`，历史读取失败时同样带 `AgentLost`，上层据此区分“这一轮没完成”和“会话已不在”。
 
 启动服务后仅对内置 Demo 快照提前准备一份未使用的 checkout。直接对话核对快照后独占领取，再加载用户技能；成功回复后后台补一份。预备尚未完成时要等剩余时间；并发领取时没有空余副本的对话仍单独创建。Git 操作总数不减少。重启不重用旧副本，沿用现有目录清理策略。
 

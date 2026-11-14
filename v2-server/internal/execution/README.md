@@ -29,12 +29,14 @@ chat 的 ID 是 conversation，workflow 是 run，schedule 是 occurrence；容�
 `Target` 只有 ProjectID，调用方不选择 Workspace。后端按以下粒度创建目录，并将生成的 WorkspaceID 记入 Session：
 
 - 每个 chat 会话一个目录；定时任务每次触发创建独立会话和目录。
-- 同一 Scope 下 `CallerWorkflow.ID` 相同的一次工作流运行共用目录，节点串行执行。
+- 同一 Scope 下 `CallerWorkflow.ID` 相同的一次工作流运行共用目录，节点串行执行；目录里同时只有一个活会话：下一个节点 Start 时结束上一个会话，固定 Node 不允许同一 checkout 上有两个 Agent 会话（Node `node-db/src/session.rs:117-120`@`aa21210e`，第二个会话被拒绝并连带关闭整个 Node）。
 - 不同对话和不同 workflow run 不争抢目录，即使它们属于同一个项目。
 - 模型直连的 Session.WorkspaceID 为空。
 
 接收执行只用单进程内的锁和一次数据库写入，持久记录建立后返回 Ref。
 `ErrWorkspaceBusy` 仅表示同一 session 或同一次 workflow run 的上一轮尚未结束；页面自己排队，公共层不另设队列。
+
+`StartRequest.Lifetime` 默认 `LifetimeTurn`：没有完成的一轮结束会话。工作流的交互节点用 `LifetimeHeld`：Agent 自己结束、但没有完成的一轮（拒绝、截断、未知停止、非调用方要求的取消）不结束会话，调用方可以接着发下一轮；Agent 丢失（崩溃、事件流断开、历史读不全、会话已结束或被停止）时仍结束会话，这一轮的 `Result.AgentLost` 为 true，调用方据此知道会话已不能继续。非 workflow 调用方用 `LifetimeHeld` 返回 `ErrInvalidRequest`。
 Start/StartModel/Append 的 context 控制本次调用，调用返回或浏览器断开不停止已开始的执行。
 `ReadAttempt` 按完整 Caller 查询已有 Turn，不派发工作。
 

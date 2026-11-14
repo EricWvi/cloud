@@ -562,6 +562,11 @@ type agentCall struct {
 	session execution.Session
 	release chan struct{}
 	once    sync.Once
+	// result and err, when result is set before unblock, replace the completed turn; silent
+	// returns them without publishing, as the driver does when it loses the Agent.
+	result *execution.Result
+	err    error
+	silent bool
 }
 
 func (c *agentCall) unblock() { c.once.Do(func() { close(c.release) }) }
@@ -574,10 +579,16 @@ func (a *orchestrationAgent) Run(ctx context.Context, _ execution.Scope, session
 		return execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}, nil
 	case <-call.release:
 		result := execution.Result{Status: execution.StatusCompleted, Answer: "fake driver orchestration", AnswerComplete: true, StopReason: "end_turn"}
+		if call.result != nil {
+			result = *call.result
+		}
+		if call.silent {
+			return result, call.err
+		}
 		// Real Node drivers must retain this before ACK. The runtime's later Finish must
 		// not create a duplicate terminal event or replace the already-retained result.
 		err := emit(ctx, execution.Event{Kind: execution.EventTurnEnded, Result: &result})
-		return result, err
+		return result, errors.Join(err, call.err)
 	}
 }
 
@@ -897,5 +908,110 @@ func TestModelsFromEnvironmentAppliesRequestLimits(t *testing.T) {
 		if models, err := ModelsFromEnvironment(func(name string) string { return env[name] }); err == nil || models != nil {
 			t.Fatalf("accepted limits %v", bad)
 		}
+	}
+}
+
+// A held workflow session survives a turn the Agent itself ended without completing (the driver
+// reports no error), so the caller can keep talking; a default session does not, and a held one
+// whose Agent is gone (the driver reports an error) ends too. Only a workflow may hold a session.
+func TestRuntimeHeldSessionSurvivesAnAgentEndedTurn(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	if err := f.service.Close(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	a := &orchestrationAgent{started: make(chan *agentCall, 8), ended: make(chan string, 8)}
+	var err error
+	f.service, err = New(f.ctx, Config{Store: f.db, Models: f.models, Agent: a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.CreateProject(f.ctx, f.scope, store.Project{ID: "project", Name: "Demo", RepositoryURL: "https://example.com/demo.git", Commit: "fixed", MirrorPath: "/fake/unused"}); err != nil {
+		t.Fatal(err)
+	}
+	request := func(run string, lifetime execution.Lifetime) execution.StartRequest {
+		return execution.StartRequest{Caller: execution.Caller{Kind: execution.CallerWorkflow, ID: run, NodeID: "draft", AttemptID: "a1"},
+			Target: execution.Target{ProjectID: "project"}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("run"), Lifetime: lifetime}
+	}
+	refused := execution.Result{Status: execution.StatusFailed, StopReason: "refusal", FailureCode: "agent_turn_incomplete", Answer: "no"}
+	gone := execution.Result{Status: execution.StatusFailed, FailureCode: "agent_ended_before_turn", AgentLost: true}
+	live := func(sid string) bool {
+		t.Helper()
+		session, err := f.service.ReadSession(f.ctx, f.scope, sid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return session.EndedAt == nil
+	}
+	for name, tc := range map[string]struct {
+		lifetime execution.Lifetime
+		result   execution.Result
+		err      error
+		live     bool
+	}{
+		"held, refused":           {execution.LifetimeHeld, refused, nil, true},
+		"held, Agent gone":        {execution.LifetimeHeld, gone, execution.ErrSessionEnded, false},
+		"held, transport lost":    {execution.LifetimeHeld, execution.Result{Status: execution.StatusFailed, FailureCode: "agent_transport_closed"}, execution.ErrUnavailable, false},
+		"default, refused":        {execution.LifetimeTurn, refused, nil, false},
+		"held, completed":         {execution.LifetimeHeld, execution.Result{Status: execution.StatusCompleted, AnswerComplete: true, StopReason: "end_turn"}, nil, true},
+		"held, unasked cancel":    {execution.LifetimeHeld, execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}, nil, true},
+		"default, unasked cancel": {execution.LifetimeTurn, execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}, nil, false},
+	} {
+		ref, err := f.service.Start(f.ctx, f.scope, request(name, tc.lifetime))
+		if err != nil {
+			t.Fatalf("%s: start: %v", name, err)
+		}
+		call := nextAgentCall(t, f, a)
+		call.result, call.err, call.silent = &tc.result, tc.err, name == "held, transport lost"
+		call.unblock()
+		recorded, _ := observeTurn(t, f, ref, 0)
+		if got := live(ref.SessionID); got != tc.live {
+			t.Fatalf("%s: session live = %v, want %v", name, got, tc.live)
+		}
+		if recorded.AgentLost != (tc.err != nil) {
+			t.Fatalf("%s: recorded AgentLost = %v, want %v", name, recorded.AgentLost, tc.err != nil)
+		}
+		if !tc.live {
+			continue
+		}
+		next := request(name, tc.lifetime).Caller
+		next.AttemptID = "a2"
+		turn, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: ref.SessionID, Caller: next, Prompt: execution.TextPrompt("again")})
+		if err != nil {
+			t.Fatalf("%s: the kept session refused the next turn: %v", name, err)
+		}
+		nextAgentCall(t, f, a).unblock()
+		if result, _ := observeTurn(t, f, turn, 0); result.Status != execution.StatusCompleted {
+			t.Fatalf("%s: next turn = %+v", name, result)
+		}
+		if err := f.service.End(f.ctx, f.scope, ref.SessionID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The pinned Node runs one live session per checkout, so the run's next Start ends a held
+	// predecessor as well.
+	held, err := f.service.Start(f.ctx, f.scope, request("shared", execution.LifetimeHeld))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextAgentCall(t, f, a).unblock()
+	observeTurn(t, f, held, 0)
+	sibling := request("shared", execution.LifetimeTurn)
+	sibling.Caller.NodeID, sibling.Caller.AttemptID = "side", "s1"
+	side, err := f.service.Start(f.ctx, f.scope, sibling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextAgentCall(t, f, a).unblock()
+	observeTurn(t, f, side, 0)
+	if live(held.SessionID) {
+		t.Fatal("a held predecessor stayed live beside its run's next session")
+	}
+	chat := request("chat", execution.LifetimeHeld)
+	chat.Caller = execution.Caller{Kind: execution.CallerChat, ID: "chat", AttemptID: "a1"}
+	if _, err := f.service.Start(f.ctx, f.scope, chat); !errors.Is(err, execution.ErrInvalidRequest) {
+		t.Fatalf("held chat session = %v, want ErrInvalidRequest", err)
+	}
+	if _, err := f.service.Start(f.ctx, f.scope, request("odd", "forever")); !errors.Is(err, execution.ErrInvalidRequest) {
+		t.Fatalf("unknown lifetime = %v, want ErrInvalidRequest", err)
 	}
 }

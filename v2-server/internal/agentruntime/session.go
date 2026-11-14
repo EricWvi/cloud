@@ -344,8 +344,11 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 			if ended.Result.Reason == "cancelled" || ended.Result.Reason == "user_ended" {
 				result = execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}
 			}
+			result.AgentLost = true
 			if !publicationFailed && a.publish(execution.Event{Ref: execution.Ref{TurnID: call.id}, Kind: execution.EventTurnEnded, Result: &result}) == nil {
-				outcome = &turnOutcome{call.id, result, nil}
+				// The session is gone, not just the turn: the error tells the execution service
+				// not to keep a held session for another turn.
+				outcome = &turnOutcome{call.id, result, execution.ErrSessionEnded}
 			} else {
 				a.fail("agent_event_write_failed", errEventStore)
 				publicationFailed = true
@@ -374,6 +377,7 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 			return nil, false
 		}
 		result := failed(nodehistory.FailureCode(err))
+		result.AgentLost = true // requestEnd above ends the session
 		if a.publish(execution.Event{Ref: execution.Ref{TurnID: call.id}, Kind: execution.EventTurnEnded, Result: &result}) != nil {
 			a.fail("agent_event_write_failed", errEventStore)
 			return nil, false

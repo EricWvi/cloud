@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -16,7 +17,11 @@ import (
 )
 
 // fakeExecution scripts the shared execution service: every accepted Start opens a session whose
-// owning turn ends when the test calls finish. Hooks inject the faults a scenario needs.
+// owning turn ends when the test calls finish. Hooks inject the faults a scenario needs. It ends
+// sessions where executionruntime.Service does: a workflow Start ends the run's previous session
+// (the pinned Node holds one per checkout) and refuses while one of the run's turns runs; a turn
+// that does not complete ends a LifetimeTurn session, and a held one only when AgentLost; Cancel
+// ends the session and reports AgentLost.
 type fakeExecution struct {
 	executiontest.Stub
 
@@ -27,8 +32,13 @@ type fakeExecution struct {
 	ended    []string
 	cancels  []execution.Ref
 	next     int
-	// closed sessions accept no Append: End and Cancel (which ends an Agent session) close one.
-	closed   map[string]bool
+	// closed sessions accept no Append: End and Cancel (which ends an Agent session) close one,
+	// and so do the runtime's own ends described above.
+	closed map[string]bool
+	// latest is each workflow run's most recent session; replaced lists the sessions a later
+	// Start of their run ended.
+	latest   map[string]string
+	replaced []string
 	appended []execution.AppendRequest
 	// appendedCh receives each accepted Append's session ID.
 	appendedCh chan string
@@ -42,14 +52,15 @@ type fakeExecution struct {
 }
 
 type fakeSession struct {
-	ref    execution.Ref
-	caller execution.Caller
-	events chan execution.Event
-	result *execution.Result
+	ref      execution.Ref
+	caller   execution.Caller
+	lifetime execution.Lifetime
+	events   chan execution.Event
+	result   *execution.Result
 }
 
 func newFakeExecution() *fakeExecution {
-	f := &fakeExecution{sessions: map[string]*fakeSession{}, startedCh: make(chan string, 16), closed: map[string]bool{}, appendedCh: make(chan string, 16)}
+	f := &fakeExecution{sessions: map[string]*fakeSession{}, startedCh: make(chan string, 16), closed: map[string]bool{}, latest: map[string]string{}, appendedCh: make(chan string, 16)}
 	f.ListExecutorsFunc = func(context.Context, execution.Scope) ([]execution.Executor, error) {
 		return []execution.Executor{
 			{ID: "opencode:fixture", AgentID: "official/ora-space.opencode", AgentName: "OpenCode", PluginVersion: "0.6.11", Model: execution.Model{ID: "fixture", Name: "Fixture"}},
@@ -94,12 +105,27 @@ func (f *fakeExecution) start(_ context.Context, scope execution.Scope, req exec
 			return s.ref, nil // an identical caller attempt is idempotent
 		}
 	}
+	if req.Caller.Kind == execution.CallerWorkflow {
+		if prior := f.sessions[f.latest[req.Caller.ID]]; prior != nil {
+			if prior.result == nil && !f.closed[prior.ref.SessionID] {
+				f.mu.Unlock()
+				return execution.Ref{}, execution.ErrWorkspaceBusy // the run's turn slot is taken
+			}
+			if !f.closed[prior.ref.SessionID] {
+				f.closed[prior.ref.SessionID] = true
+				f.replaced = append(f.replaced, prior.ref.SessionID)
+			}
+		}
+	}
 	f.next++
 	s := &fakeSession{
 		ref:    execution.Ref{SessionID: fmt.Sprintf("session-%d", f.next), TurnID: fmt.Sprintf("turn-%d", f.next)},
-		caller: req.Caller, events: make(chan execution.Event, 4),
+		caller: req.Caller, lifetime: req.Lifetime, events: make(chan execution.Event, 4),
 	}
 	f.sessions[s.ref.SessionID] = s
+	if req.Caller.Kind == execution.CallerWorkflow {
+		f.latest[req.Caller.ID] = s.ref.SessionID
+	}
 	f.started = append(f.started, req)
 	f.scopes = append(f.scopes, scope)
 	f.mu.Unlock()
@@ -145,6 +171,9 @@ func (f *fakeExecution) finish(id string, r execution.Result) {
 	s := f.sessions[id]
 	if s.result == nil {
 		s.result = &r
+		if r.Status != execution.StatusCompleted && (r.AgentLost || s.lifetime != execution.LifetimeHeld) {
+			f.closed[id] = true
+		}
 	}
 	f.mu.Unlock()
 	s.events <- execution.Event{Ref: s.ref, Kind: execution.EventTurnEnded, Result: &r}
@@ -205,9 +234,16 @@ func (f *fakeExecution) cancel(_ context.Context, _ execution.Scope, ref executi
 		}
 	}
 	f.mu.Lock()
+	if s := f.sessions[ref.SessionID]; s != nil && s.ref == ref && s.result != nil {
+		// Like the runtime, cancelling a turn that already ended returns its result and leaves
+		// the session as that turn left it.
+		r := *s.result
+		f.mu.Unlock()
+		return r, nil
+	}
 	f.closed[ref.SessionID] = true
 	f.mu.Unlock()
-	r := execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}
+	r := execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled", AgentLost: true}
 	f.finish(ref.SessionID, r)
 	return r, nil
 }
@@ -233,6 +269,13 @@ func (f *fakeExecution) request(id string) execution.StartRequest {
 		}
 	}
 	return execution.StartRequest{}
+}
+
+// isReplaced reports whether a later Start of its run ended the session.
+func (f *fakeExecution) isReplaced(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Contains(f.replaced, id)
 }
 
 func completed(answer string) execution.Result {

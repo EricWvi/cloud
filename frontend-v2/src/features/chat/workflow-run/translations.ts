@@ -415,6 +415,9 @@ export const workflowRunTranslations = {
     "workflowRun.errorHint.repository": "通常是临时故障，可直接续跑",
     "workflowRun.errorKind.session": "智能体会话失败",
     "workflowRun.errorHint.session": "检查智能体进程与网络后续跑",
+    "workflowRun.errorKind.interactive_session": "交互会话未能建立",
+    "workflowRun.errorHint.interactive_session":
+      "交互节点不会自动重试；检查智能体进程与网络后续跑",
     "workflowRun.errorKind.agent_refusal": "智能体拒绝了请求",
     "workflowRun.errorHint.agent_refusal":
       "智能体拒绝了请求；可直接续跑让它带着失败信息重试，或调整提示词后发布新版本",
@@ -487,7 +490,7 @@ export const workflowRunTranslations = {
     "workflowRun.v2.interactive.awaitingBadge": "等待输入",
     "workflowRun.v2.interactive.openHint": "等待输入：打开会话继续对话，或完成这一步",
     "workflowRun.v2.interactive.partialNote":
-      "当前为简化版：由发起人确认完成。停止本轮会结束这个节点的会话，停止后不能继续对话。",
+      "当前为简化版：由发起人确认完成。停止本轮会结束这个节点的会话，停止后不能继续对话；运行里另一个 Agent 开始执行时，这个会话也会结束。",
     "workflowRun.v2.interactive.readOnly":
       "只有发起这次运行的人可以继续对话、停止或完成这一步，你可以查看。",
     "workflowRun.v2.interactive.composerLabel": "回复 Agent",
@@ -496,7 +499,7 @@ export const workflowRunTranslations = {
     "workflowRun.v2.interactive.stop": "停止本轮",
     "workflowRun.v2.interactive.complete": "完成",
     "workflowRun.v2.interactive.sessionEnded":
-      "本轮已停止，会话已结束，不能继续对话；可以用最后一次正常结束的回答完成这一步。",
+      "会话已结束（停止了本轮、Agent 断开，或运行里另一个 Agent 开始执行），不能继续对话；可以用最后一次正常结束的回答完成这一步。",
     "workflowRun.v2.interactive.blocker.no_completed_turn":
       "还没有正常结束的回答，不能完成这一步；只能停止整个运行。",
     "workflowRun.v2.interactive.blocker.turn_not_completed":
@@ -961,6 +964,10 @@ export const workflowRunTranslations = {
     "workflowRun.errorKind.session": "Agent session failed",
     "workflowRun.errorHint.session":
       "Check the agent process and network, then resume",
+    "workflowRun.errorKind.interactive_session":
+      "Interactive session could not start",
+    "workflowRun.errorHint.interactive_session":
+      "Interactive nodes never retry automatically; check the agent process and network, then resume",
     "workflowRun.errorKind.agent_refusal": "Agent refused the request",
     "workflowRun.errorHint.agent_refusal":
       "The agent refused; resume to let it retry with the failure context, or adjust the prompt and publish a new version",
@@ -1046,7 +1053,7 @@ export const workflowRunTranslations = {
     "workflowRun.v2.interactive.awaitingBadge": "Awaiting input",
     "workflowRun.v2.interactive.openHint": "Awaiting input: open the session to reply or complete this step",
     "workflowRun.v2.interactive.partialNote":
-      "Simplified for now: the starter confirms completion. Stopping a turn ends this node's session, so the conversation cannot continue afterwards.",
+      "Simplified for now: the starter confirms completion. Stopping a turn ends this node's session, so the conversation cannot continue afterwards; the session also ends when another agent of the run starts.",
     "workflowRun.v2.interactive.readOnly":
       "Only the person who started this run can continue, stop or complete this step; you can read it.",
     "workflowRun.v2.interactive.composerLabel": "Reply to the agent",
@@ -1055,7 +1062,7 @@ export const workflowRunTranslations = {
     "workflowRun.v2.interactive.stop": "Stop this turn",
     "workflowRun.v2.interactive.complete": "Complete",
     "workflowRun.v2.interactive.sessionEnded":
-      "The turn was stopped and the session has ended, so the conversation cannot continue. You can complete the step with the last answer that ended normally.",
+      "The session has ended (the turn was stopped, the agent disconnected, or another agent of the run started), so the conversation cannot continue. You can complete the step with the last answer that ended normally.",
     "workflowRun.v2.interactive.blocker.no_completed_turn":
       "No answer ended normally yet, so this step cannot complete; only stopping the whole run is left.",
     "workflowRun.v2.interactive.blocker.turn_not_completed":

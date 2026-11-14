@@ -64,9 +64,11 @@ type Service struct {
 	groups           map[string]string
 	workspaces       map[string]string
 	workspaceSession map[string]string
-	ending           map[string]bool
-	closed           bool
-	failed           bool
+	// held lists the live LifetimeHeld sessions this process started.
+	held   map[string]bool
+	ending map[string]bool
+	closed bool
+	failed bool
 }
 
 var _ execution.Service = (*Service)(nil)
@@ -92,7 +94,7 @@ func New(ctx context.Context, cfg Config) (*Service, error) {
 	}
 	owned, cancel := context.WithCancel(ctx)
 	return &Service{db: cfg.Store, models: models, agent: cfg.Agent, ctx: owned, cancel: cancel,
-		workers: map[string]*worker{}, groups: map[string]string{}, workspaces: map[string]string{}, workspaceSession: map[string]string{}, ending: map[string]bool{}}, nil
+		workers: map[string]*worker{}, groups: map[string]string{}, workspaces: map[string]string{}, workspaceSession: map[string]string{}, held: map[string]bool{}, ending: map[string]bool{}}, nil
 }
 
 // Start validates the project and freezes a binding before recording the first Agent turn.
@@ -107,15 +109,24 @@ func (s *Service) Start(ctx context.Context, scope execution.Scope, req executio
 		owned.Plugins = slices.Clone(owned.Plugins)
 		req.Skills = &owned
 	}
-	return s.start(ctx, scope, req.Caller, req.Prompt, &req.Target, req.ExecutorID, req.AgentID, req.ModelID, req.Skills)
+	switch req.Lifetime {
+	case execution.LifetimeTurn:
+	case execution.LifetimeHeld:
+		if req.Caller.Kind != execution.CallerWorkflow {
+			return execution.Ref{}, execution.ErrInvalidRequest
+		}
+	default:
+		return execution.Ref{}, execution.ErrInvalidRequest
+	}
+	return s.start(ctx, scope, req.Caller, req.Prompt, &req.Target, req.ExecutorID, req.AgentID, req.ModelID, req.Skills, req.Lifetime)
 }
 
 // StartModel starts an independent model conversation without creating a directory or Node.
 func (s *Service) StartModel(ctx context.Context, scope execution.Scope, req execution.ModelStartRequest) (execution.Ref, error) {
-	return s.start(ctx, scope, req.Caller, req.Prompt, nil, "", "", req.ModelID, nil)
+	return s.start(ctx, scope, req.Caller, req.Prompt, nil, "", "", req.ModelID, nil, execution.LifetimeTurn)
 }
 
-func (s *Service) start(ctx context.Context, scope execution.Scope, caller execution.Caller, prompt execution.Prompt, target *execution.Target, executorID, agentID, modelID string, skills *execution.Skills) (execution.Ref, error) {
+func (s *Service) start(ctx context.Context, scope execution.Scope, caller execution.Caller, prompt execution.Prompt, target *execution.Target, executorID, agentID, modelID string, skills *execution.Skills, lifetime execution.Lifetime) (execution.Ref, error) {
 	if err := validate(caller, prompt); err != nil {
 		return execution.Ref{}, err
 	}
@@ -186,8 +197,10 @@ func (s *Service) start(ctx context.Context, scope execution.Scope, caller execu
 			} else {
 				s.workspaces[key] = session.WorkspaceID
 			}
-			// A workflow's next node may use a different Agent/model. End its idle predecessor
-			// before lending that run's directory to a new logical session.
+			// A workflow's next node may use a different Agent/model. End its predecessor before
+			// lending that run's directory to a new logical session, held or not: the pinned Node
+			// refuses a second Agent session on a checkout that still has one, and the refusal
+			// takes the whole Node down (node-db session.rs:117-120 at aa21210e).
 			if prior := s.workspaceSession[session.WorkspaceID]; prior != "" {
 				if err := s.agent.End(ctx, prior); err != nil {
 					return execution.Ref{}, execution.ErrStopUnconfirmed
@@ -195,6 +208,7 @@ func (s *Service) start(ctx context.Context, scope execution.Scope, caller execu
 				if err := s.db.EndExecutionSession(ctx, scope, prior); err != nil {
 					return execution.Ref{}, publicError(err)
 				}
+				delete(s.held, prior)
 			}
 		}
 	}
@@ -204,6 +218,9 @@ func (s *Service) start(ctx context.Context, scope execution.Scope, caller execu
 	}
 	if session.WorkspaceID != "" {
 		s.workspaceSession[session.WorkspaceID] = session.ID
+	}
+	if lifetime == execution.LifetimeHeld {
+		s.held[session.ID] = true
 	}
 	s.launch(scope, session, turn, group)
 	return turn.Ref, nil
@@ -341,6 +358,7 @@ func (s *Service) Append(ctx context.Context, scope execution.Scope, req executi
 func (s *Service) launch(scope execution.Scope, session execution.Session, turn execution.Turn, group string) {
 	ctx, cancel := context.WithCancel(s.ctx)
 	w := &worker{cancel: cancel, done: make(chan struct{}), ref: turn.Ref, scope: scope, group: group}
+	held := s.held[session.ID]
 	s.workers[turn.Ref.TurnID] = w
 	s.groups[group] = turn.Ref.TurnID
 	go func() {
@@ -379,12 +397,17 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		if result.Status == "" {
 			result = failedResult(ctx, execution.ErrUnavailable)
 		}
+		// An Agent error means the session is gone; the driver marks the results it publishes
+		// itself, and this marks the ones only the runtime writes.
+		result.AgentLost = result.AgentLost || agentErr != nil
 		write, stop := context.WithTimeout(context.Background(), 10*time.Second)
 		_, err := s.db.FinishExecutionTurn(write, scope, turn.Ref, result)
 		stop()
-		if session.Target != nil && (agentErr != nil || result.Status != execution.StatusCompleted) {
+		if session.Target != nil && (agentErr != nil || (result.Status != execution.StatusCompleted && !held)) {
 			// A failed/cancelled physical Agent is never advertised as resumable. Keep
 			// admission occupied until stop is confirmed, even if its result is already stored.
+			// A held session survives a turn the Agent itself ended without completing: the
+			// driver reports no error then, and the Agent is still there to take the next turn.
 			s.mu.Lock()
 			s.ending[session.ID] = true
 			s.mu.Unlock()
@@ -395,6 +418,9 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 				err = errors.Join(err, s.db.EndExecutionSession(finish, scope, session.ID))
 			}
 			cancel()
+			s.mu.Lock()
+			delete(s.held, session.ID)
+			s.mu.Unlock()
 		}
 		s.mu.Lock()
 		w.err = err
@@ -544,7 +570,13 @@ func (s *Service) End(ctx context.Context, scope execution.Scope, sid string) er
 			return execution.ErrStopUnconfirmed
 		}
 	}
-	return publicError(s.db.EndExecutionSession(ctx, scope, sid))
+	err = s.db.EndExecutionSession(ctx, scope, sid)
+	if err == nil {
+		s.mu.Lock()
+		delete(s.held, sid)
+		s.mu.Unlock()
+	}
+	return publicError(err)
 }
 
 // Close shuts down workers and physical Agents. Persisted sessions are ended by recovery on
