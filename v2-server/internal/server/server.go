@@ -21,6 +21,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/taskdecomp"
 	"github.com/wanglongan587/cloud/v2-server/internal/taskrun"
+	"github.com/wanglongan587/cloud/v2-server/internal/taskworkflow"
 )
 
 // SessionCookie is the Gateway's development cookie name, so the frontend sees the same session.
@@ -62,6 +63,8 @@ type PluginPackageDownloader func(context.Context, string, string, pluginmarket.
 
 // Options tune the server.
 type Options struct {
+	// TaskWorkflows owns handling runs and unified task workflow history.
+	TaskWorkflows   *taskworkflow.Host
 	RefreshOfficial func(context.Context) error
 	// SessionTTL is how long a login lasts.
 	SessionTTL time.Duration
@@ -205,6 +208,7 @@ func newRouter(h *handler) *router {
 	h.workspaceRoutes(rt)
 	h.taskRunRoutes(rt)
 	h.taskDecompositionRoutes(rt)
+	h.taskWorkflowRoutes(rt)
 	rt.public("/api/", func(w http.ResponseWriter, _ *http.Request) { fault(w, http.StatusNotFound, "not_found") })
 	return rt
 }

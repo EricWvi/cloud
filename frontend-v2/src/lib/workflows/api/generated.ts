@@ -300,6 +300,8 @@ export const WorkflowRunStatus = {
 } as const;
 
 export interface WorkflowRun {
+  /** Owning handling or decomposition task, when present. */
+  taskId?: string;
   id: string;
   workflowId: string;
   snapshotId: string;

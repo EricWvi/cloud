@@ -655,3 +655,33 @@ CREATE TABLE IF NOT EXISTS v2_workflow_finding_tasks (
 );
 
 ALTER TABLE v2_workflow_forms ADD COLUMN IF NOT EXISTS submitted_at timestamptz;
+
+-- Task handling owns one run; inspection reports retain their existing many-task associations.
+CREATE UNIQUE INDEX IF NOT EXISTS v2_tasks_tenant_identity ON v2_tasks(tenant_id,id);
+CREATE UNIQUE INDEX IF NOT EXISTS v2_workflow_runs_tenant_identity ON v2_workflow_runs(tenant_id,id);
+CREATE TABLE IF NOT EXISTS v2_task_workflow_runs (
+ run_id uuid PRIMARY KEY,
+ tenant_id uuid NOT NULL,
+ task_id uuid NOT NULL,
+ started_by uuid NOT NULL REFERENCES users(id),
+ start_key text NOT NULL,
+ status text NOT NULL DEFAULT 'running' CHECK(status IN ('running','succeeded','failed','cancelled','interrupted')),
+ failure text NOT NULL DEFAULT '',
+ created_at timestamptz NOT NULL DEFAULT now(),
+ FOREIGN KEY(tenant_id,task_id) REFERENCES v2_tasks(tenant_id,id),
+ FOREIGN KEY(tenant_id,run_id) REFERENCES v2_workflow_runs(tenant_id,id),
+ UNIQUE(task_id,started_by,start_key)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS v2_task_workflow_runs_live ON v2_task_workflow_runs(task_id) WHERE status='running';
+
+-- Compatibility columns from the earlier general-version fence. Status ownership below
+-- replaces task_version so ordinary task edits cannot interfere with settlement.
+ALTER TABLE v2_task_workflow_runs ADD COLUMN IF NOT EXISTS task_version bigint;
+ALTER TABLE v2_task_workflow_runs ADD COLUMN IF NOT EXISTS original_status text NOT NULL DEFAULT 'pending';
+CREATE INDEX IF NOT EXISTS v2_task_decompositions_run ON v2_task_decompositions(tenant_id,workflow_run_id);
+CREATE INDEX IF NOT EXISTS v2_workflow_forms_task_results ON v2_workflow_forms USING gin(results jsonb_path_ops);
+
+-- Status ownership belongs to the handling admission, independent of editable task metadata.
+-- task_version is retained for old readers but is no longer a settlement fence.
+ALTER TABLE v2_task_workflow_runs ADD COLUMN IF NOT EXISTS status_revision bigint NOT NULL DEFAULT 1;
+ALTER TABLE v2_task_workflow_runs ADD COLUMN IF NOT EXISTS task_status text NOT NULL DEFAULT 'running';

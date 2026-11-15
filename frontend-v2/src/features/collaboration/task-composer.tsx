@@ -102,7 +102,7 @@ export function TaskComposer({ tenantId, task, me, inSquad, sending, error, onSe
     </div>
     <div className="mc-composer-foot">
       {runsAgent(task, me, inSquad)
-        ? <label className="mc-switch-line" title={reach.reason}><Switch checked={sendToAgent} disabled={!reach.ok} onCheckedChange={setToAgent} aria-label="发给 Agent" />发给 Agent<small>{reach.reason}</small></label>
+        ? <label className="mc-switch-line" title={reach.reason}><Switch checked={sendToAgent} disabled={!reach.ok} onCheckedChange={setToAgent} aria-label="发给 Agent" /><span className="mc-composer-toggle-label">发给 Agent</span><small>{reach.reason}</small></label>
         : <small className="mc-muted">评论全团队可见。</small>}
       <Button type="button" size="sm" disabled={!body.trim() || sending} onClick={() => void submit()}>
         <SendHorizontal data-icon="inline-start" />{sending ? '发送中…' : sendToAgent ? '发给 Agent' : '评论'}

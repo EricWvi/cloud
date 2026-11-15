@@ -164,6 +164,17 @@ func scanWorkflowRun(row pgx.Row) (WorkflowRun, error) {
 func (s *Store) CreateWorkflowRun(ctx context.Context, tenant, workflowID, snapshotID string, in WorkflowRunInput) (WorkflowRun, error) {
 	var run WorkflowRun
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var err error
+		run, err = createWorkflowRun(ctx, tx, tenant, workflowID, snapshotID, in)
+		return err
+	})
+	return run, err
+}
+
+// createWorkflowRun shares snapshot freezing with atomic task admission. The caller owns tx.
+func createWorkflowRun(ctx context.Context, tx pgx.Tx, tenant, workflowID, snapshotID string, in WorkflowRunInput) (WorkflowRun, error) {
+	var run WorkflowRun
+	err := func() error {
 		var publishedSnapshotID *string
 		var workflowName string
 		err := tx.QueryRow(ctx, `
@@ -242,7 +253,7 @@ func (s *Store) CreateWorkflowRun(ctx context.Context, tenant, workflowID, snaps
 			return fmt.Errorf("record root scope: %w", err)
 		}
 		return nil
-	})
+	}()
 	return run, err
 }
 

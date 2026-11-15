@@ -268,7 +268,7 @@ Agent 正在执行一轮时，人工推进返回 409 `run_active`。
 - **身份归发起人**：会话在点「开始处理」的人的 scope 下运行。工作区任何成员都能读运行和它的事件流
   （服务端校验读者是成员后，用发起人的 scope 读），但只有发起人能发下一轮：别人代发，等于用发起人的身份（以后是他的模型凭据）跑。
   其他成员发给 Agent 是 409 `run_owned`，他们可以重新执行，用自己的身份开一次新运行。
-- **一个任务最多一个活着的运行**：重新执行会先结束空闲的旧会话（`endReason = replaced`）；正在执行一轮时是 409 `run_active`，要先停。
+- **一个任务最多一个活着的运行**：与活工作流处理也互斥（409 `run_active`），空闲 Agent 会话必须先结束才能交给工作流。重新执行会先结束空闲的旧会话（`endReason = replaced`）；正在执行一轮时是 409 `run_active`，要先停。
   页面不排队，追问在一轮执行中同样是 409 `run_active`。
 - **停止即结束这次运行**：固定 Node 上取消一轮会结束整个会话，之后只能重新执行。任务完成或取消时结束空闲会话（`closed`）。
 - **重启**：进程启动前把上一个进程留下的活运行记为 `interrupted`，正在执行的任务回到 `pending`；不重放、不恢复。
@@ -281,6 +281,98 @@ Agent 正在执行一轮时，人工推进返回 409 `run_active`。
 Space Agent），写入时解析名字；正文里手打的「@名字」不路由。`toAgent` 把评论作为一轮发给 Agent：调用者自己的活运行就追加到同一会话，
 没有活运行就用调用者身份开新运行。v2 没有通知渠道，@ 靠 `task-mentions` 送达：被 @ 的人在任务里评论一次就算回复，
 自己 @ 自己和已完成、已取消任务上的 @ 不算。
+
+#### 任务工作流处理 / Task workflow handling
+
+正式 `api/openapi.json` 没有以下两条任务工作流路由。候选契约为
+[`task-workflows.openapi.json`](task-workflows.openapi.json)，独立 Orval 配置为
+`frontend-v2/orval.task-workflows.config.ts`；仅用于 v2，不修改 Cloud 契约。
+
+| 路由 / Route | 行为 / Behavior |
+|---|---|
+| `POST /api/v2/tenants/{tid}/tasks/{taskid}/workflow-runs` | 必须带 `Idempotency-Key`；`workflowId`、可选 `snapshotId`、`input`、Start `values`；以负责人身份启动冻结的发布版本 / Requires an idempotency key; starts a frozen published snapshot as the assignee |
+| `GET /api/v2/tenants/{tid}/tasks/{taskid}/workflow-runs` | 返回处理、拆分、巡检来源三类记录及工作流名称、版本、真实发起人、状态和失败原因 / Lists handling, decomposition and inspection sources with workflow name, version, actual starter, status and failure |
+
+权限与 Agent 任务运行共用同一函数：派给人时仅本人可启动，派给小队时仅当前人类队员可启动，
+派给 Agent 时工作区成员均可启动；不符合指派范围返回 409 `not_assignee`，未指派返回
+409 `not_agent_task`。项目由任务固定，草稿不可运行。两种运行都锁任务行准入；活 Agent 会话
+（含空闲会话）与处理工作流互斥，冲突为 409 `run_active`。处理期间人工推进（包括关闭任务）
+同样返回该错误。能查看任务的成员在任务的「工作流」页签打开处理运行后点击「停止」（列表也提供入口），
+任务回到 `pending` 后再操作；权限与对话运行视图的取消接口一致，不要求本人是发起人。
+
+启动前先读取并固定发布快照，调用执行引擎相同的图可执行性、Start 类型、必填和选项校验。
+这些拒绝返回 400，不创建运行或关联，也不改变任务状态。随后在一个数据库事务里进行准入、
+按 `CanRunTransitionTask` 进入 `running` 并写关联及关联自己的状态修订号。事务提交后的准备、校验或启动
+发生错误时，先重读运行：仍未执行的（`pending`，或 `started_at` 为空的 `cancelled`）在同一个事务里取消
+运行、把关联记为 `failed` 并保存原因（停止先于启动时原因固定为「启动前被停止」），只有本次处理关联
+仍拥有它写入的 `running` 状态时才恢复启动前状态；已经开始执行的运行改经工作流宿主取消（连同已派发的
+Agent 一轮；停止未确认时由运行自己的 worker 收尾），再由正常结算记录真实结果，恢复原状态是错的。
+清理遇到暂时错误会由受进程管理的 worker 重试。已执行的运行不允许按拒绝结算。
+每个任务使用自己的进程锁，持有到首次调度返回，防止同键重试越过尚未确定的启动结果；其他任务不等待；持有者与排队者全部退出后即删除该锁条目。
+
+成功或执行失败从 `running` 进入 `review`，执行后取消或重启中断进入 `pending`；执行前就被停止
+（`started_at` 为空的 `cancelled`）的启动不算发生过，关联记为 `failed`（「启动前被停止」）并恢复原任务
+状态，与从未执行的删除准入同规则。结算同时校验处理关联的身份、状态修订号和任务状态；仅状态写入会撤销该关联的状态所有权，
+所以描述、标题、项目和指派修改不影响结算，`running → pending → running` 则不会被旧运行覆盖。
+旧的 `task_version` 列保留兼容，不再用于结算。重启先结算已完成运行，再取消未完成的处理运行并标为 `interrupted`，
+不恢复执行。拆分和巡检不推进任务状态，巡检可关联多个任务。
+
+同一任务、发起人、幂等键返回原运行，终态也一样；同键不同请求体仍沿用原请求。对话框复用普通
+运行的类型化 Start 字段，固定显示的发布快照；HTTP 错误或请求体改变后使用新键，只有相同请求的
+网络失败重试保留原键。页签只在有活运行时轮询；读取只结算尚未释放的处理关联，历史读取不加写锁。
+巡检来源查询使用 `results @>` 与 GIN 索引。删除运行历史后，处理和拆分记录仍可见，标为已删除且
+不可打开。处理关联尚未结算时按运行表里保留的状态结算：执行后取消仍回到 `pending`；从未执行的
+`pending` 准入（含删除）以及执行前就被停止的运行按启动拒绝处理，恢复原任务状态。
+运行详情的声明式 store 方法提供 `taskId`，拆分关联按租户与运行 ID 建索引。
+390px 导航完整换行，开关文字和时间不截断，工作区使用可用全宽。巡检任务描述不再写对话页 URL。
+
+Agent and workflow task starts share one permission function: the named human, current human squad
+members, or any workspace member for an Agent-assigned task. Out-of-scope callers receive 409
+`not_assignee`; unassigned tasks receive `not_agent_task`. Both kinds lock the task row for admission.
+Live Agent sessions, including idle sessions, and handling workflows exclude each other with 409
+`run_active`. Manual status changes, including closing a task, are refused while handling is live;
+any member who can see the task opens the handling run in its Workflow tab and clicks 停止 (also
+available in the list) to return it to pending, using the chat run view’s existing cancellation
+endpoint without a starter-only restriction.
+
+Before admission, the service freezes a published snapshot and applies the engine's executable-graph
+and Start-input checks. Refusals return 400 without creating a run/link or moving the task. Admission,
+the running transition and the versioned link commit together. Any later preparation or start error
+re-reads the run: one that never executed (pending, or cancelled with a NULL started_at) is cancelled
+and settled failed with its reason in one transaction — a run stopped before start records exactly
+that reason — restoring the original task status only while the handling link still owns its admitted
+running status; a run that already began executing is cancelled through the workflow host, dispatched
+Agent turn included (the run's own worker finishes an unconfirmed stop), and settles with its real
+outcome, since restoring the original status would misreport work that really ran. Process-owned
+workers retry transient cleanup failures, and an executed run is no longer refuseable. Per-task
+locks remain held through the first scheduling pass so same-key retries cannot overtake its outcome;
+unrelated tasks proceed independently. Lock entries are removed when their last holder or waiter exits.
+
+Execution success/failure moves running to review; cancellation after execution and restart
+interruption move it to pending. A start stopped before it ever executed (cancelled with a NULL
+started_at) never happened: the link records the stop as failed and the task returns to its original
+status, the same rule as a never-executed deleted admission. Settlement fences on the handling link’s identity/revision and admitted task status. Only status
+writes revoke that ownership; metadata edits and reassignment do not prevent settlement, while a
+running/pending/running cycle invalidates it. The legacy task_version column is retained but unused.
+Recovery settles completed runs normally, cancels unfinished handling runs, and marks them interrupted.
+Decomposition and inspection do not move tasks. Reusing task/caller/key replays the original run;
+the dialog rotates its key after HTTP errors or body edits, retaining it only for identical network
+retries. It shares the normal typed Start fields and sends the displayed snapshot ID.
+
+List reads settle only unsettled links and query history once; the frontend polls only live runs
+and immediately refreshes task status/version when handling settles.
+Inspection sources use indexed JSON containment (`results @>` with GIN). Deleted handling and
+decomposition runs remain listed but cannot open. An unsettled handling link uses the stored run
+outcome: a cancellation after execution still returns the task to pending, while a never-executed
+pending admission (deleted or not) and a run stopped before it ever executed restore the original
+task status as refused starts. A declared store method supplies task backlinks;
+decomposition lookups use a tenant/run index. Phone navigation wraps fully, toggle labels and times
+remain readable, and workspaces use the available width. Inspection descriptions omit chat-page URLs.
+
+Desktop references (read-only at `ebd5b725`): explicit published choices follow
+`packages/app-shell/src/features/workspace/sidebar-create-menu.tsx:52-65`; execution project and
+workflow identity follow `packages/app-shell/src/features/workflow-run/run-workflow-dialog.tsx:73-81`.
+Task ownership and status policy are Cloud v2 owner decisions, since Desktop tasks are workspaces.
 
 #### 任务拆分
 

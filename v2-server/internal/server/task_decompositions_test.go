@@ -37,6 +37,11 @@ func (r finishingRuns) Start(ctx context.Context, tenant, _, runID string) error
 	return e
 }
 
+func (r finishingRuns) Cancel(ctx context.Context, tenant, _, runID string) error {
+	_, e := r.store.CancelWorkflowRun(ctx, tenant, runID)
+	return e
+}
+
 func (finishingRuns) Subscribe(string) (<-chan struct{}, func()) {
 	return make(chan struct{}), func() {}
 }

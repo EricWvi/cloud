@@ -1,9 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ReactNode } from 'react'
 import { MemoryRouter, Route, Routes } from 'react-router'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { UserContext } from '@/app/auth/user'
 import type { CollaborationTarget, User } from '@/api/generated.schemas'
 import { type Conversation, emptyConversation } from '@/components/agent-thread/model/types'
@@ -11,6 +11,8 @@ import * as workflowsApi from '@/lib/workflows/api/generated'
 import * as decompositionApi from './decomposition-api/generated'
 import * as workspaceApi from '@/lib/workspace-api/generated'
 import * as api from './tasks-api/generated'
+import * as taskWorkflows from './task-workflows-api/generated'
+import type { TaskWorkflowRun } from './task-workflows-api/generated'
 import type { Task, TaskDecomposition, TaskRun, TaskTimeline } from './tasks-api/generated'
 import TaskPage from './task-page'
 
@@ -35,8 +37,9 @@ vi.mock('./tasks-api/generated', () => ({
 }))
 vi.mock('./decomposition-api/generated', () => ({ listDecompositionWorkflows: vi.fn() }))
 vi.mock('@/lib/workflows/api/generated', () => ({
-  listWorkflows: vi.fn(), listWorkflowRuns: vi.fn(), createWorkflowRun: vi.fn(), updateWorkflowRunInput: vi.fn(), startWorkflowRun: vi.fn(),
+  cancelWorkflowRun: vi.fn(), getWorkflow: vi.fn(), listWorkflows: vi.fn(), listWorkflowRuns: vi.fn(), createWorkflowRun: vi.fn(), updateWorkflowRunInput: vi.fn(), startWorkflowRun: vi.fn(),
 }))
+vi.mock('./task-workflows-api/generated', () => ({ listTaskWorkflowRuns: vi.fn(), startTaskWorkflow: vi.fn() }))
 vi.mock('@/lib/workspace-api/generated', () => ({ getTaskRunWorkspaceChanges: vi.fn(), getWorkflowRunWorkspaceChanges: vi.fn() }))
 // The run view has its own tests; here it shows which run the page opened and how.
 vi.mock('@/features/chat/workflow-run/run-pane', () => ({
@@ -56,8 +59,8 @@ const run = (overrides: Partial<TaskRun> = {}): TaskRun => ({
 })
 const empty: TaskTimeline = { runs: [], comments: [] }
 
-function renderPage(query='') {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+function renderPage(query='', suppliedClient?: QueryClient) {
+  const client = suppliedClient ?? new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   return render(<QueryClientProvider client={client}><UserContext.Provider value={me}>
     <MemoryRouter initialEntries={['/collaboration/tasks/task-1'+query]}>
       <Routes><Route path="/collaboration/tasks/:taskId" element={<TaskPage />} /></Routes>
@@ -69,6 +72,7 @@ beforeEach(() => {
   HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', '') }
   HTMLDialogElement.prototype.close = function () { this.removeAttribute('open') }
   vi.clearAllMocks()
+  vi.mocked(workflowsApi.getWorkflow).mockResolvedValue({published:{id:'snapshot-1',workflowId:'wf-dev',version:'v1',graph:'{"nodes":[],"edges":[]}',createdAt:0,updatedAt:0}} as never)
   session.conversation = null
   workspace.role = 'owner'
   targets.items = [
@@ -79,6 +83,7 @@ beforeEach(() => {
   vi.mocked(api.getTaskTimeline).mockResolvedValue(empty)
   vi.mocked(api.listTasks).mockResolvedValue({ items: [], nextCursor: '' })
   vi.mocked(api.listTaskDecompositions).mockResolvedValue({ items: [] })
+  vi.mocked(taskWorkflows.listTaskWorkflowRuns).mockImplementation(async () => ({ items: (await api.listTaskDecompositions('tenant', 'task-1')).items.map(d => ({ ...d, kind: 'decomposition' as const, version: 'v1' })) }))
   vi.mocked(api.listTaskExecutors).mockResolvedValue({ items: [
     { id: 'claude:fixture', name: 'Claude Code / Fixture', agentId: 'official/ora-space.claude', agentName: 'Claude Code', modelId: 'messages-fixture', modelName: 'Fixture' },
     { id: 'claude:configured', name: 'Claude Code / Sonnet', agentId: 'official/ora-space.claude', agentName: 'Claude Code', modelId: 'messages-configured', modelName: 'Sonnet' },
@@ -103,7 +108,7 @@ it('starts the Agent with the configured model and shows the run being prepared'
   await waitFor(() => expect(api.startTaskRun).toHaveBeenCalledWith('tenant', 'task-1', { executorId: 'claude:configured' }, expect.objectContaining({ headers: expect.anything() })))
 
   expect(await screen.findByText('正在准备…')).toBeInTheDocument()
-  expect(await screen.findByText('Agent 正在执行，结束后再推进。')).toBeInTheDocument()
+  expect(await screen.findByText('运行正在执行，结束后再推进。')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: '停止' })).toBeInTheDocument()
 })
 
@@ -362,7 +367,7 @@ it('opens the run as soon as a split starts, read-only, and goes back to the lis
   vi.mocked(api.listTaskDecompositions).mockImplementation(async () => ({ items: started ? [decomposition()] : [] }))
   renderPage()
   await userEvent.click(await screen.findByRole('button', { name: '拆分' }))
-  expect(screen.queryByRole('tab', { name: /工作流/ })).not.toBeInTheDocument()
+  expect(screen.getByRole('tab', { name: /工作流/ })).toBeInTheDocument()
   const dialog = await screen.findByRole('dialog')
   await waitFor(() => expect(within(dialog).getByLabelText('工作流')).toHaveValue('wf-split'))
   await userEvent.click(within(dialog).getByRole('button', { name: '开始拆分' }))
@@ -371,7 +376,7 @@ it('opens the run as soon as a split starts, read-only, and goes back to the lis
   // The run takes the room the composer would.
   expect(screen.queryByLabelText('评论或给 Agent 的消息')).not.toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: '返回工作流列表' }))
-  expect(await screen.findByRole('list', { name: '工作流运行记录' })).toHaveTextContent('正在拆分')
+  expect(await screen.findByRole('list', { name: '工作流运行记录' })).toHaveTextContent('运行中')
   expect(screen.getByLabelText('评论或给 Agent 的消息')).toBeInTheDocument()
 })
 
@@ -515,58 +520,192 @@ it('offers no workspace before anything has run', async () => {
   expect(screen.queryByRole('button', { name: '工作区' })).not.toBeInTheDocument()
 })
 
+const handlingRun = (overrides: Partial<TaskWorkflowRun> = {}): TaskWorkflowRun => ({
+  id: 'handle:wf-run-1', taskId: 'task-1', workflowId: 'wf-dev', workflowRunId: 'wf-run-1', workflowName: '需求开发',
+  version: 'v1', startedBy: 'user-me', startedByName: '演示用户', kind: 'handle', status: 'succeeded',
+  failure: '', createdCount: 0, createdAt: '2026-11-14T00:00:00Z', ...overrides,
+})
+
 describe('handling a task with a workflow', () => {
   const human = { type: 'human' as const, id: 'user-me', displayName: '演示用户', identifier: '' }
   const workflow = (id: string, name: string) => ({ id, namespace: 'team', name, publishedVersion: 'v1', createdAt: 1, updatedAt: 1 })
-  const summary = { id: 'wf-run-1', name: '修复登录页', projectId: 'project-1', workflowId: 'wf-dev', version: 'v1', startedAt: 2, finishedAt: null, createdAt: 2 }
 
-  afterEach(() => { vi.unstubAllEnvs() })
-
-  it('is not offered without the demo mock', async () => {
+  it('offers the entry without the demo flag, only to the assignee', async () => {
     vi.mocked(api.getTask).mockResolvedValue(task({ assignee: human }))
+    const view = renderPage()
+    expect(await screen.findByRole('button', { name: '用工作流处理' })).toBeEnabled()
+    view.unmount()
+    vi.mocked(api.getTask).mockResolvedValue(task({ assignee: { ...human, id: 'other' } }))
     renderPage()
-    await screen.findByRole('button', { name: '用 Agent 处理' })
+    expect(await screen.findByText(/只有负责人或负责小队的成员可以处理/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '用工作流处理' })).not.toBeInTheDocument()
   })
 
-  it('starts the picked workflow with the requirement and opens the run on the task', async () => {
-    vi.stubEnv('VITE_DEMO_MOCK', '1')
+  it('requires an explicit workflow pick and passes input and Start values in one idempotent request', async () => {
     const user = userEvent.setup()
     let started = false
-    vi.mocked(api.getTask).mockResolvedValue(task({ assignee: human }))
-    vi.mocked(api.setTaskStatus).mockResolvedValue(task({ assignee: human, status: 'running' }))
+    vi.mocked(api.getTask).mockImplementation(async()=>task({assignee:human,status:started?'running':'pending',version:started?2:1}))
     vi.mocked(workflowsApi.listWorkflows).mockResolvedValue({ workflows: [workflow('wf-split', '需求拆分'), workflow('wf-dev', '需求开发')] })
-    vi.mocked(workflowsApi.listWorkflowRuns).mockImplementation(async () => ({ runs: started ? [{ ...summary, status: 'running' as const }] : [] }))
-    vi.mocked(workflowsApi.createWorkflowRun).mockResolvedValue({ run: { id: 'wf-run-1' } } as never)
-    vi.mocked(workflowsApi.updateWorkflowRunInput).mockResolvedValue({} as never)
-    vi.mocked(workflowsApi.startWorkflowRun).mockImplementation(async () => { started = true; return {} as never })
+    vi.mocked(taskWorkflows.listTaskWorkflowRuns).mockImplementation(async () => ({ items: started ? [handlingRun({ status: 'running' })] : [] }))
+    vi.mocked(taskWorkflows.startTaskWorkflow).mockImplementation(async () => { started = true; return { workflowRunId: 'wf-run-1' } })
     renderPage()
-
     await user.click(await screen.findByRole('button', { name: '用工作流处理' }))
     const dialog = screen.getByRole('dialog')
-    await waitFor(() => expect(within(dialog).getByLabelText('工作流')).toHaveDisplayValue('需求开发（v1）'))
-    const prompt = within(dialog).getByLabelText('需求')
-    expect(prompt).toHaveValue('# 修复登录页\n\n按钮错位\n\n## 约束\n- ')
-    await user.type(prompt, '不新增依赖')
+    await screen.findByRole('option', { name: '需求开发（v1）' })
+    expect(within(dialog).getByLabelText('工作流')).toHaveValue('')
+    expect(within(dialog).getByRole('button', { name: '启动工作流' })).toBeDisabled()
+    await user.selectOptions(within(dialog).getByLabelText('工作流'), 'wf-dev')
+    expect(await within(dialog).findByLabelText('需求')).toHaveValue('修复登录页\n\n按钮错位')
     await user.click(within(dialog).getByRole('button', { name: '启动工作流' }))
-
     await screen.findByText('运行视图 wf-run-1 tenant 只读')
-    expect(workflowsApi.createWorkflowRun).toHaveBeenCalledWith('tenant', 'wf-dev', { projectId: 'project-1', name: '修复登录页' })
-    expect(workflowsApi.updateWorkflowRunInput).toHaveBeenCalledWith('tenant', 'wf-run-1', { input: '# 修复登录页\n\n按钮错位\n\n## 约束\n- 不新增依赖' })
-    expect(api.setTaskStatus).toHaveBeenCalledWith('tenant', 'task-1', { status: 'running', version: 1 })
-    expect(screen.getByRole('tab', { name: '工作流 1' })).toHaveAttribute('aria-selected', 'true')
+    expect(taskWorkflows.startTaskWorkflow).toHaveBeenCalledWith('tenant', 'task-1', { workflowId: 'wf-dev', snapshotId: 'snapshot-1', input: '修复登录页\n\n按钮错位', values: {} }, expect.objectContaining({ headers: { 'Idempotency-Key': expect.any(String) } }))
+    await waitFor(()=>expect(screen.getByText('进行中',{selector:'.mc-task-bar .mc-status'})).toBeInTheDocument())
+    expect(api.setTaskStatus).not.toHaveBeenCalled()
   })
 
-  it('lists the handling run with its outcome', async () => {
-    vi.stubEnv('VITE_DEMO_MOCK', '1')
-    vi.mocked(api.getTask).mockResolvedValue(task({ assignee: human }))
-    vi.mocked(workflowsApi.listWorkflows).mockResolvedValue({ workflows: [workflow('wf-dev', '需求开发')] })
-    vi.mocked(workflowsApi.listWorkflowRuns).mockResolvedValue({ runs: [{ ...summary, status: 'succeeded' }, { ...summary, id: 'other', name: '别的任务', status: 'running' }] })
+  it('lists all three kinds and opens inspection sources inside the tab', async () => {
+    vi.mocked(taskWorkflows.listTaskWorkflowRuns).mockResolvedValue({ items: [
+      handlingRun(), handlingRun({ id: 'decomposition:2', workflowRunId: 'split-2', kind: 'decomposition', createdCount: 2 }),
+      handlingRun({ id: 'source:3', workflowRunId: 'source-3', kind: 'source', workflowName: '巡检' }),
+    ] })
     renderPage('?tab=workflows')
-
-    const row = await screen.findByRole('button', { name: /查看工作流运行 需求开发/ })
-    expect(row).toHaveTextContent('处理 · 演示用户 发起')
-    expect(row).toHaveTextContent('处理完成')
-    expect(screen.getAllByRole('listitem')).toHaveLength(1)
+    const list = await screen.findByRole('list', { name: '工作流运行记录' })
+    expect(list).toHaveTextContent('处理 · v1 · 演示用户 发起')
+    expect(list).toHaveTextContent('拆分 · v1 · 演示用户 发起')
+    expect(list).toHaveTextContent('巡检来源 · v1 · 演示用户 发起')
+    expect(within(list).getAllByRole('listitem')).toHaveLength(3)
+    expect(document.querySelector('a[href^="/chat?run="]')).toBeNull()
+    await userEvent.click(within(list).getByRole('button', { name: /查看工作流运行 巡检/ }))
+    expect(await screen.findByText('运行视图 source-3 tenant 只读')).toBeInTheDocument()
   })
+})
+
+
+it.each([
+  ['idle Agent',task({assignee:{type:'human',id:'user-me',displayName:'Me'},activeRun:{id:'idle',state:'idle',startedBy:'user-me',startedByName:'Me',executorName:'Test'}})],
+  ['done',task({assignee:{type:'human',id:'user-me',displayName:'Me'},status:'done'})],
+  ['cancelled',task({assignee:{type:'human',id:'user-me',displayName:'Me'},status:'cancelled'})],
+] as const)('disables workflow handling for %s',async(_,target)=>{
+ vi.mocked(api.getTask).mockResolvedValue(target)
+ renderPage()
+ expect(await screen.findByRole('button',{name:'用工作流处理'})).toBeDisabled()
+})
+
+it.each(['running','awaitingInput'] as const)('blocks Agent and workflow starts while handling is %s',async status=>{
+ vi.mocked(api.getTask).mockResolvedValue(task({assignee:{type:'human',id:'user-me',displayName:'Me'}}))
+ vi.mocked(taskWorkflows.listTaskWorkflowRuns).mockResolvedValue({items:[handlingRun({status})]})
+ renderPage()
+ await screen.findByText('工作流正在处理，结束后才能开始新的运行。')
+ expect(screen.getByRole('button',{name:'用 Agent 处理'})).toBeDisabled()
+ expect(screen.getByRole('button',{name:'用工作流处理'})).toBeDisabled()
+})
+
+it('keeps deleted task workflow records without opening their deleted runs',async()=>{
+ vi.mocked(taskWorkflows.listTaskWorkflowRuns).mockResolvedValue({items:[handlingRun({deleted:true})]})
+ renderPage('?tab=workflows&workflow=wf-run-1')
+ expect(await screen.findByText('运行已删除')).toBeInTheDocument()
+ expect(screen.queryByRole('button',{name:/查看工作流运行/})).not.toBeInTheDocument()
+ expect(screen.queryByText(/运行视图/)).not.toBeInTheDocument()
+})
+
+it('reuses a key only for an identical network retry, rotates on body edits and error responses',async()=>{
+ const user=userEvent.setup()
+ vi.mocked(api.getTask).mockResolvedValue(task({assignee:{type:'human',id:'user-me',displayName:'Me'}}))
+ vi.mocked(workflowsApi.listWorkflows).mockResolvedValue({workflows:[{id:'wf-dev',namespace:'team',name:'开发',publishedVersion:'v1',createdAt:0,updatedAt:0}]})
+ vi.mocked(taskWorkflows.startTaskWorkflow).mockRejectedValue(new Error('network unavailable'))
+ renderPage()
+ await user.click(await screen.findByRole('button',{name:'用工作流处理'}))
+ await user.selectOptions(screen.getByLabelText('工作流'),'wf-dev')
+ const prompt=await screen.findByLabelText('需求')
+ const submit=screen.getByRole('button',{name:'启动工作流'})
+ await user.click(submit);await screen.findByRole('alert')
+ const key=(n:number)=>vi.mocked(taskWorkflows.startTaskWorkflow).mock.calls[n]![3]!.headers!['Idempotency-Key']
+ await user.click(submit);await waitFor(()=>expect(taskWorkflows.startTaskWorkflow).toHaveBeenCalledTimes(2))
+ expect(key(1)).toBe(key(0))
+ await user.type(prompt,' changed')
+ await user.click(submit);await waitFor(()=>expect(taskWorkflows.startTaskWorkflow).toHaveBeenCalledTimes(3))
+ expect(key(2)).not.toBe(key(1))
+ vi.mocked(taskWorkflows.startTaskWorkflow).mockRejectedValue(Object.assign(new Error('invalid input'),{response:{status:400}}))
+ await user.click(submit);await waitFor(()=>expect(taskWorkflows.startTaskWorkflow).toHaveBeenCalledTimes(4))
+ await waitFor(()=>expect(submit).toBeEnabled())
+ await user.click(submit);await waitFor(()=>expect(taskWorkflows.startTaskWorkflow).toHaveBeenCalledTimes(5))
+ expect(key(4)).not.toBe(key(3))
+})
+
+
+it('keeps decomposition independent of handling admission and manual task controls',async()=>{
+ vi.mocked(api.getTask).mockResolvedValue(handedToMe('running'))
+ vi.mocked(taskWorkflows.listTaskWorkflowRuns).mockResolvedValue({items:[handlingRun({kind:'decomposition',status:'running'})]})
+ renderPage()
+ expect(await screen.findByRole('button',{name:'用 Agent 处理'})).toBeEnabled()
+ expect(screen.getByRole('button',{name:'提交验收'})).toBeEnabled()
+ expect(screen.getByRole('button',{name:'用工作流处理'})).toBeEnabled()
+})
+
+it('hides manual moves while a handling run owns the task status',async()=>{
+ vi.mocked(api.getTask).mockResolvedValue(handedToMe('running'))
+ vi.mocked(taskWorkflows.listTaskWorkflowRuns).mockResolvedValue({items:[handlingRun({status:'running'})]})
+ renderPage()
+ await screen.findByText('工作流正在处理，结束后才能开始新的运行。')
+ expect(screen.queryByRole('button',{name:'提交验收'})).not.toBeInTheDocument()
+ expect(screen.queryByRole('button',{name:'取消任务'})).not.toBeInTheDocument()
+})
+
+it('polls a live handling run, immediately refreshes settlement, and submits the fresh task version',async()=>{
+ vi.useFakeTimers()
+ const client=new QueryClient({defaultOptions:{queries:{retry:false},mutations:{retry:false}}})
+ let settled=false
+ vi.mocked(api.getTask).mockImplementation(async()=>task({status:settled?'review':'running',version:settled?2:1}))
+ vi.mocked(taskWorkflows.listTaskWorkflowRuns).mockImplementation(async()=>({items:[handlingRun({status:settled?'succeeded':'running'})]}))
+ vi.mocked(api.setTaskStatus).mockResolvedValue(task({status:'done',version:3}))
+ const view=renderPage('?tab=workflows',client)
+ try{
+  await vi.waitFor(()=>expect(client.getQueryData(['task-workflow-runs','tenant','task-1'])).toMatchObject({items:[{status:'running'}]}))
+  const before=vi.mocked(taskWorkflows.listTaskWorkflowRuns).mock.calls.length
+  settled=true
+  await act(async()=>{await vi.advanceTimersByTimeAsync(3100)})
+  await vi.waitFor(()=>expect(client.getQueryData(['task','tenant','task-1'])).toMatchObject({status:'review',version:2}))
+  expect(vi.mocked(taskWorkflows.listTaskWorkflowRuns).mock.calls.length).toBeGreaterThan(before)
+  fireEvent.click(screen.getByRole('button',{name:'确认完成'}))
+  await vi.waitFor(()=>expect(api.setTaskStatus).toHaveBeenCalledWith('tenant','task-1',{status:'done',version:2}))
+  await act(async()=>{await vi.advanceTimersByTimeAsync(0)})
+  const past=vi.mocked(taskWorkflows.listTaskWorkflowRuns).mock.calls.length
+  await act(async()=>{await vi.advanceTimersByTimeAsync(3100)})
+  expect(vi.mocked(taskWorkflows.listTaskWorkflowRuns).mock.calls.length).toBe(past)
+ }finally{view.unmount();client.clear();vi.useRealTimers()}
+})
+
+it('lets any member stop handling inside the task tab and refreshes the returned pending task',async()=>{
+ let cancelled=false
+ vi.mocked(api.getTask).mockImplementation(async()=>task({status:cancelled?'pending':'running',version:cancelled?3:2}))
+ vi.mocked(taskWorkflows.listTaskWorkflowRuns).mockImplementation(async()=>({items:[handlingRun({startedBy:'other',startedByName:'鲍勃',status:cancelled?'cancelled':'awaitingInput'})]}))
+ vi.mocked(workflowsApi.cancelWorkflowRun).mockImplementation(async()=>{cancelled=true;return {} as never})
+ renderPage('?tab=workflows&workflow=wf-run-1')
+ await userEvent.click(await screen.findByRole('button',{name:'停止'}))
+ await waitFor(()=>expect(screen.getByText('待处理',{selector:'.mc-task-bar .mc-status'})).toBeInTheDocument())
+ expect(workflowsApi.cancelWorkflowRun).toHaveBeenCalledWith('tenant','wf-run-1')
+ expect(screen.queryByRole('button',{name:'停止'})).not.toBeInTheDocument()
+})
+
+it('stops a handling admission that is still pending, settling the task back to its original status',async()=>{
+ let stopped=false
+ vi.mocked(api.getTask).mockImplementation(async()=>task({status:stopped?'pending':'running',version:stopped?3:2}))
+ vi.mocked(taskWorkflows.listTaskWorkflowRuns).mockImplementation(async()=>({items:[handlingRun({startedBy:'other',startedByName:'鲍勃',status:stopped?'failed':'pending'})]}))
+ vi.mocked(workflowsApi.cancelWorkflowRun).mockImplementation(async()=>{stopped=true;return {} as never})
+ renderPage('?tab=workflows&workflow=wf-run-1')
+ // A still-pending row (待启动) is stoppable: cancelling it is a start that did not happen.
+ await userEvent.click(await screen.findByRole('button',{name:'停止'}))
+ await waitFor(()=>expect(screen.getByText('待处理',{selector:'.mc-task-bar .mc-status'})).toBeInTheDocument())
+ expect(workflowsApi.cancelWorkflowRun).toHaveBeenCalledWith('tenant','wf-run-1')
+ expect(screen.queryByRole('button',{name:'停止'})).not.toBeInTheDocument()
+})
+
+it.each([
+ {kind:'decomposition',startedBy:'user-me'},
+ {kind:'source',startedBy:'user-me'},
+] as const)('does not offer task-tab cancellation for $kind',async record=>{
+ vi.mocked(taskWorkflows.listTaskWorkflowRuns).mockResolvedValue({items:[handlingRun({...record,status:'running'})]})
+ renderPage('?tab=workflows&workflow=wf-run-1')
+ await screen.findByText(/运行视图/)
+ expect(screen.queryByRole('button',{name:'停止'})).not.toBeInTheDocument()
 })

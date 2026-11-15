@@ -28,9 +28,9 @@ import (
 // Errors the HTTP layer maps to stable codes.
 var (
 	// ErrNotAgentTask reports a run on a task assigned to no Agent, person or squad.
-	ErrNotAgentTask = errors.New("task not assigned to an agent, a person or a squad")
+	ErrNotAgentTask = store.ErrTaskNotRunnable
 	// ErrNotAssignee reports a run on a person's or squad's task by someone outside it.
-	ErrNotAssignee = errors.New("task assigned to someone else")
+	ErrNotAssignee = store.ErrTaskNotAssignee
 	// ErrNoExecutor reports an Agent with no runnable executor, or an executor of another Agent.
 	ErrNoExecutor = errors.New("no executor for the task's agent")
 	// ErrTaskClosed reports a run on a task that is done or cancelled.
@@ -137,27 +137,8 @@ func (h *Host) Executors(ctx context.Context, scope execution.Scope, taskID stri
 }
 
 func (h *Host) executorsFor(ctx context.Context, scope execution.Scope, task store.Task) ([]execution.Executor, error) {
-	if task.Assignee == nil {
-		return nil, ErrNotAgentTask
-	}
-	switch task.Assignee.Type {
-	case store.AssigneeHuman:
-		// A person's task runs on that person's identity, so only they start it.
-		if task.Assignee.ID != scope.UserID {
-			return nil, ErrNotAssignee
-		}
-	case store.AssigneeSquad:
-		// A squad's task runs on the identity of whichever member picks it up.
-		member, e := h.store.InSquad(ctx, scope.TenantID, task.Assignee.ID, scope.UserID)
-		if e != nil {
-			return nil, e
-		}
-		if !member {
-			return nil, ErrNotAssignee
-		}
-	case store.AssigneeAgent:
-	default:
-		return nil, ErrNotAgentTask
+	if err := store.AuthorizeTaskRunner(ctx, task, scope.UserID, h.store.InSquad); err != nil {
+		return nil, err
 	}
 	all, e := h.catalog.ListExecutors(ctx, scope)
 	if e != nil {

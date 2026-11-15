@@ -90,7 +90,7 @@ func (h *Host) createFormTasks(ctx context.Context, runID, nodeRunID string) err
 		if len(chars) > 3500 {
 			description = string(chars[:3500])
 		}
-		description += "\n\n来源巡检：/chat?run=" + runID + "\n问题标识：" + v.Key
+		description += "\n\n问题标识：" + v.Key
 		var assignee *store.TaskAssigneeRef
 		if a.Assignee != nil {
 			assignee = &store.TaskAssigneeRef{Type: a.Assignee.Type, ID: a.Assignee.ID}

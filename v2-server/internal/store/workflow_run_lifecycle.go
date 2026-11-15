@@ -337,6 +337,18 @@ func (s *Store) FinishWorkflowRun(ctx context.Context, tenant, runID, status str
 func (s *Store) CancelWorkflowRun(ctx context.Context, tenant, runID string) (WorkflowRun, error) {
 	var run WorkflowRun
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var err error
+		run, err = cancelWorkflowRun(ctx, tx, tenant, runID)
+		return err
+	})
+	return run, err
+}
+
+// cancelWorkflowRun shares the complete cancellation transition with refused task admissions.
+// Keeping it transaction-scoped lets the caller settle the task link in the same commit.
+func cancelWorkflowRun(ctx context.Context, tx pgx.Tx, tenant, runID string) (WorkflowRun, error) {
+	var run WorkflowRun
+	err := func() error {
 		if err := lockWorkflowRun(ctx, tx, tenant, runID); err != nil {
 			return err
 		}
@@ -381,7 +393,7 @@ func (s *Store) CancelWorkflowRun(ctx context.Context, tenant, runID string) (Wo
 			WHERE tenant_id = $1 AND id = $2
 			RETURNING `+workflowRunColumns, tenant, runID))
 		return err
-	})
+	}()
 	return run, err
 }
 

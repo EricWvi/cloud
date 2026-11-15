@@ -1,31 +1,20 @@
-import { useState, type Dispatch, type SetStateAction } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { IconAlertTriangle, IconLoader2 } from "@tabler/icons-react";
 import {
   Button,
-  Checkbox,
   Dialog,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  Input,
   Label,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
   Textarea,
 } from "@/lib/workflows/host/ui";
-import {
-  formatWorkflowVariableValue,
-  parseWorkflowVariableValueText,
-  resolveWorkflowInputFieldType,
-  workflowVariableValueExample,
-  type WorkflowInputVariable,
-} from "@/lib/workflows/mock";
+import type { WorkflowInputVariable } from "@/lib/workflows/mock";
+import { WorkflowStartVariableFields } from "@/lib/workflows/host/start-variable-fields";
+import { workflowStartDrafts, parseWorkflowStartDrafts } from "@/lib/workflows/host/start-variable-drafts";
 
 /** A reachable node start will refuse, named as the author titled it. */
 export interface WorkflowRunUnsupportedNode {
@@ -110,36 +99,10 @@ function WorkflowRunStartDialogContent({
   const { t } = useTranslation();
   const [initialPromptDraft, setInitialPromptDraft] = useState(initialPrompt);
   const [drafts, setDrafts] = useState<Record<string, string>>(() =>
-    Object.fromEntries(
-      variables.map((variable) => [
-        variable.name,
-        resolveWorkflowInputFieldType(variable) === "checkbox" &&
-        variable.value === undefined
-          ? "false"
-          : formatWorkflowVariableValue(variable.value, variable.valueType),
-      ]),
-    ),
+    workflowStartDrafts(variables),
   );
   const [attemptedStart, setAttemptedStart] = useState(false);
-  const parsed = variables.map((variable) => {
-    const result = parseWorkflowVariableValueText(
-      drafts[variable.name] ?? "",
-      variable.valueType,
-    );
-    return {
-      variable,
-      result,
-      missingRequired:
-        variable.required === true &&
-        result.valid &&
-        result.value === undefined,
-      exceedsMaxLength:
-        variable.maxLength !== undefined &&
-        result.valid &&
-        typeof result.value === "string" &&
-        Array.from(result.value).length > variable.maxLength,
-    };
-  });
+  const parsed = parseWorkflowStartDrafts(variables,drafts);
   const hasInvalidValue = parsed.some(
     ({ result, exceedsMaxLength, missingRequired }) =>
       !result.valid || exceedsMaxLength || missingRequired,
@@ -179,134 +142,7 @@ function WorkflowRunStartDialogContent({
         {unsupportedNodes.length > 0 && (
           <UnsupportedNodesWarning nodes={unsupportedNodes} />
         )}
-        {variables.length === 0 ? (
-          <p className="rounded-lg bg-muted/45 px-3 py-5 text-center text-xs text-muted-foreground">
-            {t("workflowRun.startInputsEmpty")}
-          </p>
-        ) : (
-          variables.map((variable, index) => {
-            const parsedVariable = parsed[index];
-            const result = parsedVariable?.result;
-            const fieldType = resolveWorkflowInputFieldType(variable);
-            const inputId = `workflow-run-start-${variable.name}`;
-            const value = drafts[variable.name] ?? "";
-            const invalid =
-              attemptedStart &&
-              (result?.valid === false ||
-                parsedVariable?.missingRequired === true ||
-                parsedVariable?.exceedsMaxLength === true);
-            return (
-              <div key={variable.name} className="space-y-1.5">
-                <div className="flex items-baseline justify-between gap-2">
-                  <Label htmlFor={inputId}>
-                    {variable.displayName?.trim() || variable.name}
-                  </Label>
-                  <span className="text-[10px] text-muted-foreground">
-                    {variable.required === true
-                      ? t("workflowRun.inputRequired")
-                      : t("workflowRun.inputOptional")}
-                  </span>
-                </div>
-                {fieldType === "paragraph" ||
-                fieldType === "file-list" ||
-                fieldType === "json" ? (
-                  <Textarea
-                    id={inputId}
-                    className="min-h-24 bg-muted/55"
-                    value={value}
-                    aria-invalid={invalid}
-                    maxLength={variable.maxLength}
-                    placeholder={workflowVariableValueExample(
-                      variable.valueType,
-                    )}
-                    onChange={(event) =>
-                      updateDraft(setDrafts, variable.name, event.target.value)
-                    }
-                  />
-                ) : fieldType === "select" ? (
-                  <Select
-                    value={value || null}
-                    onValueChange={(next) =>
-                      updateDraft(setDrafts, variable.name, next ?? "")
-                    }
-                  >
-                    <SelectTrigger
-                      id={inputId}
-                      className="w-full bg-muted/55"
-                      aria-invalid={invalid}
-                    >
-                      <SelectValue
-                        placeholder={t("workflowRun.selectPlaceholder")}
-                      />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(variable.options ?? []).map((option) => (
-                        <SelectItem key={option} value={option}>
-                          {option}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                ) : fieldType === "checkbox" ? (
-                  <label
-                    htmlFor={inputId}
-                    className="flex h-10 items-center gap-2 rounded-md bg-muted/55 px-3 text-sm"
-                  >
-                    <Checkbox
-                      id={inputId}
-                      checked={value === "true"}
-                      aria-invalid={invalid}
-                      onCheckedChange={(checked) =>
-                        updateDraft(
-                          setDrafts,
-                          variable.name,
-                          checked === true ? "true" : "false",
-                        )
-                      }
-                    />
-                    {value === "true"
-                      ? t("settings.workflow.start.checked")
-                      : t("settings.workflow.start.unchecked")}
-                  </label>
-                ) : (
-                  <Input
-                    id={inputId}
-                    className="h-10 bg-muted/55"
-                    type={fieldType === "number" ? "number" : "text"}
-                    value={value}
-                    aria-invalid={invalid}
-                    maxLength={variable.maxLength}
-                    placeholder={workflowVariableValueExample(
-                      variable.valueType,
-                    )}
-                    onChange={(event) =>
-                      updateDraft(setDrafts, variable.name, event.target.value)
-                    }
-                  />
-                )}
-                {attemptedStart && result?.valid === false && (
-                  <p className="text-[11px] text-destructive" role="status">
-                    {t("settings.workflow.variableValueInvalid", {
-                      type: variable.valueType,
-                    })}
-                  </p>
-                )}
-                {attemptedStart && parsedVariable?.exceedsMaxLength && (
-                  <p className="text-[11px] text-destructive" role="status">
-                    {t("settings.workflow.start.valueTooLong", {
-                      count: variable.maxLength,
-                    })}
-                  </p>
-                )}
-                {attemptedStart && parsedVariable?.missingRequired && (
-                  <p className="text-[11px] text-destructive" role="status">
-                    {t("workflowRun.inputRequiredError")}
-                  </p>
-                )}
-              </div>
-            );
-          })
-        )}
+        <WorkflowStartVariableFields variables={variables} drafts={drafts} setDrafts={setDrafts} attemptedStart={attemptedStart} />
         <div className="space-y-1.5">
           <div className="flex items-baseline justify-between gap-2">
             <Label htmlFor="workflow-run-start-prompt">
@@ -387,13 +223,4 @@ function UnsupportedNodesWarning({
       </ul>
     </div>
   );
-}
-
-/** Replaces one field draft without coupling the individual controls to form state shape. */
-function updateDraft(
-  setDrafts: Dispatch<SetStateAction<Record<string, string>>>,
-  name: string,
-  value: string,
-): void {
-  setDrafts((current) => ({ ...current, [name]: value }));
 }

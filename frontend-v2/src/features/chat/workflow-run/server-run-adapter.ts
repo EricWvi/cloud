@@ -268,6 +268,7 @@ export function toGraphWorkflowRun(detail: WorkflowRunDetail, definition: Workfl
   }
   const result: GraphWorkflowRun = {
     id: run.id,
+    taskId: run.taskId,
     projectId: run.projectId,
     definitionId: run.workflowId,
     definitionSnapshot: withRunStartValues(definition, detail),

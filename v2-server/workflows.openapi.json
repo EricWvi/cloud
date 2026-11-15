@@ -1153,6 +1153,7 @@
         "required": ["id", "workflowId", "snapshotId", "projectId", "name", "status", "state", "input", "output", "error", "startedAt", "finishedAt", "createdAt", "updatedAt"],
         "additionalProperties": false,
         "properties": {
+          "taskId": { "type": "string", "description": "Owning handling or decomposition task, when present." },
           "id": {"type": "string", "format": "uuid"},
           "workflowId": {"type": "string", "format": "uuid"},
           "snapshotId": {"type": "string", "format": "uuid"},

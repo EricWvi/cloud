@@ -229,7 +229,24 @@ func (s *Store) CreateTaskRun(ctx context.Context, in NewTaskRun) (TaskRun, erro
  (SELECT id FROM v2_tasks WHERE id=$1 AND tenant_id=$2 AND version=$7 FOR UPDATE) eligible RETURNING id`
 		args = append(args, in.ExpectedVersion)
 	}
-	e := s.pool.QueryRow(ctx, query, args...).Scan(&id)
+	e := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var locked string
+		err := tx.QueryRow(ctx, `SELECT id::text FROM v2_tasks WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, in.TenantID, in.TaskID).Scan(&locked)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		var live bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM v2_task_workflow_runs WHERE tenant_id=$1 AND task_id=$2 AND status='running')`, in.TenantID, in.TaskID).Scan(&live); err != nil {
+			return err
+		}
+		if live {
+			return ErrRunActive
+		}
+		return tx.QueryRow(ctx, query, args...).Scan(&id)
+	})
 	if errors.Is(e, pgx.ErrNoRows) {
 		return TaskRun{}, ErrConflict
 	}
@@ -471,8 +488,12 @@ func (s *Store) PendingMentions(ctx context.Context, tenant, caller string) ([]P
 
 // InSquad reports whether the user is a current human member of the squad.
 func (s *Store) InSquad(ctx context.Context, tenant, squad, user string) (bool, error) {
+	return inSquad(ctx, s.pool, tenant, squad, user)
+}
+
+func inSquad(ctx context.Context, q dbTX, tenant, squad, user string) (bool, error) {
 	var member bool
-	e := s.pool.QueryRow(ctx, `
+	e := q.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM v2_squad_members m JOIN v2_squads q ON q.id = m.squad_id
 			WHERE q.tenant_id = $1 AND m.squad_id = $2 AND m.user_id = $3
 				AND m.member_type = 'human' AND m.ended_at IS NULL)`, tenant, squad, user).Scan(&member)

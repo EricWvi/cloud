@@ -640,6 +640,8 @@ export type WorkflowNodeConversationItem =
  * A project-scoped execution of a mounted workflow definition.
  */
 export interface GraphWorkflowRun {
+  /** Owning handling or decomposition task, when this run has one. */
+  taskId?: string;
   id: string;
   projectId: string;
   definitionId: string;

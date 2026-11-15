@@ -188,3 +188,15 @@ at `ebd5b725a8a21d72ecf5e6fb7ced10d007b72dfe`.
 工作流目录新增动态表单和创建任务节点。表单配置固定字段、报告与数组变量以及确认人；运行页展示冻结报告、问题确认、人员/Agent/小队选择和备注，支持服务端草稿、提交记录、现有任务提示和结果链接。创建任务在后续节点执行。运行链接保留 run 参数供刷新和分享；窄屏打开运行自动收起聊天列表。
 
 DTS 模拟通过 lib/demo/dts.ts 提供，只有 VITE_DEMO_MOCK=1 才显示。回执按真实任务 ID 稳定生成，明确标为模拟，失败重试不改变 Cloud 任务。协作页项目筛选保存在 URL 的 project 参数中。
+
+## 任务工作流 / Task workflows
+
+任务的「工作流」页签经 `task-workflows.openapi.json` 生成的客户端读取真实处理、拆分、巡检来源记录，
+在页签内打开运行；不再使用标题匹配的 demo mock。工作流处理权限与 Agent 一致：人类负责人本人、小队成员，或 Agent 任务的任一成员；其他人看到原因。
+对话框要求显式选择发布工作流，可填写需求和 Start 变量；状态由服务器推进。手机上工作区使用全宽，关闭后返回任务。
+
+The task workflow tab uses the generated v2-only task-workflow client for handling, decomposition
+and inspection sources, opening each run in place. The handling action uses the same human/squad/Agent-assigned policy as Agent runs;
+others see the reason. The dialog requires an explicit published workflow choice and accepts input
+and Start values. The server owns status flow-back. Phone workspaces use the available full width.
+Run `npm run api:generate:task-workflows` after changing the candidate contract.

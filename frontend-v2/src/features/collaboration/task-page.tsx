@@ -1,19 +1,18 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { ChevronLeft, ClipboardList, ListTree, PanelRight, Pencil } from 'lucide-react'
 import { useUser } from '@/app/auth/user'
 import { Button } from '@/components/ui/button'
 import { getApiV2TenantsTidProjects } from '@/lib/projects-api/generated'
-import { demoMockEnabled } from '@/lib/demo/flags'
-import { useDemoTaskRuns } from '@/lib/demo/task-workflows'
+import { listTaskWorkflowRuns } from './task-workflows-api/generated'
 import { listSquads } from '@/lib/squads-api/generated'
 import { PanelDialog } from '@/components/panel/panel-dialog'
 import { WorkspaceNavigationProvider } from '@/components/workspace-panel/navigation'
 import type { WorkspaceSource } from '@/components/workspace-panel/source'
 import { useWorkspacePanel } from '@/components/workspace-panel/use-panel'
 import { WorkspacePanel } from '@/components/workspace-panel/workspace-panel'
-import { WorkspaceSplit } from '@/components/workspace-panel/workspace-split'
+import { TaskWorkspace } from './task-workspace'
 import { RunPane } from './run-pane'
 import { TaskComposer, type CommentDraft } from './task-composer'
 import { DecomposeDialog, TaskFamily } from './task-decomposition'
@@ -79,22 +78,45 @@ export default function TaskPage() {
 
   // The task is read most often; when its run changes state, the timeline and the sidebar's counts
   // follow at once instead of on their own slower beat.
-  const runState = task ? `${task.activeRun?.id ?? ''}:${task.activeRun?.state ?? ''}:${task.status}` : ''
+  const runState = task ? `${task.activeRun?.id ?? ''}:${task.activeRun?.state ?? ''}:${task.status}:${task.version}` : ''
   useEffect(() => {
     if (!runState) return
     void client.invalidateQueries({ queryKey: ['task-timeline', tenantId, taskId] })
+    void client.invalidateQueries({ queryKey: ['task-workflow-runs', tenantId, taskId] })
     void client.invalidateQueries({ queryKey: ['tasks', tenantId] })
   }, [runState, client, tenantId, taskId])
   const decompositions = useDecompositions(tenantId, taskId)
   const splitting = decompositions.latest?.status === 'running'
-  const demoRuns = useDemoTaskRuns(tenantId, task)
-  const workflowRuns = [...demoRuns, ...decompositions.items].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  const workflowHistory = useQuery({
+    queryKey: ['task-workflow-runs', tenantId, taskId],
+    queryFn: () => listTaskWorkflowRuns(tenantId, taskId),
+    enabled: !!tenantId && !!taskId,
+    refetchInterval: q => q.state.data?.items.some(run => !run.deleted && ['pending', 'running', 'awaitingInput'].includes(run.status)) ? 3000 : false,
+  })
+  const workflowRuns = workflowHistory.data?.items ?? []
+  const observedHandling = useRef<{taskId:string;states:Map<string,string>}>({taskId,states:new Map()})
+  useEffect(()=>{
+    if(observedHandling.current.taskId!==taskId)observedHandling.current={taskId,states:new Map()}
+    let settled=false
+    for(const run of workflowHistory.data?.items ?? []){
+      if(run.kind!=='handle')continue
+      const previous=observedHandling.current.states.get(run.workflowRunId)
+      if(previous!==run.status && !['pending','running','awaitingInput'].includes(run.status))settled=true
+      observedHandling.current.states.set(run.workflowRunId,run.status)
+    }
+    if(settled){
+      void client.invalidateQueries({queryKey:['task',tenantId,taskId]})
+      void client.invalidateQueries({queryKey:['tasks',tenantId]})
+    }
+  },[workflowHistory.data,client,tenantId,taskId])
+
+  const handlingLive = workflowRuns.some(run => run.kind === 'handle' && ['pending', 'running', 'awaitingInput'].includes(run.status))
   const runs = timeline.data?.runs ?? []
   const comments = timeline.data?.comments ?? []
   const selected = pickedRun ? runs.find(r=>r.id===pickedRun) : runs.at(-1)
   // A link to a run the task no longer lists falls back to the list.
-  const openedWorkflow = tab === 'workflows' ? workflowRuns.find(d => d.workflowRunId && d.workflowRunId === params.get('workflow')) : undefined
-  const newestRun = workflowRuns.find(d => d.workflowRunId)
+  const openedWorkflow = tab === 'workflows' ? workflowRuns.find(d => !d.deleted && d.workflowRunId && d.workflowRunId === params.get('workflow')) : undefined
+  const newestRun = workflowRuns.find(d => !d.deleted && d.workflowRunId)
   // Every run has its own checkout, so the panel shows the run on screen, in place of the side column.
   const workflowRunId = openedWorkflow?.workflowRunId
   const agentRunId = tab === 'runs' ? selected?.id : undefined
@@ -201,22 +223,21 @@ export default function TaskPage() {
       <Button type="button" variant="outline" size="sm" onClick={() => { setError(''); setEditing(true) }} disabled={save.isPending}><Pencil data-icon="inline-start" />编辑</Button>
     </header>
     <WorkspaceNavigationProvider value={workspaceSource ? workspace.navigation : null}>
-    <WorkspaceSplit id="task" panel={workspaceShown && <WorkspacePanel key={workflowRunId ?? agentRunId} source={workspaceSource!}
+    <TaskWorkspace panel={workspaceShown && <WorkspacePanel key={workflowRunId ?? agentRunId} source={workspaceSource!}
       caption={openedWorkflow ? openedWorkflow.workflowName : selected && `Agent 运行 ${runs.indexOf(selected) + 1}`}
       revision={String(timeline.dataUpdatedAt)} request={workspace.request} onClose={() => workspace.setOpen(false)} />}>
     <div className={workspaceShown ? 'mc-task-body wide' : 'mc-task-body'}>
       <section className="mc-task-main-col" aria-label="运行与讨论">
         {task.description && <p className="mc-description">{task.description}</p>}
-        {task.workflowSources?.map(source=><p key={source.runId}><Link className="underline" to={`/chat?run=${source.runId}`}>查看来源巡检报告 · {source.name}{source.submittedAt ? ` · ${new Date(source.submittedAt).toLocaleString()}` : ''}</Link></p>)}
         <TaskFamily tenantId={tenantId} task={task} latest={decompositions.latest} folded={!!openedWorkflow} onRetry={() => setDecomposing(true)} />
         <div className="mc-tabs" role="tablist" aria-label="任务内容">
           <button type="button" role="tab" aria-selected={tab === 'runs'} onClick={() => showTab('runs')}>Agent 运行 <b>{runs.length}</b></button>
-          {(workflowRuns.length > 0 || tab === 'workflows') && <button type="button" role="tab" aria-selected={tab === 'workflows'} onClick={() => showWorkflows()}>工作流 <b>{workflowRuns.length}</b></button>}
+          <button type="button" role="tab" aria-selected={tab === 'workflows'} onClick={() => showWorkflows()}>工作流 <b>{workflowRuns.length}</b></button>
           <button type="button" role="tab" aria-selected={tab === 'discussion'} onClick={() => showTab('discussion')}>讨论 <b>{comments.length}</b></button>
         </div>
         <div className="mc-tab-body">
           {tab === 'workflows'
-            ? <TaskWorkflows tenantId={tenantId} runs={workflowRuns} selected={openedWorkflow} workspace={workspace} onSelect={showWorkflows} />
+            ? workflowHistory.isError ? <p role="alert">工作流记录加载失败，请刷新重试。</p> : <TaskWorkflows tenantId={tenantId} onStopped={refresh} runs={workflowRuns} selected={openedWorkflow} workspace={workspace} onSelect={showWorkflows} />
             : timeline.isError
             ? <p role="alert">运行与讨论加载失败，请刷新重试。</p>
             : tab === 'runs'
@@ -228,26 +249,26 @@ export default function TaskPage() {
       </section>
       {!workspaceShown && <aside className="mc-task-side-col" aria-label="任务属性">
         <TaskDetailView task={task} me={me.id} inSquad={inSquad} canClose={canCloseTask(task, me.id, role)} projectName={projectLabel(projectList, task.projectId)} squads={squads.data?.items ?? []}
-          busy={move.isPending || assign.isPending} error={error}
+          busy={move.isPending || assign.isPending} workflowActive={handlingLive} error={error}
           run={{
             executors: executorList, executorId, onExecutor: setExecutorId, hasRuns: runs.length > 0,
             starting: start.isPending, stopping: stop.isPending,
             onStart: () => { setError(''); start.mutate() },
             onStop: () => { if (task.activeRun) { setError(''); stop.mutate(task.activeRun.id) } },
           }}
-          onWorkflow={demoMockEnabled() ? () => setHandling(true) : undefined}
+          onWorkflow={() => setHandling(true)}
           onStatus={status => { setError(''); move.mutate({ status, target: task }) }}
           onAssign={next => { setError(''); assign.mutate({ assignee: next, target: task }) }} />
       </aside>}
     </div>
-    </WorkspaceSplit>
+    </TaskWorkspace>
     </WorkspaceNavigationProvider>
 
-    {decomposing && <DecomposeDialog tenantId={tenantId} task={task} onClose={() => setDecomposing(false)} onStarted={created => { setDecomposing(false); showWorkflows(created.status === 'running' ? created.workflowRunId : undefined) }} />}
+    {decomposing && <DecomposeDialog tenantId={tenantId} task={task} onClose={() => setDecomposing(false)} onStarted={created => { setDecomposing(false); void client.invalidateQueries({ queryKey: ['task-workflow-runs', tenantId, taskId] }); showWorkflows(created.status === 'running' ? created.workflowRunId : undefined) }} />}
 
     {handling && <TaskWorkflowDialog tenantId={tenantId} task={task} onClose={() => setHandling(false)} onStarted={runId => {
       setHandling(false)
-      if (task.status === 'pending') move.mutate({ status: 'running', target: task })
+      void refresh()
       showWorkflows(runId)
     }} />}
 

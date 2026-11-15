@@ -26,7 +26,7 @@ export interface RunControls {
  * One task's facts and the moves on it: who owns it, running its Agent, and the manual status
  * moves. While the Agent runs a turn, the run owns the status, so manual moves wait for it.
  */
-export function TaskDetailView({ task, me, inSquad, canClose, projectName, squads, busy, error, run, onWorkflow, onStatus, onAssign }: {
+export function TaskDetailView({ task, me, inSquad, canClose, projectName, squads, busy, workflowActive = false, error, run, onWorkflow, onStatus, onAssign }: {
   task: Task
   /** The caller's user id: a person's task runs an Agent only for that person. */
   me: string
@@ -38,12 +38,14 @@ export function TaskDetailView({ task, me, inSquad, canClose, projectName, squad
   projectName: string
   /** Live squads the task may be reassigned to. */
   squads: SquadSummary[]
+  /** A handling workflow owns the task admission slot. */
+  workflowActive?: boolean
   /** A write is in flight. */
   busy: boolean
   /** Error from the last write attempt. */
   error: string
   run: RunControls
-  /** Opens handling the task with a workflow; only the demo offers it, on a person's task. */
+  /** Opens handling the task with a workflow as its human assignee. */
   onWorkflow?: () => void
   onStatus: (status: TaskStatusProperty) => void
   onAssign: (next: TaskAssigneeRef | null) => void
@@ -83,13 +85,10 @@ export function TaskDetailView({ task, me, inSquad, canClose, projectName, squad
             {run.executors.map(x => <NativeSelectOption key={x.id} value={x.id}>{x.name}</NativeSelectOption>)}
           </NativeSelect>
           <div className="mc-actions">
-            <Button type="button" size="sm" disabled={running || run.starting || run.executors.length === 0} onClick={run.onStart}>
+            <Button type="button" size="sm" disabled={workflowActive || running || run.starting || run.executors.length === 0} onClick={run.onStart}>
               {run.hasRuns ? <RotateCcw data-icon="inline-start" /> : <CirclePlay data-icon="inline-start" />}
               {run.starting ? '正在启动…' : run.hasRuns ? '重新执行' : personal ? '用 Agent 处理' : '开始处理'}
             </Button>
-            {personal && onWorkflow && <Button type="button" size="sm" variant="outline" disabled={running} onClick={onWorkflow}>
-              <Workflow data-icon="inline-start" />用工作流处理
-            </Button>}
             {task.activeRun && <Button type="button" size="sm" variant="outline" disabled={run.stopping} onClick={run.onStop}>
               <CircleStop data-icon="inline-start" />{running ? '停止' : '结束会话'}
             </Button>}
@@ -106,12 +105,20 @@ export function TaskDetailView({ task, me, inSquad, canClose, projectName, squad
         </>}
     </section>}
 
+    {onWorkflow && <section className="mc-section" aria-label="工作流处理">
+      {runsAgent(task, me, inSquad)
+        ? <Button type="button" size="sm" variant="outline" disabled={finished || workflowActive || !!task.activeRun} onClick={onWorkflow}><Workflow data-icon="inline-start" />用工作流处理</Button>
+        : <p className="mc-note">只有负责人或负责小队的成员可以处理；Agent 任务对成员开放。</p>}
+      {workflowActive && <p className="mc-note">工作流正在处理，结束后才能开始新的运行。</p>}
+      {task.activeRun && <p className="mc-note">请先结束 Agent 会话，再用工作流处理。</p>}
+    </section>}
+
     <section className="mc-section" aria-label="推进状态">
       <h3>推进任务</h3>
       {finished
         ? <p className="mc-empty-line">任务已结束，不能再改状态。</p>
-        : running
-          ? <p className="mc-empty-line">Agent 正在执行，结束后再推进。</p>
+        : running || workflowActive
+          ? <p className="mc-empty-line">运行正在执行，结束后再推进。</p>
           : <>
             <div className="mc-actions">{actions.map(action => {
               const refused = isTaskFinished(action.status) && !canClose

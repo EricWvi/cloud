@@ -47,6 +47,7 @@ test('inspection form persists a draft, creates a real task once and survives re
   await expect(form.getByText('验收磁盘异常', { exact: true })).toBeVisible()
   await form.getByRole('link', { name: '打开任务', exact: true }).click()
   await expect(page.getByText('请清理并核对增长来源', { exact: false })).toBeVisible()
-  await page.getByRole('link', { name: '查看来源巡检报告' }).click()
+  await page.getByRole('tab', { name: /工作流/ }).click()
+  await page.getByRole('button', { name: /查看工作流运行 表单验收/ }).click()
   await expect(form).toBeVisible()
 })

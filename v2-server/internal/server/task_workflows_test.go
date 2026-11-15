@@ -1,0 +1,202 @@
+package server_test
+
+import (
+	"context"
+	"encoding/json"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/getkin/kin-openapi/routers/legacy"
+	"github.com/wanglongan587/cloud/v2-server/internal/server"
+	"github.com/wanglongan587/cloud/v2-server/internal/store"
+	"github.com/wanglongan587/cloud/v2-server/internal/taskworkflow"
+)
+
+type workflowTaskHTTPPort struct{ finishingRuns }
+
+func (workflowTaskHTTPPort) Prepare(context.Context, string, string, string, *string, map[string]json.RawMessage) error {
+	return nil
+}
+
+func TestTaskWorkflowsHTTP(t *testing.T) {
+	f := newSquadServer(t)
+	host := taskworkflow.New(f.store, workflowTaskHTTPPort{finishingRuns{store: f.store, output: `{}`}})
+	t.Cleanup(host.Close)
+	f.srv.Close()
+	f.srv = httptest.NewServer(server.New(f.store, server.Options{SessionTTL: time.Hour, TaskWorkflows: host}))
+	t.Cleanup(f.srv.Close)
+	c := f.taskClient()
+	c.login()
+	tid := f.tenant(t)
+	f.project(t)
+	w, _, err := f.store.CreateWorkflow(f.ctx, tid, "Handling", `{"nodes":[{"id":"start","data":{"kind":"start","inputVariables":[{"name":"branch","valueType":"string"}]}}],"edges":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.PublishWorkflow(f.ctx, tid, w.ID, "v1", nil); err != nil {
+		t.Fatal(err)
+	}
+	base := "/api/v2/tenants/" + tid + "/tasks"
+	status, task := c.do("POST", base, map[string]any{"title": "Task", "projectId": taskProjectID})
+	if status != 201 {
+		t.Fatalf("create=%d %v", status, task)
+	}
+	path := base + "/" + task["id"].(string) + "/workflow-runs"
+	doc, err := openapi3.NewLoader().LoadFromFile("../../task-workflows.openapi.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := doc.Validate(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	routes, err := legacy.NewRouter(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := c.routes
+	c.routes = routes
+	key := map[string]string{"Idempotency-Key": "handle"}
+	body := map[string]any{"workflowId": w.ID, "input": "Do this task", "values": map[string]any{"branch": "main"}}
+	if status, got := c.do("POST", path, body); status != 400 || got["code"] != "idempotency_key_required" {
+		t.Fatalf("no key=%d %v", status, got)
+	}
+	if status, got := c.doHeaders("POST", path, body, key); status != 409 || got["code"] != "not_agent_task" {
+		t.Fatalf("unassigned=%d %v", status, got)
+	}
+	c.routes = original
+	status, task = c.do("PUT", base+"/"+task["id"].(string)+"/assignment", map[string]any{"version": task["version"], "assignee": map[string]any{"type": "human", "id": task["createdBy"]}})
+	if status != 200 {
+		t.Fatalf("assign=%d %v", status, task)
+	}
+	c.routes = routes
+	status, started := c.doHeaders("POST", path, body, key)
+	if status != 201 || started["workflowRunId"] == "" {
+		t.Fatalf("start=%d %v", status, started)
+	}
+	status, retry := c.doHeaders("POST", path, body, key)
+	if status != 201 || retry["workflowRunId"] != started["workflowRunId"] {
+		t.Fatalf("retry=%d %v", status, retry)
+	}
+	status, list := c.do("GET", path, nil)
+	items, _ := list["items"].([]any)
+	if status != 200 || len(items) != 1 || items[0].(map[string]any)["kind"] != "handle" || items[0].(map[string]any)["status"] != "succeeded" {
+		t.Fatalf("list=%d %v", status, list)
+	}
+	c.routes = original
+	status, task = c.do("GET", base+"/"+task["id"].(string), nil)
+	if status != 200 || task["status"] != store.TaskReview {
+		t.Fatalf("settled task=%d %v", status, task)
+	}
+	c.routes = routes
+	invalid := map[string]any{"workflowId": w.ID, "projectId": taskProjectID}
+	if status, got := c.doHeaders("POST", path, invalid, key); status != 400 {
+		t.Fatalf("scope injection=%d %v", status, got)
+	}
+}
+
+// conflictWorkflowPort injects an admission-following failure through the real HTTP route.
+type conflictWorkflowPort struct{ workflowTaskHTTPPort }
+
+func (conflictWorkflowPort) Prepare(context.Context, string, string, string, *string, map[string]json.RawMessage) error {
+	return store.ErrConflict
+}
+
+func TestTaskWorkflowChoiceErrorsHTTP(t *testing.T) {
+	f := newSquadServer(t)
+	host := taskworkflow.New(f.store, workflowTaskHTTPPort{finishingRuns{store: f.store, output: `{}`}})
+	t.Cleanup(host.Close)
+	f.srv.Close()
+	f.srv = httptest.NewServer(server.New(f.store, server.Options{SessionTTL: time.Hour, TaskWorkflows: host}))
+	t.Cleanup(f.srv.Close)
+	c := f.taskClient()
+	c.login()
+	tid := f.tenant(t)
+	f.project(t)
+	graph := `{"nodes":[{"id":"start","data":{"kind":"start"}}],"edges":[]}`
+	w, draft, err := f.store.CreateWorkflow(f.ctx, tid, "Handling", graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unpublished, _, err := f.store.CreateWorkflow(f.ctx, tid, "Unpublished", graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _, err := f.store.CreateWorkflow(f.ctx, tid, "Other", graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSnap, err := f.store.PublishWorkflow(f.ctx, tid, other.ID, "v1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.PublishWorkflow(f.ctx, tid, w.ID, "v1", nil); err != nil {
+		t.Fatal(err)
+	}
+	base := "/api/v2/tenants/" + tid + "/tasks"
+	_, task := c.do("POST", base, map[string]any{"title": "Task", "projectId": taskProjectID})
+	_, task = c.do("PUT", base+"/"+task["id"].(string)+"/assignment", map[string]any{"version": task["version"], "assignee": map[string]any{"type": "human", "id": task["createdBy"]}})
+	path := base + "/" + task["id"].(string) + "/workflow-runs"
+	doc, err := openapi3.NewLoader().LoadFromFile("../../task-workflows.openapi.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := doc.Validate(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	c.routes, err = legacy.NewRouter(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, wid, snapshot, code string
+		status                    int
+	}{
+		{"draft", w.ID, draft.ID, "workflow_run_cannot_use_draft_snapshot", 400},
+		{"unpublished", unpublished.ID, "", "workflow_no_published_snapshot", 400},
+		{"foreign snapshot", w.ID, otherSnap.ID, "workflow_snapshot_not_found", 404},
+		{"missing snapshot", w.ID, "00000000-0000-4000-8000-000000000099", "workflow_snapshot_not_found", 404},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := map[string]any{"workflowId": tc.wid}
+			if tc.snapshot != "" {
+				body["snapshotId"] = tc.snapshot
+			}
+			status, got := c.doHeaders("POST", path, body, map[string]string{"Idempotency-Key": tc.name})
+			if status != tc.status || got["code"] != tc.code {
+				t.Fatalf("choice=%d %v want %d %s", status, got, tc.status, tc.code)
+			}
+		})
+	}
+	bad, _, err := f.store.CreateWorkflow(f.ctx, tid, "Invalid graph", `{"nodes":[],"edges":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.PublishWorkflow(f.ctx, tid, bad.ID, "v1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if status, got := c.doHeaders("POST", path, map[string]any{"workflowId": bad.ID}, map[string]string{"Idempotency-Key": "graph"}); status != 400 || got["code"] != "workflow_run_start_failed" {
+		t.Fatalf("invalid graph=%d %v", status, got)
+	}
+	if _, err := f.db.Exec(f.ctx, `UPDATE v2_tasks SET project_id='missing' WHERE id=$1`, task["id"]); err != nil {
+		t.Fatal(err)
+	}
+	status, got := c.doHeaders("POST", path, map[string]any{"workflowId": w.ID}, map[string]string{"Idempotency-Key": "project"})
+	if status != 404 || got["code"] != "project_not_found" {
+		t.Fatalf("project=%d %v", status, got)
+	}
+	if _, err := f.db.Exec(f.ctx, `UPDATE v2_tasks SET project_id=$2 WHERE id=$1`, task["id"], taskProjectID); err != nil {
+		t.Fatal(err)
+	}
+	conflict := taskworkflow.New(f.store, conflictWorkflowPort{workflowTaskHTTPPort{finishingRuns{store: f.store}}})
+	t.Cleanup(conflict.Close)
+	f.srv.Close()
+	f.srv = httptest.NewServer(server.New(f.store, server.Options{SessionTTL: time.Hour, TaskWorkflows: conflict}))
+	t.Cleanup(f.srv.Close)
+	c.base = f.srv.URL
+	status, got = c.doHeaders("POST", path, map[string]any{"workflowId": w.ID}, map[string]string{"Idempotency-Key": "conflict"})
+	if status != 409 || got["code"] != "version_conflict" {
+		t.Fatalf("conflict=%d %v", status, got)
+	}
+}

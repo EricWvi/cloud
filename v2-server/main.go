@@ -32,6 +32,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/taskdecomp"
 	"github.com/wanglongan587/cloud/v2-server/internal/taskrun"
+	"github.com/wanglongan587/cloud/v2-server/internal/taskworkflow"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflowhost"
 	"golang.org/x/sys/unix"
 )
@@ -250,6 +251,11 @@ func run(addr, dbURL string, cleanup, fixture, testFixtures bool) (resultErr err
 		return e
 	}
 	defer workflowRuns.Close()
+	taskWorkflows := taskworkflow.New(db, taskWorkflowRunner{workflowRunStarter{workflowRuns}})
+	defer taskWorkflows.Close()
+	if e := taskWorkflows.Recover(ctx); e != nil {
+		return e
+	}
 	if e := workflowRuns.Interrupt(ctx); e != nil {
 		return e
 	}
@@ -273,6 +279,7 @@ func run(addr, dbURL string, cleanup, fixture, testFixtures bool) (resultErr err
 		Catalog:            runtime,
 		TaskRuns:           taskRuns,
 		TaskDecompositions: decompositions,
+		TaskWorkflows:      taskWorkflows,
 		// The signal context ends with the process, before the database pool is closed.
 		Context: ctx,
 	}, workflowRuns)
@@ -515,4 +522,19 @@ func (s workflowRunStarter) Start(ctx context.Context, tenant, user, runID strin
 
 func (s workflowRunStarter) Subscribe(runID string) (<-chan struct{}, func()) {
 	return s.host.Hub().Subscribe(runID)
+}
+
+// taskWorkflowRunner adapts the existing host without changing workflow execution semantics.
+type taskWorkflowRunner struct{ workflowRunStarter }
+
+func (s taskWorkflowRunner) Prepare(ctx context.Context, tenant, user, id string, input *string, values map[string]json.RawMessage) error {
+	_, err := s.host.UpdateRunInput(ctx, server.WorkflowRunScope{TenantID: tenant, UserID: user}, id, input, values)
+	return err
+}
+
+// Cancel routes a failed start's cleanup through the workflow host, so an Agent turn the run
+// already dispatched is stopped rather than only the database row.
+func (s taskWorkflowRunner) Cancel(ctx context.Context, tenant, user, id string) error {
+	_, err := s.host.CancelRun(ctx, server.WorkflowRunScope{TenantID: tenant, UserID: user}, id)
+	return err
 }

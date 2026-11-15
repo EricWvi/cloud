@@ -1,3 +1,4 @@
+import { Link } from 'react-router'
 import { QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import { MapIcon, MessageSquareIcon, PlayIcon, RotateCcwIcon, SquareIcon, TheaterIcon, WorkflowIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -298,6 +299,7 @@ function RunWorkspace({ tenantId, run, readOnly, hostedWorkspace, leading, refre
         <WorkflowIcon className="size-4 shrink-0 text-muted-foreground" />
         <h2 className="flex min-w-0 flex-1 text-sm font-medium">
           <FadeText text={run.name} />
+          {run.taskId && <Link className="text-xs underline shrink-0" to={`/collaboration/tasks/${run.taskId}?tab=workflows&workflow=${run.id}`}>返回任务</Link>}
         </h2>
         <Badge variant="outline" className={cn('gap-1.5', tone.badge)}>
           <span className={cn('size-1.5 rounded-full', tone.dot)} />

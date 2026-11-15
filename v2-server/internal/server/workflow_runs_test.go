@@ -83,6 +83,21 @@ func TestWorkflowRunsOverHTTP(t *testing.T) {
 	if summary["version"] != "v1" || summary["id"] != runID || summary["projectId"] != project.ID {
 		t.Fatalf("summary = %v", summary)
 	}
+	task, err := s.CreateTask(ctx, tid, user, store.TaskInput{Title: "Owned run", ProjectID: project.ID, Assignee: &store.TaskAssigneeRef{Type: "human", ID: user}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned, _, err := s.CreateTaskWorkflowRun(ctx, store.NewTaskWorkflow{TenantID: tid, TaskID: task.ID, UserID: user, Key: "backlink", WorkflowID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, ownedDetail := call("GET", "/api/v2/tenants/"+tid+"/workflow-runs/"+owned, nil)
+	if status != 200 || ownedDetail["run"].(map[string]any)["taskId"] != task.ID {
+		t.Fatalf("owning task missing from run detail: %d %v", status, ownedDetail)
+	}
+	if err := s.DeleteWorkflowRun(ctx, tid, owned); err != nil {
+		t.Fatal(err)
+	}
 	_, byProject := call("GET", "/api/v2/tenants/"+tid+"/workflow-runs?projectId="+project.ID, nil)
 	if len(byProject["runs"].([]any)) != 1 {
 		t.Fatalf("project runs = %v", byProject)

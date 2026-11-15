@@ -236,6 +236,12 @@ func lockTask(ctx context.Context, tx pgx.Tx, tenant, id string, version int64) 
 
 // writeTaskStatus applies a transition that the caller already validated and returns the row.
 func writeTaskStatus(ctx context.Context, tx pgx.Tx, id, status string) (Task, error) {
+	// Only status writers revoke handling ownership. Metadata edits and reassignment must not
+	// interfere with run settlement; an internal status cycle must invalidate the old admission.
+	if _, err := tx.Exec(ctx, `UPDATE v2_task_workflow_runs SET status_revision=status_revision+1 WHERE task_id=$1 AND status='running'`, id); err != nil {
+		return Task{}, fmt.Errorf("invalidate handling status owner: %w", err)
+	}
+
 	if _, e := tx.Exec(ctx, `UPDATE v2_tasks SET status = $2, version = version + 1, updated_at = now()
 		WHERE id = $1`, id, status); e != nil {
 		return Task{}, fmt.Errorf("update task status: %w", e)
@@ -270,7 +276,7 @@ func (s *Store) Task(ctx context.Context, tenant, id string) (Task, error) {
 		return task, err
 	}
 	rows, err := s.pool.Query(ctx, `SELECT f.run_id::text,r.name,f.submitted_at FROM v2_workflow_forms f JOIN v2_workflow_runs r ON r.id=f.run_id
- WHERE f.tenant_id=$1 AND r.deleted_at IS NULL AND EXISTS(SELECT 1 FROM jsonb_array_elements(f.results) result WHERE result->>'taskId'=$2)
+ WHERE f.tenant_id=$1 AND r.deleted_at IS NULL AND f.results @> jsonb_build_array(jsonb_build_object('taskId',$2::text))
  ORDER BY f.submitted_at DESC,f.id`, tenant, id)
 	if err != nil {
 		return task, err
@@ -358,6 +364,13 @@ func (s *Store) SetTaskStatus(ctx context.Context, a Access, id, status string, 
 			if !canCloseTask(a, task) {
 				return ErrForbidden
 			}
+		}
+		var handling bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM v2_task_workflow_runs WHERE tenant_id=$1 AND task_id=$2 AND status='running')`, a.TenantID, id).Scan(&handling); err != nil {
+			return err
+		}
+		if handling {
+			return ErrRunActive
 		}
 		if task.ActiveRun != nil && task.ActiveRun.State == TaskRunRunning {
 			return ErrRunActive

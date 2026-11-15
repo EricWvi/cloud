@@ -176,3 +176,30 @@
 @media (max-width: 640px) {
   .mc-workspace-bar { padding: 0 16px; }
 }
+
+/* Task controls wrap independently of the title; the workspace retains readable column width. */
+@media (max-width: 640px) {
+  .mc-task-page, .mc-task-body, .mc-task-side-col { min-width: 0; }
+  .mc-sidebar-head, .mc-new-task, .mc-nav { flex-shrink: 0; }
+  .mc-sidebar-head h1 { white-space: nowrap; }
+  .mc-task-bar { flex-wrap: wrap; gap: 8px; }
+  .mc-task-bar h2 { flex-basis: calc(100% - 110px); }
+  .mc-task-main-col { padding: 12px; }
+  .mc-tabs { flex-wrap: wrap; gap: 4px; }
+  .mc-description, .mc-facts-list dd { overflow-wrap: anywhere; }
+  .mc-workflow-outcome { flex-basis: 100%; max-width: 100%; text-align: left; }
+  .mc-workflow-run { min-width: 0; }
+}
+
+@media (max-width: 640px) {
+ .mc-sidebar { display: grid; grid-template-columns: auto 1fr; overflow: visible; }
+ .mc-new-task { justify-self: end; }
+ .mc-nav { grid-column: 1 / -1; width: 100%; justify-content: space-between; gap: 0; }
+ .mc-nav-link { padding: 6px; gap: 4px; font-size: 12px; }
+ .mc-composer-foot { flex-wrap: wrap; }
+ .mc-composer-foot .mc-switch-line { display: grid; grid-template-columns: auto auto; justify-content: start; }
+ .mc-composer-toggle-label { white-space: nowrap; }
+ .mc-composer-foot small { grid-column: 1 / -1; overflow-wrap: anywhere; }
+ .mc-workflow-meta { white-space: normal !important; overflow: visible !important; text-overflow: clip !important; }
+ .mc-workflow-meta time { display: block; white-space: nowrap; }
+}
