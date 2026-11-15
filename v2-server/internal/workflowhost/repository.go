@@ -36,7 +36,7 @@ func nodeRun(n store.WorkflowNodeRun) workflow.NodeRun {
 	}
 	return workflow.NodeRun{
 		ID: n.ID, NodeID: n.NodeID, NodeType: n.NodeType, Status: n.Status,
-		ScopeID: scopeID, Iteration: n.Iteration, Error: n.Error, Output: n.Output, SessionID: n.SessionID, FinishedAt: n.FinishedAt,
+		ScopeID: scopeID, Iteration: n.Iteration, Error: n.Error, Output: n.Output, SessionID: n.SessionID, FinishedAt: n.FinishedAt, StartedAt: n.StartedAt, Payload: n.Payload,
 	}
 }
 

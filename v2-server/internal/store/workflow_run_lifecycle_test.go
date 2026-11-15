@@ -351,3 +351,36 @@ func TestWorkflowNodeRetryChain(t *testing.T) {
 		t.Fatalf("retry completed attempt = %v", err)
 	}
 }
+
+// A run that ended while its attempt was still running takes no retry: the store refuses it in
+// the scheduling transaction and leaves the attempt as it was.
+func TestWorkflowNodeRetryRefusedOnceTheRunEnded(t *testing.T) {
+	s := storetest.Open(t)
+	user, tenant := storetest.Login(t, s, "retry-ended")
+	ctx := context.Background()
+	run, _ := startedRun(t, s, user, tenant, "重试已结束")
+	node, err := s.CreateWorkflowNodeRun(ctx, tenant, run.ID, store.WorkflowNodeRunInput{NodeID: "agent-1", NodeType: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := "另一分支失败"
+	if _, err := s.FinishWorkflowRun(ctx, tenant, run.ID, store.WorkflowStatusFailed, nil, &failure); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RetryWorkflowNodeRun(ctx, tenant, run.ID, node.ID, store.WorkflowNodeRetry{
+		Failure: store.WorkflowNodeFailure{Error: "迟到的失败"}, NextPayload: []byte(`{"retry_wait":{"attempt":2}}`),
+	}); !errors.Is(err, store.ErrWorkflowRunState) {
+		t.Fatalf("retry under a failed run = %v, want ErrWorkflowRunState", err)
+	}
+	nodes, err := s.WorkflowRunNodes(ctx, tenant, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].ID != node.ID || nodes[0].Status != store.WorkflowStatusRunning {
+		t.Fatalf("a refused retry changed the attempts: %+v", nodes)
+	}
+	history, err := s.WorkflowRunFailedAttempts(ctx, tenant, run.ID)
+	if err != nil || len(history) != 0 {
+		t.Fatalf("a refused retry left history: %+v %v", history, err)
+	}
+}

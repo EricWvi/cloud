@@ -176,11 +176,15 @@ type WorkflowNodeRetry struct {
 	FailurePayload func(attempt int) ([]byte, error)
 	// NextPayload is the replacement's payload, typically the retry wait the bridge armed.
 	NextPayload []byte
+	// BuildNextPayload receives the store-assigned number of the replacement attempt.
+	BuildNextPayload func(attempt int) ([]byte, error)
 }
 
 // RetryWorkflowNodeRun atomically fails and soft-deletes the current attempt, then inserts the next
 // attempt for the same (scope, node, iteration) identity. The attempt counter sees the replaced row
-// as soon as it is soft-deleted, so a chain of retries numbers 1, 2, 3 as desktop does.
+// as soon as it is soft-deleted, so a chain of retries numbers 1, 2, 3 as desktop does. An attempt
+// that is not running returns ErrWorkflowNodeRunState and a run that is not running returns
+// ErrWorkflowRunState, both without changes.
 func (s *Store) RetryWorkflowNodeRun(ctx context.Context, tenant, runID, nodeRunID string, retry WorkflowNodeRetry) (WorkflowNodeRun, error) {
 	var next WorkflowNodeRun
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -193,6 +197,15 @@ func (s *Store) RetryWorkflowNodeRun(ctx context.Context, tenant, runID, nodeRun
 		}
 		if current.Status != WorkflowStatusRunning {
 			return ErrWorkflowNodeRunState
+		}
+		// A run that already ended takes no retry: its late failure is recorded as such instead
+		// (desktop@ebd5b725 crates/db/src/repository/workflow_run_engine/retry.rs:58-63).
+		runStatus, err := readWorkflowRunStatus(ctx, tx, tenant, runID)
+		if err != nil {
+			return err
+		}
+		if runStatus != WorkflowStatusRunning {
+			return ErrWorkflowRunState
 		}
 		attempt, err := workflowNodeAttempt(ctx, tx, runID, current)
 		if err != nil {
@@ -213,13 +226,20 @@ func (s *Store) RetryWorkflowNodeRun(ctx context.Context, tenant, runID, nodeRun
 			tenant, runID, nodeRunID, retry.Failure.Error, retry.Failure.Output, payload); err != nil {
 			return fmt.Errorf("replace failed attempt: %w", err)
 		}
+		nextPayload := retry.NextPayload
+		if retry.BuildNextPayload != nil {
+			nextPayload, err = retry.BuildNextPayload(attempt + 1)
+			if err != nil {
+				return err
+			}
+		}
 		next, err = scanNodeRun(tx.QueryRow(ctx, `
 			INSERT INTO v2_workflow_node_runs
 				(tenant_id, run_id, scope_id, node_id, node_type, status, input, payload, iteration)
 			VALUES ($1, $2, $3, $4, $5, 'running', $6, $7, $8)
 			RETURNING `+workflowNodeRunColumns,
 			tenant, runID, current.ScopeID, current.NodeID, current.NodeType, current.Input,
-			retry.NextPayload, current.Iteration))
+			nextPayload, current.Iteration))
 		return err
 	})
 	return next, err
@@ -276,7 +296,8 @@ func workflowNodeAttempt(ctx context.Context, tx pgx.Tx, runID string, current W
 }
 
 // FinishWorkflowRun closes a run that reached a terminal outcome. Only succeeded and failed are
-// accepted here; cancellation has its own transition and any other status is a caller bug.
+// accepted here; cancellation has its own transition and any other status is a caller bug. A
+// failed run abandons its waiting retries in the same transaction.
 func (s *Store) FinishWorkflowRun(ctx context.Context, tenant, runID, status string, output, runError *string) (WorkflowRun, error) {
 	if status != WorkflowStatusSucceeded && status != WorkflowStatusFailed {
 		return WorkflowRun{}, fmt.Errorf("finish workflow run: unsupported status %q", status)
@@ -292,6 +313,11 @@ func (s *Store) FinishWorkflowRun(ctx context.Context, tenant, runID, status str
 		}
 		if current != WorkflowStatusPending && current != WorkflowStatusRunning {
 			return ErrWorkflowRunState
+		}
+		if status == WorkflowStatusFailed {
+			if err := abandonRetryWaits(ctx, tx, runID); err != nil {
+				return err
+			}
 		}
 		run, err = scanWorkflowRun(tx.QueryRow(ctx, `
 			UPDATE v2_workflow_runs

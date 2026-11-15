@@ -166,7 +166,7 @@ describe('workflow runs in chat', () => {
     const details = await within(pane).findByLabelText('阶段详情')
     expect(within(details).getByLabelText('实际执行')).toHaveTextContent('Claude Code · Fixture')
     expect(within(details).getByLabelText('实际执行')).toHaveTextContent('没有找到配置的模型「claude-sonnet-5-5」')
-    expect(within(details).getByLabelText('v2 未应用的设置')).toHaveTextContent('v2 未应用：自动重试')
+    expect(within(details).getByLabelText('v2 未应用的设置')).toHaveTextContent('v2 未应用：MCP')
 
     await user.click(within(pane).getByRole('button', { name: '在对话中追问' }))
     expect(screen.getByRole('button', { name: '选择项目' })).toHaveTextContent('ora-space/cloud')

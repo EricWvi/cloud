@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
 
@@ -113,7 +114,11 @@ func (h *Host) complete(d workflow.AgentDispatch, c workflow.Completion) {
 // finishCancel closes a run whose cancellation was requested once its turn is known to have
 // ended, covering a cancellation whose stop the execution service did not confirm in time.
 func (h *Host) finishCancel(st *runState, runID string) {
-	if _, err := h.store.CancelWorkflowRun(h.ctx, st.scope.TenantID, runID); err != nil {
+	_, err := h.store.CancelWorkflowRun(h.ctx, st.scope.TenantID, runID)
+	if err == nil || errors.Is(err, store.ErrWorkflowRunState) {
+		h.engine.ReleaseRetries(runID) // the run is closed; its waits are settled
+	}
+	if err != nil {
 		if h.ctx.Err() == nil { // at shutdown the next start interrupts the run instead
 			h.log.Error("close cancelled workflow run", "run", runID, "error", err)
 		}

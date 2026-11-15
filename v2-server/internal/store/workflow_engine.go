@@ -288,7 +288,8 @@ func without(items []string, drop string) []string {
 }
 
 // FailWorkflowEngineNode records the failed attempt. Iteration members leave propagation to
-// their owner; a Loop child closes its scope and parent. Other failures fail the root run.
+// their owner; a Loop child closes its scope and parent. Other failures fail the root run and
+// abandon its waiting retries.
 // Terminal attempts and runs reject late callbacks without moving the failure anchor.
 func (s *Store) FailWorkflowEngineNode(
 	ctx context.Context, runID, nodeRunID, message string, output *string,
@@ -343,6 +344,10 @@ func (s *Store) FailWorkflowEngineNode(
 			if _, err := tx.Exec(ctx, `UPDATE v2_workflow_node_runs SET status='cancelled', error=COALESCE(error,'{"reason":"sibling_failed"}'), finished_at=now(), updated_at=now() WHERE scope_id=$1 AND status IN ('pending','running') AND deleted_at IS NULL`, node.ScopeID); err != nil {
 				return err
 			}
+		}
+		// The run fails now, so no pending retry of another node may fire into it.
+		if err := abandonRetryWaits(ctx, tx, runID); err != nil {
+			return err
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE v2_workflow_runs SET status = 'failed', error = $2, finished_at = now(), updated_at = now()
@@ -430,7 +435,8 @@ func (s *Store) UpdateWorkflowEngineRunInput(ctx context.Context, runID string, 
 
 // InterruptWorkflowRuns fails every attempt and run a previous process left executing, before
 // the process serves requests. Frozen root reviews are excluded and recovered separately;
-// every other non-terminal attempt fails without replaying an Agent.
+// every other non-terminal attempt fails without replaying an Agent. A waiting retry fails too,
+// losing its wait marker, because restart never re-arms a retry timer.
 func (s *Store) InterruptWorkflowRuns(ctx context.Context, message string, detail func(attempt int, node []byte) ([]byte, error)) ([]string, error) {
 	var interrupted []string
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -466,7 +472,7 @@ func (s *Store) InterruptWorkflowRuns(ctx context.Context, message string, detai
 				return err
 			}
 			if _, err := tx.Exec(ctx, `
-				UPDATE v2_workflow_node_runs SET status = 'failed', error = $2, payload = $3,
+				UPDATE v2_workflow_node_runs SET status = 'failed', error = $2, payload = $3::jsonb - 'retry_wait',
 					finished_at = now(), updated_at = now()
 				WHERE id = $1`, node.ID, message, payload); err != nil {
 				return fmt.Errorf("interrupt node: %w", err)

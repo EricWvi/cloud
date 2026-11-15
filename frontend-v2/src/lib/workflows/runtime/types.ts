@@ -471,8 +471,9 @@ export interface WorkflowNodeAutoRetry {
 
 /**
  * What replaced an earlier failed attempt, when the run detail allows telling it.
- * `automatic_retry_scheduled`: an automatic retry was scheduled but never started (it is still
- * waiting, or the wait was cancelled, abandoned, or ended by an app restart).
+ * `automatic_retry_scheduled`: an automatic retry is scheduled and still waiting under a live run.
+ * A wait cancelled, abandoned, or ended by a restart before starting replaced nothing and carries
+ * no replacement.
  */
 export type WorkflowNodeAttemptReplacement =
   "automatic_retry" | "automatic_retry_scheduled" | "manual_resume";

@@ -19,6 +19,8 @@ type NodeRun struct {
 	Output                       *string
 	SessionID                    *string
 	FinishedAt                   *time.Time
+	StartedAt                    *time.Time
+	Payload                      []byte
 }
 
 // RunContext is everything one scheduling pass reads about a run in one query.
@@ -84,8 +86,8 @@ type Dispatcher interface {
 }
 
 // Engine drives runs from pending to a terminal state, as desktop's WorkflowRunEngine: it is
-// stateless and recomputes every wave from persistence. All commands and callbacks of one run
-// pass through a per-run gate.
+// recomputes every wave from persistence and owns process-local retry timers. All commands
+// and callbacks of one run pass through a per-run gate.
 type Engine struct {
 	repo    Repository
 	agents  Dispatcher
@@ -93,6 +95,7 @@ type Engine struct {
 	now     func() time.Time
 	locale  string
 	gates   sync.Map
+	retries retryTimers
 }
 
 // NewEngine assembles the engine. publish is called after every committed transition and must
@@ -101,7 +104,7 @@ func NewEngine(repo Repository, agents Dispatcher, publish func(string), now fun
 	if publish == nil {
 		publish = func(string) {}
 	}
-	return &Engine{repo: repo, agents: agents, publish: publish, now: now, locale: LocaleZhCN}
+	return &Engine{repo: repo, agents: agents, publish: publish, now: now, locale: LocaleZhCN, retries: newRetryTimers()}
 }
 
 func (e *Engine) gate(runID string) func() {
@@ -337,8 +340,8 @@ func foldCompletion(output *string, structured any) func([]byte, NodeRun) ([]byt
 	}
 }
 
-// FailNode records one attempt's failure and lets its container decide propagation (v2 performs
-// no automatic retry). A late callback is a no-op.
+// FailNode retries eligible root Agents or records failure and propagates it to the owner.
+// A late callback is a no-op.
 func (e *Engine) FailNode(ctx context.Context, runID, nodeRunID string, f Failure) error {
 	defer e.gate(runID)()
 	if err := e.fail(ctx, runID, nodeRunID, f); err != nil {
@@ -348,6 +351,9 @@ func (e *Engine) FailNode(ctx context.Context, runID, nodeRunID string, f Failur
 }
 
 func (e *Engine) fail(ctx context.Context, runID, nodeRunID string, f Failure) error {
+	if e.retry(ctx, runID, nodeRunID, f) {
+		return nil
+	}
 	advanced, err := e.repo.FailNode(ctx, runID, nodeRunID, f.Message, f.Output, func(attempt int, payload []byte) map[string]any {
 		inject := true
 		if p, ok, _ := DecodeRunPayload(payload); ok {

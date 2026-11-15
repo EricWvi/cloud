@@ -94,6 +94,7 @@ func (h *Host) Hub() *Hub { return h.hub }
 // interrupts the runs.
 func (h *Host) Close() {
 	h.stop()
+	h.engine.Close()
 	h.workers.Wait()
 }
 
@@ -234,6 +235,7 @@ func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, run
 	if err != nil {
 		return store.WorkflowRun{}, err
 	}
+	h.engine.CancelRetries(runID)
 	st := h.state(runID)
 	if st != nil && (run.Status == store.WorkflowStatusPending || run.Status == store.WorkflowStatusRunning) {
 		stopCtx, cancel := context.WithTimeout(ctx, h.stopTimeout)
@@ -249,6 +251,9 @@ func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, run
 		}
 	}
 	run, err = h.store.CancelWorkflowRun(ctx, scope.TenantID, runID)
+	if err == nil || errors.Is(err, store.ErrWorkflowRunState) {
+		h.engine.ReleaseRetries(runID) // the run is closed; its waits are settled
+	}
 	if err != nil {
 		return store.WorkflowRun{}, err
 	}

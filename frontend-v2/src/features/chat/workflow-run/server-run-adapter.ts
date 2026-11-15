@@ -1,6 +1,7 @@
 import type { WorkflowNodeFailedAttempt, WorkflowNodeRun, WorkflowRunDetail } from '@/lib/workflows/api/generated'
 import {
   computeInactiveNodes,
+  isTerminalRunStatus,
   projectNodeStatus,
   projectRunStatus,
   type GraphWorkflowNodeState,
@@ -89,9 +90,27 @@ function conversation(runId: string, node: WorkflowNodeRun, payload: Record<stri
   return items
 }
 
-function nodeState(runId: string, node: WorkflowNodeRun, decisions: Record<string, string>): GraphWorkflowNodeState {
+/** A row still waiting for its retry deadline: running, never started, with the wait marker. */
+const awaitingRetry = (node: WorkflowNodeRun, payload: Record<string, unknown>): boolean =>
+  node.status === 'running' && node.startedAt === null && record(payload.retry_wait) !== undefined
+
+/**
+ * Projects one attempt. `live` is false once the run is terminal: the server settles waits when a
+ * run ends, and a wait it left behind can never fire, so it shows as cancelled, not as waiting.
+ */
+function nodeState(runId: string, node: WorkflowNodeRun, decisions: Record<string, string>, live: boolean): GraphWorkflowNodeState {
   const payload = parseObject(node.payload)
   const state: GraphWorkflowNodeState = { status: projectNodeStatus({ status: node.status }), nodeRunId: node.id }
+  const wait = record(payload.retry_wait)
+  const auto = record(payload.auto_retry)
+  if (!live && awaitingRetry(node, payload)) state.status = 'cancelled'
+  else if (wait && awaitingRetry(node, payload) &&
+      ['attempt', 'max_attempt', 'retry', 'max_retries', 'delay_ms', 'scheduled_at', 'due_at'].every((key) => typeof wait[key] === 'number' && Number.isFinite(wait[key]))) {
+    state.status = 'retry_waiting'
+    state.retryWait = { attempt: wait.attempt as number, maxAttempt: wait.max_attempt as number, retry: wait.retry as number,
+      maxRetries: wait.max_retries as number, delayMs: wait.delay_ms as number, scheduledAt: wait.scheduled_at as number, dueAt: wait.due_at as number }
+  }
+  if (auto && typeof auto.retry === 'number' && typeof auto.max_retries === 'number') state.autoRetry = { retry: auto.retry, maxRetries: auto.max_retries }
   if (node.iteration !== null) state.iteration = node.iteration
   if (node.nodeType === 'condition' && decisions[node.nodeId] !== undefined) state.selectedBranchId = decisions[node.nodeId]
   if (node.sessionId !== null) state.sessionId = node.sessionId
@@ -120,11 +139,11 @@ function currentNodes(state: string | null): string[] {
 }
 
 /** Projects one exact scope/round; absent members cannot inherit another occurrence's answer. */
-function scopedStates(runId: string, definition: WorkflowDefinition, rows: WorkflowNodeRun[], decisions: Record<string, string>, iteration?: number, owner?: string): Record<string, GraphWorkflowNodeState> {
+function scopedStates(runId: string, definition: WorkflowDefinition, rows: WorkflowNodeRun[], decisions: Record<string, string>, live: boolean, iteration?: number, owner?: string): Record<string, GraphWorkflowNodeState> {
   const states: Record<string, GraphWorkflowNodeState> = {}
   for (const node of definition.nodes) states[node.id] = { status: 'idle', ...(iteration === undefined ? {} : { iteration }) }
   if (owner) states[owner] = { status: 'succeeded' }
-  for (const row of rows) states[row.nodeId] = nodeState(runId, row, decisions)
+  for (const row of rows) states[row.nodeId] = nodeState(runId, row, decisions, live)
   const statuses = Object.fromEntries(Object.entries(states).map(([id, state]) => [id, state.status]))
   for (const id of computeInactiveNodes(definition, statuses, decisions)) states[id] = { ...states[id]!, status: 'inactive' }
   if (owner) delete states[owner]
@@ -188,12 +207,13 @@ function attemptFailure(attempt: WorkflowNodeFailedAttempt): WorkflowNodeAttempt
  * except those behind a Condition branch not taken, which never get a row and are shown inactive,
  * projected from the decisions of that exact execution. Loop scopes and Iteration array indices
  * stay separate, preserving historical sessions even when the same node runs again.
- * Earlier root-scope failures go to their node, oldest first, without inventing a retry reason.
- * v2 has no retry/resume and therefore no replaced attempts; the compatibility history mapping
- * remains root-only until those operations define how container attempts should be replaced.
+ * Earlier root-scope failures retain their sessions and reasons. Replacement labels come only
+ * from persisted retry-chain links; container retry history remains outside this scope.
  */
 export function toGraphWorkflowRun(detail: WorkflowRunDetail, definition: WorkflowDefinition): GraphWorkflowRun {
   const { run } = detail
+  const status = projectRunStatus(run.status, currentNodes(run.state))
+  const live = !isTerminalRunStatus(status)
   const nodeStates: Record<string, GraphWorkflowNodeState> = {}
   for (const node of definition.nodes) nodeStates[node.id] = { status: 'idle' }
   const loops = new Set(definition.nodes.filter((node) => node.data.kind === 'loop').map((node) => node.id))
@@ -202,7 +222,7 @@ export function toGraphWorkflowRun(detail: WorkflowRunDetail, definition: Workfl
   const rootIds = new Set(definition.nodes.filter((node) => !loopOwner(node) && !iterations.has(node.parentId ?? '')).map((node) => node.id))
   const scopeIds = new Set(detail.scopes.map((scope) => scope.id))
   const rootRows = detail.nodes.filter((node) => !scopeIds.has(node.scopeId))
-  Object.assign(nodeStates, scopedStates(run.id, subgraph(definition, rootIds), rootRows.filter((node) => node.iteration === null && rootIds.has(node.nodeId)), detail.conditionDecisions))
+  Object.assign(nodeStates, scopedStates(run.id, subgraph(definition, rootIds), rootRows.filter((node) => node.iteration === null && rootIds.has(node.nodeId)), detail.conditionDecisions, live))
   const rounds: GraphWorkflowRound[] = []
   for (const scope of detail.scopes) {
     const parent = rootRows.find((node) => node.id === scope.parentLoopNodeRunId)
@@ -210,14 +230,25 @@ export function toGraphWorkflowRun(detail: WorkflowRunDetail, definition: Workfl
     const ids = new Set(definition.nodes.filter((node) => loopOwner(node) === parent.nodeId).map((node) => node.id))
     const decisions = stringMap(parseObject(scope.state).conditionDecisions)
     rounds.push({ id: scope.id, parentLoopNodeRunId: parent.id, parentLoopNodeId: parent.nodeId, roundIndex: scope.roundIndex,
-      status: scope.status, nodeStates: scopedStates(run.id, subgraph(definition, ids), detail.nodes.filter((node) => node.scopeId === scope.id), decisions),
+      status: scope.status, nodeStates: scopedStates(run.id, subgraph(definition, ids), detail.nodes.filter((node) => node.scopeId === scope.id), decisions, live),
       createdAt: iso(scope.createdAt)!, updatedAt: iso(scope.updatedAt)!,
     })
   }
   for (const attempt of detail.failedAttempts) {
     const state = nodeStates[attempt.nodeId]
     if (state === undefined || !rootIds.has(attempt.nodeId) || attempt.iteration !== null || scopeIds.has(attempt.scopeId)) continue
-    state.failedAttempts = [...(state.failedAttempts ?? []), attemptFailure(attempt)]
+    const failure = attemptFailure(attempt)
+    const replacement = detail.nodes.find((row) => parseObject(row.payload).retry_chain instanceof Array &&
+      (parseObject(row.payload).retry_chain as unknown[]).includes(attempt.nodeRunId))
+    if (replacement) {
+      const payload = parseObject(replacement.payload)
+      const chain = payload.retry_chain as unknown[]
+      // Retried once the next attempt started; scheduled only while it still waits under a live
+      // run. A wait cancelled or abandoned before starting replaced nothing, so it has no label.
+      if (chain.at(-1) !== attempt.nodeRunId || replacement.startedAt !== null) failure.replacedBy = 'automatic_retry'
+      else if (live && awaitingRetry(replacement, payload)) failure.replacedBy = 'automatic_retry_scheduled'
+    }
+    state.failedAttempts = [...(state.failedAttempts ?? []), failure]
   }
   rounds.sort((a, b) => a.roundIndex - b.roundIndex || a.id.localeCompare(b.id))
   const roundStates: Record<string, GraphWorkflowNodeState[]> = {}
@@ -228,7 +259,7 @@ export function toGraphWorkflowRun(detail: WorkflowRunDetail, definition: Workfl
     for (const index of indices) {
       const suffix = `#${index}`
       const decisions = Object.fromEntries(Object.entries(detail.iterationConditionDecisions).filter(([key]) => key.endsWith(suffix)).map(([key, branch]) => [key.slice(0, -suffix.length), branch]))
-      const states = scopedStates(run.id, subgraph(definition, new Set([owner, ...members])), rows.filter((node) => node.iteration === index), decisions, index, owner)
+      const states = scopedStates(run.id, subgraph(definition, new Set([owner, ...members])), rows.filter((node) => node.iteration === index), decisions, live, index, owner)
       for (const [id, state] of Object.entries(states)) {
         (roundStates[id] ??= []).push(state)
         nodeStates[id] = state
@@ -241,7 +272,7 @@ export function toGraphWorkflowRun(detail: WorkflowRunDetail, definition: Workfl
     definitionId: run.workflowId,
     definitionSnapshot: withRunStartValues(definition, detail),
     name: run.name,
-    status: projectRunStatus(run.status, currentNodes(run.state)),
+    status,
     nodeStates,
     rounds,
     roundStates,

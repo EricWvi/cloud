@@ -98,6 +98,14 @@ func (h *handler) workflowNodeEvents(w http.ResponseWriter, r *http.Request, a a
 		workflowRunFault(w, err, "workflow node events")
 		return
 	}
+	// Replaced failed attempts remain readable through their own session, with the same run
+	// membership and execution-owner checks as live attempts.
+	failed, err := s.WorkflowRunFailedAttempts(r.Context(), tenant, runID)
+	if err != nil {
+		workflowRunFault(w, err, "workflow node history")
+		return
+	}
+	nodes = append(nodes, failed...)
 	var sessionID *string
 	found := false
 	for _, node := range nodes {

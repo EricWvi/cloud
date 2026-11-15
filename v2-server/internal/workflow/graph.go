@@ -223,8 +223,8 @@ func (n Node) OutputBindings() []OutputBinding {
 	return result
 }
 
-// AgentConfig includes selected Skills and MCP bindings. Skills are applied; MCP bindings,
-// role and retry/interactive settings remain explicitly unapplied.
+// AgentConfig includes selected Skills and MCP bindings. Skills are applied; Unapplied lists
+// what unappliedAgentSettings decides a run saves but does not apply.
 type AgentConfig struct {
 	Prompt, AgentCLI, ModelID string
 	Skills, MCPs              []string

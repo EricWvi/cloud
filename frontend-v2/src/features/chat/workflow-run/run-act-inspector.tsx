@@ -24,8 +24,7 @@ import { RunLoopRoundHistory } from "./run-loop-round-history";
 import { RunRetryWaitLabel } from "./run-retry-wait-label";
 import { RunStatusBadge } from "./run-status-mark";
 import { shouldPreviewBrief } from "./should-preview-brief";
-import { useDiagnoseWorkflowNodeFailure } from "./demo-host";
-import { useWorkspaceSelectionStore } from "./demo-host";
+import { useDiagnoseWorkflowNodeFailure, useWorkspaceSelectionStore } from "./demo-host";
 import { useContractErrorToast } from "./demo-host";
 import type {
   GraphWorkflowNodeState,
@@ -46,6 +45,7 @@ import {
 const KNOWN_NODE_FAILURE_KINDS = new Set<string>(NODE_FAILURE_KINDS);
 
 interface RunActInspectorProps {
+  runId?: string;
   nodeId: string | null;
   data: WorkflowNodeData | null;
   state: GraphWorkflowNodeState | null;
@@ -131,6 +131,7 @@ function parseInputVariableValue(
  * execution metrics and artifacts.
  */
 export function RunActInspector({
+  runId,
   nodeId,
   data,
   state,
@@ -198,6 +199,7 @@ export function RunActInspector({
 
   return (
     <RunActInspectorPanel
+      runId={runId}
       nodeId={nodeId}
       data={data}
       state={effectiveState ?? state}
@@ -229,6 +231,7 @@ export function RunActInspector({
 }
 
 function RunActInspectorPanel({
+  runId,
   nodeId,
   data,
   state,
@@ -256,6 +259,7 @@ function RunActInspectorPanel({
   runStatus,
   runSnapshotId,
 }: {
+  runId?: string;
   nodeId: string;
   data: WorkflowNodeData;
   state: GraphWorkflowNodeState;
@@ -284,7 +288,7 @@ function RunActInspectorPanel({
   runSnapshotId?: string;
 }) {
   const { i18n, t } = useTranslation();
-  const runId = useWorkspaceSelectionStore((s) => s.selection.workflowRunId);
+  const diagnoseRunId = useWorkspaceSelectionStore((s) => s.selection.workflowRunId);
   const diagnose = useDiagnoseWorkflowNodeFailure();
   const showContractError = useContractErrorToast();
   const locale =
@@ -724,7 +728,7 @@ function RunActInspectorPanel({
             )}
           {state.status === "failed" &&
           data.kind === "agent" &&
-          runId != null ? (
+          diagnoseRunId != null ? (
             <div className="space-y-2">
               {state.aiDiagnosis != null ? (
                 <div className="rounded-lg border border-border px-3 py-2">
@@ -749,7 +753,7 @@ function RunActInspectorPanel({
                 disabled={diagnose.isPending}
                 onClick={() => {
                   diagnose.mutate(
-                    { runId, nodeId },
+                    { runId: diagnoseRunId, nodeId },
                     { onError: (error) => showContractError(error) },
                   );
                 }}
@@ -769,7 +773,7 @@ function RunActInspectorPanel({
           ) : null}
         </InspectorSection>
 
-        <RunActFailedAttempts attempts={state.failedAttempts} />
+        <RunActFailedAttempts attempts={state.failedAttempts} runId={runId ?? undefined} />
 
         {data.kind === "loop" && (
           <InspectorSection title={t("workflowRun.loopRounds.title")}>

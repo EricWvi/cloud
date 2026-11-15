@@ -463,6 +463,7 @@ export const workflowRunTranslations = {
     "workflowRun.failedAttempts.beforeRestart": "从头重新运行前",
     "workflowRun.failedAttempts.rootCause": "底层原因",
     "workflowRun.failedAttempts.chain": "完整错误链（{{levels}} 层）",
+    "workflowRun.failedAttempts.viewSession": "查看会话 · {{sessionId}}",
     "workflowRun.retry.exhausted_one": "已自动重试 {{count}} 次，仍然失败",
     "workflowRun.retry.exhausted_other": "已自动重试 {{count}} 次，仍然失败",
     "workflowRun.retry.abandoned": "运行在等待自动重试时结束，这次重试没有开始",
@@ -992,6 +993,7 @@ export const workflowRunTranslations = {
     "workflowRun.failedAttempts.beforeRestart": "Before “Run again from start”",
     "workflowRun.failedAttempts.rootCause": "Underlying error",
     "workflowRun.failedAttempts.chain": "Full error chain ({{levels}} levels)",
+    "workflowRun.failedAttempts.viewSession": "View session · {{sessionId}}",
     "workflowRun.retry.exhausted_one":
       "Retried automatically {{count}} time, still failed",
     "workflowRun.retry.exhausted_other":

@@ -93,7 +93,7 @@ func TestTwoAgentChainHandsTheAnswerDownstream(t *testing.T) {
 	_ = json.Unmarshal(node(nodes, "a").Payload, &payloadA)
 	_ = json.Unmarshal(node(nodes, "b").Payload, &payloadB)
 	if payloadA["stop_reason"] != "end_turn" || payloadA["executor"].(map[string]any)["id"] != "opencode:other" ||
-		payloadA["model"].(map[string]any)["fallback"] != false || !reflect.DeepEqual(payloadA["unapplied"], []any{"role", "retry"}) {
+		payloadA["model"].(map[string]any)["fallback"] != false || !reflect.DeepEqual(payloadA["unapplied"], []any{"role"}) {
 		t.Fatalf("A payload = %v", payloadA)
 	}
 	if payloadB["task"] != "审阅这段初稿：初稿：先拆网关" {
@@ -139,7 +139,7 @@ func TestAgentOutcomesFailTheRun(t *testing.T) {
 	f := newFixture(t)
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			runID := f.run(t, twoAgents, str("输入"))
+			runID := f.run(t, strings.Replace(twoAgents, `"roleId":"reviewer"`, `"roleId":"reviewer","retry":{"enabled":false,"maxRetries":2,"initialDelaySeconds":10}`, 1), str("输入"))
 			if _, err := f.host.StartRun(context.Background(), f.scope, runID); err != nil {
 				t.Fatal(err)
 			}
@@ -407,7 +407,7 @@ const parallelAgents = `{"nodes":[
 
 func TestQueuedSiblingOfAFailedNodeNeverStarts(t *testing.T) {
 	f := newFixture(t)
-	runID := f.run(t, parallelAgents, nil)
+	runID := f.run(t, strings.Replace(parallelAgents, `"prompt":"A"`, `"prompt":"A","retry":{"enabled":false,"maxRetries":2,"initialDelaySeconds":10}`, 1), nil)
 	if _, err := f.host.StartRun(context.Background(), f.scope, runID); err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +532,7 @@ func TestStructuredReviewRoutesOneBranchThroughTheAggregator(t *testing.T) {
 
 func TestNonconformingStructuredAnswerFailsTheNode(t *testing.T) {
 	f := newFixture(t)
-	runID := f.run(t, reviewBranches, str("支付重构"))
+	runID := f.run(t, strings.Replace(reviewBranches, `"outputContract":`, `"retry":{"enabled":false,"maxRetries":2,"initialDelaySeconds":10},"outputContract":`, 1), str("支付重构"))
 	if _, err := f.host.StartRun(context.Background(), f.scope, runID); err != nil {
 		t.Fatal(err)
 	}

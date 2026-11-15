@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { RunNodeSessionChat } from "./run-node-session-chat";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/workflows/host/ui";
 import { formatRunClock } from "./run-format";
@@ -23,8 +25,10 @@ const REPLACEMENT_LABEL_KEYS: Record<WorkflowNodeAttemptReplacement, string> = {
  */
 export function RunActFailedAttempts({
   attempts,
+  runId,
 }: {
   attempts: readonly WorkflowNodeAttemptFailure[] | undefined;
+  runId?: string;
 }) {
   const { t } = useTranslation();
   if (attempts === undefined || attempts.length === 0) {
@@ -37,7 +41,7 @@ export function RunActFailedAttempts({
       </h4>
       <ol className="space-y-2">
         {attempts.map((attempt) => (
-          <FailedAttemptEntry key={attempt.nodeRunId} attempt={attempt} />
+          <FailedAttemptEntry key={attempt.nodeRunId} attempt={attempt} runId={runId} />
         ))}
       </ol>
     </section>
@@ -46,9 +50,12 @@ export function RunActFailedAttempts({
 
 function FailedAttemptEntry({
   attempt,
+  runId,
 }: {
   attempt: WorkflowNodeAttemptFailure;
+  runId?: string;
 }) {
+  const [open, setOpen] = useState(false);
   const { i18n, t } = useTranslation();
   const locale = i18n.resolvedLanguage === "en-US" ? "en-US" : "zh-CN";
   const kindLabel = KNOWN_NODE_FAILURE_KINDS.has(attempt.kind)
@@ -113,6 +120,17 @@ function FailedAttemptEntry({
           {": "}
           {rootCause}
         </p>
+      )}
+      {runId && attempt.sessionId && (
+        <details onToggle={(event) => setOpen(event.currentTarget.open)}>
+          <summary className="cursor-pointer">
+            {t("workflowRun.failedAttempts.viewSession", {
+              sessionId: attempt.sessionId,
+            })}
+          </summary>
+          {open && <div className="h-96 overflow-auto"><RunNodeSessionChat conversation={[]} status="failed" errorMessage={attempt.errorMessage}
+            session={{ runId, nodeRunId: attempt.nodeRunId }} /></div>}
+        </details>
       )}
       {attempt.sourceChain.length > 1 && (
         <details>

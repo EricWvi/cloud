@@ -74,7 +74,8 @@ export function serveRuns(tenantId: string, backend: LocalWorkflowBackend): RunS
           executor: { id: 'claude-code:fixture', agentId: 'ora/claude-code', name: 'Claude Code', pluginVersion: '0.4.0' },
           model: { id: 'fixture', name: 'Fixture', requested: node.data.agentConfig?.executor?.modelId ?? '', fallback: true },
           // A fixed record standing in for v2-server's: the run page shows what the attempt recorded.
-          unapplied: ['retry'],
+          // A root Agent's retry applies (#1168), so the record names a setting that never does.
+          unapplied: ['mcp'],
         })
         answers[id] = row.output
       }

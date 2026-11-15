@@ -90,8 +90,8 @@ func TestWorkflowRunsWithMCPAndReportsOnlyEnabledBindingsUnapplied(t *testing.T)
 					t.Fatal(err)
 				}
 				want := enabled && id == "a"
-				// Neither node sets a retry policy, so desktop's default retry is listed after MCP.
-				if slices.Contains(payload.Unapplied, "mcp") != want || (want && !slices.Equal(payload.Unapplied, []string{"mcp", "retry"})) {
+				// Neither node sets a retry policy; desktop's default retry applies to root Agents.
+				if slices.Contains(payload.Unapplied, "mcp") != want || (want && !slices.Equal(payload.Unapplied, []string{"mcp"})) {
 					t.Fatalf("node %s unapplied = %v, want MCP = %v", id, payload.Unapplied, want)
 				}
 			}

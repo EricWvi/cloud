@@ -293,3 +293,63 @@ describe('toGraphWorkflowRun', () => {
     })
   })
 })
+
+it('projects retry countdown, started replacements and real failed sessions from persisted chains', () => {
+  const wait = { attempt: 3, max_attempt: 3, retry: 2, max_retries: 2, delay_ms: 20000, scheduled_at: 2000, due_at: 22000 }
+  const current = nodeRun({ id: 'a3', nodeId: 'a', nodeType: 'agent', status: 'running', startedAt: null, finishedAt: null,
+    payload: JSON.stringify({ retry_wait: wait, auto_retry: { retry: 2, max_retries: 2 }, retry_chain: ['a1', 'a2'] }) })
+  const d = detail({}, [current])
+  d.failedAttempts = [1, 2].map((n) => ({ nodeRunId: `a${n}`, nodeId: 'a', scopeId: 'root:run', iteration: null,
+    sessionId: `real-session-${n}`, attempt: n, kind: 'session', message: `failure ${n}`, sourceChain: [`cause ${n}`],
+    recordedAt: n * 1000, startedAt: n * 1000, finishedAt: n * 1000 + 500 }))
+  const state = toGraphWorkflowRun(d, definition).nodeStates.a!
+  expect(state.status).toBe('retry_waiting')
+  expect(state.retryWait).toEqual({ attempt: 3, maxAttempt: 3, retry: 2, maxRetries: 2, delayMs: 20000, scheduledAt: 2000, dueAt: 22000 })
+  expect(state.sessionId).toBeUndefined()
+  expect(state.failedAttempts?.map((a) => [a.attempt, a.sessionId, a.errorMessage, a.sourceChain, a.replacedBy])).toEqual([
+    [1, 'real-session-1', 'failure 1', ['cause 1'], 'automatic_retry'],
+    [2, 'real-session-2', 'failure 2', ['cause 2'], 'automatic_retry_scheduled'],
+  ])
+  current.startedAt = 22000
+  current.payload = JSON.stringify({ auto_retry: { retry: 2, max_retries: 2 }, retry_chain: ['a1', 'a2'] })
+  const started = toGraphWorkflowRun(d, definition).nodeStates.a!
+  expect(started.status).toBe('running')
+  expect(started.retryWait).toBeUndefined()
+  expect(started.failedAttempts?.every((a) => a.replacedBy === 'automatic_retry')).toBe(true)
+})
+
+describe('retry waits under a run that is no longer live', () => {
+  const wait = { attempt: 2, max_attempt: 3, retry: 1, max_retries: 2, delay_ms: 10000, scheduled_at: 2000, due_at: 12000 }
+  const history = [{ nodeRunId: 'a1', nodeId: 'a', scopeId: 'root:run', iteration: null, sessionId: 'real-session-1', attempt: 1,
+    kind: 'session', message: 'failure 1', sourceChain: [], recordedAt: 1000, startedAt: 1000, finishedAt: 1500 }]
+  const waitingRow = (over: Partial<WorkflowNodeRun> = {}) => nodeRun({ id: 'a2', nodeId: 'a', nodeType: 'agent', status: 'running', startedAt: null, finishedAt: null,
+    payload: JSON.stringify({ retry_wait: wait, auto_retry: { retry: 1, max_retries: 2 }, retry_chain: ['a1'] }), ...over })
+
+  it.each(['failed', 'cancelled', 'succeeded'] as const)('never shows a wait left under a %s run as waiting or scheduled', (status) => {
+    const d = detail({ status, state: '{"current_nodes":[]}', finishedAt: 3000 }, [waitingRow()])
+    d.failedAttempts = history
+    const state = toGraphWorkflowRun(d, definition).nodeStates.a!
+    expect(state.status).toBe('cancelled')
+    expect(state.retryWait).toBeUndefined()
+    expect(state.failedAttempts?.map((a) => a.replacedBy)).toEqual([undefined])
+  })
+
+  it('labels a cancelled or abandoned wait as neither scheduled nor retried', () => {
+    const settled = waitingRow({ status: 'cancelled', finishedAt: 3000, error: '{"reason":"retry_abandoned"}',
+      payload: JSON.stringify({ auto_retry: { retry: 1, max_retries: 2 }, retry_chain: ['a1'] }) })
+    // Even a live run (e.g. one still closing) cannot schedule from a settled wait.
+    const d = detail({}, [settled])
+    d.failedAttempts = history
+    const state = toGraphWorkflowRun(d, definition).nodeStates.a!
+    expect(state.status).toBe('cancelled')
+    expect(state.failedAttempts?.map((a) => [a.attempt, a.sessionId, a.replacedBy])).toEqual([[1, 'real-session-1', undefined]])
+  })
+
+  it('keeps the countdown and scheduled label while the run is live', () => {
+    const d = detail({}, [waitingRow()])
+    d.failedAttempts = history
+    const state = toGraphWorkflowRun(d, definition).nodeStates.a!
+    expect(state.status).toBe('retry_waiting')
+    expect(state.failedAttempts?.map((a) => a.replacedBy)).toEqual(['automatic_retry_scheduled'])
+  })
+})

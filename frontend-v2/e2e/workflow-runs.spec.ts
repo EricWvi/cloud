@@ -100,8 +100,8 @@ test('workflow runs: v2-server executes a published workflow started from chat',
     await pane.getByLabel('工作流全图俯瞰').getByText('起草', { exact: true }).click()
     await pane.getByRole('button', { name: '打开节点详情' }).click()
     await expect(pane.getByText(/not available in v2/).filter({ visible: true }).first()).toBeVisible()
-    // The node configures no retry, so desktop would retry it by default; v2 says it did not.
-    await expect(pane.getByLabel('v2 未应用的设置').filter({ visible: true }).first()).toContainText('自动重试')
+    // Missing executors are not retryable; the root retry policy is supported.
+    await expect(pane.getByLabel('v2 未应用的设置')).toHaveCount(0)
     // The Start node shows what this run was started with, not the frozen graph's empty prompt.
     await pane.getByRole('button', { name: '开始: 成功' }).click()
     await expect(pane.getByLabel('阶段详情').getByText('给支付模块加一个对账接口')).toBeVisible()
@@ -132,7 +132,7 @@ test('workflow runs: v2-server executes a published workflow started from chat',
   // Its details name the executor and the model it actually ran on.
   await pane.getByRole('button', { name: '打开节点详情' }).click()
   await expect(pane.getByLabel('实际执行').filter({ visible: true }).first()).toContainText('· Fixture')
-  await expect(pane.getByLabel('v2 未应用的设置').filter({ visible: true }).first()).toContainText('自动重试')
+  await expect(pane.getByLabel('v2 未应用的设置')).toHaveCount(0)
   await screenshot(page, testInfo.outputPath('4-review-details.png'))
   await runAgain()
 })
@@ -203,7 +203,7 @@ test('workflow runs: a Condition takes one branch and the other shows as inactiv
     // Its details still say which configured settings v2 does not apply.
     await card('常规处理').getByText('常规处理', { exact: true }).click()
     await pane.getByRole('button', { name: '打开节点详情' }).click()
-    await expect(pane.getByLabel('v2 未应用的设置').filter({ visible: true }).first()).toContainText('自动重试')
+    await expect(pane.getByLabel('v2 未应用的设置')).toHaveCount(0)
     return
   }
   await expect(card('常规处理').getByText('成功', { exact: true })).toBeVisible()

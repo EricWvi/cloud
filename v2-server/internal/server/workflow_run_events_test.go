@@ -230,6 +230,15 @@ func TestWorkflowNodeEventsRelayTheAttemptSession(t *testing.T) {
 	if resumed := read("?after=2"); len(resumed) != 4 || resumed[0] != "id: 3" {
 		t.Fatalf("resumed = %q", resumed)
 	}
+	// Replacing the attempt preserves its own readable session rather than serving the new one.
+	if _, err := s.RetryWorkflowNodeRun(ctx, tenant, runID, node.ID, store.WorkflowNodeRetry{
+		Failure: store.WorkflowNodeFailure{Error: "retryable failure"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if replaced := read(""); len(replaced) != 8 {
+		t.Fatalf("replaced session = %q", replaced)
+	}
 	// The session is read in the caller's own scope, never another member's.
 	mu.Lock()
 	for _, scope := range seen {

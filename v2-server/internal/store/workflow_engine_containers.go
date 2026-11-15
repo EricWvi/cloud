@@ -197,6 +197,9 @@ func (s *Store) AdvanceWorkflowEngineContainer(ctx context.Context, runID, paren
 			}
 			currentNodes := without(r.current, parent.NodeID)
 			if result.Status == WorkflowStatusFailed {
+				if err := abandonRetryWaits(ctx, tx, runID); err != nil {
+					return err
+				}
 				if _, err := tx.Exec(ctx, `UPDATE v2_workflow_runs SET status='failed',error=$2,finished_at=now(),updated_at=now() WHERE id=$1`, runID, result.Error); err != nil {
 					return err
 				}

@@ -36,16 +36,32 @@ func unappliedAgentSettings(config object, at placement) []string {
 	if len(enabledBindings(config, "mcps", "mcpId")) != 0 {
 		unapplied = append(unapplied, "mcp")
 	}
-	interactive, _ := config["interactive"].(bool)
+	interactive := agentInteractive(config)
 	if interactive {
 		unapplied = append(unapplied, "interactive")
 	}
-	// v2 never retries, so retry is unapplied wherever desktop would retry. Desktop never retries
-	// an interactive node, which a person drives (node_runtime.rs:373-379 at ebd5b725).
-	if retryWouldRun(config) && !interactive {
+	// Retry is unapplied where desktop would retry and v2 does not. Desktop never retries an
+	// interactive node, which a person drives (node_runtime.rs:373-379 at ebd5b725), so retry is
+	// not listed there; elsewhere retryApplies alone says where v2 retries.
+	if retryWouldRun(config) && !interactive && !retryApplies(config, at) {
 		unapplied = append(unapplied, "retry")
 	}
 	return unapplied
+}
+
+// retryApplies is the single answer to "will v2 automatically retry this Agent node": its
+// policy would retry, it is not interactive, and it sits in the root graph. Loop and Iteration
+// members do not retry yet (#1169), and desktop never retries an interactive node
+// (node_runtime.rs:373-379 at ebd5b725). unappliedAgentSettings and the engine's retry decision
+// both call it with the node's placement, so the editor, the run payload and the runtime agree.
+func retryApplies(config object, at placement) bool {
+	return retryWouldRun(config) && !agentInteractive(config) && at == placement{}
+}
+
+// agentInteractive reports whether an Agent is configured for a conversation a person drives.
+func agentInteractive(config object) bool {
+	interactive, _ := config["interactive"].(bool)
+	return interactive
 }
 
 // enabledBindings lists the IDs of the Skill or MCP bindings under key that a run receives: every
@@ -68,12 +84,8 @@ func enabledBindings(config object, key, idField string) []string {
 // or null policy is the default, enabled with retries left; an explicit one retries only when
 // enabled with a positive budget. It reads the policy only; where retry applies is the caller's.
 func retryWouldRun(config object) bool {
-	if config["retry"] == nil {
-		return true
-	}
-	retry, _ := config["retry"].(object)
-	budget, _ := uintNumber(retry["maxRetries"], 1<<32-1)
-	return retry["enabled"] == true && budget > 0
+	p := retryPolicyOf(config)
+	return p.enabled && p.max > 0
 }
 
 // unappliedSettings lists every Agent node of the document, spare ones included because the

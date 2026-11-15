@@ -86,10 +86,11 @@ func TestDesktopExecutionProjection(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		unused []string
-		// Agents without a retry policy have desktop's default, which v2 does not apply.
+		// Container members without a retry policy have desktop's default, which v2 does not
+		// apply there; root Agents retry, so they list nothing.
 		defaultRetry []string
 	}{
-		{"spare-chain", []string{"other", "spare"}, []string{"spare"}},
+		{"spare-chain", []string{"other", "spare"}, nil},
 		{"iteration", []string{"spare"}, []string{"fix", "spare"}},
 		{"loop", []string{}, []string{"writer"}},
 	} {
@@ -132,7 +133,8 @@ func TestUnknownKindsAreNotSpareNodes(t *testing.T) {
 	addNode(g, "weird", "hologram", nil)
 	addNode(g, "a", "prompt", nil)
 	want := workflow.Analysis{UnusedNodeIDs: []string{"a", "z"}, UnrecognizedNodes: []workflow.UnrecognizedNode{{NodeID: "weird", Kind: "hologram"}},
-		UnappliedSettings: []workflow.UnappliedSetting{{NodeID: "z", Settings: []string{"retry"}}}, UnsupportedNodes: []workflow.UnsupportedNode{}}
+		// The spare root Agent has desktop's default retry, which v2 applies to root Agents.
+		UnappliedSettings: []workflow.UnappliedSetting{}, UnsupportedNodes: []workflow.UnsupportedNode{}}
 	got, err := workflow.AnalyzeWorkflow(encode(t, g))
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("%#v %v", got, err)

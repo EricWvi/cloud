@@ -79,8 +79,7 @@ func runtimeFailure(kind, message string) Failure {
 }
 
 // Detail renders the payload.error_detail object for the attempt number the store assigned.
-// v2 performs no automatic retry or resume, but the flags keep desktop's meaning so the run
-// view can explain a failure the same way.
+// Flags retain desktop's meaning, including for nodes outside the automatic retry scope.
 func (f Failure) Detail(attempt int, injectLastFailure bool, now time.Time) map[string]any {
 	chain := f.SourceChain
 	if chain == nil {

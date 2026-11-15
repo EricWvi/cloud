@@ -68,8 +68,8 @@ func TestWorkflowDomainServesAnalyzeAndPublish(t *testing.T) {
 
 	status, analysis := call("POST", base+"/analyze", map[string]any{"graph": spareChain})
 	want := map[string]any{"unusedNodeIds": []any{"other", "spare"}, "unrecognizedNodes": []any{}, "unsupportedNodes": []any{},
-		// The spare Agent has no retry policy, so desktop's default retry is listed as unapplied.
-		"unappliedSettings": []any{map[string]any{"nodeId": "spare", "settings": []any{"retry"}}}}
+		// The spare root Agent has desktop's default retry, which v2 applies to root Agents.
+		"unappliedSettings": []any{}}
 	if status != http.StatusOK || !reflect.DeepEqual(analysis, want) {
 		t.Fatalf("analyze spare chain = %d %v, want %v", status, analysis, want)
 	}

@@ -1,7 +1,9 @@
 package workflow_test
 
 import (
+	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -19,7 +21,9 @@ func placedAgents(wire bool) (obj, []string) {
 		"interactive":       {"interactive": true},
 		"mcp":               {"mcps": []any{obj{"mcpId": "official/tools", "enabled": true}}},
 		"interactive-retry": {"interactive": true, "retry": obj{"enabled": true, "maxRetries": 1, "initialDelaySeconds": 1}},
-		"plain":             {},
+		// plain and null-retry carry desktop's default policy, absent and explicitly null.
+		"plain":      {},
+		"null-retry": {"retry": nil},
 	}
 	g := obj{"schemaVersion": 2, "nodes": []any{
 		obj{"id": "start", "data": obj{"kind": "start", "inputVariables": []any{obj{"name": "items", "valueType": "array[string]"}}}},
@@ -119,6 +123,14 @@ func TestAnalysisMatchesRunPathForEveryPlacement(t *testing.T) {
 	if listed == 0 {
 		t.Fatal("no setting is unapplied any more; the comparison checks nothing")
 	}
+	// Default-policy Agents sit at the root, in an Iteration and in a Loop. Whatever the rule says
+	// for each, the comparison covers a rule that depends on placement only if they differ.
+	for _, variant := range []string{"plain", "null-retry"} {
+		root := got["root-"+variant]
+		if reflect.DeepEqual(root, got["iter-"+variant]) && reflect.DeepEqual(root, got["loop-"+variant]) {
+			t.Errorf("default policy (%s) lists %v at every placement; the comparison does not cover placement", variant, root)
+		}
+	}
 }
 
 // The analysis must hand the rule the same configuration and placement the run path does, so a
@@ -158,14 +170,16 @@ func TestAnalysisFeedsTheRuleTheRunPathInputs(t *testing.T) {
 }
 
 // The rule follows desktop's effective retry policy (retry.rs:66-74, 96-99 at ebd5b725): an absent
-// policy is the default, enabled with two retries, and an interactive node never retries. It lists settings in the payload's fixed order,
-// and counts an MCP binding without an enabled flag as enabled, as AgentConfig.MCPs does. Each
-// case is checked on the analysis and on the run path for a root Agent.
+// policy is the default, enabled with two retries, and an interactive node never retries. It lists
+// settings in the payload's fixed order, and counts an MCP binding without an enabled flag as
+// enabled, as AgentConfig.MCPs does. Each case is checked on the analysis and on the run path, for
+// a Loop member, where v2 does not retry, and for a root Agent, whose retry v2 applies.
 func TestUnappliedAgentSettingsRule(t *testing.T) {
 	off := obj{"enabled": false, "maxRetries": 2, "initialDelaySeconds": 5}
 	for name, tc := range map[string]struct {
 		config obj
-		want   []string
+		// want is the Loop member's list; a root Agent lists the same without retry.
+		want []string
 		// spare marks a draft-only configuration publication rejects; only the analysis sees it.
 		spare bool
 	}{
@@ -185,37 +199,63 @@ func TestUnappliedAgentSettingsRule(t *testing.T) {
 			"mcps": []any{obj{"mcpId": "official/tools", "enabled": true}}, "roleId": "reviewer"},
 			[]string{"role", "mcp", "retry"}, false},
 	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			tc.config["prompt"] = "x"
-			g := flat()
-			addNode(g, "a", "agent", obj{"agentConfig": tc.config})
-			if !tc.spare {
-				connect(g, "start", "a")
-			}
-			source := encode(t, g)
-			analysis, err := workflow.AnalyzeWorkflow(source)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var listed []string
-			for _, entry := range analysis.UnappliedSettings {
-				listed = entry.Settings
-			}
-			if tc.spare {
-				if !reflect.DeepEqual(listed, tc.want) {
-					t.Fatalf("analysis lists %v; want %v", listed, tc.want)
+		for _, inLoop := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/loop=%v", name, inLoop), func(t *testing.T) {
+				t.Parallel()
+				config := obj{"prompt": "x"}
+				for k, v := range tc.config {
+					config[k] = v
 				}
-				return
-			}
-			run, err := workflow.ParseGraph(source)
-			if err != nil {
-				t.Fatal(err)
-			}
-			node, _ := run.Node("a")
-			if !reflect.DeepEqual(listed, tc.want) || !reflect.DeepEqual(node.Agent().Unapplied, tc.want) {
-				t.Fatalf("analysis lists %v, run records %v; want %v", listed, node.Agent().Unapplied, tc.want)
-			}
-		})
+				want := tc.want
+				if !inLoop {
+					want = slices.DeleteFunc(slices.Clone(want), func(s string) bool { return s == "retry" })
+					if len(want) == 0 {
+						want = nil
+					}
+				}
+				g := obj{"schemaVersion": 2, "nodes": []any{
+					obj{"id": "start", "data": obj{"kind": "start"}},
+					obj{"id": "loop", "data": obj{"kind": "loop", "loopConfig": obj{"maxIterations": 3, "variables": []any{},
+						"until": obj{"logic": "and", "conditions": []any{}}, "outputs": []any{}}}},
+					obj{"id": "entry", "parentId": "loop", "data": obj{"kind": "start", "containerId": "loop"}},
+				}, "edges": []any{obj{"source": "start", "target": "loop"}}}
+				// runPathView reads the placement from the ID prefix.
+				id := map[bool]string{true: "loop-a", false: "root-a"}[inLoop]
+				a := obj{"id": id, "data": obj{"kind": "agent", "agentConfig": config}}
+				from := "start"
+				if inLoop {
+					a["parentId"] = "loop"
+					a["data"].(obj)["containerId"] = "loop"
+					from = "entry"
+				}
+				g["nodes"] = append(g["nodes"].([]any), a)
+				if !tc.spare {
+					connect(g, from, id)
+				}
+				source := encode(t, g)
+				analysis, err := workflow.AnalyzeWorkflow(source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var listed []string
+				for _, entry := range analysis.UnappliedSettings {
+					listed = entry.Settings
+				}
+				if tc.spare {
+					if !reflect.DeepEqual(listed, want) {
+						t.Fatalf("analysis lists %v; want %v", listed, want)
+					}
+					return
+				}
+				run, err := workflow.ParseGraph(source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				node := runPathView(t, run, id)
+				if !reflect.DeepEqual(listed, want) || !reflect.DeepEqual(node.Agent().Unapplied, want) {
+					t.Fatalf("analysis lists %v, run records %v; want %v", listed, node.Agent().Unapplied, want)
+				}
+			})
+		}
 	}
 }

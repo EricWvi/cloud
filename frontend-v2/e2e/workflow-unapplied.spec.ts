@@ -66,26 +66,38 @@ test('the retry hint follows the server for every retry policy form', async ({ p
   await signIn(page)
   const tid = (await (await page.request.get('/api/v1/me/tenants')).json()).items[0].id
   const name = `重试策略 ${Date.now()}`
-  // Absent (desktop's default policy), switched off, no budget, and switched on.
+  // Absent (desktop's default policy), switched off, no budget, and switched on, each on a Loop
+  // member; plus a root Agent with the default policy. Where retry applies is the server's call.
   const policies: Record<string, unknown> = {
     'retry-absent': undefined,
     'retry-off': { enabled: false, maxRetries: 2, initialDelaySeconds: 10 },
     'retry-zero': { enabled: true, maxRetries: 0, initialDelaySeconds: 10 },
     'retry-on': { enabled: true, maxRetries: 2, initialDelaySeconds: 10 },
   }
-  const ids = Object.keys(policies)
+  const members = Object.keys(policies)
+  const ids = [...members, 'root-default']
+  const agent = (id: string, x: number, y: number, retry: unknown, parentId?: string) => ({
+    id, type: 'workflow', position: { x, y }, ...(parentId ? { parentId } : {}),
+    data: { kind: 'agent', title: id, ...(parentId ? { containerId: parentId } : {}), agentConfig: {
+      executor: { agentCli: 'official/ora-space.opencode', modelId: 'fixture' },
+      prompt: id,
+      skills: [],
+      mcps: [],
+      ...(retry === undefined ? {} : { retry }),
+    } },
+  })
   const graph = JSON.stringify({
+    schemaVersion: 2,
     nodes: [
       { id: 'start', type: 'workflow', position: { x: 0, y: 0 }, data: { kind: 'start', title: '开始' } },
-      ...ids.map((id, i) => ({ id, type: 'workflow', position: { x: 320, y: i * 220 }, data: { kind: 'agent', title: id, agentConfig: {
-        executor: { agentCli: 'official/ora-space.opencode', modelId: 'fixture' },
-        prompt: id,
-        skills: [],
-        mcps: [],
-        ...(policies[id] === undefined ? {} : { retry: policies[id] }),
-      } } })),
+      { id: 'loop', type: 'workflow', position: { x: 320, y: 0 }, data: { kind: 'loop', title: '循环', loopConfig: {
+        maxIterations: 2, variables: [], until: { logic: 'and', conditions: [] }, outputs: [] } } },
+      { id: 'entry', type: 'workflow', position: { x: 40, y: 80 }, parentId: 'loop', data: { kind: 'start', title: '本轮开始', containerId: 'loop' } },
+      ...members.map((id, i) => agent(id, 360, 40 + i * 200, policies[id], 'loop')),
+      agent('root-default', 0, 400, undefined),
     ],
-    edges: ids.map((id) => ({ id: `e-${id}`, source: 'start', target: id })),
+    edges: [{ id: 'e-loop', source: 'start', target: 'loop' }, { id: 'e-root', source: 'start', target: 'root-default' },
+      ...members.map((id) => ({ id: `e-${id}`, source: 'entry', target: id }))],
   })
   expect((await page.request.post(`/api/v2/tenants/${tid}/workflows`, { data: { name, graph } })).status()).toBe(201)
   const analysis = (await (await page.request.post(`/api/v2/tenants/${tid}/workflows/analyze`, { data: { graph } })).json()) as {
