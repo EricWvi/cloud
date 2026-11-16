@@ -159,7 +159,9 @@ test('server-backed plugin and skill install lifecycle survives reload and a new
   browser,
 }) => {
   // Skill installs settle through the server; read-only kinds stay visible without an install entry.
-  test.setTimeout(120_000)
+  // Each Skill install downloads and verifies the real package before it answers, so the waits for
+  // an install allow for the marketplace download.
+  test.setTimeout(150_000)
   await login(page, '/settings/plugins')
   const row = page.getByRole('article', { name: 'Matt Pocock Skills' })
   await expect(row).toBeVisible()
@@ -170,7 +172,7 @@ test('server-backed plugin and skill install lifecycle survives reload and a new
   if (await install.count()) {
     await install.click()
     await expect(row.getByText('已安装', { exact: true })).toBeVisible({
-      timeout: 15_000,
+      timeout: 30_000,
     })
   }
   await row.getByRole('button', { name: '移除' }).click()
@@ -197,7 +199,7 @@ test('server-backed plugin and skill install lifecycle survives reload and a new
     .click()
   await expect(
     page.getByRole('dialog').getByText('已安装', { exact: true }),
-  ).toBeVisible({ timeout: 15_000 })
+  ).toBeVisible({ timeout: 30_000 })
   await page.keyboard.press('Escape')
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await page.goto('/settings/skills')
@@ -232,7 +234,7 @@ test('server-backed plugin and skill install lifecycle survives reload and a new
   await skill.getByRole('button', { name: '安装技能' }).click()
   await expect(
     skill.getByText(/等待下发|下发中|已下发/),
-  ).toBeVisible()
+  ).toBeVisible({ timeout: 30_000 })
 
   await page.goto('/settings/plugins')
   const tavily = page.getByRole('article', { name: 'Tavily' })
