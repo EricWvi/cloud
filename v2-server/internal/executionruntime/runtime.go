@@ -175,7 +175,8 @@ func (s *Service) start(ctx context.Context, scope execution.Scope, caller execu
 	} else if !errors.Is(err, execution.ErrNotFound) {
 		return execution.Ref{}, publicError(err)
 	}
-	group := groupKey(scope, caller)
+	sessionID := newID()
+	group := turnGroup(scope, caller, sessionID)
 	if s.groups[group] != "" {
 		return execution.Ref{}, execution.ErrWorkspaceBusy
 	}
@@ -199,11 +200,11 @@ func (s *Service) start(ctx context.Context, scope execution.Scope, caller execu
 	if !ok || (target == nil && choice.Binding.Protocol != nodeservices.OpenAICompletions) {
 		return execution.Ref{}, execution.ErrNotFound
 	}
-	session := execution.Session{MCP: mcp, Skills: skills, ID: newID(), Target: target, Executor: executor, Model: choice.Model, CreatedAt: time.Now().UTC()}
+	session := execution.Session{MCP: mcp, Skills: skills, ID: sessionID, Target: target, Executor: executor, Model: choice.Model, CreatedAt: time.Now().UTC()}
 	if target != nil {
 		session.WorkspaceID = newID()
 		if caller.Kind == execution.CallerWorkflow {
-			key := group + "/" + target.ProjectID
+			key := groupKey(scope, caller) + "/" + target.ProjectID
 			if id := s.workspaces[key]; id != "" {
 				session.WorkspaceID = id
 			} else {
@@ -213,8 +214,8 @@ func (s *Service) start(ctx context.Context, scope execution.Scope, caller execu
 			// (an interactive node waiting for its starter) is not ended when the next node
 			// starts. The Node admits several live sessions per checkout (its
 			// shared_checkout_sessions capability, which the Agent driver requires) and refuses
-			// only the session over its own limit, without touching the others. Turns still run
-			// one at a time per run (see groups).
+			// only the session over its own limit, without touching the others. Each session
+			// takes one turn at a time; the run's sessions run theirs concurrently (see turnGroup).
 		}
 	}
 	turn := execution.Turn{Ref: execution.Ref{SessionID: session.ID, TurnID: newID()}, Caller: caller, Prompt: copyPrompt(prompt), StartedAt: time.Now().UTC()}
@@ -314,7 +315,7 @@ func (s *Service) Append(ctx context.Context, scope execution.Scope, req executi
 		if len(first.Items) != 1 || first.Items[0].Caller.Kind != req.Caller.Kind || first.Items[0].Caller.ID != req.Caller.ID {
 			return execution.Ref{}, execution.ErrConflict
 		}
-		group := groupKey(scope, req.Caller)
+		group := turnGroup(scope, req.Caller, session.ID)
 		if active := s.groups[group]; active != "" {
 			prior := s.workers[active]
 			if prior == nil {
@@ -676,6 +677,16 @@ func (s *Service) ListExecutors(ctx context.Context, scope execution.Scope) ([]e
 }
 func groupKey(scope execution.Scope, caller execution.Caller) string {
 	return scope.TenantID + "/" + scope.UserID + "/" + string(caller.Kind) + "/" + caller.ID
+}
+
+// turnGroup is the admission unit that allows one active turn. A conversation, schedule or task
+// caller owns one session, so its caller is the unit. A workflow run hosts concurrent Agent
+// attempts, each in its own session, so each session is its own unit.
+func turnGroup(scope execution.Scope, caller execution.Caller, session string) string {
+	if caller.Kind == execution.CallerWorkflow {
+		return "session/" + session
+	}
+	return groupKey(scope, caller)
 }
 func validate(c execution.Caller, p execution.Prompt) error {
 	if c.ID == "" || c.AttemptID == "" || (c.Kind != execution.CallerChat && c.Kind != execution.CallerWorkflow && c.Kind != execution.CallerSchedule && c.Kind != execution.CallerTask) {

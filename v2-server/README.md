@@ -605,7 +605,8 @@ HTTP 集成测试按 `chat.openapi.json` 验证 JSON 响应，向注入点传入
 Session、Turn、连续事件、完整结果和 Caller attempt 保存在 PostgreSQL；worker 不依赖 HTTP 观察者。
 有项目的调用经过每项目 Node 与独立 checkout，无项目 `StartModel` 直接使用
 [`internal/modelturn`](internal/modelturn/README.md)，不创建目录。同一 Caller attempt 返回原 Ref；
-同一对话或 workflow run 还在执行时拒绝新轮次。
+同一对话还在执行时拒绝新轮次；workflow run 的每个会话
+各自一次只执行一轮，同一 run 的多个会话可以同时执行。
 
 有项目 Cancel 会结束整个物理会话，确认停止后后续 Append 返回 `ErrSessionEnded`；
 纯模型 Cancel 只停止当前轮，之后可继续。取消已经结束的旧轮只返回原结果，不停止后来的轮次。

@@ -44,7 +44,7 @@ func (a *failureAgent) End(ctx context.Context, sid string) error {
 }
 func (a *failureAgent) Close(context.Context) error { return nil }
 
-func TestRuntimeAgentFailureRequiresStopBeforeSessionEndAndDirectoryReuse(t *testing.T) {
+func TestRuntimeAgentFailureRequiresStopBeforeSessionEnd(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		result         execution.Result
@@ -100,9 +100,6 @@ func TestRuntimeAgentFailureRequiresStopBeforeSessionEndAndDirectoryReuse(t *tes
 			next := req
 			next.Caller.NodeID = "next"
 			next.Caller.AttemptID = "next"
-			if _, err := f.service.Start(f.ctx, f.scope, next); !errors.Is(err, execution.ErrWorkspaceBusy) {
-				t.Fatalf("directory reused before stop confirmation: %v", err)
-			}
 			if _, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: ref.SessionID, Caller: next.Caller, Prompt: next.Prompt}); !errors.Is(err, execution.ErrSessionEnded) {
 				t.Fatalf("broken physical session accepted Append: %v", err)
 			}
