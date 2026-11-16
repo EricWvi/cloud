@@ -60,6 +60,17 @@ func sourceProxy() (string, error) {
 	}
 	return raw, nil
 }
+
+// OfficialSourceRetrieval is the retrieval the official marketplace uses when a package download is
+// needed: direct HTTPS by default, or through the configured SOCKS proxy when one is set. The demo
+// host cannot reach the marketplace host directly, so the proxy keeps installs working there.
+func OfficialSourceRetrieval() Retrieval {
+	r := Retrieval{Mode: "direct_https"}
+	if _, e := sourceProxy(); e == nil {
+		r.UseProxy = true
+	}
+	return r
+}
 func marketCipher() (cipher.AEAD, error) {
 	key, e := base64.StdEncoding.DecodeString(os.Getenv("V2_MARKET_CREDENTIAL_KEY"))
 	if e != nil || len(key) != 32 {
