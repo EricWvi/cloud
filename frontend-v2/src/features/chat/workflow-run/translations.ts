@@ -103,6 +103,39 @@ export const workflowRunTranslations = {
     "workflowRun.resume.loadingPreview": "正在读取改动…",
     "workflowRun.resume.previewFailed": "无法读取改动。",
     "workflowRun.resume.confirm": "从失败处继续",
+    "workflowRun.resume.v2Description":
+      "已成功的节点保留结果，不会重跑；下面的节点在同一次运行里重新执行。",
+    "workflowRun.resume.startsFrom": "从这些节点继续",
+    "workflowRun.resume.nodeStatus.failed": "失败",
+    "workflowRun.resume.nodeStatus.cancelled": "已取消",
+    "workflowRun.resume.insideContainer": "位于「{{name}}」内",
+    "workflowRun.resume.restartsContainer": "「{{name}}」将从第一轮重新开始",
+    "workflowRun.resume.alsoReruns": "随后重新执行",
+    "workflowRun.resume.keepFiles":
+      "工作区文件保持现状，不会回滚；重跑的节点在当前文件上继续工作。",
+    "workflowRun.resume.loadingNodes": "正在计算要重跑的节点…",
+    "workflowRun.resume.previewUnavailable": "无法读取续跑预览。",
+    "workflowRun.resume.refused.run_not_ended":
+      "只有失败或已取消的运行才能从失败处继续。",
+    "workflowRun.resume.refused.node_running":
+      "还有节点在运行：{{nodes}}。等它们结束后再继续。",
+    "workflowRun.resume.refused.no_failed_node":
+      "这次运行没有失败或取消的节点，可以用「再跑一次」重新运行。",
+    "workflowRun.resume.refused.node_stuck":
+      "节点 {{nodes}} 停在运行中，不会再结束，这次运行无法从失败处继续；请用「再跑一次」重新运行。",
+    "workflowRun.resume.refused.review_form":
+      "这次运行停在确认表单上，表单还没有提交，不能从失败处继续；请用「再跑一次」重新运行。",
+    "workflowRun.resume.refused.run_settling":
+      "上一次执行还在收尾（例如刚停止的节点还没完全结束），请稍后再试。",
+    "workflowRun.resume.refused.review_form_retry":
+      "要重跑的节点包含已经提交的确认表单，不能从失败处继续；任务创建失败了，请在确认页点击「重试任务创建」重新创建任务。",
+    "workflowRun.resume.refused.review_form_submitted":
+      "要重跑的节点包含已经提交的确认表单，表单不能重新填写，不能从失败处继续；请用「再跑一次」重新运行。",
+    "workflowRun.resume.refused.task_handling":
+      "这次运行是任务的处理运行，任务已按它的结果结算，不能从失败处继续；请回到任务页重新开始处理。",
+    "workflowRun.resume.refused.task_decomposition":
+      "这次运行是任务的拆分运行，拆分已按它的结果结算，不能从失败处继续；请回到任务页重新拆分。",
+    "workflowRun.resume.resuming": "正在继续…",
     "workflowRun.resume.switchPublished":
       "改用当前发布版本 {{version}} 续跑（当前运行用的是 {{current}}）",
     "workflowRun.resume.snapshotReason.node_missing": "新版本删掉了节点 {{id}}",
@@ -437,7 +470,8 @@ export const workflowRunTranslations = {
     "workflowRun.errorResumeWithoutInjectionHint":
       "本次运行关闭了失败信息注入：同版本续跑时，智能体不会得知这次失败的原因；若仍失败，再修改工作流并发布新版本。",
     "workflowRun.injectedFailure.title": "本次尝试注入的上次失败信息",
-    "workflowRun.resumeFromTopHint": "可在顶部点击「再跑一次」创建新运行。",
+    "workflowRun.resumeFromTopHint":
+      "可在顶部点击「从失败处继续」重跑这个节点，或点击「再跑一次」创建新运行。",
     "workflowRun.nodeFromOlderSnapshotHint":
       "此节点的结果来自本运行之前使用的版本（续跑时已切换版本）",
     "workflowRun.aiDiagnosis.run": "让 AI 分析",
@@ -601,6 +635,39 @@ export const workflowRunTranslations = {
     "workflowRun.resume.loadingPreview": "Reading changes…",
     "workflowRun.resume.previewFailed": "Could not read the changes.",
     "workflowRun.resume.confirm": "Resume from failure",
+    "workflowRun.resume.v2Description":
+      "Succeeded nodes keep their results and do not run again; the nodes below run again in the same run.",
+    "workflowRun.resume.startsFrom": "Resumes from",
+    "workflowRun.resume.nodeStatus.failed": "Failed",
+    "workflowRun.resume.nodeStatus.cancelled": "Cancelled",
+    "workflowRun.resume.insideContainer": "inside “{{name}}”",
+    "workflowRun.resume.restartsContainer": "“{{name}}” restarts from round 1",
+    "workflowRun.resume.alsoReruns": "Then runs again",
+    "workflowRun.resume.keepFiles":
+      "Workspace files stay as they are and are not rolled back; the rerun nodes continue on the current files.",
+    "workflowRun.resume.loadingNodes": "Working out which nodes run again…",
+    "workflowRun.resume.previewUnavailable": "Could not read the resume preview.",
+    "workflowRun.resume.refused.run_not_ended":
+      "Only a failed or cancelled run can resume from failure.",
+    "workflowRun.resume.refused.node_running":
+      "Nodes are still running: {{nodes}}. Resume once they finish.",
+    "workflowRun.resume.refused.no_failed_node":
+      "This run has no failed or cancelled node; use “Run again” to run it anew.",
+    "workflowRun.resume.refused.node_stuck":
+      "Node {{nodes}} was left running and will never finish, so this run cannot resume; use “Run again” to run it anew.",
+    "workflowRun.resume.refused.review_form":
+      "This run stopped at a review form that was never submitted, so it cannot resume; use “Run again” to run it anew.",
+    "workflowRun.resume.refused.run_settling":
+      "The previous execution is still winding down (a stopped node has not finished ending); try again shortly.",
+    "workflowRun.resume.refused.review_form_retry":
+      "The nodes to rerun include a submitted review form, so this run cannot resume; its task creation failed, so use “Retry task creation” on the review page to create the tasks again.",
+    "workflowRun.resume.refused.review_form_submitted":
+      "The nodes to rerun include a submitted review form that cannot be filled again, so this run cannot resume; use “Run again” to run it anew.",
+    "workflowRun.resume.refused.task_handling":
+      "This is a task's handling run and the task has already settled on its outcome, so it cannot resume; start handling again from the task.",
+    "workflowRun.resume.refused.task_decomposition":
+      "This is a task's decomposition run and the decomposition has already settled on its outcome, so it cannot resume; decompose the task again from the task page.",
+    "workflowRun.resume.resuming": "Resuming…",
     "workflowRun.resume.switchPublished":
       "Resume with the currently published version {{version}} (this run uses {{current}})",
     "workflowRun.resume.snapshotReason.node_missing":
@@ -966,7 +1033,7 @@ export const workflowRunTranslations = {
     "workflowRun.injectedFailure.title":
       "Previous-failure context injected into this attempt",
     "workflowRun.resumeFromTopHint":
-      "Use “Run again” at the top to create a new run.",
+      "Use “Resume from failure” at the top to rerun this node, or “Run again” to create a new run.",
     "workflowRun.nodeFromOlderSnapshotHint":
       "This node's result comes from the version this run used before switching",
     "workflowRun.aiDiagnosis.run": "Ask AI to analyze",

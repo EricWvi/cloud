@@ -69,6 +69,10 @@ func (h *handler) workflowForm(w http.ResponseWriter, r *http.Request, a access)
 			fault(w, 409, "version_conflict")
 		case errors.Is(err, store.ErrWorkflowRunState):
 			fault(w, 409, "workflow_form_closed")
+		case errors.Is(err, store.ErrTaskHandlingRun):
+			fault(w, 409, "task_handling")
+		case errors.Is(err, store.ErrTaskDecompositionRun):
+			fault(w, 409, "task_decomposition")
 		case errors.As(err, &field):
 			writeJSON(w, 400, map[string]any{"code": "invalid_form_answer", "key": field.Key, "field": field.Field, "reason": field.Reason})
 		default:

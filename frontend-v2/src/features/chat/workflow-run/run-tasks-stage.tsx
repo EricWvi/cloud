@@ -6,6 +6,7 @@ import { Button, buttonVariants } from '@/components/ui/button'
 import { getWorkflowForm } from '@/lib/workflows/api/generated'
 import type { GraphWorkflowNodeState } from '@/lib/workflows/runtime'
 import { cn } from '@/lib/utils'
+import { taskOwnedRetryText, type RunTaskLink } from './task-owned-retry'
 
 type TaskResult = {
   key?: string
@@ -36,18 +37,22 @@ function readTasks(state: GraphWorkflowNodeState | null): TaskResult[] {
   }
 }
 
+
 /**
  * CreateTasks owns the task outcome, so its stage lists exactly what was created or reused.
  * Titles come from the run's frozen form when it is readable; the finding key alone is not a
  * sentence anyone should have to read.
  */
-export function RunTasksStage({ tenantId, runId, nodeTitle, state, onOpenForm }: {
+export function RunTasksStage({ tenantId, runId, nodeTitle, state, onOpenForm, taskLink }: {
   tenantId: string
   runId: string
   nodeTitle: string
   state: GraphWorkflowNodeState | null
   onOpenForm?: () => void
+  /** The run's owning task link: a run a task owns cannot retry its task creation (D30, D32), so the stage points back to the task. */
+  taskLink?: RunTaskLink
 }) {
+  const ownedText = taskOwnedRetryText(taskLink)
   const tasks = readTasks(state)
   const status = state?.status ?? 'idle'
   const pending = status === 'running' || status === 'awaiting_input' || status === 'retry_waiting'
@@ -100,8 +105,8 @@ export function RunTasksStage({ tenantId, runId, nodeTitle, state, onOpenForm }:
     </ul> : <div className="rounded-xl border border-dashed bg-muted/20 px-5 py-10 text-center">
       <ClipboardCheck className="mx-auto size-6 text-muted-foreground" aria-hidden />
       <p className="mt-3 text-sm font-medium">{pending ? '正在创建或关联任务' : status === 'failed' ? '任务没有建成' : '没有需要创建的任务'}</p>
-      <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">{pending ? '表单提交后，这里会列出每个问题的处理结果。' : status === 'failed' ? state?.errorMessage || '确认已经保存；回到确认节点可以重试任务创建，不需要重新判定。' : '本次确认没有需要创建或关联的协作任务。'}</p>
-      {status === 'failed' && onOpenForm && <Button className="mt-3" variant="outline" size="sm" onClick={onOpenForm}><RotateCcw />回到确认节点重试</Button>}
+      <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">{pending ? '表单提交后，这里会列出每个问题的处理结果。' : status === 'failed' ? (ownedText !== undefined ? `确认已经保存。${ownedText}` : state?.errorMessage || '确认已经保存；回到确认节点可以重试任务创建，不需要重新判定。') : '本次确认没有需要创建或关联的协作任务。'}</p>
+      {status === 'failed' && onOpenForm && ownedText === undefined && <Button className="mt-3" variant="outline" size="sm" onClick={onOpenForm}><RotateCcw />回到确认节点重试</Button>}
     </div>}
   </section>
 }

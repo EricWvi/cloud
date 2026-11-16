@@ -11,6 +11,14 @@ export interface RunServer {
   seen: string[]
   /** When set, a started run stops at its first Agent, running, until cancelled. */
   hold: boolean
+  /** When set, a resume preview reports nodes still running (v2-server's idle gate). */
+  runningNodeIds?: string[]
+  /** When set, the resume preview answers this instead of the plan computed from the rows. */
+  preview?: Record<string, unknown>
+  /** When set, a resume is refused with these params although the preview allowed it. */
+  resumeRefusal?: { reason: string; runningNodeIds: string[] }
+  /** Finishes a run held at its Agent: the Agent answers and the rest of the graph executes. */
+  finishHeld: (runId: string) => void
 }
 
 /**
@@ -20,7 +28,18 @@ export interface RunServer {
  * Agent instead.
  */
 export function serveRuns(tenantId: string, backend: LocalWorkflowBackend): RunServer {
-  const server: RunServer = { runs: new Map(), seen: [], hold: false }
+  const server: RunServer = {
+    runs: new Map(), seen: [], hold: false,
+    finishHeld: (runId) => {
+      const entry = server.runs.get(runId)!
+      const held = entry.detail.nodes.find((n) => n.status === 'running')!
+      held.status = 'succeeded'
+      held.output = `回答：${held.nodeId}`
+      held.finishedAt = now()
+      server.hold = false
+      execute(entry)
+    },
+  }
   const previous = http.defaults.adapter as AxiosAdapter
   let clock = 1_700_000_000_000
   let ids = 0
@@ -34,6 +53,28 @@ export function serveRuns(tenantId: string, backend: LocalWorkflowBackend): RunS
     return response
   }
   const refuse = (config: Parameters<AxiosAdapter>[0], status: number, code: string) => respond(config, status, { code, params: {}, requestId: 'r' })
+
+  /** v2-server's resume plan without containers: failed or cancelled rows and their descendants. */
+  function resumePlan(entry: { detail: WorkflowRunDetail; graph: string }) {
+    const { run, nodes } = entry.detail
+    const graph = parseWorkflowGraph(entry.graph)
+    const failedNodes = nodes.filter((n) => n.status === 'failed' || n.status === 'cancelled')
+      .map((n) => ({ nodeId: n.nodeId, nodeRunId: n.id, status: n.status as 'failed' | 'cancelled', containerNodeId: null }))
+    const clear = new Set<string>()
+    const queue = failedNodes.map((n) => n.nodeId)
+    while (queue.length > 0) {
+      const id = queue.shift()!
+      if (clear.has(id)) continue
+      clear.add(id)
+      for (const edge of graph.edges) if (edge.source === id) queue.push(edge.target)
+    }
+    const running = server.runningNodeIds ?? []
+    const reason = run.status !== 'failed' && run.status !== 'cancelled' ? 'run_not_ended' : running.length > 0 ? 'node_running' : clear.size === 0 ? 'no_failed_node' : null
+    return {
+      resumable: reason === null, reason, runningNodeIds: reason === 'node_running' ? running : [], rollback: 'keep' as const,
+      failedNodes: reason === null || reason === 'node_running' ? failedNodes : [], restartContainerNodeIds: [], clearNodeIds: reason === null ? [...clear].sort() : [],
+    }
+  }
 
   function execute(entry: { detail: WorkflowRunDetail; graph: string }) {
     const { run } = entry.detail
@@ -50,6 +91,12 @@ export function serveRuns(tenantId: string, backend: LocalWorkflowBackend): RunS
     const answers: Record<string, string> = {}
     for (const id of order) {
       const node = graph.nodes.find((n) => n.id === id)!
+      // A resumed run keeps the rows that survived; only the cleared nodes execute again.
+      const kept = entry.detail.nodes.find((n) => n.nodeId === id)
+      if (kept) {
+        if (node.data.kind === 'agent' && kept.output) answers[id] = kept.output
+        continue
+      }
       const at = now()
       const row: WorkflowNodeRun = {
         id: `node-run-${++ids}`, runId: run.id, scopeId: `root:${run.id}`, nodeId: id, nodeType: node.data.kind, sessionId: null,
@@ -113,7 +160,7 @@ export function serveRuns(tenantId: string, backend: LocalWorkflowBackend): RunS
         .map(({ detail: { run }, version }) => ({ id: run.id, name: run.name, projectId: run.projectId, workflowId: run.workflowId, version, status: run.status, startedAt: run.startedAt, finishedAt: run.finishedAt, createdAt: run.createdAt }))
       return respond(config, 200, { runs })
     }
-    const [, runId, action = ''] = url.slice(runsBase.length).match(/^\/([^/]+)(\/[a-z]+)?$/) ?? []
+    const [, runId, action = ''] = url.slice(runsBase.length).match(/^\/([^/]+)(\/[a-z-]+)?$/) ?? []
     const entry = runId ? server.runs.get(runId) : undefined
     if (!entry) return refuse(config, 404, 'workflow_run_not_found')
     const { run } = entry.detail
@@ -144,6 +191,18 @@ export function serveRuns(tenantId: string, backend: LocalWorkflowBackend): RunS
       run.status = 'cancelled'
       run.finishedAt = now()
       for (const node of entry.detail.nodes) if (node.status === 'running') node.status = 'cancelled'
+      return respond(config, 200, { run })
+    }
+    if (action === '/resume-preview' && method === 'GET') return respond(config, 200, server.preview ?? resumePlan(entry))
+    if (action === '/resume' && method === 'POST') {
+      if (server.resumeRefusal) return respond(config, 409, { code: 'workflow_run_not_resumable', params: server.resumeRefusal, requestId: 'r' })
+      const plan = resumePlan(entry)
+      if (!plan.resumable) return respond(config, 409, { code: 'workflow_run_not_resumable', params: { reason: plan.reason, runningNodeIds: plan.runningNodeIds }, requestId: 'r' })
+      entry.detail.nodes = entry.detail.nodes.filter((n) => !plan.clearNodeIds.includes(n.nodeId))
+      run.status = 'running'
+      run.error = null
+      run.finishedAt = null
+      execute(entry)
       return respond(config, 200, { run })
     }
     if (action === '' && method === 'DELETE') {

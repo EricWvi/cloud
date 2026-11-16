@@ -82,8 +82,8 @@ func TestTaskWorkflowLifecycle(t *testing.T) {
 			if err != nil || detail.ProjectID != taskProject || detail.SnapshotID != snap.ID {
 				t.Fatalf("frozen run=%+v %v", detail, err)
 			}
-			if got, err := f.store.WorkflowRunTask(f.ctx, f.tenant, id); err != nil || got != task.ID {
-				t.Fatalf("owning task=%s %v", got, err)
+			if got, kind, err := f.store.WorkflowRunTaskLink(f.ctx, f.tenant, id); err != nil || got != task.ID || kind != store.TaskLinkHandle {
+				t.Fatalf("owning task=%s %s %v", got, kind, err)
 			}
 			if retry, err := h.Start(f.ctx, in, values); err != nil || retry != id {
 				t.Fatalf("idempotent=%s %v", retry, err)

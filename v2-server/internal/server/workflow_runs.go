@@ -15,7 +15,7 @@ import (
 // scoping covers both, while the run lifecycle stays in its own interface.
 type WorkflowRunStore interface {
 	WorkflowStore
-	WorkflowRunTask(context.Context, string, string) (string, error)
+	WorkflowRunTaskLink(context.Context, string, string) (string, string, error)
 	CreateWorkflowRun(context.Context, string, string, string, store.WorkflowRunInput) (store.WorkflowRun, error)
 	WorkflowRuns(context.Context, string, string, string) ([]store.WorkflowRunSummary, error)
 	WorkflowRun(context.Context, string, string) (store.WorkflowRun, error)
@@ -28,6 +28,7 @@ type WorkflowRunStore interface {
 
 type workflowRunView struct {
 	TaskID     string  `json:"taskId,omitempty"`
+	TaskLink   string  `json:"taskLink,omitempty"`
 	ID         string  `json:"id"`
 	WorkflowID string  `json:"workflowId"`
 	SnapshotID string  `json:"snapshotId"`
@@ -310,7 +311,7 @@ func (h *handler) getWorkflowRun(w http.ResponseWriter, r *http.Request, a acces
 		scopeViews = append(scopeViews, toWorkflowScopeView(scope))
 	}
 	view := toWorkflowRunView(run)
-	view.TaskID, err = s.WorkflowRunTask(r.Context(), tenant, runID)
+	view.TaskID, view.TaskLink, err = s.WorkflowRunTaskLink(r.Context(), tenant, runID)
 	if err != nil {
 		workflowRunFault(w, err, "get workflow task")
 		return

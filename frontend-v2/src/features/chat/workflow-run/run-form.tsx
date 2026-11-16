@@ -22,6 +22,7 @@ import type { TaskAssigneeRef } from '@/features/collaboration/tasks-api/generat
 import { DtsReceipt } from './dts-receipt'
 import { RunFindingCard, type FormAnswer } from './run-finding-card'
 import { RunReportPanel } from './run-report-panel'
+import { taskOwnedRetryText, type RunTaskLink } from './task-owned-retry'
 import { cn } from '@/lib/utils'
 
 type FindingFilter = 'all' | 'pending' | 'confirmed' | 'rejected'
@@ -76,8 +77,13 @@ const severityChip = (severity: string) => {
   return 'border-border bg-muted text-muted-foreground'
 }
 
-/** Reads a durable review; refreshing never invents a new form or task. */
-export function RunForm({ tenantId, runId, runStatus, nodeError }: { tenantId: string; runId: string; runStatus: string; nodeError?: string }) {
+/**
+ * Reads a durable review; refreshing never invents a new form or task. `taskLink` is the run's
+ * owning task link: a task's handling run (`handle`, owner decision D30) or a task decomposition's
+ * run (`decomposition`, D32) offers no task creation retry, because the task's link settled with
+ * the run and the task starts handling or decomposing again instead.
+ */
+export function RunForm({ tenantId, runId, runStatus, nodeError, taskLink }: { tenantId: string; runId: string; runStatus: string; nodeError?: string; taskLink?: RunTaskLink }) {
   const query = useQuery({ queryKey: ['workflow-form', tenantId, runId], queryFn: () => getWorkflowForm(tenantId, runId), refetchInterval: 3000, retry: false })
   if (query.isPending) return <div className="flex min-h-48 items-center justify-center text-sm text-muted-foreground" role="status">正在读取确认表单…</div>
   if (!query.data) {
@@ -94,10 +100,18 @@ export function RunForm({ tenantId, runId, runStatus, nodeError }: { tenantId: s
     </div>
     return <div className="flex min-h-48 flex-col items-center justify-center gap-3 text-sm text-muted-foreground" role="status"><CircleDashed className="size-6" />表单尚未生成，运行到确认步骤后会自动显示。<Button variant="outline" onClick={() => void query.refetch()}>刷新</Button></div>
   }
-  return <FormEditor key={query.data.id} form={query.data} tenantId={tenantId} runStatus={runStatus} />
+  return <FormEditor key={query.data.id} form={query.data} tenantId={tenantId} runStatus={runStatus} ownedText={taskOwnedRetryText(taskLink)} />
 }
 
-function FormEditor({ form, tenantId, runStatus }: { form: WorkflowForm; tenantId: string; runStatus: string }) {
+/** The task link a 409 refusal of the task creation retry names (D30, D32), if any. */
+function refusedTaskLink(error: unknown): RunTaskLink | undefined {
+  if (!isAxiosError(error) || error.response?.status !== 409) return undefined
+  const code = (error.response.data as { code?: unknown } | undefined)?.code
+  return code === 'task_handling' ? 'handle' : code === 'task_decomposition' ? 'decomposition' : undefined
+}
+
+
+function FormEditor({ form, tenantId, runStatus, ownedText }: { form: WorkflowForm; tenantId: string; runStatus: string; ownedText: string | undefined }) {
   const roster = useGetApiV1TenantsTidMembers(tenantId, undefined, { query: { enabled: !!tenantId } })
   const squads = useQuery({ queryKey: ['squads', tenantId], queryFn: () => listSquads(tenantId) })
   const client = useQueryClient()
@@ -359,10 +373,10 @@ function FormEditor({ form, tenantId, runStatus }: { form: WorkflowForm; tenantI
         {mutation.isError && <p role="alert" className="mt-3 flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/5 px-3 py-2 text-sm text-destructive"><TriangleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden />{saveError}</p>}
 
         {status === 'submitted' && runStatus === 'failed' && form.results.length === 0 && displayAnswers.some(answer => answer.decision === 'confirmed') && <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-warning/35 bg-warning-soft px-3 py-2.5">
-          <p className="min-w-0 flex-1 text-sm">确认已保存，但任务没有建成。重试只会补建任务，不需要重新判定。</p>
-          <Button variant="outline" size="sm" disabled={retry.isPending} onClick={() => retry.mutate()}><RotateCcw />{retry.isPending ? '正在重试…' : '重试任务创建'}</Button>
+          <p className="min-w-0 flex-1 text-sm">{ownedText !== undefined ? `确认已保存，但任务没有建成。${ownedText}` : '确认已保存，但任务没有建成。重试只会补建任务，不需要重新判定。'}</p>
+          {ownedText === undefined && <Button variant="outline" size="sm" disabled={retry.isPending} onClick={() => retry.mutate()}><RotateCcw />{retry.isPending ? '正在重试…' : '重试任务创建'}</Button>}
         </div>}
-        {retry.isError && <p role="alert" className="mt-2 text-sm text-destructive">任务当前不可重试，请查看运行状态。</p>}
+        {retry.isError && <p role="alert" className="mt-2 text-sm text-destructive">{taskOwnedRetryText(refusedTaskLink(retry.error)) ?? '任务当前不可重试，请查看运行状态。'}</p>}
 
         {notice && form.status === 'open' && <p role="status" className="mt-3 text-sm text-muted-foreground">{notice}</p>}
       </section>

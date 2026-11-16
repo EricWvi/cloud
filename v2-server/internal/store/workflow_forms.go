@@ -262,7 +262,10 @@ func (s *Store) WorkflowStarter(ctx context.Context, runID string) (string, erro
 }
 
 // RetryWorkflowFormTasks reopens only a failed deterministic action. Completed
-// tasks, cancelled runs and failures in evidence collection cannot be replayed.
+// tasks, cancelled runs and failures in evidence collection cannot be replayed, and neither can a
+// task's handling run (ErrTaskHandlingRun, owner decision D30) or a task decomposition's run
+// (ErrTaskDecompositionRun, D32): its task link settled when the run failed, so the task starts
+// handling or decomposing again instead.
 func (s *Store) RetryWorkflowFormTasks(ctx context.Context, a Access, runID string) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := lockWorkflowRun(ctx, tx, a.TenantID, runID); err != nil {
@@ -284,6 +287,14 @@ func (s *Store) RetryWorkflowFormTasks(ctx context.Context, a Access, runID stri
 		}
 		if r.status != WorkflowStatusFailed || f.Status != "submitted" {
 			return ErrWorkflowRunState
+		}
+		switch link, err := runTaskLink(ctx, tx, runID); {
+		case err != nil:
+			return err
+		case link == TaskLinkHandle:
+			return ErrTaskHandlingRun
+		case link == TaskLinkDecomposition:
+			return ErrTaskDecompositionRun
 		}
 		var nodeID string
 		err = tx.QueryRow(ctx, `UPDATE v2_workflow_node_runs SET status='running',error=NULL,finished_at=NULL WHERE run_id=$1 AND node_type='createTasks' AND status='failed' AND deleted_at IS NULL RETURNING node_id`, runID).Scan(&nodeID)

@@ -198,6 +198,8 @@ func newRouter(h *handler) *router {
 	rt.tenant("DELETE /api/v2/tenants/{tid}/workflow-runs/{rid}", h.deleteWorkflowRun)
 	rt.tenant("POST /api/v2/tenants/{tid}/workflow-runs/{rid}/start", h.startWorkflowRun)
 	rt.tenant("POST /api/v2/tenants/{tid}/workflow-runs/{rid}/cancel", h.cancelWorkflowRun)
+	rt.tenant("GET /api/v2/tenants/{tid}/workflow-runs/{rid}/resume-preview", h.previewWorkflowRunResume)
+	rt.tenant("POST /api/v2/tenants/{tid}/workflow-runs/{rid}/resume", h.resumeWorkflowRun)
 	rt.tenant("PATCH /api/v2/tenants/{tid}/workflow-runs/{rid}/input", h.updateWorkflowRunInput)
 	rt.tenant("POST /api/v2/tenants/{tid}/workflow-runs/{rid}/nodes/{nodeId}/complete", h.completeWorkflowNode)
 	rt.tenant("GET /api/v2/tenants/{tid}/workflow-runs/{rid}/nodes", h.listWorkflowRunNodes)

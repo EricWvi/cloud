@@ -35,7 +35,7 @@ func (h *Host) Dispatch(d workflow.AgentDispatch) {
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.queue = append(st.queue, d)
+	st.queue = append(st.queue, queuedDispatch{d: d, generation: st.generation})
 	if !st.working {
 		st.working = true
 		h.workers.Add(1)
@@ -57,14 +57,14 @@ func (h *Host) work(runID string, st *runState) {
 			h.forgetFinished(runID, st)
 			return
 		}
-		d := st.queue[0]
+		q := st.queue[0]
 		st.queue = st.queue[1:]
-		cancelling := st.cancelling
+		cancelling := st.cancelling || q.generation != st.generation
 		st.mu.Unlock()
-		if cancelling || h.abandoned(d) {
+		if cancelling || h.abandoned(q.d) {
 			continue
 		}
-		h.runAgent(st, d)
+		h.runAgent(st, q.d, q.generation)
 	}
 }
 
@@ -130,7 +130,7 @@ func (h *Host) finishCancel(st *runState, runID string) {
 // runAgent drives one Agent attempt as desktop's drive_agent_node: resolve the executor, render
 // the prompt, start the session, bind it to the attempt, wait for the owning turn's result, end
 // the session and report the outcome to the engine.
-func (h *Host) runAgent(st *runState, d workflow.AgentDispatch) {
+func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint64) {
 	cfg := d.Node.Agent()
 	skills, err := h.store.ResolveWorkflowSkills(h.ctx, st.scope, d.ProjectID, cfg.Skills)
 	if err != nil {
@@ -153,7 +153,15 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch) {
 		ExecutorID: executor.executor.ID, Prompt: agentPrompt(d, task),
 	}
 
-	if !st.beginStart(d.ScopeID) {
+	if !st.beginStart(d.ScopeID, generation) {
+		return
+	}
+	// Resolving the executor and rendering the prompt took a while after the worker's abandon
+	// check: the run may have ended (a sibling failed it) or been cancelled meanwhile. Check again
+	// with the slot reserved, so nothing can end the run between this check and the start
+	// without waiting for the start to return.
+	if h.abandoned(d) {
+		st.releaseStart()
 		return
 	}
 	ref, err := h.start(st.scope, request)
@@ -197,17 +205,29 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch) {
 	h.settle(d, result, executor, cfg, task)
 }
 
-// beginStart reserves the start slot, or reports false once cancellation was requested.
-func (st *runState) beginStart(scopeID string) bool {
+// beginStart reserves the start slot, or reports false once cancellation was requested or the
+// dispatch belongs to a generation a resume has since replaced.
+func (st *runState) beginStart(scopeID string, generation uint64) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.cancelling || st.closedScopes[scopeID] {
+	if st.cancelling || st.closedScopes[scopeID] || generation != st.generation {
 		return false
 	}
 	st.starting = make(chan struct{})
 	st.turnDone = make(chan struct{})
 	st.activeScope = scopeID
 	return true
+}
+
+// releaseStart gives back a slot beginStart reserved for an attempt that will not start.
+func (st *runState) releaseStart() {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	close(st.turnDone)
+	st.turnDone = nil
+	st.activeScope = ""
+	close(st.starting)
+	st.starting = nil
 }
 
 // endStart publishes the started turn to a waiting cancellation and reports whether one was

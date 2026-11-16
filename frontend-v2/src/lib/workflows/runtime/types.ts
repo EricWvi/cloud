@@ -642,6 +642,12 @@ export type WorkflowNodeConversationItem =
 export interface GraphWorkflowRun {
   /** Owning handling or decomposition task, when this run has one. */
   taskId?: string;
+  /**
+   * How taskId owns the run: as its handling run or as its decomposition's run. Neither resumes
+   * from failure or retries its task creation (owner decisions D25, D30, D32): the task starts
+   * handling or decomposing again instead.
+   */
+  taskLink?: "handle" | "decomposition";
   id: string;
   projectId: string;
   definitionId: string;

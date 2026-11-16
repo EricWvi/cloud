@@ -53,6 +53,65 @@ type Host struct {
 
 	mu   sync.Mutex
 	runs map[string]*runState
+	// lifecycles serializes a run's cancellation and resume: a cancellation that starts while a
+	// resume is under way waits for it and then stops the resumed Agent, and a resume is refused
+	// while a cancellation is under way. An entry exists only while someone holds or waits for
+	// it, and only for a run the caller's tenant was found to own, so the map stays bounded by
+	// the lifecycle operations in flight.
+	lifecycles map[string]*lifecycleLock
+	// resuming, when set (tests only), runs inside ResumeRun once it holds the run's lifecycle
+	// lock and has admitted the resume, before the resume transaction.
+	resuming func(runID string)
+}
+
+// lifecycleLock is one run's cancel/resume lock and the number of callers holding or waiting.
+type lifecycleLock struct {
+	mutex sync.Mutex
+	users int
+}
+
+// lockLifecycle waits for the run's cancel/resume lock and returns its release.
+func (h *Host) lockLifecycle(runID string) func() {
+	l := h.joinLifecycle(runID)
+	l.mutex.Lock()
+	return func() {
+		l.mutex.Unlock()
+		h.leaveLifecycle(runID, l)
+	}
+}
+
+// tryLockLifecycle takes the run's cancel/resume lock only when nobody holds it.
+func (h *Host) tryLockLifecycle(runID string) (func(), bool) {
+	l := h.joinLifecycle(runID)
+	if !l.mutex.TryLock() {
+		h.leaveLifecycle(runID, l)
+		return nil, false
+	}
+	return func() {
+		l.mutex.Unlock()
+		h.leaveLifecycle(runID, l)
+	}, true
+}
+
+func (h *Host) joinLifecycle(runID string) *lifecycleLock {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	l := h.lifecycles[runID]
+	if l == nil {
+		l = &lifecycleLock{}
+		h.lifecycles[runID] = l
+	}
+	l.users++
+	return l
+}
+
+func (h *Host) leaveLifecycle(runID string, l *lifecycleLock) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	l.users--
+	if l.users == 0 {
+		delete(h.lifecycles, runID)
+	}
 }
 
 var _ server.WorkflowRunHost = (*Host)(nil)
@@ -64,7 +123,7 @@ func NewHost(c Config) (*Host, error) {
 	}
 	h := &Host{
 		store: c.Store, exec: c.Execution, catalog: c.Catalog, hub: c.Hub, log: c.Logger, now: c.Now,
-		stopTimeout: c.StopTimeout, busyRetry: c.BusyRetry, runs: map[string]*runState{},
+		stopTimeout: c.StopTimeout, busyRetry: c.BusyRetry, runs: map[string]*runState{}, lifecycles: map[string]*lifecycleLock{},
 	}
 	if h.hub == nil {
 		h.hub = NewHub()
@@ -209,7 +268,11 @@ type runState struct {
 	mu         sync.Mutex
 	starters   int
 	cancelling bool
-	queue      []workflow.AgentDispatch
+	// generation counts the resumes of this run in this process. A dispatch carries the generation
+	// it was queued in, so one queued before a cancellation and a resume can never start a turn
+	// for the attempt the resume soft-deleted (see beginStart).
+	generation uint64
+	queue      []queuedDispatch
 	working    bool
 	// starting is closed when an in-flight Start returns, so a cancellation can learn its ref.
 	starting           chan struct{}
@@ -218,6 +281,13 @@ type runState struct {
 	turnDone           chan struct{}
 	closedScopes       map[string]bool
 	scopeCleanupErrors map[string]error
+}
+
+// queuedDispatch is one Agent attempt waiting for the run's worker, with the generation of the
+// run state it was dispatched in.
+type queuedDispatch struct {
+	d          workflow.AgentDispatch
+	generation uint64
 }
 
 // register records who is starting a run and counts the start under way. A run that already
@@ -306,11 +376,21 @@ func (h *Host) CompleteNode(ctx context.Context, scope server.WorkflowRunScope, 
 // the stop is unconfirmed; the run still never advances, and its worker closes it as cancelled
 // once the turn ends.
 func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, runID string) (store.WorkflowRun, error) {
+	// Look the run up in the caller's tenant before taking its lock, so an unknown or foreign id
+	// never creates lifecycle state.
 	run, err := h.store.WorkflowRun(ctx, scope.TenantID, runID)
 	if err != nil {
 		return store.WorkflowRun{}, err
 	}
-	h.engine.CancelRetries(runID)
+	defer h.lockLifecycle(runID)()
+	// The status decides whether there is execution to stop, so it is read again together with
+	// the retry fence, under the run gate: a resume that committed after the read above has
+	// returned the run to running and dispatched its Agents, which must be stopped too.
+	status, err := h.engine.FenceRetriesForCancel(ctx, runID)
+	if err != nil {
+		return store.WorkflowRun{}, err // the engine dropped the fence again
+	}
+	run.Status = status
 	st := h.state(runID)
 	if st != nil && (run.Status == store.WorkflowStatusPending || run.Status == store.WorkflowStatusRunning) {
 		stopCtx, cancel := context.WithTimeout(ctx, h.stopTimeout)

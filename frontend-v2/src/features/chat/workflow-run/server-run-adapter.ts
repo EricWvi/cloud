@@ -202,13 +202,37 @@ function attemptFailure(attempt: WorkflowNodeFailedAttempt): WorkflowNodeAttempt
 }
 
 /**
+ * Labels the failed attempt a resume from failure replaced, as desktop's `markReplacements`
+ * (packages/app-shell/src/state/data/workflow-run-retry.ts:161-214@ebd5b725): an automatic retry
+ * always links the attempt it replaced through the live row's `retry_chain`, so the newest attempt
+ * older than that chain (older than the live row itself when it has none) was replaced by a manual
+ * resume. When the attempt numbers are known, the label requires the next attempt to follow it
+ * directly, since a gap means a hidden row (a cleared wait or region row) came between. Desktop
+ * also needs the live row's own number; v2 labels a fresh resumed row that has not recorded one
+ * yet too, because only a resume soft-deletes a root failure without linking it.
+ */
+function markManualResume(attempts: WorkflowNodeAttemptFailure[], live: WorkflowNodeRun): void {
+  const payload = parseObject(live.payload)
+  const chain = Array.isArray(payload.retry_chain) ? payload.retry_chain : []
+  const chained = attempts.filter((attempt) => chain.includes(attempt.nodeRunId)).map((attempt) => attempt.attempt)
+  const own = [record(payload.error_detail)?.attempt, record(payload.retry_wait)?.attempt].find((n): n is number => typeof n === 'number')
+  const next = chained.length > 0 ? Math.min(...chained) : own
+  const replaced = attempts
+    .filter((attempt) => attempt.replacedBy === undefined && (next === undefined || attempt.attempt < next))
+    .sort((a, b) => a.attempt - b.attempt)
+    .at(-1)
+  if (replaced && (next === undefined || replaced.attempt === next - 1)) replaced.replacedBy = 'manual_resume'
+}
+
+/**
  * Projects a v2-server run onto the run model Theater and Overview render, as desktop's backend
  * run adapter does. The detail lists each node's latest attempt; graph nodes without one stay idle,
  * except those behind a Condition branch not taken, which never get a row and are shown inactive,
  * projected from the decisions of that exact execution. Loop scopes and Iteration array indices
  * stay separate, preserving historical sessions even when the same node runs again. Earlier
  * failures retain their sessions and reasons in that exact root, Iteration or Loop occurrence.
- * Replacement labels come only from persisted retry-chain links.
+ * Replacement labels come from persisted retry-chain links and, for a root node or an Iteration
+ * member resumed from failure, from what those links leave out.
  */
 export function toGraphWorkflowRun(detail: WorkflowRunDetail, definition: WorkflowDefinition): GraphWorkflowRun {
   const { run } = detail
@@ -281,9 +305,24 @@ export function toGraphWorkflowRun(detail: WorkflowRunDetail, definition: Workfl
     }
     state.failedAttempts = [...(state.failedAttempts ?? []), failure]
   }
+  // A resume from failure soft-deletes a root or Iteration failure without linking it, so label it
+  // once every failure is attached to its state, each against the live row of its own
+  // (node, iteration) as desktop's projectFailedAttempts keys it. Loop members restart numbering
+  // in the new rounds a resume opens, so their old rounds have no live row to compare with.
+  for (const [nodeId, state] of Object.entries(nodeStates)) {
+    const liveRow = rootRows.find((row) => row.nodeId === nodeId && row.iteration === null)
+    if (state.failedAttempts && liveRow) markManualResume(state.failedAttempts, liveRow)
+  }
+  for (const [nodeId, states] of Object.entries(roundStates)) {
+    for (const state of states) {
+      const liveRow = rootRows.find((row) => row.nodeId === nodeId && row.iteration !== null && row.iteration === state.iteration)
+      if (state.failedAttempts && liveRow) markManualResume(state.failedAttempts, liveRow)
+    }
+  }
   const result: GraphWorkflowRun = {
     id: run.id,
     taskId: run.taskId,
+    taskLink: run.taskLink,
     projectId: run.projectId,
     definitionId: run.workflowId,
     definitionSnapshot: withRunStartValues(definition, detail),

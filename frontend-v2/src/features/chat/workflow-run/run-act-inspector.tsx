@@ -36,6 +36,7 @@ import type {
   WorkflowNodeFileChange,
   WorkflowVariableValueType,
 } from "@/lib/workflows/runtime";
+import { resumeCanHelp } from "./resume-eligibility";
 import {
   HINT_PROMISES_INJECTION_KINDS,
   NODE_FAILURE_KINDS,
@@ -84,6 +85,8 @@ interface RunActInspectorProps {
   onClose?: () => void;
   runStatus?: GraphWorkflowRunStatus;
   runSnapshotId?: string;
+  /** Whether the run offers 「从失败处继续」 at all; a task's handling run does not. */
+  resumeOffered?: boolean;
 }
 
 /** Formats an optional typed Start value for the compact read-only summary. */
@@ -157,6 +160,7 @@ export function RunActInspector({
   onClose,
   runStatus,
   runSnapshotId,
+  resumeOffered = true,
 }: RunActInspectorProps) {
   const { t } = useTranslation();
   // Region nodes hold one state per round; the round strip lets the viewer switch rounds.
@@ -226,6 +230,7 @@ export function RunActInspector({
       onClose={onClose}
       runStatus={runStatus}
       runSnapshotId={runSnapshotId}
+      resumeOffered={resumeOffered}
     />
   );
 }
@@ -258,6 +263,7 @@ function RunActInspectorPanel({
   onClose,
   runStatus,
   runSnapshotId,
+  resumeOffered,
 }: {
   runId?: string;
   nodeId: string;
@@ -286,6 +292,7 @@ function RunActInspectorPanel({
   onClose?: () => void;
   runStatus?: GraphWorkflowRunStatus;
   runSnapshotId?: string;
+  resumeOffered: boolean;
 }) {
   const { i18n, t } = useTranslation();
   const diagnoseRunId = useWorkspaceSelectionStore((s) => s.selection.workflowRunId);
@@ -712,7 +719,9 @@ function RunActInspectorPanel({
             </p>
           )}
           {(state.status === "failed" || state.status === "cancelled") &&
-            (runStatus === "failed" || runStatus === "cancelled") && (
+            (runStatus === "failed" || runStatus === "cancelled") &&
+            resumeOffered &&
+            resumeCanHelp(state.errorDetail) && (
               <p className="text-[11px] text-muted-foreground">
                 {t("workflowRun.resumeFromTopHint")}
               </p>

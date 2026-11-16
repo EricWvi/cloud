@@ -12,6 +12,7 @@ import { newChatKey, resetChatStore, useChatStore } from '../store'
 import { chatBackend, FakeEventSource, line, tenantId } from '../test-backend'
 import { sampleWorkflowBackend, serveWorkflows, type WorkflowServer } from '@/lib/workflows/test/workflow-server'
 import RunPane from './run-pane'
+import { parseWorkflowGraph } from '@/lib/workflows/runtime'
 import { runRefreshMs } from './server-runs'
 import { serveRuns, type RunServer } from './test-run-server'
 
@@ -446,6 +447,190 @@ describe('workflow runs in chat', () => {
     await waitFor(() => expect(within(project()).getByRole('button', { name: /工作流运行 要停的运行（已取消|已停止）/ })).toBeInTheDocument())
     const [run] = [...runs.runs.values()]
     expect(run!.detail.nodes.find((n) => n.nodeType === 'agent')!.status).toBe('cancelled')
+  }, 30_000)
+
+  it('resumes a stopped run from its cancelled node in the same run, after a refused preview', async () => {
+    runs.hold = true
+    const user = userEvent.setup()
+    await renderPage()
+    await createRun(user, '要续跑的运行')
+    const pane = await screen.findByRole('region', { name: '工作流运行' })
+    await within(pane).findByRole('heading', { level: 2, name: '要续跑的运行' }, { timeout: 10_000 })
+    await user.click(within(pane).getByRole('button', { name: '启动' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '启动' }))
+    await user.click(await within(pane).findByRole('button', { name: '停止' }))
+    await waitFor(() => expect(within(project()).getByRole('button', { name: /工作流运行 要续跑的运行（已取消|已停止）/ })).toBeInTheDocument())
+    const [entry] = [...runs.runs.values()]
+    const agent = entry!.detail.nodes.find((n) => n.nodeType === 'agent')!
+    const title = parseWorkflowGraph(entry!.graph).nodes.find((n) => n.id === agent.nodeId)!.data.title!
+    // The two actions are distinct: a new run, or the same run from where it stopped.
+    expect(within(pane).getByRole('button', { name: '再跑一次' })).toBeInTheDocument()
+
+    // While v2-server still sees the node running, the preview refuses and names it.
+    runs.runningNodeIds = [agent.nodeId]
+    await user.click(within(pane).getByRole('button', { name: '从失败处继续' }))
+    let dialog = await screen.findByRole('dialog', { name: '从失败处继续' })
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(`还有节点在运行：${title}。等它们结束后再继续。`)
+    expect(within(dialog).getByRole('button', { name: '从失败处继续' })).toBeDisabled()
+    await user.click(within(dialog).getByRole('button', { name: '取消' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '从失败处继续' })).not.toBeInTheDocument())
+
+    runs.runningNodeIds = undefined
+    runs.hold = false
+    await user.click(within(pane).getByRole('button', { name: '从失败处继续' }))
+    dialog = await screen.findByRole('dialog', { name: '从失败处继续' })
+    const startsFrom = await within(dialog).findByRole('region', { name: '从这些节点继续' })
+    expect(startsFrom).toHaveTextContent(`${title}已取消`)
+    expect(within(dialog).getByText('工作区文件保持现状，不会回滚；重跑的节点在当前文件上继续工作。')).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: '从失败处继续' }))
+    await waitFor(() => expect(within(project()).getByRole('button', { name: '工作流运行 要续跑的运行（成功）' })).toBeInTheDocument(), { timeout: 15_000 })
+    // The same run went on: no second run, the Start row kept, the Agent answered this time.
+    expect(runs.runs.size).toBe(1)
+    expect(runs.seen.filter((r) => r.endsWith('/resume'))).toEqual([`POST /api/v2/tenants/${tenantId}/workflow-runs/${entry!.detail.run.id}/resume`])
+    expect(entry!.detail.nodes.find((n) => n.nodeId === agent.nodeId)!.status).toBe('succeeded')
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '从失败处继续' })).not.toBeInTheDocument())
+    await waitFor(() => expect(within(pane).queryByRole('button', { name: '从失败处继续' })).not.toBeInTheDocument())
+  }, 30_000)
+
+  /** Creates, starts and stops a run held at its first Agent; returns its pane and server entry. */
+  async function stoppedRun(user: ReturnType<typeof userEvent.setup>, name: string) {
+    runs.hold = true
+    await renderPage()
+    await createRun(user, name)
+    const pane = await screen.findByRole('region', { name: '工作流运行' })
+    await within(pane).findByRole('heading', { level: 2, name }, { timeout: 10_000 })
+    await user.click(within(pane).getByRole('button', { name: '启动' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '启动' }))
+    await user.click(await within(pane).findByRole('button', { name: '停止' }))
+    await waitFor(() => expect(within(project()).getByRole('button', { name: new RegExp(`工作流运行 ${name}（已取消|已停止）`) })).toBeInTheDocument())
+    return { pane, entry: [...runs.runs.values()][0]! }
+  }
+
+  it('explains a resume the server refused although the preview allowed it, and reads the preview again', async () => {
+    const user = userEvent.setup()
+    const { pane } = await stoppedRun(user, '收尾中的运行')
+    // v2-server's process is still ending the stopped turn: only the resume itself can say so.
+    runs.resumeRefusal = { reason: 'run_settling', runningNodeIds: [] }
+    await user.click(within(pane).getByRole('button', { name: '从失败处继续' }))
+    const dialog = await screen.findByRole('dialog', { name: '从失败处继续' })
+    await within(dialog).findByRole('region', { name: '从这些节点继续' })
+    const previews = () => runs.seen.filter((r) => r.endsWith('/resume-preview')).length
+    const before = previews()
+    await user.click(within(dialog).getByRole('button', { name: '从失败处继续' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('上一次执行还在收尾（例如刚停止的节点还没完全结束），请稍后再试。')
+    expect(within(dialog).getByRole('button', { name: '从失败处继续' })).toBeDisabled()
+    // The refusal re-reads the preview (it lives under the run's query key) and is no generic error.
+    await waitFor(() => expect(previews()).toBeGreaterThan(before))
+    expect(screen.queryByText('发生未知错误。')).not.toBeInTheDocument()
+    // Opening the dialog again starts from a fresh preview, without the old refusal.
+    runs.resumeRefusal = undefined
+    await user.click(within(dialog).getByRole('button', { name: '取消' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '从失败处继续' })).not.toBeInTheDocument())
+    await user.click(within(pane).getByRole('button', { name: '从失败处继续' }))
+    const again = await screen.findByRole('dialog', { name: '从失败处继续' })
+    await within(again).findByRole('region', { name: '从这些节点继续' })
+    expect(within(again).queryByRole('alert')).not.toBeInTheDocument()
+    expect(within(again).getByRole('button', { name: '从失败处继续' })).toBeEnabled()
+  }, 30_000)
+
+  it('drops a settling refusal once the preview changes, showing one alert at a time', async () => {
+    const user = userEvent.setup()
+    const { pane } = await stoppedRun(user, '收尾后可续跑')
+    runs.resumeRefusal = { reason: 'run_settling', runningNodeIds: [] }
+    await user.click(within(pane).getByRole('button', { name: '从失败处继续' }))
+    const dialog = await screen.findByRole('dialog', { name: '从失败处继续' })
+    await within(dialog).findByRole('region', { name: '从这些节点继续' })
+    await user.click(within(dialog).getByRole('button', { name: '从失败处继续' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('上一次执行还在收尾')
+    // v2-server's preview now reports the settling itself: its notice replaces the stored refusal.
+    runs.resumeRefusal = undefined
+    runs.preview = { resumable: false, reason: 'run_settling', runningNodeIds: [], rollback: 'keep', failedNodes: [], restartContainerNodeIds: [], clearNodeIds: [] }
+    await waitFor(() => expect(within(dialog).queryByRole('region', { name: '从这些节点继续' })).not.toBeInTheDocument())
+    expect(within(dialog).getAllByRole('alert')).toHaveLength(1)
+    // The turn has ended: the preview allows the resume again, and nothing stale blocks it.
+    runs.preview = undefined
+    await within(dialog).findByRole('region', { name: '从这些节点继续' })
+    await waitFor(() => expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument())
+    expect(within(dialog).getByRole('button', { name: '从失败处继续' })).toBeEnabled()
+  }, 30_000)
+
+  it('offers no resume for a task\'s handling run', async () => {
+    runs.hold = true
+    const user = userEvent.setup()
+    await renderPage()
+    await createRun(user, '任务处理运行')
+    const pane = await screen.findByRole('region', { name: '工作流运行' })
+    await within(pane).findByRole('heading', { level: 2, name: '任务处理运行' }, { timeout: 10_000 })
+    const [entry] = [...runs.runs.values()]
+    Object.assign(entry!.detail.run, { taskId: 'task-1', taskLink: 'handle' })
+    await user.click(within(pane).getByRole('button', { name: '启动' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '启动' }))
+    await user.click(await within(pane).findByRole('button', { name: '停止' }))
+    await waitFor(() => expect(within(pane).getByRole('button', { name: '再跑一次' })).toBeInTheDocument())
+    expect(within(pane).getByRole('link', { name: '返回任务' })).toBeInTheDocument()
+    expect(within(pane).queryByRole('button', { name: '从失败处继续' })).not.toBeInTheDocument()
+  }, 30_000)
+
+  // D25 and D32 hide the resume for a run a task owns, as its handling run or its decomposition's
+  // run: the header button and the node detail's hint go together, and an unowned run keeps both.
+  it.each([
+    ['an unowned run', undefined, true],
+    ['a decomposition run', 'decomposition', false],
+    ['a handling run', 'handle', false],
+  ] as const)('offers the resume and its node hint by task link: %s', async (_, taskLink, offered) => {
+    runs.hold = true
+    const user = userEvent.setup()
+    await renderPage()
+    await createRun(user, '按链接续跑')
+    const pane = await screen.findByRole('region', { name: '工作流运行' })
+    await within(pane).findByRole('heading', { level: 2, name: '按链接续跑' }, { timeout: 10_000 })
+    const [entry] = [...runs.runs.values()]
+    if (taskLink !== undefined) Object.assign(entry!.detail.run, { taskId: 'task-1', taskLink })
+    await user.click(within(pane).getByRole('button', { name: '启动' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '启动' }))
+    await user.click(await within(pane).findByRole('button', { name: '停止' }))
+    await waitFor(() => expect(within(pane).getByRole('button', { name: '再跑一次' })).toBeInTheDocument())
+    const agent = entry!.detail.nodes.find((n) => n.nodeType === 'agent')!
+    const title = parseWorkflowGraph(entry!.graph).nodes.find((n) => n.id === agent.nodeId)!.data.title!
+    await user.click(within(pane).getByRole('button', { name: '舞台' }))
+    await user.click(await within(pane).findByRole('button', { name: new RegExp(`^${title}: `) }))
+    await user.click(await within(pane).findByRole('button', { name: '打开节点详情' }))
+    const details = await within(pane).findByLabelText('阶段详情')
+    const hint = '可在顶部点击「从失败处继续」重跑这个节点，或点击「再跑一次」创建新运行。'
+    if (offered) {
+      expect(await within(details).findByText(hint)).toBeInTheDocument()
+      expect(within(pane).getByRole('button', { name: '从失败处继续' })).toBeInTheDocument()
+    } else {
+      await within(details).findByText(/已取消|已停止/)
+      expect(within(details).queryByText(hint)).not.toBeInTheDocument()
+      expect(within(pane).queryByRole('button', { name: '从失败处继续' })).not.toBeInTheDocument()
+    }
+  }, 30_000)
+
+  it('announces the resumed run finishing again', async () => {
+    const user = userEvent.setup()
+    const { pane, entry } = await stoppedRun(user, '再次结束的运行')
+    runs.hold = true // the resumed run stops at its Agent again until the test lets it finish
+    await user.click(within(pane).getByRole('button', { name: '从失败处继续' }))
+    const dialog = await screen.findByRole('dialog', { name: '从失败处继续' })
+    await within(dialog).findByRole('region', { name: '从这些节点继续' })
+    await user.click(within(dialog).getByRole('button', { name: '从失败处继续' }))
+    await waitFor(() => expect(within(project()).getByRole('button', { name: '工作流运行 再次结束的运行（运行中）' })).toBeInTheDocument())
+    await user.click(within(pane).getByRole('button', { name: '全图' }))
+    runs.finishHeld(entry.detail.run.id)
+    expect(await screen.findByText('运行已结束', {}, { timeout: 10_000 })).toBeInTheDocument()
+  }, 30_000)
+
+  it('offers no resume for a run that stopped before any node ran', async () => {
+    const user = userEvent.setup()
+    await renderPage()
+    await createRun(user, '没开始就取消')
+    const pane = await screen.findByRole('region', { name: '工作流运行' })
+    await within(pane).findByRole('heading', { level: 2, name: '没开始就取消' }, { timeout: 10_000 })
+    const [entry] = [...runs.runs.values()]
+    entry!.detail.run.status = 'cancelled'
+    await waitFor(() => expect(within(pane).getByRole('button', { name: '再跑一次' })).toBeInTheDocument())
+    expect(within(pane).queryByRole('button', { name: '从失败处继续' })).not.toBeInTheDocument()
   }, 30_000)
 
   it('searches the published workflows in the + menu', async () => {

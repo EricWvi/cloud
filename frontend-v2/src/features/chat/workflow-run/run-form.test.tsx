@@ -25,9 +25,9 @@ beforeEach(() => {
   api.read.mockImplementation(async () => structuredClone(form))
 })
 
-function mount(runStatus = 'awaiting_input') {
+function mount(runStatus = 'awaiting_input', taskLink?: 'handle' | 'decomposition') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
-  const view = render(<QueryClientProvider client={client}><MemoryRouter><RunForm tenantId="tenant" runId="run" runStatus={runStatus} /></MemoryRouter></QueryClientProvider>)
+  const view = render(<QueryClientProvider client={client}><MemoryRouter><RunForm tenantId="tenant" runId="run" runStatus={runStatus} taskLink={taskLink} /></MemoryRouter></QueryClientProvider>)
   return { client, view }
 }
 
@@ -69,6 +69,70 @@ it('offers task retry from the submitted answers despite a conflicting local rej
   await waitFor(() => expect(screen.getByRole('button', { name: '重试任务创建' })).toBeEnabled())
   expect(screen.queryByText(/无需处理，运行已完成/)).not.toBeInTheDocument()
   expect(within(screen.getByRole('article', { name: '磁盘异常' })).getByText('是问题')).toBeInTheDocument()
+})
+
+const handlingText = '这次运行是任务的处理运行，任务已按它的结果结算，不能在这里重试任务创建；请回到任务页重新开始处理。'
+
+/** A failed run whose submitted form confirmed a finding but whose task creation failed. */
+function failedTaskCreation() {
+  form = { ...form, version: 2, status: 'submitted', canEdit: false, submittedBy: 'admin', answers: [{ key: 'disk', decision: 'confirmed', assignee: { type: 'human', id: 'admin' }, values: {} }] }
+}
+
+// D30: a task's handling run settled its task link when it failed; the form must not reopen it.
+it('offers no task creation retry for a task\'s handling run and points back to the task', async () => {
+  failedTaskCreation()
+  mount('failed', 'handle')
+  expect(await screen.findByText(`确认已保存，但任务没有建成。${handlingText}`)).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '重试任务创建' })).not.toBeInTheDocument()
+  expect(api.retry).not.toHaveBeenCalled()
+})
+
+const decompositionText = '这次运行是任务的拆分运行，拆分已按它的结果结算，不能在这里重试任务创建；请回到任务页重新拆分。'
+
+// D32: a task decomposition's run settled its decomposition when it failed, like a handling run.
+it('offers no task creation retry for a task decomposition\'s run and points back to the task', async () => {
+  failedTaskCreation()
+  mount('failed', 'decomposition')
+  expect(await screen.findByText(`确认已保存，但任务没有建成。${decompositionText}`)).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '重试任务创建' })).not.toBeInTheDocument()
+  expect(api.retry).not.toHaveBeenCalled()
+})
+
+it('keeps the task creation retry for a run no task owns', async () => {
+  failedTaskCreation()
+  api.retry.mockResolvedValueOnce(structuredClone(form))
+  mount('failed')
+  fireEvent.click(await screen.findByRole('button', { name: '重试任务创建' }))
+  await waitFor(() => expect(api.retry).toHaveBeenCalledWith('tenant', 'run'))
+  expect(screen.queryByText(handlingText, { exact: false })).not.toBeInTheDocument()
+  expect(screen.queryByText(decompositionText, { exact: false })).not.toBeInTheDocument()
+})
+
+it('explains the server refusing a decomposition run\'s retry the page did not know about', async () => {
+  failedTaskCreation()
+  api.retry.mockRejectedValueOnce(new AxiosError('conflict', '409', undefined, undefined, { status: 409, data: { code: 'task_decomposition' } } as never))
+  mount('failed')
+  fireEvent.click(await screen.findByRole('button', { name: '重试任务创建' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent(decompositionText)
+})
+
+// Only the task_handling refusal names a handling run: a form another reviewer already retried is
+// refused as closed and keeps the generic text (F3).
+it('keeps the generic text when the server refuses a retry for another reason', async () => {
+  failedTaskCreation()
+  api.retry.mockRejectedValueOnce(new AxiosError('conflict', '409', undefined, undefined, { status: 409, data: { code: 'workflow_form_closed' } } as never))
+  mount('failed')
+  fireEvent.click(await screen.findByRole('button', { name: '重试任务创建' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('任务当前不可重试，请查看运行状态。')
+  expect(screen.queryByText(handlingText, { exact: false })).not.toBeInTheDocument()
+})
+
+it('explains the server refusing a handling run\'s retry the page did not know about', async () => {
+  failedTaskCreation()
+  api.retry.mockRejectedValueOnce(new AxiosError('conflict', '409', undefined, undefined, { status: 409, data: { code: 'task_handling' } } as never))
+  mount('failed')
+  fireEvent.click(await screen.findByRole('button', { name: '重试任务创建' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent(handlingText)
 })
 
 it('sends only the assignee identity when reusing an existing task', async () => {

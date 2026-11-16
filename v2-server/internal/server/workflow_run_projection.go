@@ -73,8 +73,8 @@ type workflowFailedAttemptView struct {
 }
 
 // workflowFailedAttempts maps the replaced failed rows of a run, skipping one without an
-// error_detail as desktop's map_failed_attempt does. v2 neither retries nor resumes, so nothing
-// replaces a failed attempt yet and the list stays empty; the current failure is the node's own row.
+// error_detail as desktop's map_failed_attempt does. Root Agent automatic retries and resumes from
+// failure replace failed attempts; a node's current failure stays its own live row.
 func workflowFailedAttempts(rows []store.WorkflowNodeRun) []workflowFailedAttemptView {
 	views := []workflowFailedAttemptView{}
 	for _, row := range rows {

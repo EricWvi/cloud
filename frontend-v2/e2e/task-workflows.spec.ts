@@ -184,4 +184,17 @@ test('the starter stops real handling from the task tab and can immediately move
   await page.getByRole('button', { name: '开始处理', exact: true }).click()
   expect((await move).status()).toBe(200)
   await expect(page.locator('.mc-task-bar .mc-status')).toHaveText('进行中')
+  // A stopped handling run cannot resume (owner decision D25): its task settled on it, so the task
+  // starts handling again instead. The server refuses, and the run page does not offer it.
+  const preview = await (await page.request.get(`${base}/workflow-runs/${runId}/resume-preview`)).json()
+  expect(preview).toMatchObject({ resumable: false, reason: 'task_handling' })
+  const resumed = await page.request.post(`${base}/workflow-runs/${runId}/resume`)
+  expect(resumed.status()).toBe(409)
+  expect(await resumed.json()).toMatchObject({ code: 'workflow_run_not_resumable', params: { reason: 'task_handling' } })
+  await page.goto(`/chat?run=${runId}`)
+  const pane = page.getByRole('region', { name: '工作流运行' })
+  await expect(pane.getByRole('link', { name: '返回任务', exact: true })).toBeVisible()
+  await expect(pane.getByRole('button', { name: '再跑一次', exact: true })).toBeVisible()
+  await expect(pane.getByRole('button', { name: '从失败处继续', exact: true })).toHaveCount(0)
+  await page.screenshot({ path: '../.tmp/screens/resume-task-handling.png' })
 })

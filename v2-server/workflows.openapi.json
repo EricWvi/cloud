@@ -139,6 +139,7 @@
     "/api/v2/tenants/{tid}/workflow-runs/{rid}/form/retry": {
       "post": {
         "operationId": "retryWorkflowFormTasks",
+        "description": "v2 only, candidate for Cloud. Retries the failed task creation of a failed run's submitted review form. 409 workflow_form_closed when the run is not failed or the form was not submitted; 409 task_handling for a task's handling run (owner decision D30) and 409 task_decomposition for a task decomposition's run (D32), which the task starts again instead.",
         "tags": [
           "Workflows"
         ],
@@ -170,7 +171,13 @@
                 }
               }
             }
-          }
+          },
+          "400": {"$ref": "#/components/responses/WorkflowError"},
+          "403": {"$ref": "#/components/responses/WorkflowError"},
+          "404": {"$ref": "#/components/responses/WorkflowError"},
+          "409": {"$ref": "#/components/responses/WorkflowError"},
+          "500": {"$ref": "#/components/responses/WorkflowError"},
+          "503": {"$ref": "#/components/responses/WorkflowError"}
         }
       }
     },
@@ -554,6 +561,37 @@
         "responses": {
           "200": {"description": "Response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WorkflowRunActionResponse"}}}},
           "400": {"$ref": "#/components/responses/WorkflowError"},
+          "401": {"$ref": "#/components/responses/WorkflowError"},
+          "404": {"$ref": "#/components/responses/WorkflowError"},
+          "409": {"$ref": "#/components/responses/WorkflowError"},
+          "500": {"$ref": "#/components/responses/WorkflowError"},
+          "503": {"$ref": "#/components/responses/WorkflowError"}
+        }
+      }
+    },
+    "/api/v2/tenants/{tid}/workflow-runs/{rid}/resume-preview": {
+      "parameters": [{"$ref": "#/components/parameters/Tenant"}, {"$ref": "#/components/parameters/Run"}],
+      "get": {
+        "operationId": "previewWorkflowRunResume",
+        "tags": ["workflowRuns"],
+        "description": "v2 only, candidate for Cloud. What resuming from failure would do now, desktop's preview_resume with only the keep-files mode: the failed or cancelled nodes it starts from, the Loop and Iteration containers that restart from round 1 in their place, and every node whose attempts it clears. reason names the refusing rule when resumable is false.",
+        "responses": {
+          "200": {"description": "Response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WorkflowRunResumePreview"}}}},
+          "401": {"$ref": "#/components/responses/WorkflowError"},
+          "404": {"$ref": "#/components/responses/WorkflowError"},
+          "500": {"$ref": "#/components/responses/WorkflowError"},
+          "503": {"$ref": "#/components/responses/WorkflowError"}
+        }
+      }
+    },
+    "/api/v2/tenants/{tid}/workflow-runs/{rid}/resume": {
+      "parameters": [{"$ref": "#/components/parameters/Tenant"}, {"$ref": "#/components/parameters/Run"}],
+      "post": {
+        "operationId": "resumeWorkflowRun",
+        "tags": ["workflowRuns"],
+        "description": "v2 only, candidate for Cloud. Resumes a failed or cancelled run in place from its failed nodes, keeping the workspace files, desktop's resume_from_failure. A refusal is 409 workflow_run_not_resumable with params.reason (run_not_ended, node_running, node_stuck, no_failed_node, review_form, review_form_retry, review_form_submitted, task_handling, task_decomposition, run_settling) and params.runningNodeIds. task_handling refuses a task's handling run (owner decision D25) and task_decomposition a task decomposition's run (D32); the task starts handling or decomposing again instead.",
+        "responses": {
+          "200": {"description": "Response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WorkflowRunActionResponse"}}}},
           "401": {"$ref": "#/components/responses/WorkflowError"},
           "404": {"$ref": "#/components/responses/WorkflowError"},
           "409": {"$ref": "#/components/responses/WorkflowError"},
@@ -1154,6 +1192,7 @@
         "additionalProperties": false,
         "properties": {
           "taskId": { "type": "string", "description": "Owning handling or decomposition task, when present." },
+          "taskLink": { "type": "string", "enum": ["handle", "decomposition"], "description": "How taskId owns the run: as its handling run or as its decomposition's run. Neither resumes from failure or retries its task creation (owner decisions D25, D30, D32); handling or decomposition is started again from the task." },
           "id": {"type": "string", "format": "uuid"},
           "workflowId": {"type": "string", "format": "uuid"},
           "snapshotId": {"type": "string", "format": "uuid"},
@@ -1224,6 +1263,31 @@
         "required": ["run"],
         "additionalProperties": false,
         "properties": {"run": {"$ref": "#/components/schemas/WorkflowRun"}}
+      },
+      "WorkflowRunResumePreview": {
+        "type": "object",
+        "required": ["resumable", "reason", "runningNodeIds", "failedNodes", "restartContainerNodeIds", "clearNodeIds", "rollback"],
+        "additionalProperties": false,
+        "properties": {
+          "resumable": {"type": "boolean"},
+          "reason": {"type": "string", "nullable": true, "enum": ["run_not_ended", "node_running", "node_stuck", "no_failed_node", "review_form", "review_form_retry", "review_form_submitted", "task_handling", "task_decomposition", "run_settling", null]},
+          "runningNodeIds": {"type": "array", "items": {"type": "string"}, "description": "Nodes still executing, which block the resume (reason node_running)."},
+          "failedNodes": {"type": "array", "items": {"$ref": "#/components/schemas/WorkflowRunResumeFailedNode"}},
+          "restartContainerNodeIds": {"type": "array", "items": {"type": "string"}, "description": "Loop and Iteration nodes that restart from round 1."},
+          "clearNodeIds": {"type": "array", "items": {"type": "string"}, "description": "Every node whose live attempts the resume soft-deletes, sorted: failed nodes, their descendants, and each restarting container with its members. A Loop cleared only as a descendant is listed without its body nodes; its round rows are soft-deleted with it all the same."},
+          "rollback": {"type": "string", "enum": ["keep"], "description": "v2 keeps the workspace files as they are; desktop's node_files and checkpoint modes are not offered."}
+        }
+      },
+      "WorkflowRunResumeFailedNode": {
+        "type": "object",
+        "required": ["nodeId", "nodeRunId", "status", "containerNodeId"],
+        "additionalProperties": false,
+        "properties": {
+          "nodeId": {"type": "string"},
+          "nodeRunId": {"type": "string", "format": "uuid"},
+          "status": {"type": "string", "enum": ["failed", "cancelled"]},
+          "containerNodeId": {"type": "string", "nullable": true, "description": "The Loop or Iteration that restarts in this node's place."}
+        }
       },
       "WorkflowRunInputUpdate": {
         "type": "object",
@@ -1303,7 +1367,7 @@
       },
       "WorkflowNodeFailedAttempt": {
         "type": "object",
-        "description": "An earlier attempt that failed and was run again, desktop's WorkflowNodeFailedAttempt, read from its payload.error_detail. v2 neither retries nor resumes, so none exists yet.",
+        "description": "An earlier attempt that failed and was run again, desktop's WorkflowNodeFailedAttempt, read from its payload.error_detail. Root Agent automatic retries and resumes from failure replace failed attempts.",
         "required": ["nodeRunId", "nodeId", "scopeId", "iteration", "sessionId", "attempt", "kind", "message", "sourceChain", "recordedAt", "startedAt", "finishedAt"],
         "additionalProperties": false,
         "properties": {

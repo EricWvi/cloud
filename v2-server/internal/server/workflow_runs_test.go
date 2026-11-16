@@ -92,8 +92,26 @@ func TestWorkflowRunsOverHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, ownedDetail := call("GET", "/api/v2/tenants/"+tid+"/workflow-runs/"+owned, nil)
-	if status != 200 || ownedDetail["run"].(map[string]any)["taskId"] != task.ID {
+	if got := ownedDetail["run"].(map[string]any); status != 200 || got["taskId"] != task.ID || got["taskLink"] != "handle" {
 		t.Fatalf("owning task missing from run detail: %d %v", status, ownedDetail)
+	}
+	// The run page offers resume and the form's task creation retry by this kind (D25, D30): a
+	// decomposition keeps both, so it must not read as a handling run, and an unowned run has none.
+	_, splitCreated := call("POST", base+"/"+id+"/runs", map[string]any{"projectId": project.ID})
+	splitRun := splitCreated["run"].(map[string]any)["id"].(string)
+	if _, err := s.CreateTaskDecomposition(ctx, store.NewTaskDecomposition{TaskID: task.ID, TenantID: tid, StartedBy: user, StartKey: "split", WorkflowID: id, WorkflowName: "拆分", WorkflowRunID: splitRun}); err != nil {
+		t.Fatal(err)
+	}
+	status, splitDetail := call("GET", "/api/v2/tenants/"+tid+"/workflow-runs/"+splitRun, nil)
+	if got := splitDetail["run"].(map[string]any); status != 200 || got["taskId"] != task.ID || got["taskLink"] != "decomposition" {
+		t.Fatalf("decomposition link in run detail: %d %v", status, splitDetail)
+	}
+	if err := s.DeleteWorkflowRun(ctx, tid, splitRun); err != nil {
+		t.Fatal(err)
+	}
+	status, plainDetail := call("GET", "/api/v2/tenants/"+tid+"/workflow-runs/"+runID, nil)
+	if got := plainDetail["run"].(map[string]any); status != 200 || got["taskId"] != nil || got["taskLink"] != nil {
+		t.Fatalf("an unowned run reports a task link: %d %v", status, plainDetail)
 	}
 	if err := s.DeleteWorkflowRun(ctx, tid, owned); err != nil {
 		t.Fatal(err)

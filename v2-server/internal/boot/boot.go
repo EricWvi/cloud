@@ -5,7 +5,10 @@
 // composite recovery), so after the sweep some workflow runs outlive the process that started
 // them. Runs owned by a task — a task's handling run and a task decomposition's run — must not:
 // their owners settle them first, cancelling every one still live, so the sweep never absorbs
-// one and its owner's record cannot disagree with a run that carries on. The one exception is a
+// one and its owner's record cannot disagree with a run that carries on. It also holds after a
+// settlement: a run its owner settled is never reopened in place, as resume and the review
+// form's task creation retry refuse task-owned runs (owner decisions D25, D30 and D32), so no
+// settled task run turns live again for a later sweep to absorb. The one exception is a
 // decomposition run at a submitted review: the sweep never absorbs it (form runs are excluded and
 // only their deterministic review work is replayed), so it is left to the review recovery and its
 // decomposition is adopted after the sweep.

@@ -703,6 +703,7 @@ export function RunTheater({
                   runId={run.id}
                   runStatus={run.status}
                   nodeError={primaryDisplayState?.errorMessage ?? undefined}
+                  taskLink={run.taskLink}
                 />
               ) : primaryStage === "tasks" ? (
                 <RunTasksStage
@@ -710,6 +711,7 @@ export function RunTheater({
                   runId={run.id}
                   nodeTitle={primaryNode?.data.title ?? ""}
                   state={primaryDisplayState ?? null}
+                  taskLink={run.taskLink}
                   onOpenForm={
                     reviewNodeId === undefined
                       ? undefined
@@ -933,6 +935,7 @@ export function RunTheater({
                 revealedArtifactId={revealedArtifactId}
                 runStatus={run.status}
                 runSnapshotId={run.snapshotId}
+                resumeOffered={run.taskLink === undefined}
                 loopRounds={
                   primaryNode?.data.kind === "loop"
                     ? (run.rounds ?? []).filter(

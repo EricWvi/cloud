@@ -247,15 +247,23 @@ func (s *Store) TaskWorkflowRuns(ctx context.Context, tenant, taskID string) ([]
 	return out, rows.Err()
 }
 
-// WorkflowRunTask returns the owning task for handling or decomposition. Inspection can create
-// several tasks, so it has no single owning task and remains visible through each task's history.
-func (s *Store) WorkflowRunTask(ctx context.Context, tenant, runID string) (string, error) {
-	var id string
-	err := s.pool.QueryRow(ctx, `SELECT task_id::text FROM v2_task_workflow_runs WHERE tenant_id=$1 AND run_id=$2 UNION ALL SELECT task_id::text FROM v2_task_decompositions WHERE tenant_id=$1 AND workflow_run_id=$2 LIMIT 1`, tenant, runID).Scan(&id)
+// Task link kinds WorkflowRunTaskLink reports.
+const (
+	TaskLinkHandle        = "handle"
+	TaskLinkDecomposition = "decomposition"
+)
+
+// WorkflowRunTaskLink returns the owning task and how it owns the run: as its handling run
+// (TaskLinkHandle) or as its decomposition (TaskLinkDecomposition). Both are empty for a run no
+// task owns, or one outside the tenant. Inspection can create several tasks, so it has no single
+// owning task and remains visible through each task's history.
+func (s *Store) WorkflowRunTaskLink(ctx context.Context, tenant, runID string) (string, string, error) {
+	var id, kind string
+	err := s.pool.QueryRow(ctx, `SELECT task_id::text, 'handle' FROM v2_task_workflow_runs WHERE tenant_id=$1 AND run_id=$2 UNION ALL SELECT task_id::text, 'decomposition' FROM v2_task_decompositions WHERE tenant_id=$1 AND workflow_run_id=$2 LIMIT 1`, tenant, runID).Scan(&id, &kind)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
+		return "", "", nil
 	}
-	return id, err
+	return id, kind, err
 }
 
 // TaskWorkflowRunByKey replays a caller's durable admission identity before preflight.

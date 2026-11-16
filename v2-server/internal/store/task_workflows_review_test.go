@@ -207,8 +207,11 @@ func TestTaskWorkflowRecoveryCancelsAndTenantBacklink(t *testing.T) {
 		t.Fatalf("recovery left executable run=%+v %v", run, err)
 	}
 	foreign := "00000000-0000-4000-8000-000000000099"
-	if got, err := f.store.WorkflowRunTask(f.ctx, foreign, id); err != nil || got != "" {
-		t.Fatalf("cross-tenant backlink leaked=%s %v", got, err)
+	if got, kind, err := f.store.WorkflowRunTaskLink(f.ctx, f.tenant, id); err != nil || got != task.ID || kind != store.TaskLinkHandle {
+		t.Fatalf("own-tenant backlink=%s %s %v", got, kind, err)
+	}
+	if got, kind, err := f.store.WorkflowRunTaskLink(f.ctx, foreign, id); err != nil || got != "" || kind != "" {
+		t.Fatalf("cross-tenant backlink leaked=%s %s %v", got, kind, err)
 	}
 	if _, err := f.store.CreateTaskRun(f.ctx, store.NewTaskRun{TenantID: f.tenant, TaskID: task.ID, StartedBy: user, StartKey: "after", ExecutorID: "test"}); err != nil {
 		t.Fatalf("terminal link blocks Agent=%v", err)
@@ -341,8 +344,11 @@ func TestTaskWorkflowHistoryDeletedAndReadOnly(t *testing.T) {
 	if _, _, err := f.store.SettleTaskDecomposition(f.ctx, d.ID, []store.Subtask{{Title: "Child"}}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := f.store.WorkflowRunTask(f.ctx, "00000000-0000-4000-8000-000000000099", split.ID); err != nil || got != "" {
-		t.Fatalf("decomposition backlink leaked: %s %v", got, err)
+	if got, kind, err := f.store.WorkflowRunTaskLink(f.ctx, f.tenant, split.ID); err != nil || got != task.ID || kind != store.TaskLinkDecomposition {
+		t.Fatalf("own-tenant decomposition backlink: %s %s %v", got, kind, err)
+	}
+	if got, kind, err := f.store.WorkflowRunTaskLink(f.ctx, "00000000-0000-4000-8000-000000000099", split.ID); err != nil || got != "" || kind != "" {
+		t.Fatalf("decomposition backlink leaked: %s %s %v", got, kind, err)
 	}
 	for _, rid := range []string{id, split.ID} {
 		if err := f.store.DeleteWorkflowRun(f.ctx, f.tenant, rid); err != nil {
@@ -527,8 +533,11 @@ func TestTaskWorkflowAssigneePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("squad member=%v", err)
 	}
-	if _, err := f.store.WorkflowRunTask(f.ctx, "00000000-0000-4000-8000-000000000099", id); err != nil {
-		t.Fatal(err)
+	if got, kind, err := f.store.WorkflowRunTaskLink(f.ctx, f.tenant, id); err != nil || got != task.ID || kind != store.TaskLinkHandle {
+		t.Fatalf("squad member's handling link=%s %s %v", got, kind, err)
+	}
+	if got, kind, err := f.store.WorkflowRunTaskLink(f.ctx, "00000000-0000-4000-8000-000000000099", id); err != nil || got != "" || kind != "" {
+		t.Fatalf("cross-tenant backlink leaked=%s %s %v", got, kind, err)
 	}
 	// The Agent-assigned case uses the same policy without needing executor configuration here.
 	assigned := store.Task{TenantID: f.tenant, Assignee: &store.TaskAssignee{Type: store.AssigneeAgent, ID: "agent"}}

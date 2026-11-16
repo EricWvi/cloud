@@ -287,6 +287,17 @@ export interface WorkflowAnalysis {
   unsupportedNodes: WorkflowUnsupportedNode[];
 }
 
+/**
+ * How taskId owns the run: as its handling run or as its decomposition's run. Neither resumes from failure or retries its task creation (owner decisions D25, D30, D32); handling or decomposition is started again from the task.
+ */
+export type WorkflowRunTaskLink = typeof WorkflowRunTaskLink[keyof typeof WorkflowRunTaskLink];
+
+
+export const WorkflowRunTaskLink = {
+  handle: 'handle',
+  decomposition: 'decomposition',
+} as const;
+
 export type WorkflowRunStatus = typeof WorkflowRunStatus[keyof typeof WorkflowRunStatus];
 
 
@@ -302,6 +313,8 @@ export const WorkflowRunStatus = {
 export interface WorkflowRun {
   /** Owning handling or decomposition task, when present. */
   taskId?: string;
+  /** How taskId owns the run: as its handling run or as its decomposition's run. Neither resumes from failure or retries its task creation (owner decisions D25, D30, D32); handling or decomposition is started again from the task. */
+  taskLink?: WorkflowRunTaskLink;
   id: string;
   workflowId: string;
   snapshotId: string;
@@ -383,6 +396,69 @@ export interface WorkflowRunDeleted {
 
 export interface WorkflowRunActionResponse {
   run: WorkflowRun;
+}
+
+/**
+ * @nullable
+ */
+export type WorkflowRunResumePreviewReason = typeof WorkflowRunResumePreviewReason[keyof typeof WorkflowRunResumePreviewReason] | null;
+
+
+export const WorkflowRunResumePreviewReason = {
+  run_not_ended: 'run_not_ended',
+  node_running: 'node_running',
+  node_stuck: 'node_stuck',
+  no_failed_node: 'no_failed_node',
+  review_form: 'review_form',
+  review_form_retry: 'review_form_retry',
+  review_form_submitted: 'review_form_submitted',
+  task_handling: 'task_handling',
+  task_decomposition: 'task_decomposition',
+  run_settling: 'run_settling',
+} as const;
+
+/**
+ * v2 keeps the workspace files as they are; desktop's node_files and checkpoint modes are not offered.
+ */
+export type WorkflowRunResumePreviewRollback = typeof WorkflowRunResumePreviewRollback[keyof typeof WorkflowRunResumePreviewRollback];
+
+
+export const WorkflowRunResumePreviewRollback = {
+  keep: 'keep',
+} as const;
+
+export type WorkflowRunResumeFailedNodeStatus = typeof WorkflowRunResumeFailedNodeStatus[keyof typeof WorkflowRunResumeFailedNodeStatus];
+
+
+export const WorkflowRunResumeFailedNodeStatus = {
+  failed: 'failed',
+  cancelled: 'cancelled',
+} as const;
+
+export interface WorkflowRunResumeFailedNode {
+  nodeId: string;
+  nodeRunId: string;
+  status: WorkflowRunResumeFailedNodeStatus;
+  /**
+     * The Loop or Iteration that restarts in this node's place.
+     * @nullable
+     */
+  containerNodeId: string | null;
+}
+
+export interface WorkflowRunResumePreview {
+  resumable: boolean;
+  /** @nullable */
+  reason: WorkflowRunResumePreviewReason;
+  /** Nodes still executing, which block the resume (reason node_running). */
+  runningNodeIds: string[];
+  failedNodes: WorkflowRunResumeFailedNode[];
+  /** Loop and Iteration nodes that restart from round 1. */
+  restartContainerNodeIds: string[];
+  /** Every node whose live attempts the resume soft-deletes, sorted: failed nodes, their descendants, and each restarting container with its members. A Loop cleared only as a descendant is listed without its body nodes; its round rows are soft-deleted with it all the same. */
+  clearNodeIds: string[];
+  /** v2 keeps the workspace files as they are; desktop's node_files and checkpoint modes are not offered. */
+  rollback: WorkflowRunResumePreviewRollback;
 }
 
 export type WorkflowRunInputUpdateVariables = { [key: string]: unknown };
@@ -490,7 +566,7 @@ export interface WorkflowRunVariable {
 }
 
 /**
- * An earlier attempt that failed and was run again, desktop's WorkflowNodeFailedAttempt, read from its payload.error_detail. v2 neither retries nor resumes, so none exists yet.
+ * An earlier attempt that failed and was run again, desktop's WorkflowNodeFailedAttempt, read from its payload.error_detail. Root Agent automatic retries and resumes from failure replace failed attempts.
  */
 export interface WorkflowNodeFailedAttempt {
   nodeRunId: string;
@@ -799,6 +875,9 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       return useMutation(getSubmitWorkflowFormMutationOptions(options), queryClient);
     }
 
+/**
+ * v2 only, candidate for Cloud. Retries the failed task creation of a failed run's submitted review form. 409 workflow_form_closed when the run is not failed or the form was not submitted; 409 task_handling for a task's handling run (owner decision D30) and 409 task_decomposition for a task decomposition's run (D32), which the task starts again instead.
+ */
 export const retryWorkflowFormTasks = (
     tid: string,
     rid: string,
@@ -817,7 +896,7 @@ export const retryWorkflowFormTasks = (
 
 export const getRetryWorkflowFormTasksMutationKey = () => ['retryWorkflowFormTasks'] as const;
 
-export const getRetryWorkflowFormTasksMutationOptions = <TError = ErrorType<unknown>,
+export const getRetryWorkflowFormTasksMutationOptions = <TError = ErrorType<WorkflowErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof retryWorkflowFormTasks>>, TError,RetryWorkflowFormTasksMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
 ): UseMutationOptions<Awaited<ReturnType<typeof retryWorkflowFormTasks>>, TError,RetryWorkflowFormTasksMutationVariables, TContext> => {
 
@@ -846,10 +925,10 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type RetryWorkflowFormTasksMutationResult = NonNullable<Awaited<ReturnType<typeof retryWorkflowFormTasks>>>
 
-    export type RetryWorkflowFormTasksMutationError = ErrorType<unknown>
+    export type RetryWorkflowFormTasksMutationError = ErrorType<WorkflowErrorResponse>
     export type RetryWorkflowFormTasksMutationVariables = {tid: string;rid: string}
 
-    export const useRetryWorkflowFormTasks = <TError = ErrorType<unknown>,
+    export const useRetryWorkflowFormTasks = <TError = ErrorType<WorkflowErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof retryWorkflowFormTasks>>, TError,RetryWorkflowFormTasksMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof retryWorkflowFormTasks>>,
@@ -2933,6 +3012,167 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getCancelWorkflowRunMutationOptions(options), queryClient);
+    }
+
+/**
+ * v2 only, candidate for Cloud. What resuming from failure would do now, desktop's preview_resume with only the keep-files mode: the failed or cancelled nodes it starts from, the Loop and Iteration containers that restart from round 1 in their place, and every node whose attempts it clears. reason names the refusing rule when resumable is false.
+ */
+export const previewWorkflowRunResume = (
+    tid: string,
+    rid: string,
+ options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
+) => {
+
+
+      return customInstance<WorkflowRunResumePreview>(
+      {url: `/api/v2/tenants/${tid}/workflow-runs/${rid}/resume-preview`, method: 'GET', signal
+    },
+      options);
+    }
+
+
+
+
+export const getPreviewWorkflowRunResumeQueryKey = (tid: string,
+    rid: string,) => {
+    return [
+    `/api/v2/tenants/${tid}/workflow-runs/${rid}/resume-preview`
+    ] as const;
+    }
+
+
+export const getPreviewWorkflowRunResumeQueryOptions = <TData = Awaited<ReturnType<typeof previewWorkflowRunResume>>, TError = ErrorType<WorkflowErrorResponse>>(tid: string,
+    rid: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof previewWorkflowRunResume>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPreviewWorkflowRunResumeQueryKey(tid,rid);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof previewWorkflowRunResume>>> = ({ signal }) => previewWorkflowRunResume(tid,rid, requestOptions, signal);
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: tid !== null && tid !== undefined && rid !== null && rid !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof previewWorkflowRunResume>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PreviewWorkflowRunResumeQueryResult = NonNullable<Awaited<ReturnType<typeof previewWorkflowRunResume>>>
+export type PreviewWorkflowRunResumeQueryError = ErrorType<WorkflowErrorResponse>
+
+
+export function usePreviewWorkflowRunResume<TData = Awaited<ReturnType<typeof previewWorkflowRunResume>>, TError = ErrorType<WorkflowErrorResponse>>(
+ tid: string,
+    rid: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof previewWorkflowRunResume>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof previewWorkflowRunResume>>,
+          TError,
+          Awaited<ReturnType<typeof previewWorkflowRunResume>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePreviewWorkflowRunResume<TData = Awaited<ReturnType<typeof previewWorkflowRunResume>>, TError = ErrorType<WorkflowErrorResponse>>(
+ tid: string,
+    rid: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof previewWorkflowRunResume>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof previewWorkflowRunResume>>,
+          TError,
+          Awaited<ReturnType<typeof previewWorkflowRunResume>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePreviewWorkflowRunResume<TData = Awaited<ReturnType<typeof previewWorkflowRunResume>>, TError = ErrorType<WorkflowErrorResponse>>(
+ tid: string,
+    rid: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof previewWorkflowRunResume>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function usePreviewWorkflowRunResume<TData = Awaited<ReturnType<typeof previewWorkflowRunResume>>, TError = ErrorType<WorkflowErrorResponse>>(
+ tid: string,
+    rid: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof previewWorkflowRunResume>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPreviewWorkflowRunResumeQueryOptions(tid,rid,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+/**
+ * v2 only, candidate for Cloud. Resumes a failed or cancelled run in place from its failed nodes, keeping the workspace files, desktop's resume_from_failure. A refusal is 409 workflow_run_not_resumable with params.reason (run_not_ended, node_running, node_stuck, no_failed_node, review_form, review_form_retry, review_form_submitted, task_handling, task_decomposition, run_settling) and params.runningNodeIds. task_handling refuses a task's handling run (owner decision D25) and task_decomposition a task decomposition's run (D32); the task starts handling or decomposing again instead.
+ */
+export const resumeWorkflowRun = (
+    tid: string,
+    rid: string,
+ options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
+) => {
+
+
+      return customInstance<WorkflowRunActionResponse>(
+      {url: `/api/v2/tenants/${tid}/workflow-runs/${rid}/resume`, method: 'POST', signal
+    },
+      options);
+    }
+
+
+
+
+export const getResumeWorkflowRunMutationKey = () => ['resumeWorkflowRun'] as const;
+
+export const getResumeWorkflowRunMutationOptions = <TError = ErrorType<WorkflowErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof resumeWorkflowRun>>, TError,ResumeWorkflowRunMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof resumeWorkflowRun>>, TError,ResumeWorkflowRunMutationVariables, TContext> => {
+
+const mutationKey = getResumeWorkflowRunMutationKey();
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof resumeWorkflowRun>>, ResumeWorkflowRunMutationVariables> = (props) => {
+          const {tid,rid} = props ?? {};
+
+          return  resumeWorkflowRun(tid,rid,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ResumeWorkflowRunMutationResult = NonNullable<Awaited<ReturnType<typeof resumeWorkflowRun>>>
+
+    export type ResumeWorkflowRunMutationError = ErrorType<WorkflowErrorResponse>
+    export type ResumeWorkflowRunMutationVariables = {tid: string;rid: string}
+
+    export const useResumeWorkflowRun = <TError = ErrorType<WorkflowErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof resumeWorkflowRun>>, TError,ResumeWorkflowRunMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof resumeWorkflowRun>>,
+        TError,
+        ResumeWorkflowRunMutationVariables,
+        TContext
+      > => {
+      return useMutation(getResumeWorkflowRunMutationOptions(options), queryClient);
     }
 
 export const updateWorkflowRunInput = (

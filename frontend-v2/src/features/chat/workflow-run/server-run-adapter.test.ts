@@ -228,7 +228,8 @@ describe('toGraphWorkflowRun', () => {
     )
     expect(run.nodeStates.a!.failedAttempts).toEqual([
       { nodeRunId: 'a-1', attempt: 1, kind: 'session', errorMessage: '第 1 次失败', sourceChain: ['boom'], recordedAt: 1, sessionId: 's-a-1', startedAt: new Date(1_000).toISOString(), finishedAt: new Date(2_000).toISOString() },
-      { nodeRunId: 'a-2', attempt: 2, kind: 'session', errorMessage: '第 2 次失败', sourceChain: ['boom'], recordedAt: 2, finishedAt: new Date(2_000).toISOString() },
+      // The live row links no retry chain, so a resume replaced the newest attempt.
+      { nodeRunId: 'a-2', attempt: 2, kind: 'session', errorMessage: '第 2 次失败', sourceChain: ['boom'], recordedAt: 2, finishedAt: new Date(2_000).toISOString(), replacedBy: 'manual_resume' },
     ])
     expect(run.nodeStates.out!.failedAttempts).toBeUndefined()
   })
@@ -393,5 +394,55 @@ describe('retry waits under a run that is no longer live', () => {
     const state = toGraphWorkflowRun(d, definition).nodeStates.a!
     expect(state.status).toBe('retry_waiting')
     expect(state.failedAttempts?.map((a) => a.replacedBy)).toEqual(['automatic_retry_scheduled'])
+  })
+})
+
+describe('attempts a resume from failure replaced', () => {
+  const failure = (n: number) => ({ nodeRunId: `a${n}`, nodeId: 'a', scopeId: 'root:run', iteration: null, sessionId: `s${n}`, attempt: n,
+    kind: 'session', message: `failure ${n}`, sourceChain: [], recordedAt: n * 1000, startedAt: n * 1000, finishedAt: n * 1000 + 500 })
+  const labels = (rows: WorkflowNodeRun[], attempts: number[]) => {
+    const d = detail({}, rows)
+    d.failedAttempts = attempts.map(failure)
+    return toGraphWorkflowRun(d, definition).nodeStates.a!.failedAttempts?.map((a) => [a.attempt, a.replacedBy])
+  }
+
+  it('labels the newest attempt a fresh resumed row replaced; older retries lost their chain with it', () => {
+    // Attempts 1-3 failed (two automatic retries), then the run was resumed: attempt 4 runs.
+    expect(labels([nodeRun({ id: 'a4', nodeId: 'a', nodeType: 'agent', status: 'running', finishedAt: null })], [1, 2, 3]))
+      .toEqual([[1, undefined], [2, undefined], [3, 'manual_resume']])
+  })
+
+  it('labels the attempt before a resumed attempt that is now retrying automatically', () => {
+    const wait = { attempt: 5, max_attempt: 6, retry: 1, max_retries: 2, delay_ms: 10000, scheduled_at: 5000, due_at: 15000 }
+    const waiting = nodeRun({ id: 'a5', nodeId: 'a', nodeType: 'agent', status: 'running', startedAt: null, finishedAt: null,
+      payload: JSON.stringify({ retry_wait: wait, auto_retry: { retry: 1, max_retries: 2 }, retry_chain: ['a4'] }) })
+    expect(labels([waiting], [1, 2, 3, 4])).toEqual([[1, undefined], [2, undefined], [3, 'manual_resume'], [4, 'automatic_retry_scheduled']])
+  })
+
+  // L1 (merge review): an Iteration member's failures are labelled against the live row of the same
+  // (node, iteration), as desktop keys them. Iteration 0 was resumed (attempt 1 failed, live attempt
+  // 2); iteration 1's live attempt 3 sits after a gap, so its attempt 1 stays unlabelled even though
+  // iteration 0's row would label it (F1).
+  it('labels each Iteration round against its own live row', () => {
+    const graph = normalizeWorkflowDefinition({ ...definition, nodes: [graphNode('start', 'start'), graphNode('iter', 'iteration'), graphNode('worker', 'agent', 'iter')],
+      edges: [{ id: 'e1', source: 'start', target: 'iter' }, { id: 'e2', source: 'iter', target: 'worker' }] })
+    const live = (id: string, iteration: number, attempt: number) => nodeRun({ id, nodeId: 'worker', nodeType: 'agent', iteration, status: 'failed',
+      payload: JSON.stringify({ error_detail: { kind: 'session', attempt } }) })
+    const d = detail({ status: 'failed', state: '{"current_nodes":[]}' }, [
+      nodeRun({ id: 'iter-row', nodeId: 'iter', nodeType: 'iteration', status: 'failed' }), live('w0-2', 0, 2), live('w1-3', 1, 3),
+    ])
+    d.failedAttempts = [0, 1].map((iteration) => ({ nodeRunId: `w${iteration}-1`, nodeId: 'worker', scopeId: 'root:run', iteration, sessionId: `s${iteration}`, attempt: 1,
+      kind: 'session', message: `failure ${iteration}`, sourceChain: [], recordedAt: 1000, startedAt: 1000, finishedAt: 1500 }))
+    const rounds = toGraphWorkflowRun(d, graph).roundStates?.worker
+    expect(rounds?.map((state) => [state.iteration, state.failedAttempts?.map((a) => [a.attempt, a.replacedBy])]))
+      .toEqual([[0, [[1, 'manual_resume']]], [1, [[1, undefined]]]])
+  })
+
+  it('labels nothing across a gap in the attempt numbers', () => {
+    // Attempt 4 was a hidden row (a cancelled wait cleared by the resume) between attempts 3 and 5.
+    const again = nodeRun({ id: 'a5', nodeId: 'a', nodeType: 'agent', status: 'failed', payload: JSON.stringify({ error_detail: { kind: 'session', attempt: 5 } }) })
+    expect(labels([again], [3])).toEqual([[3, undefined]])
+    const adjacent = nodeRun({ id: 'a4', nodeId: 'a', nodeType: 'agent', status: 'failed', payload: JSON.stringify({ error_detail: { kind: 'session', attempt: 4 } }) })
+    expect(labels([adjacent], [3])).toEqual([[3, 'manual_resume']])
   })
 })

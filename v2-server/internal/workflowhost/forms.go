@@ -3,6 +3,7 @@ package workflowhost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
@@ -48,7 +49,17 @@ func (h *Host) dispatchReview(d workflow.AgentDispatch) {
 		err = h.createFormTasks(h.ctx, d.RunID, d.NodeRunID)
 	}
 	if err != nil {
-		h.fail(d, workflow.Failure{Kind: workflow.FailureSession, Message: "表单处理失败，请核对数据与负责人后重试"})
+		message := formFailed
+		if d.Node.Kind == "createTasks" {
+			// The first task creation fails here, not in resumeReviewRun, so a handling run's
+			// text must come from the same choice. The dispatch has no caller to return a lookup
+			// error to, so it is logged at this boundary.
+			var lookupErr error
+			if message, lookupErr = h.formTasksFailure(h.ctx, d.RunID, formFailed); lookupErr != nil {
+				h.log.Error("read task handling link", "run", d.RunID, "error", lookupErr)
+			}
+		}
+		h.fail(d, workflow.Failure{Kind: workflow.FailureSession, Message: message})
 		return
 	}
 	h.hub.Publish(d.RunID)
@@ -187,14 +198,45 @@ func (h *Host) resumeReviewRun(ctx context.Context, id string) error {
 	for _, n := range nodes {
 		if n.NodeType == "createTasks" && n.Status == store.WorkflowStatusRunning {
 			if err := h.createFormTasks(ctx, id, n.ID); err != nil {
-				if recordErr := h.engine.FailNode(ctx, id, n.ID, workflow.Failure{Kind: workflow.FailureSession, Message: "任务创建失败，请核对负责人后重试"}); recordErr != nil {
-					return recordErr
+				message, lookupErr := h.formTasksFailure(ctx, id, formTasksFailed)
+				if recordErr := h.engine.FailNode(ctx, id, n.ID, workflow.Failure{Kind: workflow.FailureSession, Message: message}); recordErr != nil {
+					return errors.Join(recordErr, lookupErr)
 				}
-				return err
+				return errors.Join(err, lookupErr)
 			}
 		}
 	}
 	return h.engine.Resume(ctx, id)
+}
+
+// Failure texts of a review run. formFailed is the dispatch's (opening the form or the first task
+// creation), formTasksFailed a replayed task creation's. A run a task owns cannot retry its task
+// creation (owner decisions D30 for a handling run, D32 for a decomposition's run: the task's link
+// settles with the run), so formTasksFailedHandling and formTasksFailedDecomposition point to the
+// task instead; FailNode also stores them as the run's error, which the task page shows, so they
+// read correctly there too.
+const (
+	formFailed                   = "表单处理失败，请核对数据与负责人后重试"
+	formTasksFailed              = "任务创建失败，请核对负责人后重试"
+	formTasksFailedHandling      = "任务创建失败。任务已按这次处理运行的结果结算，不能在运行里重试任务创建；如需继续，请在任务页重新开始处理。"
+	formTasksFailedDecomposition = "任务创建失败。拆分已按这次运行的结果结算，不能在运行里重试任务创建；如需继续，请在任务页重新拆分。"
+)
+
+// formTasksFailure returns the failure text for run id's task creation: the handling or
+// decomposition text for a run a task owns, otherwise the caller's own text. When the task link
+// cannot be read the caller's text is recorded anyway, so the node still fails and a run that may
+// be retried is not told otherwise, and the read error is returned for the caller to report.
+func (h *Host) formTasksFailure(ctx context.Context, id, otherwise string) (string, error) {
+	link, err := h.store.WorkflowRunTaskLinkKind(ctx, id)
+	switch {
+	case err != nil:
+		return otherwise, err
+	case link == store.TaskLinkHandle:
+		return formTasksFailedHandling, nil
+	case link == store.TaskLinkDecomposition:
+		return formTasksFailedDecomposition, nil
+	}
+	return otherwise, nil
 }
 
 // RetryForm retries task creation without collecting or confirming evidence again.

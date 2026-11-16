@@ -1,0 +1,152 @@
+package workflowhost
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/server"
+	"github.com/wanglongan587/cloud/v2-server/internal/store"
+	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
+)
+
+var _ workflow.ResumeRepository = repository{}
+var _ server.WorkflowRunResumer = (*Host)(nil)
+
+func resumeState(st store.WorkflowResumeState) workflow.ResumeState {
+	nodes := make([]workflow.NodeRun, len(st.Nodes))
+	for i, n := range st.Nodes {
+		nodes[i] = nodeRun(n)
+	}
+	return workflow.ResumeState{Status: st.Status, Nodes: nodes, FormNodeIDs: st.FormNodeIDs, SubmittedFormNodeIDs: st.SubmittedFormNodeIDs,
+		TaskHandling: st.TaskLink == store.TaskLinkHandle, TaskDecomposition: st.TaskLink == store.TaskLinkDecomposition}
+}
+
+func (r repository) ResumeState(ctx context.Context, runID string) (workflow.ResumeState, error) {
+	st, err := r.s.WorkflowResumeState(ctx, runID)
+	return resumeState(st), err
+}
+
+func (r repository) ResumeRun(ctx context.Context, runID string, plan func(workflow.ResumeState) ([]string, error), clear func([]byte, []string) ([]byte, error)) error {
+	return r.s.ResumeWorkflowEngineRun(ctx, runID, func(st store.WorkflowResumeState) ([]string, error) {
+		return plan(resumeState(st))
+	}, clear)
+}
+
+// PreviewRunResume plans a resume from failure of a run in the caller's tenant without changing it.
+func (h *Host) PreviewRunResume(ctx context.Context, scope server.WorkflowRunScope, runID string) (server.WorkflowRunResumePreview, error) {
+	if _, err := h.store.WorkflowRun(ctx, scope.TenantID, runID); err != nil {
+		return server.WorkflowRunResumePreview{}, err
+	}
+	plan, err := h.engine.PreviewResume(ctx, runID)
+	if err != nil {
+		return server.WorkflowRunResumePreview{}, err
+	}
+	// The rows allow it, but this process still starts or ends a turn of the run: say so now
+	// rather than let the resume be refused after the user confirmed it.
+	if plan.Refusal == "" && h.settling(runID) {
+		plan.Refusal = workflow.ResumeRefusedSettling
+	}
+	failed := make([]server.WorkflowRunResumeFailedNode, len(plan.Failed))
+	for i, n := range plan.Failed {
+		failed[i] = server.WorkflowRunResumeFailedNode{NodeID: n.NodeID, NodeRunID: n.NodeRunID, Status: n.Status, ContainerNodeID: n.Container}
+	}
+	return server.WorkflowRunResumePreview{
+		Reason: plan.Refusal, RunningNodeIDs: plan.Running, FailedNodes: failed,
+		RestartContainerNodeIDs: plan.Containers, ClearNodeIDs: plan.Clear,
+	}, nil
+}
+
+// ResumeRun resumes a failed or cancelled run of the caller's tenant from its failed nodes, as
+// desktop's resume_from_failure with the keep-files mode: the workspace is left as it is. The
+// permission is the cancellation's. The resumed Agents execute under the run's persisted starter,
+// who owns every earlier session of the run, so the run's sessions keep one owner; a run without a
+// recorded starter executes under the caller.
+func (h *Host) ResumeRun(ctx context.Context, scope server.WorkflowRunScope, runID string) (store.WorkflowRun, error) {
+	run, err := h.store.WorkflowRun(ctx, scope.TenantID, runID)
+	if err != nil {
+		return store.WorkflowRun{}, err
+	}
+	if run.Status != store.WorkflowStatusFailed && run.Status != store.WorkflowStatusCancelled {
+		return store.WorkflowRun{}, &server.WorkflowRunNotResumable{Reason: workflow.ResumeRefusedStatus}
+	}
+	// A cancellation still under way (waiting for its turn to stop) owns the run until it closes.
+	unlock, ok := h.tryLockLifecycle(runID)
+	if !ok {
+		return store.WorkflowRun{}, &server.WorkflowRunNotResumable{Reason: workflow.ResumeRefusedSettling, RunningNodeIDs: []string{}}
+	}
+	defer unlock()
+	owner, err := h.store.WorkflowStarter(ctx, runID)
+	if err != nil {
+		return store.WorkflowRun{}, fmt.Errorf("read workflow run starter: %w", err)
+	}
+	if owner == "" {
+		owner = scope.UserID
+	}
+	st, ok := h.admitResume(runID, execution.Scope{TenantID: scope.TenantID, UserID: owner})
+	if !ok {
+		// The rows may name a rule that refuses anyway; otherwise the bridge is still settling a
+		// turn (for example a cancelled turn that has not finished ending) and the user retries.
+		refused := &server.WorkflowRunNotResumable{Reason: workflow.ResumeRefusedSettling, RunningNodeIDs: []string{}}
+		if plan, err := h.engine.PreviewResume(ctx, runID); err == nil && plan.Refusal != "" {
+			refused.Reason, refused.RunningNodeIDs = plan.Refusal, plan.Running
+		}
+		return store.WorkflowRun{}, refused
+	}
+	if h.resuming != nil {
+		h.resuming(runID)
+	}
+	// Like a start, the resumed run outlives the request.
+	err = h.engine.ResumeFromFailure(context.WithoutCancel(ctx), runID)
+	st.started()
+	h.forgetFinished(runID, st)
+	if err != nil {
+		var refusal *workflow.ResumeRefusal
+		if errors.As(err, &refusal) {
+			return store.WorkflowRun{}, &server.WorkflowRunNotResumable{Reason: refusal.Reason, RunningNodeIDs: refusal.Running}
+		}
+		if errors.Is(err, store.ErrWorkflowRunState) {
+			return store.WorkflowRun{}, &server.WorkflowRunNotResumable{Reason: workflow.ResumeRefusedNothing}
+		}
+		return store.WorkflowRun{}, err
+	}
+	return h.store.WorkflowRun(ctx, scope.TenantID, runID)
+}
+
+// settling reports whether this process is still starting or executing an Agent turn of the run.
+func (h *Host) settling(runID string) bool {
+	st := h.state(runID)
+	if st == nil {
+		return false
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.active != nil || st.starting != nil || st.starters != 0
+}
+
+// admitResume registers the resumed run's execution owner and counts the resume as a start under
+// way. A run with an Agent start or turn still in flight in this process is refused. A leftover
+// state is reused with its cancellation request cleared, because the run it belonged to has
+// closed, and its generation advanced: a worker still draining its queue keeps going, but a
+// dispatch queued before the resume carries the old generation, so neither the worker loop nor
+// beginStart lets it start a turn, even when it was already past its abandon check and resolving
+// its executor while the run was cancelled and resumed.
+func (h *Host) admitResume(runID string, scope execution.Scope) (*runState, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	st := h.runs[runID]
+	if st == nil {
+		st = &runState{scope: scope}
+		h.runs[runID] = st
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.active != nil || st.starting != nil || st.starters != 0 {
+		return nil, false
+	}
+	st.cancelling = false
+	st.generation++
+	st.starters++
+	return st, true
+}

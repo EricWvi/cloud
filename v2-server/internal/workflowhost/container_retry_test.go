@@ -465,3 +465,40 @@ func TestIterationRetryAttemptNumbersArePerRound(t *testing.T) {
 		}
 	}
 }
+
+// L3 (merge review): a failure through another branch settles a container wait in PostgreSQL but
+// leaves its in-process timer armed; the resume must cancel it (retryTimers.forget, G2), as the
+// README promises, or the abandoned wait's goroutine lives until its deadline.
+func TestResumeCancelsTheTimerOfAWaitASiblingFailureAbandoned(t *testing.T) {
+	f := newFixture(t)
+	retryClock(t, f)
+	ctx := context.Background()
+	graph := strings.Replace(loopGraph, `{"id":"out"`, `{"id":"sibling","data":{"kind":"agent","containerId":"loop","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"sibling",`+containerRetryDisabled+`}}},{"id":"out"`, 1)
+	graph = strings.Replace(retryContainer(graph), `{"source":"entry","target":"writer"}`, `{"source":"entry","target":"writer"},{"source":"entry","target":"sibling"}`, 1)
+	id := f.run(t, graph, nil)
+	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.finish(f.exec.awaitStart(t), sessionFailed)
+	rounds, err := f.s.WorkflowEngineLoopRounds(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	containerWait(t, f, id, rounds[0].ID, "writer", nil)
+	sibling := f.exec.awaitStart(t)
+	if err := f.host.engine.FailNode(ctx, id, f.exec.request(sibling).Caller.AttemptID, workflow.Failure{Kind: workflow.FailureRepository, Message: "sibling broke"}); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.finish(sibling, completed("late"))
+	f.await(t, id, terminal)
+	awaitIdle(t, f, id)
+	if fenced, armed := f.host.engine.HeldRetries(id); fenced || armed != 1 {
+		t.Fatalf("setup: the failed run holds fenced=%v armed=%d, want the abandoned wait's timer armed", fenced, armed)
+	}
+	if _, err := f.host.ResumeRun(ctx, f.scope, id); err != nil {
+		t.Fatal(err)
+	}
+	if fenced, armed := f.host.engine.HeldRetries(id); fenced || armed != 0 {
+		t.Fatalf("after the resume: fenced=%v armed=%d, want no stale timer left", fenced, armed)
+	}
+}

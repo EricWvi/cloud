@@ -227,9 +227,11 @@ func (s *Store) CompleteWorkflowEngineNode(
 		if node.Status != WorkflowStatusRunning && node.Status != WorkflowStatusPending {
 			return nil
 		}
-		if r.status != WorkflowStatusRunning {
-			return nil
-		}
+		// A root sibling that finishes after another node failed the run still records its result,
+		// as desktop does (desktop@ebd5b725 crates/db/src/repository/workflow_run_engine/
+		// scoped_node.rs:54-112): the run's status decides scheduling, not whether the attempt
+		// settles. Leaving the row running would keep the run from ever passing the resume idle
+		// gate, and a resume reuses the recorded answer.
 		executionPayload := r.payload
 		if node.ScopeID != r.root {
 			var active bool
@@ -290,7 +292,13 @@ func without(items []string, drop string) []string {
 // FailWorkflowEngineNode records the failed attempt. Iteration members leave propagation to
 // their owner; a Loop child closes its scope and parent. Other failures fail the root run and
 // abandon its waiting retries.
-// Terminal attempts and runs reject late callbacks without moving the failure anchor.
+// A terminal attempt rejects a late callback. A running attempt of a run that already ended
+// records its failure, like desktop (desktop@ebd5b725 crates/db/src/repository/
+// workflow_run_engine/scoped_node.rs:160-240), so the resume idle gate can open. Beyond that v2
+// deliberately deviates: desktop also settles retry waits again (scoped_node.rs:182) and rewrites
+// current_nodes to the late node's anchor (scoped_node.rs:225-230). v2 does neither, because the
+// waits were already settled when the run left running, and the anchor must keep naming the node
+// that actually failed the run, which the run page and its error read; only the attempt changes.
 func (s *Store) FailWorkflowEngineNode(
 	ctx context.Context, runID, nodeRunID, message string, output *string,
 	detail func(attempt int, node, run []byte) ([]byte, error),
@@ -308,7 +316,7 @@ func (s *Store) FailWorkflowEngineNode(
 		if err != nil {
 			return err
 		}
-		if node.Status != WorkflowStatusRunning || r.status != WorkflowStatusRunning {
+		if node.Status != WorkflowStatusRunning {
 			return nil
 		}
 		attempt, err := workflowNodeAttempt(ctx, tx, runID, node)
@@ -326,8 +334,9 @@ func (s *Store) FailWorkflowEngineNode(
 			return fmt.Errorf("fail node: %w", err)
 		}
 		advanced = true
-		// A region failure is settled by its Iteration owner, which applies fail/continue.
-		if node.Iteration != nil {
+		// A region failure is settled by its Iteration owner, which applies fail/continue; a late
+		// failure under a run that already ended propagates nowhere.
+		if node.Iteration != nil || r.status != WorkflowStatusRunning {
 			return nil
 		}
 		anchor := node.NodeID

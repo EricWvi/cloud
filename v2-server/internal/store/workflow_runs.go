@@ -27,6 +27,12 @@ var (
 	ErrWorkflowNodeRunState = errors.New("workflow node run is not in a transitionable state")
 	// ErrWorkflowRunState reports a run transition its current status does not allow.
 	ErrWorkflowRunState = errors.New("workflow run is not in a transitionable state")
+	// ErrTaskHandlingRun reports a reopening of a task's handling run, which only the task may
+	// replace with a new handling run (owner decisions D25 and D30).
+	ErrTaskHandlingRun = errors.New("workflow run is a task's handling run")
+	// ErrTaskDecompositionRun reports a reopening of a task decomposition's run, which only a new
+	// decomposition from the task may replace (owner decision D32).
+	ErrTaskDecompositionRun = errors.New("workflow run is a task decomposition's run")
 	// ErrWorkflowSnapshotInUse reports a snapshot a live run froze.
 	ErrWorkflowSnapshotInUse = errors.New("workflow snapshot is in use")
 	// ErrWorkflowActiveRuns reports a definition a live run still references.

@@ -10,8 +10,11 @@ import {
   getWorkflowRun,
   getWorkflowRunSnapshot,
   listWorkflowRuns,
+  previewWorkflowRunResume,
+  resumeWorkflowRun,
   startWorkflowRun,
   updateWorkflowRunInput,
+  type WorkflowRunResumePreview,
   type WorkflowRunSummary,
   type WorkflowAnalysis,
   type WorkflowUnsupportedNode,
@@ -100,6 +103,8 @@ function definitionOf(workflowId: string, name: string, graph: string, updatedAt
 export const runKeys = {
   project: (tenantId: string, projectId: string) => ['workflow-runs', tenantId, 'project', projectId] as const,
   run: (tenantId: string, runId: string) => ['workflow-runs', tenantId, 'run', runId] as const,
+  // Under the run's key, so every invalidation of the run also reads the preview again.
+  resumePreview: (tenantId: string, runId: string) => ['workflow-runs', tenantId, 'run', runId, 'resume-preview'] as const,
   snapshot: (tenantId: string, runId: string) => ['workflow-runs', tenantId, 'snapshot', runId] as const,
   // A frozen snapshot and its analysis never change, so they live outside the 'workflow-runs'
   // prefix that run mutations (form saves, starts) invalidate wholesale.
@@ -294,4 +299,27 @@ export async function rerun(tenantId: string, previous: GraphWorkflowRun): Promi
     createWorkflowRun(tenantId, previous.definitionId, { projectId: previous.projectId, snapshotId: previous.snapshotId, name: previous.name }),
   )
   return run.id
+}
+
+/**
+ * What 「从失败处继续」 would do now: the failed or cancelled nodes it starts from, the Loop and
+ * Iteration containers that restart from round 1 in their place, every node it clears, or why it is
+ * refused. It is never cached, since a sibling still running or a cancellation can change it.
+ */
+export function runResumePreviewQuery(tenantId: string, runId: string) {
+  return queryOptions({
+    queryKey: runKeys.resumePreview(tenantId, runId),
+    staleTime: 0,
+    gcTime: 0,
+    retry: false,
+    queryFn: async ({ signal }): Promise<WorkflowRunResumePreview> => call(() => previewWorkflowRunResume(tenantId, runId, undefined, signal)),
+  })
+}
+
+/**
+ * 「从失败处继续」: the same run goes back to running from its failed nodes, keeping succeeded
+ * results and the workspace files, unlike 「再跑一次」 which creates a new run.
+ */
+export async function resumeRun(tenantId: string, runId: string): Promise<void> {
+  await call(() => resumeWorkflowRun(tenantId, runId))
 }

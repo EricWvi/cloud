@@ -1,6 +1,6 @@
 import { Link } from 'react-router'
 import { QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
-import { MapIcon, MessageSquareIcon, PlayIcon, RotateCcwIcon, SquareIcon, TheaterIcon, WorkflowIcon } from 'lucide-react'
+import { MapIcon, MessageSquareIcon, PlayIcon, RotateCcwIcon, SquareIcon, StepForwardIcon, TheaterIcon, WorkflowIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { I18nextProvider, useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
@@ -24,10 +24,13 @@ import { FadeText } from '../components/fade-text'
 import { ShowSidebarButton } from '../components/sidebar'
 import { emptyDraft, newChatKey, useChatStore } from '../store'
 import { useRunInvalidations } from './run-events'
-import { cancelRun, rerun, runKeys, runQuery, runSnapshotQuery, startRun, useRunStartPreflight, useRunUnappliedSettings } from './server-runs'
+import { isCdaseRun } from '@/lib/demo/cdase'
+import { cancelRun, rerun, resumeRun, runKeys, runQuery, runSnapshotQuery, startRun, useRunStartPreflight, useRunUnappliedSettings } from './server-runs'
 import { isLoopHistoryNode } from './loop-round-state'
 import { resolveStageFocusNodeId, resolveTheaterFocus, shouldReleaseLivePinToFollow, shouldStealFocusForArtifactReveal, type TheaterFocusStatusSample } from './run-focus'
 import { RunOverviewCanvas } from './run-overview-canvas'
+import { RunResumeDialog } from './run-resume-dialog'
+import { hasResumableNode, resumeRefusalOf, type ResumeRefusal } from './resume-eligibility'
 import { runStatusLabel, runStatusTone } from './run-status-style'
 import { RunTenantContext } from './run-tenant'
 import { RunAnalyzedUnappliedContext } from './run-analysis-context'
@@ -141,6 +144,9 @@ function RunWorkspace({ tenantId, run, readOnly, hostedWorkspace, leading, refre
   const [openInspectorOnTheaterEnter, setOpenInspectorOnTheaterEnter] = useState(false)
   const [overviewFitRequestKey, setOverviewFitRequestKey] = useState(0)
   const [startOpen, setStartOpen] = useState(false)
+  const [resumeOpen, setResumeOpen] = useState(false)
+  const [resumeRefusal, setResumeRefusal] = useState<ResumeRefusal>()
+  const clearResumeRefusal = useCallback(() => setResumeRefusal(undefined), [])
   const [busy, setBusy] = useState(false)
   const stageAreaRef = useRef<HTMLDivElement>(null)
   const focusStatusSampleRef = useRef<TheaterFocusStatusSample | null>(null)
@@ -186,7 +192,12 @@ function RunWorkspace({ tenantId, run, readOnly, hostedWorkspace, leading, refre
   if (freshHitls.length > 0) setSeenHitls(new Set(run.openHitls.map((h) => h.id)))
   const announcedFinish = useRef(finished)
   useEffect(() => {
-    if (!finished || announcedFinish.current) return
+    // A resumed run finishes again later and is announced again.
+    if (!finished) {
+      announcedFinish.current = false
+      return
+    }
+    if (announcedFinish.current) return
     announcedFinish.current = true
     if (viewMode === 'overview') {
       toast.message(t('workflowRun.result.finishedToastTitle'), {
@@ -339,6 +350,12 @@ function RunWorkspace({ tenantId, run, readOnly, hostedWorkspace, leading, refre
               <span className="hidden sm:inline">停止</span>
             </Button>
           )}
+          {!readOnly && (run.status === 'failed' || run.status === 'cancelled') && hasResumableNode(run) && run.taskLink === undefined && !isCdaseRun(run.id) && (
+            <Button variant="outline" size="sm" className="h-7 px-2.5 text-xs" aria-label="从失败处继续" title="在同一次运行里重跑失败的节点，保留已成功的结果和工作区文件" onClick={() => { setResumeRefusal(undefined); setResumeOpen(true) }} disabled={busy}>
+              <StepForwardIcon />
+              <span className="hidden sm:inline">从失败处继续</span>
+            </Button>
+          )}
           {!readOnly && finished && (
             <Button
               variant="outline"
@@ -417,6 +434,40 @@ function RunWorkspace({ tenantId, run, readOnly, hostedWorkspace, leading, refre
           )}
         </div>
       </WorkspaceSplit>
+      <RunResumeDialog
+        open={resumeOpen}
+        tenantId={tenantId}
+        runId={run.id}
+        definition={run.definitionSnapshot}
+        busy={busy}
+        refusal={resumeRefusal}
+        onRefusalStale={clearResumeRefusal}
+        onOpenChange={setResumeOpen}
+        onResume={async () => {
+          setBusy(true)
+          try {
+            await resumeRun(tenantId, run.id)
+          } catch (error) {
+            // A refusal is explained in the dialog: by the preview, which the invalidation below
+            // reads again (it lives under the run's key), and by the refusal itself when only the
+            // server's process state refused (a turn still ending). Anything else is a toast.
+            const refusal = error instanceof ContractError && error.code === 'workflow_run_not_resumable' ? resumeRefusalOf(error.params) : undefined
+            const shown = queryClient.getQueryData(runKeys.resumePreview(tenantId, run.id))
+            if (refusal) setResumeRefusal({ ...refusal, basis: JSON.stringify(shown) })
+            else toast.error(localizeContractError(error, t))
+            return
+          } finally {
+            setBusy(false)
+            void queryClient.invalidateQueries({ queryKey: runKeys.run(tenantId, run.id) })
+          }
+          refreshProjectRuns(run.projectId)
+          setResumeOpen(false)
+          // The same run plays on: follow it live rather than the result it had.
+          setFocusNodeId(null)
+          setConversationNodeId(null)
+          setViewMode('theater')
+        }}
+      />
       <WorkflowRunStartDialog
         open={startOpen}
         runName={run.name}
