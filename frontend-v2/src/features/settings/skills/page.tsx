@@ -102,7 +102,8 @@ function pluginSkillName(entry: PluginCatalogEntry): string {
  * Names of market Skills already installed in this space, keyed by the user-visible skill name.
  * The server fills `packMembers` on an installed skill package with the names its archive
  * materializes at runtime (`assets/<name>/SKILL.md`), the same names the runtime projects, so the
- * match never depends on guessing from the readme.
+ * match never depends on guessing from the readme. Only a package installed before those names were
+ * recorded falls back to its readme heading.
  */
 function installedMarketSkillNames(
   catalog: PluginCatalogEntry[],
@@ -112,8 +113,9 @@ function installedMarketSkillNames(
   for (const entry of catalog) {
     if (entry.kind !== 'skill') continue
     if (selection(entry)?.desiredState !== 'installed') continue
-    names.set(pluginSkillName(entry), pluginSkillName(entry))
-    for (const name of entry.packMembers ?? []) names.set(name, name)
+    const runtime = entry.packMembers ?? []
+    for (const name of runtime.length > 0 ? runtime : [pluginSkillName(entry)])
+      names.set(name, name)
   }
   return names
 }

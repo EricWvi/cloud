@@ -106,6 +106,43 @@ it('marks a user skill whose name an installed market Skill takes', async () => 
   expect(within(dialog).getByText(/同名，在这里不生效，使用的是市场版本/)).toBeInTheDocument()
 })
 
+it('matches only the runtime names once the server records them, not the readme heading', async () => {
+  // The readme says "review", but the archive materializes "code-review": only that name is taken.
+  const recorded = marketplaceEntry('reviewing', {
+    kind: 'skill',
+    readme: '# review\n\n代码审查。',
+    packMembers: ['code-review'],
+  })
+  installMarketplaceBackend({
+    catalog: [recorded],
+    selections: [marketplaceSelection(recorded)],
+    skills: [
+      serverSkill(),
+      serverSkill({ id: '00000000-0000-4000-8000-000000000804', name: 'code-review' }),
+    ],
+  })
+  renderSettingsPage(<SkillsPage />)
+  expect(
+    await screen.findByText(/与本空间已安装的市场 Skill「code-review」同名/),
+  ).toBeInTheDocument()
+  expect(
+    screen.queryByText(/与本空间已安装的市场 Skill「review」同名/),
+  ).not.toBeInTheDocument()
+})
+
+it('does not mark a user skill when the same-name market Skill was removed', async () => {
+  installMarketplaceBackend({
+    catalog: [reviewing],
+    selections: [marketplaceSelection(reviewing, { desiredState: 'removed' })],
+    skills: [serverSkill()],
+  })
+  renderSettingsPage(<SkillsPage />)
+  expect(
+    (await screen.findAllByRole('article', { name: 'review' })).length,
+  ).toBeGreaterThan(0)
+  expect(screen.queryByText(/与本空间已安装的市场 Skill/)).not.toBeInTheDocument()
+})
+
 it('creates, edits, renders and deletes a server-backed skill', async () => {
   const backend = installMarketplaceBackend({
     catalog: [writing],
