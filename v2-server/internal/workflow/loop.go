@@ -42,6 +42,42 @@ type loopExit struct {
 	Result map[string]any `json:"result"`
 }
 
+// Match desktop's LoopExitState: all fields are required, and Result contains exactly one
+// typed variant. Boot must reject the same malformed state that runtime cleanup cannot finish.
+func (e *loopExit) UnmarshalJSON(raw []byte) error {
+	var stored struct {
+		NodeRunID   *string                    `json:"nodeRunId"`
+		RequestedAt *int64                     `json:"requestedAt"`
+		Result      map[string]json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		return err
+	}
+	if stored.NodeRunID == nil || stored.RequestedAt == nil || len(stored.Result) != 1 {
+		return fmt.Errorf("LoopExit requires nodeRunId, requestedAt and one frozen result")
+	}
+	result := map[string]any{}
+	if raw, ok := stored.Result["Ok"]; ok {
+		var outputs map[string]any
+		d := json.NewDecoder(bytes.NewReader(raw))
+		d.UseNumber()
+		if err := d.Decode(&outputs); err != nil || outputs == nil {
+			return fmt.Errorf("LoopExit Ok result must be an object")
+		}
+		result["Ok"] = outputs
+	} else if raw, ok := stored.Result["Err"]; ok {
+		var message *string
+		if err := json.Unmarshal(raw, &message); err != nil || message == nil {
+			return fmt.Errorf("LoopExit Err result must be a string")
+		}
+		result["Err"] = *message
+	} else {
+		return fmt.Errorf("LoopExit result must be Ok or Err")
+	}
+	*e = loopExit{NodeRunID: *stored.NodeRunID, RequestedAt: *stored.RequestedAt, Result: result}
+	return nil
+}
+
 // HasPendingLoopExit recognizes a persisted break whose cleanup must be replayed at boot.
 // Use the runtime's decoder so malformed round state cannot exempt a Loop from interruption.
 func HasPendingLoopExit(raw []byte) bool {
