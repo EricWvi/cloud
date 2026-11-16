@@ -25,8 +25,6 @@ export function RoleImportDialog({
   onImported,
 }: {
   onClose: () => void
-  pending: boolean
-  error: unknown
   onImport: (input: ImportRoleInput) => Promise<Role>
   onImported: (name: string, overwritten: boolean) => void
 }) {

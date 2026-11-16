@@ -213,8 +213,6 @@ export default function RolesPage() {
       )}
       {importing && (
         <RoleImportDialog
-          pending={local.importPending}
-          error={local.mutationError}
           onClose={() => setImporting(false)}
           onImport={(input) =>
             local.importFile({ tid: local.tenantId, data: input })

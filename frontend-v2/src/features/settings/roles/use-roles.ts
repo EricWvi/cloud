@@ -75,7 +75,6 @@ export function useWorkspaceRoles() {
     importFile: importFile.mutateAsync,
     savePending: create.isPending || update.isPending,
     deletePending: remove.isPending,
-    importPending: importFile.isPending,
     loading: tenants.isLoading || query.isPending,
     error: roleError(tenants.error ?? query.error),
     mutationError: roleError(
