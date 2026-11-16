@@ -86,13 +86,10 @@ func TestDesktopExecutionProjection(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		unused []string
-		// Container members without a retry policy have desktop's default, which v2 does not
-		// apply there; root Agents retry, so they list nothing.
-		defaultRetry []string
 	}{
-		{"spare-chain", []string{"other", "spare"}, nil},
-		{"iteration", []string{"spare"}, []string{"fix", "spare"}},
-		{"loop", []string{}, []string{"writer"}},
+		{"spare-chain", []string{"other", "spare"}},
+		{"iteration", []string{"spare"}},
+		{"loop", []string{}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -101,9 +98,6 @@ func TestDesktopExecutionProjection(t *testing.T) {
 			got, err := workflow.AnalyzeWorkflow(source)
 			want := workflow.Analysis{UnusedNodeIDs: test.unused, UnrecognizedNodes: []workflow.UnrecognizedNode{},
 				UnappliedSettings: []workflow.UnappliedSetting{}, UnsupportedNodes: []workflow.UnsupportedNode{}}
-			for _, id := range test.defaultRetry {
-				want.UnappliedSettings = append(want.UnappliedSettings, workflow.UnappliedSetting{NodeID: id, Settings: []string{"retry"}})
-			}
 			if err != nil || !reflect.DeepEqual(got, want) {
 				t.Fatalf("analysis = %#v, %v; want %#v", got, err, want)
 			}

@@ -3,7 +3,6 @@ package workflow_test
 import (
 	"fmt"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 
@@ -123,14 +122,8 @@ func TestAnalysisMatchesRunPathForEveryPlacement(t *testing.T) {
 	if listed == 0 {
 		t.Fatal("no setting is unapplied any more; the comparison checks nothing")
 	}
-	// Default-policy Agents sit at the root, in an Iteration and in a Loop. Whatever the rule says
-	// for each, the comparison covers a rule that depends on placement only if they differ.
-	for _, variant := range []string{"plain", "null-retry"} {
-		root := got["root-"+variant]
-		if reflect.DeepEqual(root, got["iter-"+variant]) && reflect.DeepEqual(root, got["loop-"+variant]) {
-			t.Errorf("default policy (%s) lists %v at every placement; the comparison does not cover placement", variant, root)
-		}
-	}
+	// Default-policy Agents at every placement have no retry hint now. The computed comparison
+	// above still covers all of them without duplicating the retry rule in this test.
 }
 
 // The analysis must hand the rule the same configuration and placement the run path does, so a
@@ -173,19 +166,19 @@ func TestAnalysisFeedsTheRuleTheRunPathInputs(t *testing.T) {
 // policy is the default, enabled with two retries, and an interactive node never retries. It lists
 // settings in the payload's fixed order, and counts an MCP binding without an enabled flag as
 // enabled, as AgentConfig.MCPs does. Each case is checked on the analysis and on the run path, for
-// a Loop member, where v2 does not retry, and for a root Agent, whose retry v2 applies.
+// a Loop member and for a root Agent; retry now applies at both placements.
 func TestUnappliedAgentSettingsRule(t *testing.T) {
 	off := obj{"enabled": false, "maxRetries": 2, "initialDelaySeconds": 5}
 	for name, tc := range map[string]struct {
 		config obj
-		// want is the Loop member's list; a root Agent lists the same without retry.
+		// want is the list at either placement.
 		want []string
 		// spare marks a draft-only configuration publication rejects; only the analysis sees it.
 		spare bool
 	}{
-		"absent retry is desktop's default":   {obj{}, []string{"retry"}, false},
-		"null retry is desktop's default":     {obj{"retry": nil}, []string{"retry"}, false},
-		"enabled retry":                       {obj{"retry": obj{"enabled": true, "maxRetries": 2, "initialDelaySeconds": 5}}, []string{"retry"}, false},
+		"absent retry is desktop's default":   {obj{}, nil, false},
+		"null retry is desktop's default":     {obj{"retry": nil}, nil, false},
+		"enabled retry":                       {obj{"retry": obj{"enabled": true, "maxRetries": 2, "initialDelaySeconds": 5}}, nil, false},
 		"disabled retry":                      {obj{"retry": off}, nil, false},
 		"enabled retry with no budget":        {obj{"retry": obj{"enabled": true, "maxRetries": 0, "initialDelaySeconds": 5}}, nil, false},
 		"mcp binding without an enabled flag": {obj{"retry": off, "mcps": []any{obj{"mcpId": "official/tools"}}}, []string{"mcp"}, true},
@@ -197,7 +190,7 @@ func TestUnappliedAgentSettingsRule(t *testing.T) {
 		"interactive without a retry policy": {obj{"interactive": true}, []string{"interactive"}, false},
 		"every setting but interactive, in the payload order": {obj{"retry": obj{"enabled": true, "maxRetries": 1, "initialDelaySeconds": 1},
 			"mcps": []any{obj{"mcpId": "official/tools", "enabled": true}}, "roleId": "reviewer"},
-			[]string{"role", "mcp", "retry"}, false},
+			[]string{"role", "mcp"}, false},
 	} {
 		for _, inLoop := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/loop=%v", name, inLoop), func(t *testing.T) {
@@ -207,12 +200,6 @@ func TestUnappliedAgentSettingsRule(t *testing.T) {
 					config[k] = v
 				}
 				want := tc.want
-				if !inLoop {
-					want = slices.DeleteFunc(slices.Clone(want), func(s string) bool { return s == "retry" })
-					if len(want) == 0 {
-						want = nil
-					}
-				}
 				g := obj{"schemaVersion": 2, "nodes": []any{
 					obj{"id": "start", "data": obj{"kind": "start"}},
 					obj{"id": "loop", "data": obj{"kind": "loop", "loopConfig": obj{"maxIterations": 3, "variables": []any{},

@@ -37,8 +37,8 @@ func TestRetryPolicyAgreesWithRetryWouldRun(t *testing.T) {
 }
 
 // retryApplies is the one answer to whether v2 retries an Agent: only a policy that would retry,
-// on a non-interactive Agent in the root graph.
-func TestRetryAppliesOnlyToNonInteractiveRootAgents(t *testing.T) {
+// on a non-interactive Agent in the root, an Iteration or a Loop.
+func TestRetryAppliesToNonInteractiveAgentsAtEveryPlacement(t *testing.T) {
 	interactive := object{"interactive": true, "retry": object{"enabled": true, "maxRetries": json.Number("2"), "initialDelaySeconds": json.Number("1")}}
 	disabled := object{"retry": object{"enabled": false, "maxRetries": json.Number("2"), "initialDelaySeconds": json.Number("1")}}
 	root, region, loop := placement{}, placement{region: "iter"}, placement{loop: "loop"}
@@ -48,9 +48,10 @@ func TestRetryAppliesOnlyToNonInteractiveRootAgents(t *testing.T) {
 		applies bool
 	}{
 		"default policy at the root":     {object{}, root, true},
-		"default policy in an Iteration": {object{}, region, false},
-		"default policy in a Loop":       {object{}, loop, false},
+		"default policy in an Iteration": {object{}, region, true},
+		"default policy in a Loop":       {object{}, loop, true},
 		"interactive with a policy":      {interactive, root, false},
+		"interactive in an Iteration":    {interactive, region, false},
 		"interactive in a Loop":          {interactive, loop, false},
 		"disabled at the root":           {disabled, root, false},
 	} {

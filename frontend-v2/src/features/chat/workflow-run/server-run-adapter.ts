@@ -206,9 +206,9 @@ function attemptFailure(attempt: WorkflowNodeFailedAttempt): WorkflowNodeAttempt
  * run adapter does. The detail lists each node's latest attempt; graph nodes without one stay idle,
  * except those behind a Condition branch not taken, which never get a row and are shown inactive,
  * projected from the decisions of that exact execution. Loop scopes and Iteration array indices
- * stay separate, preserving historical sessions even when the same node runs again.
- * Earlier root-scope failures retain their sessions and reasons. Replacement labels come only
- * from persisted retry-chain links; container retry history remains outside this scope.
+ * stay separate, preserving historical sessions even when the same node runs again. Earlier
+ * failures retain their sessions and reasons in that exact root, Iteration or Loop occurrence.
+ * Replacement labels come only from persisted retry-chain links.
  */
 export function toGraphWorkflowRun(detail: WorkflowRunDetail, definition: WorkflowDefinition): GraphWorkflowRun {
   const { run } = detail
@@ -234,22 +234,6 @@ export function toGraphWorkflowRun(detail: WorkflowRunDetail, definition: Workfl
       createdAt: iso(scope.createdAt)!, updatedAt: iso(scope.updatedAt)!,
     })
   }
-  for (const attempt of detail.failedAttempts) {
-    const state = nodeStates[attempt.nodeId]
-    if (state === undefined || !rootIds.has(attempt.nodeId) || attempt.iteration !== null || scopeIds.has(attempt.scopeId)) continue
-    const failure = attemptFailure(attempt)
-    const replacement = detail.nodes.find((row) => parseObject(row.payload).retry_chain instanceof Array &&
-      (parseObject(row.payload).retry_chain as unknown[]).includes(attempt.nodeRunId))
-    if (replacement) {
-      const payload = parseObject(replacement.payload)
-      const chain = payload.retry_chain as unknown[]
-      // Retried once the next attempt started; scheduled only while it still waits under a live
-      // run. A wait cancelled or abandoned before starting replaced nothing, so it has no label.
-      if (chain.at(-1) !== attempt.nodeRunId || replacement.startedAt !== null) failure.replacedBy = 'automatic_retry'
-      else if (live && awaitingRetry(replacement, payload)) failure.replacedBy = 'automatic_retry_scheduled'
-    }
-    state.failedAttempts = [...(state.failedAttempts ?? []), failure]
-  }
   rounds.sort((a, b) => a.roundIndex - b.roundIndex || a.id.localeCompare(b.id))
   const roundStates: Record<string, GraphWorkflowNodeState[]> = {}
   for (const owner of iterations) {
@@ -265,6 +249,37 @@ export function toGraphWorkflowRun(detail: WorkflowRunDetail, definition: Workfl
         nodeStates[id] = state
       }
     }
+  }
+  for (const attempt of detail.failedAttempts) {
+    const failure = attemptFailure(attempt)
+    let state: GraphWorkflowNodeState | undefined
+    if (attempt.iteration !== null) {
+      state = roundStates[attempt.nodeId]?.find((candidate) => candidate.iteration === attempt.iteration)
+      failure.iteration = attempt.iteration
+    } else {
+      const round = rounds.find((candidate) => candidate.id === attempt.scopeId)
+      if (round) {
+        state = round.nodeStates[attempt.nodeId]
+        failure.loopRoundIndex = round.roundIndex
+      } else if (rootIds.has(attempt.nodeId) && !scopeIds.has(attempt.scopeId)) {
+        state = nodeStates[attempt.nodeId]
+      }
+    }
+    if (state === undefined) continue
+    const replacement = detail.nodes.find((row) => {
+      if (row.nodeId !== attempt.nodeId || row.scopeId !== attempt.scopeId || row.iteration !== attempt.iteration) return false
+      const chain = parseObject(row.payload).retry_chain
+      return Array.isArray(chain) && chain.includes(attempt.nodeRunId)
+    })
+    if (replacement) {
+      const payload = parseObject(replacement.payload)
+      const chain = payload.retry_chain as unknown[]
+      // Retried once the next attempt started; scheduled only while it still waits under a live
+      // run. A wait cancelled or abandoned before starting replaced nothing, so it has no label.
+      if (chain.at(-1) !== attempt.nodeRunId || replacement.startedAt !== null) failure.replacedBy = 'automatic_retry'
+      else if (live && awaitingRetry(replacement, payload)) failure.replacedBy = 'automatic_retry_scheduled'
+    }
+    state.failedAttempts = [...(state.failedAttempts ?? []), failure]
   }
   const result: GraphWorkflowRun = {
     id: run.id,

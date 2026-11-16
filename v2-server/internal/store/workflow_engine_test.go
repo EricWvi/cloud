@@ -335,6 +335,158 @@ func TestInterruptWorkflowRunsFailsOnlyLiveWork(t *testing.T) {
 	}
 }
 
+// A run left running between a completion and its next wave has no active node row: the boot
+// sweep must still fail it (and its open Loop scopes), with and without the absorb callback.
+// The absorb callback can only exclude runs it was asked about, and a run without rows is never
+// asked about, so no callback can keep the set-based guarantee from applying to it.
+func TestInterruptWorkflowRunsFailsARunWithoutActiveRows(t *testing.T) {
+	for _, mode := range []string{"plain", "absorb-none", "absorb-all"} {
+		t.Run(mode, func(t *testing.T) {
+			s := storetest.Open(t)
+			user, tenant := storetest.Login(t, s, "engine-interrupt-gap-"+mode)
+			ctx := context.Background()
+			gap := pendingRun(t, s, user, tenant, "间隙"+mode)
+			if _, err := s.StartWorkflowEngineRun(ctx, gap.ID, store.WorkflowEngineStart{NodeID: "start", NodeType: "start"}, keep); err != nil {
+				t.Fatal(err)
+			}
+			nodes, err := s.WorkflowEngineNodeRuns(ctx, gap.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			answer := ""
+			if _, err := s.CompleteWorkflowEngineNode(ctx, gap.ID, nodes[0].ID, &answer, keep, func(raw []byte, _ store.WorkflowNodeRun) ([]byte, error) { return raw, nil }); err != nil {
+				t.Fatal(err)
+			}
+			// A second run holds an active Loop row and an open round: it fails through its rows
+			// unless the absorb callback keeps it, and its scope must fail with it.
+			scoped := pendingRun(t, s, user, tenant, "带轮次"+mode)
+			// Absorption only counts when the run has a durable starter to resume under; give
+			// the absorbed case one before it starts.
+			if mode == "absorb-all" {
+				if err := s.SetWorkflowStarter(ctx, tenant, scoped.ID, user); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.StartWorkflowEngineRun(ctx, scoped.ID, store.WorkflowEngineStart{NodeID: "start", NodeType: "start"}, keep); err != nil {
+				t.Fatal(err)
+			}
+			scopedNodes, _ := s.WorkflowEngineNodeRuns(ctx, scoped.ID)
+			if _, err := s.CompleteWorkflowEngineNode(ctx, scoped.ID, scopedNodes[0].ID, &answer, keep, func(raw []byte, _ store.WorkflowNodeRun) ([]byte, error) { return raw, nil }); err != nil {
+				t.Fatal(err)
+			}
+			loop, err := s.CreateWorkflowNodeRun(ctx, tenant, scoped.ID, store.WorkflowNodeRunInput{NodeID: "loop-1", NodeType: "loop"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.StartWorkflowLoopRound(ctx, tenant, scoped.ID, loop.ID, 1, []byte(`{"conditionDecisions":{}}`)); err != nil {
+				t.Fatal(err)
+			}
+
+			detail := func(int, []byte) ([]byte, error) { return []byte(`{}`), nil }
+			var interrupted []string
+			if mode == "plain" {
+				interrupted, err = s.InterruptWorkflowRuns(ctx, "进程重启，运行中断", detail)
+			} else {
+				absorb := func(string, []store.WorkflowNodeRun) map[string]bool {
+					if mode == "absorb-none" {
+						return nil
+					}
+					return map[string]bool{}
+				}
+				interrupted, err = s.InterruptWorkflowRunsWithIterationRecovery(ctx, "进程重启，运行中断", detail, absorb)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The scoped run is reported through its rows (failed or absorbed), the gap run through
+			// the run UPDATE that failed it without any.
+			if want := []string{scoped.ID, gap.ID}; !slices.Equal(interrupted, want) {
+				t.Fatalf("interrupted = %v, want %v (the run with active rows, then the gap run)", interrupted, want)
+			}
+			c, err := s.WorkflowEngineContext(ctx, gap.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Run.Status != store.WorkflowStatusFailed || c.Run.Error == nil || *c.Run.Error != "进程重启，运行中断" {
+				t.Fatalf("run without rows left %s (error %v) after the boot sweep", c.Run.Status, c.Run.Error)
+			}
+			c, err = s.WorkflowEngineContext(ctx, scoped.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantScoped := store.WorkflowStatusFailed
+			if mode == "absorb-all" {
+				wantScoped = store.WorkflowStatusRunning
+			}
+			if c.Run.Status != wantScoped {
+				t.Fatalf("run with rows = %s, want %s", c.Run.Status, wantScoped)
+			}
+			scopes, err := s.WorkflowRunScopes(ctx, tenant, scoped.ID)
+			if err != nil || len(scopes) != 1 {
+				t.Fatalf("scopes = %+v %v", scopes, err)
+			}
+			wantScope := store.WorkflowStatusFailed
+			if mode == "absorb-all" {
+				wantScope = store.WorkflowStatusRunning
+			}
+			if scopes[0].Status == nil || *scopes[0].Status != wantScope {
+				t.Fatalf("scope = %v, want %s", scopes[0].Status, wantScope)
+			}
+		})
+	}
+}
+
+// An absorb decision is only honoured for a run with a durable starter: without one, nobody can
+// resume the run, so the sweep fails it like every other interrupted run instead of leaving it
+// running forever (or making the boot fail on it).
+func TestInterruptWorkflowRunsRefusesToAbsorbWithoutAStarter(t *testing.T) {
+	s := storetest.Open(t)
+	user, tenant := storetest.Login(t, s, "engine-interrupt-nostarter")
+	ctx := context.Background()
+	run := pendingRun(t, s, user, tenant, "无启动者")
+	if _, err := s.StartWorkflowEngineRun(ctx, run.ID, store.WorkflowEngineStart{NodeID: "start", NodeType: "start"}, keep); err != nil {
+		t.Fatal(err)
+	}
+	nodes, _ := s.WorkflowEngineNodeRuns(ctx, run.ID)
+	answer := ""
+	if _, err := s.CompleteWorkflowEngineNode(ctx, run.ID, nodes[0].ID, &answer, keep, func(raw []byte, _ store.WorkflowNodeRun) ([]byte, error) { return raw, nil }); err != nil {
+		t.Fatal(err)
+	}
+	// A running Iteration owner with a member row: the absorb callback would keep the run.
+	if _, err := s.CreateWorkflowNodeRun(ctx, tenant, run.ID, store.WorkflowNodeRunInput{NodeID: "iter", NodeType: "iteration"}); err != nil {
+		t.Fatal(err)
+	}
+	iteration := 0
+	member, err := s.CreateWorkflowNodeRun(ctx, tenant, run.ID, store.WorkflowNodeRunInput{NodeID: "worker", NodeType: "agent", Iteration: &iteration})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.InterruptWorkflowRunsWithIterationRecovery(ctx, "进程重启，运行中断",
+		func(int, []byte) ([]byte, error) { return []byte(`{}`), nil },
+		func(string, []store.WorkflowNodeRun) map[string]bool { return map[string]bool{member.ID: true} }); err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.WorkflowEngineContext(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Run.Status != store.WorkflowStatusFailed || c.Run.Error == nil {
+		t.Fatalf("run without a starter survived the sweep: %+v", c.Run)
+	}
+	rows, err := s.WorkflowRunNodes(ctx, tenant, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.NodeID != "iter" && row.NodeID != "worker" {
+			continue
+		}
+		if row.Status != store.WorkflowStatusFailed {
+			t.Fatalf("row %s = %s, want failed", row.NodeID, row.Status)
+		}
+	}
+}
+
 func TestWorkflowEngineAbandonClosesOnlyUnstartedAttemptsOfEndedRuns(t *testing.T) {
 	s := storetest.Open(t)
 	user, tenant := storetest.Login(t, s, "engine-abandon")

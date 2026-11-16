@@ -297,6 +297,46 @@ func TestWorkflowRunFailedByRestartIsInterrupted(t *testing.T) {
 	}
 }
 
+// The boot sweep absorbed the scheduled run's interrupted Iteration and resumed it, so the run is
+// still executing after recovery. Reconcile returns the occurrence to running: the schedule can
+// cancel it, and a later failure of its own is a run failure, not the restart.
+func TestWorkflowRunResumedAfterRestartRunsAgain(t *testing.T) {
+	for _, end := range []string{"cancel", "fail"} {
+		t.Run(end, func(t *testing.T) {
+			f := newWorkflowFixture(t)
+			ctx := context.Background()
+			if err := f.workflow.Dispatch(ctx, f.scope, f.occ); err != nil {
+				t.Fatal(err)
+			}
+			f.apply(t, "recover", "", "")
+			for i := 0; i < 2; i++ { // a repeated reconcile of the running occurrence changes nothing
+				if err := f.workflow.Reconcile(ctx, f.scope, f.occ); err != nil {
+					t.Fatal(err)
+				}
+				if o := f.read(t); o.Status != "running" || o.Reason != "" || o.Released || o.ExecutionRef != encodeWorkflowRef(f.runs.runs[f.occ.ID].ID) {
+					t.Fatalf("reconcile %d of the resumed run = %+v, want running with its ref", i, o)
+				}
+			}
+			if end == "cancel" {
+				if err := f.workflow.Cancel(ctx, f.scope, f.occ); err != nil {
+					t.Fatalf("cancel through the schedule = %v", err)
+				}
+				if o := f.read(t); o.Status != "cancelled" || !o.Released || f.runs.cancels != 1 {
+					t.Fatalf("cancelled occurrence = %+v cancels=%d", o, f.runs.cancels)
+				}
+				return
+			}
+			f.runs.runs[f.occ.ID].Status = store.WorkflowStatusFailed
+			if err := f.workflow.Reconcile(ctx, f.scope, f.occ); err != nil {
+				t.Fatal(err)
+			}
+			if o := f.read(t); o.Status != "failed" || o.Reason != "workflow_run_failed" || !o.Released {
+				t.Fatalf("occurrence after the resumed run failed = %+v, want failed/workflow_run_failed", o)
+			}
+		})
+	}
+}
+
 func TestWorkflowCancelWaitsForTheRunToStop(t *testing.T) {
 	f := newWorkflowFixture(t)
 	ctx := context.Background()

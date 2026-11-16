@@ -331,6 +331,11 @@ func (s *Store) FailWorkflowEngineNode(
 			return nil
 		}
 		anchor := node.NodeID
+		// The run fails now, so settle its pending retries before sibling cancellation changes
+		// their status; a Loop wait must retain desktop's retry_abandoned reason.
+		if err := abandonRetryWaits(ctx, tx, runID); err != nil {
+			return err
+		}
 		if node.ScopeID != r.root {
 			var parentID string
 			if err := tx.QueryRow(ctx, `UPDATE v2_workflow_scopes SET status='failed', updated_at=now() WHERE id=$1 AND status='running' RETURNING parent_loop_node_run_id`, node.ScopeID).Scan(&parentID); err != nil {
@@ -344,10 +349,6 @@ func (s *Store) FailWorkflowEngineNode(
 			if _, err := tx.Exec(ctx, `UPDATE v2_workflow_node_runs SET status='cancelled', error=COALESCE(error,'{"reason":"sibling_failed"}'), finished_at=now(), updated_at=now() WHERE scope_id=$1 AND status IN ('pending','running') AND deleted_at IS NULL`, node.ScopeID); err != nil {
 				return err
 			}
-		}
-		// The run fails now, so no pending retry of another node may fire into it.
-		if err := abandonRetryWaits(ctx, tx, runID); err != nil {
-			return err
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE v2_workflow_runs SET status = 'failed', error = $2, finished_at = now(), updated_at = now()
@@ -434,12 +435,60 @@ func (s *Store) UpdateWorkflowEngineRunInput(ctx context.Context, runID string, 
 }
 
 // InterruptWorkflowRuns fails every attempt and run a previous process left executing, before
-// the process serves requests. Frozen root reviews are excluded and recovered separately;
+// the process serves requests: every run that is running (or pending with started work) is
+// failed in one set-based update, including a run with no active node row left between a
+// completion and its next wave. Frozen root reviews are excluded and recovered separately;
 // every other non-terminal attempt fails without replaying an Agent. A waiting retry fails too,
-// losing its wait marker, because restart never re-arms a retry timer.
+// losing its wait marker, because restart never re-arms a retry timer. It returns every run it
+// failed or whose active rows it failed.
 func (s *Store) InterruptWorkflowRuns(ctx context.Context, message string, detail func(attempt int, node []byte) ([]byte, error)) ([]string, error) {
-	var interrupted []string
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	return s.interruptWorkflowRuns(ctx, message, detail, nil)
+}
+
+// InterruptWorkflowRunsWithIterationRecovery applies the boot sweep with desktop's composite
+// exception. absorb returns the IDs to interrupt when every active non-Iteration row belongs to a
+// still-running Iteration, or nil to fail the whole run. It is consulted only for a run that is
+// still running: an active row of a run that already ended (an Iteration owner left beside the
+// root failure that ended it) has no runtime to settle its round, so it fails as before. An absorb
+// decision is honoured only when the run has a durable starter (whoever resumes it needs that
+// identity); otherwise the run fails like the rest. Absorbed runs survive the set-based run and
+// scope failure below. The result lists every run the sweep failed or absorbed — runs whose active
+// rows it settled and runs it failed without any — so the caller can resume the absorbed ones
+// (still running) and count the rest.
+func (s *Store) InterruptWorkflowRunsWithIterationRecovery(
+	ctx context.Context,
+	message string,
+	detail func(attempt int, node []byte) ([]byte, error),
+	absorb func(graph string, nodes []WorkflowNodeRun) map[string]bool,
+) ([]string, error) {
+	return s.interruptWorkflowRuns(ctx, message, detail, absorb)
+}
+
+// interruptRunsSQL fails every run the previous process left running (or pending with started
+// work) except the absorbed IDs, returning the IDs it failed. It is one set-based statement so a
+// run left between a completion and its next wave — which has no active node row — is still failed.
+const interruptRunsSQL = `
+	UPDATE v2_workflow_runs SET status = 'failed', error = $1, finished_at = now(), updated_at = now()
+	WHERE deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM v2_workflow_forms f WHERE f.run_id=v2_workflow_runs.id)
+		AND (status = 'running' OR (status = 'pending' AND state->'current_nodes' <> '[]'::jsonb))
+		AND NOT (id = ANY($2::uuid[]))
+	RETURNING id::text`
+
+// interruptScopesSQL fails every open Loop scope of the runs the sweep failed, so a round left
+// running cannot keep its one-active-round reservation under a run that is over.
+const interruptScopesSQL = `
+	UPDATE v2_workflow_scopes SET status = 'failed', updated_at = now()
+	WHERE status IN ('pending', 'running') AND NOT (run_id = ANY($1::uuid[]))
+		AND EXISTS (SELECT 1 FROM v2_workflow_runs r WHERE r.id = v2_workflow_scopes.run_id
+			AND r.status = 'failed' AND r.deleted_at IS NULL)`
+
+func (s *Store) interruptWorkflowRuns(
+	ctx context.Context,
+	message string,
+	detail func(attempt int, node []byte) ([]byte, error),
+	absorb func(graph string, nodes []WorkflowNodeRun) map[string]bool,
+) (interrupted []string, err error) {
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT `+prefixed("n", workflowNodeRunColumns)+`
 			FROM v2_workflow_node_runs n JOIN v2_workflow_runs r ON r.id = n.run_id
@@ -449,62 +498,111 @@ func (s *Store) InterruptWorkflowRuns(ctx context.Context, message string, detai
 		if err != nil {
 			return fmt.Errorf("list interrupted nodes: %w", err)
 		}
-		nodes := []WorkflowNodeRun{}
+		byRun := map[string][]WorkflowNodeRun{}
+		runIDs := []string{}
 		for rows.Next() {
 			node, err := scanNodeRun(rows)
 			if err != nil {
 				rows.Close()
 				return err
 			}
-			nodes = append(nodes, node)
+			if _, seen := byRun[node.RunID]; !seen {
+				runIDs = append(runIDs, node.RunID)
+			}
+			byRun[node.RunID] = append(byRun[node.RunID], node)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		for _, node := range nodes {
-			attempt, err := workflowNodeAttempt(ctx, tx, node.RunID, node)
-			if err != nil {
-				return err
-			}
-			payload, err := detail(attempt, node.Payload)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.Exec(ctx, `
-				UPDATE v2_workflow_node_runs SET status = 'failed', error = $2, payload = $3::jsonb - 'retry_wait',
-					finished_at = now(), updated_at = now()
-				WHERE id = $1`, node.ID, message, payload); err != nil {
-				return fmt.Errorf("interrupt node: %w", err)
+		// Absorb-eligible runs keep their Iteration owner running; every other run with active
+		// rows fails, and the set-based statements below also fail runs without active rows.
+		// An absorbed run without a durable starter cannot be resumed by anyone, so it fails too
+		// instead of surviving forever (or aborting the caller's boot).
+		absorbed := map[string]bool{}
+		if absorb != nil {
+			for _, runID := range runIDs {
+				var graph, starter, status string
+				if err := tx.QueryRow(ctx, `SELECT snap.graph, COALESCE(r.started_by::text,''), r.status FROM v2_workflow_runs r JOIN v2_workflow_snapshots snap ON snap.id=r.snapshot_id WHERE r.id=$1`, runID).Scan(&graph, &starter, &status); err != nil {
+					return fmt.Errorf("read interrupted run graph: %w", err)
+				}
+				// Only a running run has a runtime that will settle an absorbed round.
+				if status != WorkflowStatusRunning {
+					continue
+				}
+				ids := absorb(graph, byRun[runID])
+				if ids == nil || starter == "" {
+					continue
+				}
+				absorbed[runID] = true
+				absorbedNodes := []WorkflowNodeRun{}
+				for _, node := range byRun[runID] {
+					if ids[node.ID] {
+						absorbedNodes = append(absorbedNodes, node)
+					}
+				}
+				if err := failInterruptedNodes(ctx, tx, runID, absorbedNodes, message, detail); err != nil {
+					return err
+				}
 			}
 		}
-		runRows, err := tx.Query(ctx, `
-			UPDATE v2_workflow_runs SET status = 'failed', error = $1, finished_at = now(), updated_at = now()
-			WHERE deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM v2_workflow_forms f WHERE f.run_id=v2_workflow_runs.id) AND (status = 'running' OR (status = 'pending' AND state->'current_nodes' <> '[]'::jsonb))
-			RETURNING id`, message)
+		for _, runID := range runIDs {
+			if absorbed[runID] {
+				continue
+			}
+			if err := failInterruptedNodes(ctx, tx, runID, byRun[runID], message, detail); err != nil {
+				return err
+			}
+		}
+		absorbedIDs := []string{}
+		for id := range absorbed {
+			absorbedIDs = append(absorbedIDs, id)
+		}
+		// The sweep reports every run it decided about: those with active rows, absorbed or
+		// failed, then those the run UPDATE failed without any.
+		interrupted = append(interrupted, runIDs...)
+		failed, err := tx.Query(ctx, interruptRunsSQL, message, absorbedIDs)
 		if err != nil {
 			return fmt.Errorf("interrupt runs: %w", err)
 		}
-		for runRows.Next() {
-			var id string
-			if err := runRows.Scan(&id); err != nil {
-				runRows.Close()
-				return err
+		gaps, err := pgx.CollectRows(failed, pgx.RowTo[string])
+		if err != nil {
+			return fmt.Errorf("interrupt runs: %w", err)
+		}
+		for _, id := range gaps {
+			if _, seen := byRun[id]; !seen {
+				interrupted = append(interrupted, id)
 			}
-			interrupted = append(interrupted, id)
 		}
-		runRows.Close()
-		if err := runRows.Err(); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE v2_workflow_scopes SET status = 'failed', updated_at = now()
-			WHERE status IN ('pending', 'running')`); err != nil {
+		if _, err := tx.Exec(ctx, interruptScopesSQL, absorbedIDs); err != nil {
 			return fmt.Errorf("interrupt loop rounds: %w", err)
 		}
 		return nil
 	})
 	return interrupted, err
+}
+
+// failInterruptedNodes marks the given interrupted attempts as failed with desktop's
+// interrupted_by_restart detail, dropping their retry-wait marker because restart never re-arms
+// a retry timer.
+func failInterruptedNodes(ctx context.Context, tx pgx.Tx, runID string, nodes []WorkflowNodeRun, message string, detail func(attempt int, node []byte) ([]byte, error)) error {
+	for _, node := range nodes {
+		attempt, err := workflowNodeAttempt(ctx, tx, runID, node)
+		if err != nil {
+			return err
+		}
+		payload, err := detail(attempt, node.Payload)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE v2_workflow_node_runs SET status = 'failed', error = $2, payload = $3::jsonb - 'retry_wait',
+				finished_at = now(), updated_at = now()
+			WHERE id = $1`, node.ID, message, payload); err != nil {
+			return fmt.Errorf("interrupt node: %w", err)
+		}
+	}
+	return nil
 }
 
 // prefixed qualifies a column list with a table alias.

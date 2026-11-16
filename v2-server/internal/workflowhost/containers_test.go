@@ -18,7 +18,7 @@ const loopGraph = `{"schemaVersion":2,"nodes":[
  {"id":"start","data":{"kind":"start"}},
  {"id":"loop","data":{"kind":"loop","loopConfig":{"maxIterations":2,"variables":[{"name":"draft","valueType":"string","initial":{"kind":"constant","value":"seed"},"feedback":["writer","output"]}],"until":{"logic":"and","conditions":[{"variableSelector":["writer","output"],"operator":"equals","value":"done"}]},"outputs":[{"name":"result","variableSelector":["writer","output"]}]}}},
  {"id":"entry","data":{"kind":"start","containerId":"loop"}},
- {"id":"writer","data":{"kind":"agent","containerId":"loop","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"Improve {{#loop.draft#}}"}}},
+ {"id":"writer","data":{"kind":"agent","containerId":"loop","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"Improve {{#loop.draft#}}","retry":{"enabled":false,"maxRetries":2,"initialDelaySeconds":10}}}},
  {"id":"out","data":{"kind":"output","outputs":[{"name":"result","variableSelector":["loop","result"]}]}}
  ],"edges":[{"source":"start","target":"loop"},{"source":"entry","target":"writer"},{"source":"loop","target":"out"}]} `
 
@@ -126,7 +126,7 @@ func iterationGraph(strategy string, items []string, max int) string {
  {"id":"start","data":{"kind":"start","inputVariables":[{"name":"items","valueType":"array[string]","value":%s}]}},
  {"id":"iter","data":{"kind":"iteration","iterationConfig":{"iteratorSelector":["start","items"],"collectSelector":["worker","output"],"errorStrategy":%q,"maxIterations":%d}}},
  {"id":"gate","parentId":"iter","data":{"kind":"condition","cases":[{"id":"process","logic":"and","conditions":[{"variableSelector":["iter","item"],"operator":"not_equals","value":"skip"}]}]}},
- {"id":"worker","parentId":"iter","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"item {{#iter.index#}}: {{#iter.item#}}"}}},
+ {"id":"worker","parentId":"iter","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"item {{#iter.index#}}: {{#iter.item#}}","retry":{"enabled":false,"maxRetries":2,"initialDelaySeconds":10}}}},
  {"id":"out","data":{"kind":"output","outputs":[{"name":"items","variableSelector":["iter","output"]},{"name":"failed","variableSelector":["iter","failed_count"]}]}}
  ],"edges":[{"source":"start","target":"iter"},{"source":"iter","target":"gate"},{"source":"gate","sourceHandle":"process","target":"worker"},{"source":"iter","target":"out"}]}`, string(raw), strategy, max)
 }

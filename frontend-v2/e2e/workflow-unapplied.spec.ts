@@ -66,8 +66,8 @@ test('the retry hint follows the server for every retry policy form', async ({ p
   await signIn(page)
   const tid = (await (await page.request.get('/api/v1/me/tenants')).json()).items[0].id
   const name = `重试策略 ${Date.now()}`
-  // Absent (desktop's default policy), switched off, no budget, and switched on, each on a Loop
-  // member; plus a root Agent with the default policy. Where retry applies is the server's call.
+  // Every eligible placement now applies these policies, including desktop's default. No form
+  // lists retry as unapplied; the frontend still follows the server rather than inferring it.
   const policies: Record<string, unknown> = {
     'retry-absent': undefined,
     'retry-off': { enabled: false, maxRetries: 2, initialDelaySeconds: 10 },
@@ -104,7 +104,7 @@ test('the retry hint follows the server for every retry policy form', async ({ p
     unappliedSettings: { nodeId: string; settings: string[] }[]
   }
   const listed = (id: string) => analysis.unappliedSettings.find((entry) => entry.nodeId === id)?.settings.includes('retry') ?? false
-  expect(ids.some(listed) && !ids.every(listed), 'the forms should differ in whether the server lists retry').toBe(true)
+  expect(ids.every((id) => !listed(id)), 'retry is applied at every placement and policy form').toBe(true)
 
   await page.reload()
   await page.getByRole('complementary', { name: '工作流列表' }).getByRole('button', { name, exact: true }).click()

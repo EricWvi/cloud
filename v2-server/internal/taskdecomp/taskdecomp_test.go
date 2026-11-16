@@ -315,6 +315,47 @@ func TestRecoverEndsWhatTheLastProcessLeft(t *testing.T) {
 	if got := f.await(t, stuck.ID); got.Status != store.DecompositionFailed || !strings.Contains(got.Failure, "服务重启") || got.ID != b.ID {
 		t.Fatalf("stuck = %+v", got)
 	}
+	// Recover runs before the workflow sweep, so it ends the live run itself: a run left running
+	// could be absorbed and resumed by the sweep and outlive its failed decomposition.
+	if run, e := f.store.WorkflowRun(f.ctx, f.tenant, b.WorkflowRunID); e != nil || run.Status != store.WorkflowStatusCancelled {
+		t.Fatalf("stuck run = %+v %v, want cancelled", run, e)
+	}
+	if run, e := f.store.WorkflowRun(f.ctx, f.tenant, a.WorkflowRunID); e != nil || run.Status != store.WorkflowStatusSucceeded {
+		t.Fatalf("finished run = %+v %v, want it untouched", run, e)
+	}
+}
+
+// cancelFails is the store with a decomposition run cancel that fails for a reason other than the
+// run's state, such as a lost database connection.
+type cancelFails struct {
+	*store.Store
+	err error
+}
+
+func (c cancelFails) CancelWorkflowRun(context.Context, string, string) (store.WorkflowRun, error) {
+	return store.WorkflowRun{}, c.err
+}
+
+// A cancel that fails for any reason but the run's state stops boot before the workflow sweep:
+// failing the decomposition would leave its run live for the sweep to absorb.
+func TestRecoverStopsWhenARunCannotBeCancelled(t *testing.T) {
+	f := newFixture(t)
+	stuck := f.task(t, "取消失败")
+	d, e := f.host.Start(f.ctx, f.tenant, f.owner, stuck.ID, f.workflow, "a")
+	if e != nil {
+		t.Fatal(e)
+	}
+	f.host.Close()
+	broken := errors.New("connection lost")
+	next := taskdecomp.New(cancelFails{Store: f.store, err: broken}, f.runs, nil)
+	t.Cleanup(next.Close)
+	if e := next.Recover(f.ctx); !errors.Is(e, broken) {
+		t.Fatalf("recover = %v, want the cancel error", e)
+	}
+	items, e := f.store.TaskDecompositions(f.ctx, f.tenant, stuck.ID)
+	if e != nil || len(items) != 1 || items[0].ID != d.ID || items[0].Status != store.DecompositionRunning {
+		t.Fatalf("decompositions = %+v %v, want the decomposition still running", items, e)
+	}
 }
 
 func TestSubtasksReadsTheOutput(t *testing.T) {

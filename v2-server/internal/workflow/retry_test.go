@@ -7,7 +7,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
 
-func TestRetryUnappliedOnlyOutsideEligibleRootAgents(t *testing.T) {
+func TestRetryIsAppliedAtEveryPlacement(t *testing.T) {
 	policy := obj{"enabled": true, "maxRetries": 2, "initialDelaySeconds": 10}
 	for _, interactive := range []bool{false, true} {
 		graph := flat()
@@ -34,8 +34,8 @@ func TestRetryUnappliedOnlyOutsideEligibleRootAgents(t *testing.T) {
 		t.Fatal("missing loop")
 	}
 	n, _ := body.Node("writer")
-	if !slices.Contains(n.Agent().Unapplied, "retry") {
-		t.Fatal("Loop retry lost unapplied marker")
+	if slices.Contains(n.Agent().Unapplied, "retry") {
+		t.Fatal("Loop retry remained marked as unapplied")
 	}
 	graph = fixture(t, "iteration")
 	// The fixture's Agent member is discovered from the executable graph.
@@ -51,8 +51,8 @@ func TestRetryUnappliedOnlyOutsideEligibleRootAgents(t *testing.T) {
 				t.Fatal(err)
 			}
 			member, _ := g.Node(n.ID)
-			if !slices.Contains(member.Agent().Unapplied, "retry") {
-				t.Fatal("Iteration retry lost unapplied marker")
+			if slices.Contains(member.Agent().Unapplied, "retry") {
+				t.Fatal("Iteration retry remained marked as unapplied")
 			}
 			return
 		}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"slices"
 	"sync"
 	"time"
 )
@@ -70,11 +69,78 @@ type retryPayload struct {
 	Chain []string    `json:"retry_chain"`
 }
 
-// retry replaces a failed root Agent attempt by a waiting one when its policy covers the
-// failure, and reports whether the failure was consumed. An error while deciding reports false:
-// nothing was persisted and the attempt's session already ended, so failing the attempt is the
-// only way to keep the run from waiting on a running row nothing drives (desktop@ebd5b725
-// crates/application/src/workflow_run/engine/engine/retry_scheduler.rs:38-57).
+// retryLocation resolves an attempt without broadening Repository.NodeRuns' root-only contract.
+// Iteration rows share the root graph and pool; Loop rows use their exact round's body and pool.
+type retryLocation struct {
+	roots []NodeRun
+	rows  []NodeRun
+	index int
+	round *LoopRound
+}
+
+func (e *Engine) locateRetry(ctx context.Context, runID, id string) (retryLocation, error) {
+	roots, err := e.repo.NodeRuns(ctx, runID)
+	if err != nil {
+		return retryLocation{}, err
+	}
+	for i := range roots {
+		if roots[i].ID == id {
+			return retryLocation{roots: roots, rows: roots, index: i}, nil
+		}
+	}
+	location := retryLocation{roots: roots, index: -1}
+	repo, ok := e.repo.(ContainerRepository)
+	if !ok {
+		return location, nil
+	}
+	rounds, err := repo.LoopRounds(ctx, runID)
+	if err != nil {
+		return retryLocation{}, err
+	}
+	for i := range rounds {
+		rows, err := repo.ScopeNodes(ctx, runID, rounds[i].ID)
+		if err != nil {
+			return retryLocation{}, err
+		}
+		for j := range rows {
+			if rows[j].ID == id {
+				return retryLocation{roots: roots, rows: rows, index: j, round: &rounds[i]}, nil
+			}
+		}
+	}
+	return location, nil
+}
+
+// graph returns the executable graph and node in the attempt's own scope.
+func (l retryLocation) graph(run RunContext) (*Graph, Node, bool, error) {
+	g, err := ParseGraph(run.Graph)
+	if err != nil {
+		return nil, Node{}, false, err
+	}
+	row := l.rows[l.index]
+	if l.round == nil {
+		n, ok := g.Node(row.NodeID)
+		return g, n, ok, nil
+	}
+	for _, parent := range l.roots {
+		if parent.ID != l.round.ParentID {
+			continue
+		}
+		body, ok := g.LoopBody(parent.NodeID)
+		if !ok {
+			return g, Node{}, false, nil
+		}
+		n, ok := body.Node(row.NodeID)
+		return body, n, ok, nil
+	}
+	return g, Node{}, false, nil
+}
+
+// retry replaces a failed Agent attempt by a waiting one in the same scope and round when its
+// policy covers the failure, and reports whether the failure was consumed. An error while deciding
+// reports false: nothing was persisted and the attempt's session already ended, so failing the
+// attempt is the only way to keep the run from waiting on a running row nothing drives
+// (desktop@ebd5b725 crates/application/src/workflow_run/engine/engine/retry_scheduler.rs:38-57).
 func (e *Engine) retry(ctx context.Context, runID, id string, f Failure) bool {
 	consumed, err := e.tryRetry(ctx, runID, id, f)
 	if err != nil {
@@ -97,32 +163,23 @@ func (e *Engine) tryRetry(ctx context.Context, runID, id string, f Failure) (boo
 	if run.Status != StatusRunning {
 		return false, nil
 	}
-	rows, err := e.repo.NodeRuns(ctx, runID)
+	location, err := e.locateRetry(ctx, runID, id)
 	if err != nil {
 		return false, err
 	}
-	var row NodeRun
-	for _, r := range rows {
-		if r.ID == id {
-			row = r
-			break
-		}
-	}
-	// NodeRuns lists root-scope rows only, Loop rows live in their round's scope. Whether the node
-	// retries where it sits, Iteration region included, is retryApplies' decision below.
-	if row.ID == "" || row.ScopeID != "" {
+	// An unknown row is a late callback. A row already settled by cancellation or a duplicate
+	// callback is consumed without spending another retry.
+	if location.index < 0 {
 		return false, nil
 	}
+	row := location.rows[location.index]
 	if row.Status != StatusRunning {
 		return true, nil
 	}
-	g, err := ParseGraph(run.Graph)
+	_, n, ok, err := location.graph(run)
 	if err != nil {
 		return false, err
 	}
-	// Loop members are absent from the root graph; retryApplies rejects every other placement,
-	// interactive nodes and policies that never retry, as the unapplied list says.
-	n, ok := g.Node(row.NodeID)
 	config, _ := n.data["agentConfig"].(object)
 	if !ok || n.Kind != "agent" || !retryApplies(config, n.at) {
 		return false, nil
@@ -186,16 +243,16 @@ func (e *Engine) WakeRetry(ctx context.Context, runID, id string) error {
 		}
 		return err
 	}
-	rows, err := e.repo.NodeRuns(ctx, runID)
+	location, err := e.locateRetry(ctx, runID, id)
 	if err != nil {
 		return err
 	}
-	i := slices.IndexFunc(rows, func(r NodeRun) bool { return r.ID == id })
-	if i < 0 || rows[i].Status != StatusRunning || rows[i].StartedAt != nil {
+	if location.index < 0 || location.rows[location.index].Status != StatusRunning || location.rows[location.index].StartedAt != nil {
 		return nil
 	}
+	row := location.rows[location.index]
 	var p retryPayload
-	if json.Unmarshal(rows[i].Payload, &p) != nil || p.Wait == nil {
+	if json.Unmarshal(row.Payload, &p) != nil || p.Wait == nil {
 		return nil
 	}
 	if e.now().UnixMilli() < p.Wait.DueAt {
@@ -209,42 +266,53 @@ func (e *Engine) WakeRetry(ctx context.Context, runID, id string) error {
 	if err != nil {
 		return err
 	}
-	started, err := repo.WakeNode(ctx, runID, rows[i], raw)
+	started, err := repo.WakeNode(ctx, runID, row, raw)
 	if err != nil {
 		return err
 	}
 	e.publish(runID)
-	rows[i] = started
+	location.rows[location.index] = started
 	// The attempt is started now, so an error must fail it: returning the error would leave a
 	// running row that no executor and no timer will ever finish (desktop@ebd5b725
-	// crates/application/src/workflow_run/engine/engine/retry_scheduler.rs:141-169).
-	// A root attempt's failure fails the run, so no scheduling pass follows it.
-	if f := e.dispatchRetry(run, rows, started); f != nil {
-		return e.fail(ctx, runID, id, *f)
+	// crates/application/src/workflow_run/engine/engine/retry_scheduler.rs:141-169). The
+	// scheduling pass then applies an Iteration's error policy after a final dispatch failure.
+	if f := e.dispatchRetry(run, location, started); f != nil {
+		if err := e.fail(ctx, runID, id, *f); err != nil {
+			return err
+		}
+		return e.schedule(ctx, runID)
 	}
 	return nil
 }
 
-// dispatchRetry hands a started root attempt to the Agent bridge as the original attempt was
-// dispatched, with rows reflecting the started row. A failure means it could not be dispatched.
-func (e *Engine) dispatchRetry(run RunContext, rows []NodeRun, started NodeRun) *Failure {
+// dispatchRetry hands a started attempt to the Agent bridge as the original attempt was
+// dispatched in its root, Iteration or Loop scope, with rows reflecting the started row. A
+// failure means it could not be dispatched.
+func (e *Engine) dispatchRetry(run RunContext, location retryLocation, started NodeRun) *Failure {
 	undispatched := func(reason string) *Failure {
 		return &Failure{Kind: FailureInvalidRunPayload, Message: fmt.Sprintf("retry of node %s could not be dispatched: %s", started.NodeID, reason)}
 	}
-	g, err := ParseGraph(run.Graph)
+	g, n, ok, err := location.graph(run)
 	if err != nil {
 		return undispatched(err.Error())
 	}
-	n, ok := g.Node(started.NodeID)
-	if !ok || n.Kind != "agent" || started.ScopeID != "" || started.Iteration != nil {
+	if !ok || n.Kind != "agent" {
 		return undispatched("it has no executable target in its scope")
 	}
 	payload, _, err := DecodeRunPayload(run.Payload)
 	if err != nil {
 		return undispatched(err.Error())
 	}
+	pool := payload.VariablePool
+	if location.round != nil {
+		state, err := decodeLoopState(location.round.State)
+		if err != nil {
+			return undispatched(err.Error())
+		}
+		pool = state.VariablePool
+	}
 	e.agents.Dispatch(AgentDispatch{RunID: run.RunID, NodeRunID: started.ID, ProjectID: run.ProjectID, Locale: payload.Locale,
-		Node: n, Graph: g, Pool: payload.VariablePool, RunInput: run.Input, NodeRuns: rows})
+		ScopeID: started.ScopeID, Iteration: started.Iteration, Node: n, Graph: g, Pool: pool, RunInput: run.Input, NodeRuns: location.rows})
 	return nil
 }
 

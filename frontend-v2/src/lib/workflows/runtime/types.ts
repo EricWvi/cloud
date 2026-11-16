@@ -493,7 +493,7 @@ export interface WorkflowNodeAttemptFailure {
   sessionId?: string;
   /** Composite-region round (0-based) for iteration rows. */
   iteration?: number;
-  /** Loop round (0-based) for rows inside a Loop body. */
+  /** Loop round (1-based) for rows inside a Loop body. */
   loopRoundIndex?: number;
   /** Absent when the run detail cannot tell what replaced the attempt. */
   replacedBy?: WorkflowNodeAttemptReplacement;

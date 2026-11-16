@@ -100,11 +100,11 @@ e2e/            Playwright 端到端测试
 
 运行由 v2-server 执行（见 `v2-server/README.md` 的"工作流执行"一节），客户端和工作流定义一样由 `v2-server/workflows.openapi.json` 生成。`server-runs.ts` 把创建、启动、修改启动输入、取消、删除和再跑一次接到生成的客户端上，拒绝同样转成 `ContractError`；运行详情、冻结的图和项目下的运行列表由 TanStack Query 读取。运行没结束时，运行页照 desktop 订阅它的失效事件流（`GET …/workflow-runs/{rid}/events`，`run-events.ts`）：每条 `workflow_run_invalidated` 都让运行详情和项目运行列表重新读取，事件本身不带状态，页面只信 HTTP 读到的持久状态。轮询是兜底（`runRefreshMs`）：事件流连着时每 4 秒（desktop 的兜底间隔），没连上或断开时每 1 秒；运行结束后关闭事件流。侧边栏的项目运行列表照旧在有未结束的运行时每 1 秒读一次。刷新页面后运行还在，执行也不依赖页面开着。
 
-`server-run-adapter.ts` 把服务端的节点运行按 desktop 读取后端运行时的规则投影成节点状态：节点状态、开始结束时间、输入输出、失败原因和失败详情（`payload.error_detail`）照搬。运行详情的 `variables`（根变量池）和 `failedAttempts`（被替换的失败尝试）也照 desktop 的运行适配器读：开始节点显示这次运行的初始输入，输入变量显示运行变量池里的值（声明了但没赋值的显示为空；运行开始前还没有变量池，先保留快照里的值），所以节点详情的“输入变量”是这次运行实际用的值；之前失败的尝试按节点归到“之前失败的尝试”，从旧到新，带着各自的会话和失败原因。v2 只自动重试根作用域的非交互 Agent（是否重试由 v2-server 决定，见其 README 的“根节点自动重试”），所以列表里只有这类被替换的尝试；“已自动重试”“已安排自动重试”只按服务端持久化的 `retry_chain` 标，不从配置推导。等待重试的尝试显示倒计时；运行已结束时，留下的等待行显示为已取消。Loop 和 Iteration 轮内的尝试等轮次接入后再映射。节点会话按节点尝试（`nodeRunId`，适配器从节点行带上）读：尝试绑定了会话后，`node-session.ts` 订阅 `GET …/workflow-runs/{rid}/nodes/{nodeRunId}/events`，帧格式和对话页的事件流相同，用对话页的 `applySessionEvent` / `conversationOf` 归并，所以能看到 Agent 的思考、工具调用和回答，运行中也实时更新。执行桥在一轮结束后就结束节点的会话，所以不显示对话页“会话已结束”的标记。会话只有启动运行的人能读（公共执行服务按用户隔离会话），其他成员读到 404，浏览器只看到事件流一开始就被永久关闭：这时节点会话说明只有启动这次运行的人能看实时会话，不再一直显示“正在等待”；还没有收到任何事件时也一样，节点会话退回两条消息：发给 Agent 的任务（服务端记下的渲染后任务 `payload.task`，没有时用节点的输入）和 Agent 的回答。成功的 Agent 还带着 v2 自己记下的三项：实际使用的执行器（`payload.executor`，Agent 名和插件版本）、模型（`payload.model`；新运行里配置的模型找不到或没配时节点以 `workflow_model_not_found` 失败、不启动会话，所以 `fallback` 总为假，只有旧运行可能为真）和没有应用的设置（`payload.unapplied`）。节点详情在配置的"Agent 模型"下面显示"实际执行"；旧运行退回过默认模型的，仍说明原因。
+`server-run-adapter.ts` 把服务端的节点运行按 desktop 读取后端运行时的规则投影成节点状态：节点状态、开始结束时间、输入输出、失败原因和失败详情（`payload.error_detail`）照搬。运行详情的 `variables`（根变量池）和 `failedAttempts`（被替换的失败尝试）也照 desktop 的运行适配器读：开始节点显示这次运行的初始输入，输入变量显示运行变量池里的值（声明了但没赋值的显示为空；运行开始前还没有变量池，先保留快照里的值），所以节点详情的“输入变量”是这次运行实际用的值；之前失败的尝试按节点归到“之前失败的尝试”，从旧到新，带着各自的会话和失败原因，根作用域、Iteration 轮和 Loop 轮内的尝试各归各轮（v2 对非交互 Agent 一律自动重试，是否重试由 v2-server 决定，见其 README 的「Agent 自动重试」）；“已自动重试”“已安排自动重试”只按服务端持久化的 `retry_chain` 标，不从配置推导。等待重试的尝试显示倒计时；运行已结束时，留下的等待行显示为已取消。节点会话按节点尝试（`nodeRunId`，适配器从节点行带上）读：尝试绑定了会话后，`node-session.ts` 订阅 `GET …/workflow-runs/{rid}/nodes/{nodeRunId}/events`，帧格式和对话页的事件流相同，用对话页的 `applySessionEvent` / `conversationOf` 归并，所以能看到 Agent 的思考、工具调用和回答，运行中也实时更新。执行桥在一轮结束后就结束节点的会话，所以不显示对话页“会话已结束”的标记。会话只有启动运行的人能读（公共执行服务按用户隔离会话），其他成员读到 404，浏览器只看到事件流一开始就被永久关闭：这时节点会话说明只有启动这次运行的人能看实时会话，不再一直显示“正在等待”；还没有收到任何事件时也一样，节点会话退回两条消息：发给 Agent 的任务（服务端记下的渲染后任务 `payload.task`，没有时用节点的输入）和 Agent 的回答。成功的 Agent 还带着 v2 自己记下的三项：实际使用的执行器（`payload.executor`，Agent 名和插件版本）、模型（`payload.model`；新运行里配置的模型找不到或没配时节点以 `workflow_model_not_found` 失败、不启动会话，所以 `fallback` 总为假，只有旧运行可能为真）和没有应用的设置（`payload.unapplied`）。节点详情在配置的"Agent 模型"下面显示"实际执行"；旧运行退回过默认模型的，仍说明原因。
 
 节点详情列出"v2 未应用"，按服务端的顺序，前端不从节点配置推导（规则在 v2-server，见其 README）：尝试在结果 `payload.unapplied` 里记下了列表（v2-server 只在成功时写）就显示它，哪怕是空的；没有记录时（还没运行、运行中、失败、取消、中断，或没有这项记录的旧运行）显示 v2-server 对这次运行冻结图的 analyze 结果里该节点的 `unappliedSettings`。这个结果按当前服务端的规则给出，不是那次运行当时的规则，所以根 Agent 自动重试上线前就已结束、又没有记录列表的运行不会显示自动重试的提示，虽然它当时没有重试。运行面板对它展示的每次运行都分析一次冻结图（按运行缓存、不重新请求），启动对话框的预检读的也是这一次分析。启用 MCP 的节点照常运行，但不启动或调用 MCP，并在结果 payload.unapplied 中记录 mcp；Skill 已按节点实际应用，不再从配置推导为未应用。历史运行记下的 `unapplied` 仍保留，所以旧运行不会被改写成已经应用 Skill。
 
-v2 只做核心执行，有几项界面在、但不会出现或不可用：服务端不执行需要人工参与的节点，回答人工介入的 hook 直接拒绝；只有根作用域非交互 Agent 自动重试，没有从失败处恢复，Iteration 内失败可按配置继续；AI 诊断、会话索引和文件变更评审没有搬。条件分支没走的节点投影为“未激活分支”，规则沿用 desktop 的 `computeInactiveNodes`。根决策读取 `conditionDecisions`；Iteration 以 `iterationConditionDecisions` 和 0 基 `iteration` 投影 `roundStates`，包含本轮未走的成员；Loop 按 scope 的 1 基 `roundIndex`、独立决策和节点行投影 `rounds`。切换轮次只展示该轮会话与输出，循环结果区分条件满足、达到上限和 LoopExit 主动退出。
+v2 只做核心执行，有几项界面在、但不会出现或不可用：服务端不执行需要人工参与的节点，回答人工介入的 hook 直接拒绝；非交互 Agent（根作用域与 Loop / Iteration 成员）都自动重试，没有从失败处恢复，Iteration 内重试耗尽后按配置继续；AI 诊断、会话索引和文件变更评审没有搬。条件分支没走的节点投影为“未激活分支”，规则沿用 desktop 的 `computeInactiveNodes`。根决策读取 `conditionDecisions`；Iteration 以 `iterationConditionDecisions` 和 0 基 `iteration` 投影 `roundStates`，包含本轮未走的成员；Loop 按 scope 的 1 基 `roundIndex`、独立决策和节点行投影 `rounds`。切换轮次只展示该轮会话与输出，循环结果区分条件满足、达到上限和 LoopExit 主动退出。
 
 ## 工作流
 
@@ -133,17 +133,18 @@ v2 只做核心执行，有几项界面在、但不会出现或不可用：服�
 
 Agent 和模型清单读取与 Chat 相同的 `/chat/executors`，保存后端返回的 `agentId` / `modelId`，目录为空或读取失败时不提供演示选项。旧占位配置保留并提示重新选择。角色目录读取 Settings 保存的本机角色；Skill 清单合并当前用户的服务端技能库与租户各空间已确认安装的 Skill 插件，插件标识保留 `namespace/identifier`，运行时检查目标项目的安装回执。MCP 候选合并服务端安装记录与设置页的浏览器演示安装选择（后者只在 `VITE_DEMO_MOCK=1` 时存在）；演示项按当前用户、团队及可访问空间读取，保留 namespace/identifier，标注“演示”，安装/卸载后同步更新。未安装的插件不会凭空加入候选，卸载后已有节点绑定保留并提示不可用。此接入仅用于节点配置，当前 Node 仍不支持 MCP，启用的绑定在运行时不应用，Agent 照常执行，结果 payload.unapplied 明确记录 mcp。
 
-Agent 检查器在角色、MCP、交互模式、失败自动重试旁标「暂不生效」和一句原因（`editor/workflow-unapplied-setting-hint.tsx`）。标哪几项只看 v2-server analyze 返回的 `unappliedSettings`，它和运行结果里的 `payload.unapplied` 出自同一段服务端代码；前端只知道每项放在哪个字段旁、原因怎么说，不自己判断。服务端列出重试时，即使交互模式藏起了重试字段也照样说明。服务端不再列出某项时提示自动消失；列出前端还没有对应字段的项时，在 Agent 设置末尾统一说明。浏览器里的旧工作流库（`local-workflow-backend.ts`）不执行运行，这两项总是空的。工作流页本身不运行工作流，运行在对话页里（见"运行工作流"）。
+Agent 检查器在角色、MCP、交互模式、失败自动重试旁标「暂不生效」和一句原因（`editor/workflow-unapplied-setting-hint.tsx`）。标哪几项只看 v2-server analyze 返回的 `unappliedSettings`，它和运行结果里的 `payload.unapplied` 出自同一段服务端代码；前端只知道每项放在哪个字段旁、原因怎么说，不自己判断。重试已在根作用域和 Loop / Iteration 成员上应用，新分析不再列出 `retry`；历史运行 payload 里保存的 `retry` 标记仍按原样显示。服务端列出某项时提示出现，不再列出时自动消失；列出前端还没有对应字段的项时，在 Agent 设置末尾统一说明。浏览器里的旧工作流库（`local-workflow-backend.ts`）不执行运行，这两项总是空的。工作流页本身不运行工作流，运行在对话页里（见"运行工作流"）。
 
 ### Unapplied settings and start warnings (English)
 
 The Agent inspector places a “Not applied yet” hint and a short reason beside role, MCP,
 interactive and retry fields only when server analysis lists that setting in `unappliedSettings`.
 The server derives this list from the same decision as the `Node.Agent().Unapplied` used in
-attempt payloads, with the node's Iteration or Loop, including spare Agents. A listed retry is
-explained even while interactive mode hides the retry fields. Removing a setting from server policy removes its hint without a frontend
-change. Settings without an inspector field appear together at the bottom. The legacy local
-workflow library runs nothing and reports empty policy lists.
+attempt payloads, with the node's Iteration or Loop, including spare Agents. Retry now applies at
+every placement, so new analyses no longer list `retry`; the marker persisted in older run
+payloads still displays as recorded. Removing a setting from server policy removes its hint
+without a frontend change. Settings without an inspector field appear together at the bottom. The
+legacy local workflow library runs nothing and reports empty policy lists.
 
 The run inspector's "Not applied in v2" line shows server data only, in the server's order; the
 page derives nothing from the node configuration. If the attempt recorded `payload.unapplied`

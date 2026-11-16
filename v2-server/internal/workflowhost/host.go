@@ -100,17 +100,92 @@ func (h *Host) Close() {
 
 const interruptedMessage = "the server restarted while this run was executing"
 
-// Interrupt fails every attempt and run a previous process left executing, with desktop's
-// interrupted_by_restart detail. Frozen forms and deterministic post-review work survive;
-// no Agent turn is replayed. It must run before the host serves requests.
+// iterationInterrupts selects desktop's absorbable boot-sweep rows: every executing non-owner
+// row belongs to an Iteration whose owner is still running. Any outer or Loop work fails the run.
+func iterationInterrupts(graph string, nodes []store.WorkflowNodeRun) map[string]bool {
+	g, err := workflow.ParseGraph(graph)
+	if err != nil {
+		return nil
+	}
+	running := map[string]bool{}
+	for _, row := range nodes {
+		if row.Status != store.WorkflowStatusRunning || row.Iteration != nil || row.NodeType != "iteration" {
+			continue
+		}
+		if n, ok := g.Node(row.NodeID); ok && n.Kind == "iteration" {
+			running[row.NodeID] = true
+		}
+	}
+	if len(running) == 0 {
+		return nil
+	}
+	interrupted := map[string]bool{}
+	for _, row := range nodes {
+		if row.Status != store.WorkflowStatusRunning {
+			return nil
+		}
+		if row.Iteration == nil {
+			if row.NodeType == "iteration" && running[row.NodeID] {
+				continue
+			}
+			return nil
+		}
+		member, ok := g.Node(row.NodeID)
+		if !ok || !running[member.RegionOwner] {
+			return nil
+		}
+		interrupted[row.ID] = true
+	}
+	return interrupted
+}
+
+// Interrupt fails attempts a previous process left executing with desktop's interrupted_by_restart
+// detail. Root and Loop work fails its run; an interrupted Iteration round fails alone, then its
+// owner applies the round's error strategy. Frozen forms and deterministic post-review work
+// survive; no interrupted Agent turn is replayed. It must run before the host serves requests and
+// after the owners of task runs have cancelled theirs, so an absorbed run is never task-owned
+// (package boot orders both).
 func (h *Host) Interrupt(ctx context.Context) error {
 	f := workflow.Failure{Kind: workflow.FailureInterruptedByRestart, Message: interruptedMessage}
 	now := h.now()
-	ids, err := h.store.InterruptWorkflowRuns(ctx, interruptedMessage, func(attempt int, node []byte) ([]byte, error) {
+	ids, err := h.store.InterruptWorkflowRunsWithIterationRecovery(ctx, interruptedMessage, func(attempt int, node []byte) ([]byte, error) {
 		return workflow.MergePayload(node, map[string]any{"error_detail": f.Detail(attempt, true, now)})
-	})
+	}, iterationInterrupts)
 	if err != nil {
 		return fmt.Errorf("interrupt workflow runs: %w", err)
+	}
+	for _, id := range ids {
+		current, err := h.store.WorkflowEngineContext(ctx, id)
+		if err != nil {
+			return fmt.Errorf("read interrupted run %s: %w", id, err)
+		}
+		// The sweep fails every run it cannot resume (no durable starter), so only absorbed
+		// Iteration runs are still running here.
+		if current.Run.Status != store.WorkflowStatusRunning {
+			continue
+		}
+		actor, err := h.store.WorkflowStarter(ctx, id)
+		if err != nil {
+			return fmt.Errorf("read starter of interrupted Iteration %s: %w", id, err)
+		}
+		if actor == "" {
+			// Defensive: the sweep already excludes unstartered runs; reaching here means the
+			// starter vanished between the sweep and this read, so fail rather than resume as
+			// someone else.
+			h.log.Error("interrupted Iteration lost its starter; failing the run", "run", id)
+			message := interruptedMessage
+			if _, err := h.store.FinishWorkflowRun(ctx, current.Run.TenantID, id, store.WorkflowStatusFailed, nil, &message); err != nil {
+				h.log.Error("fail interrupted Iteration without a starter", "run", id, "error", err)
+			}
+			continue
+		}
+		st := h.register(id, execution.Scope{TenantID: current.Run.TenantID, UserID: actor})
+		err = h.engine.Resume(ctx, id)
+		st.started()
+		h.forgetFinished(id, st)
+		if err != nil {
+			h.log.Error("recover interrupted Iteration", "run", id, "error", err)
+		}
 	}
 	reviews, err := h.store.RecoverableFormRuns(ctx)
 	if err != nil {

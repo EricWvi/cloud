@@ -277,7 +277,11 @@ func (a *WorkflowAdapter) Reconcile(ctx context.Context, scope execution.Scope, 
 		}
 		return a.finish(ctx, scope, o, run)
 	default:
-		if o.Status == "starting" || (o.Status == "reconciling" && o.ExecutionRef == "") {
+		// A run still executing after startup recovery was absorbed by the workflow sweep (an
+		// interrupted Iteration it resumed): the occurrence follows it as running again, as the
+		// awaitingInput branch does, so Cancel works and its later end is recorded for what it is
+		// rather than as the restart. A recovered cancelling occurrence loses its cancel intent.
+		if o.Status == "starting" || o.Status == "reconciling" {
 			_, err = a.apply(ctx, scope, o, "accepted", ref, "")
 		}
 		return err
@@ -285,8 +289,9 @@ func (a *WorkflowAdapter) Reconcile(ctx context.Context, scope execution.Scope, 
 }
 
 // finish records the run's result and frees the slot. A run that failed while the occurrence was
-// being recovered after a restart was interrupted by it: the bridge fails every run it finds still
-// executing when the process starts.
+// still being recovered after a restart was interrupted by it: the bridge's boot sweep fails every
+// run it finds executing, except an interrupted Iteration it absorbs and resumes, whose occurrence
+// Reconcile has already returned to running before that run can end.
 func (a *WorkflowAdapter) finish(ctx context.Context, scope execution.Scope, o store.Occurrence, run store.WorkflowRun) error {
 	if !isResult(o.Status) {
 		event, reason := "completed", ""

@@ -31,7 +31,7 @@
 
 没有10分钟等待、自动重试执行或停机补跑。跳过和手动运行均不改变原计划锚点。PostgreSQL 测试证明本层状态和占位，Stub 只证明公共接口消费行为，不能替代真实执行/目录/完整历史验收。
 
-取消恢复前提：cancelling 经 recover 转为 reconciling 后不保留取消意图。本流程依赖公共执行在服务重启时将旧轮次结算为 interrupted，且宿主须先完成公共恢复再恢复调度；否则核对到仍运行的轮次可能回到 running。
+取消恢复前提：cancelling 经 recover 转为 reconciling 后不保留取消意图。宿主须先完成公共恢复（含工作流执行桥的 boot sweep）再恢复调度。对话轮次依赖公共执行在服务重启时结算为 interrupted。工作流运行由 boot sweep 失败，此时核对记为 interrupted / server_restarted；但 sweep 吸收并恢复的 Iteration 运行仍在执行，核对把它的 reconciling 记录经 accepted 回到 running（与等待表单的分支相同），所以可以从定时任务取消，之后的失败记为 failed / workflow_run_failed，而不是重启。
 
 ## 等待表单
 

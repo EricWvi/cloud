@@ -218,7 +218,7 @@ describe('toGraphWorkflowRun', () => {
         failedAttempts: [
           failed('a-1', 'a', 1),
           failed('a-2', 'a', 2, { sessionId: null, startedAt: null }),
-          // v2 does not replace container attempts; compatibility history stays root-only.
+          // Unknown occurrences remain ignored; scoped retry history is covered below.
           failed('r-1', 'a', 1, { iteration: 0 }),
           failed('l-1', 'a', 1, { scopeId: 'loop-round' }),
           failed('gone', 'not-in-graph', 1),
@@ -231,6 +231,48 @@ describe('toGraphWorkflowRun', () => {
       { nodeRunId: 'a-2', attempt: 2, kind: 'session', errorMessage: '第 2 次失败', sourceChain: ['boom'], recordedAt: 2, finishedAt: new Date(2_000).toISOString() },
     ])
     expect(run.nodeStates.out!.failedAttempts).toBeUndefined()
+  })
+
+  it('attaches retry waits and real failed sessions to their exact Loop and Iteration rounds', () => {
+    const graph = normalizeWorkflowDefinition({ ...definition, nodes: [
+      graphNode('start', 'start'), graphNode('loop', 'loop'), graphNode('entry', 'start', undefined, 'loop'), graphNode('writer', 'agent', undefined, 'loop'),
+      graphNode('iter', 'iteration'), graphNode('worker', 'agent', 'iter'),
+    ], edges: [{ id: 'outer', source: 'start', target: 'loop' }, { id: 'body', source: 'entry', target: 'writer' }, { id: 'region', source: 'iter', target: 'worker' }] })
+    const wait = (previous: string) => JSON.stringify({
+      retry_wait: { attempt: 2, max_attempt: 3, retry: 1, max_retries: 2, delay_ms: 10000, scheduled_at: 2000, due_at: 12000 },
+      auto_retry: { retry: 1, max_retries: 2 }, retry_chain: [previous],
+    })
+    const wire = detail({}, [
+      nodeRun({ id: 'loop-parent', nodeId: 'loop', nodeType: 'loop', status: 'running' }),
+      nodeRun({ id: 'writer-1-next', scopeId: 'round-1', nodeId: 'writer', nodeType: 'agent', status: 'running', startedAt: null, finishedAt: null, payload: wait('writer-1-old') }),
+      nodeRun({ id: 'writer-2-next', scopeId: 'round-2', nodeId: 'writer', nodeType: 'agent', status: 'running', startedAt: null, finishedAt: null, payload: wait('writer-2-old') }),
+      nodeRun({ id: 'worker-0-next', nodeId: 'worker', nodeType: 'agent', iteration: 0, status: 'running', startedAt: null, finishedAt: null, payload: wait('worker-0-old') }),
+      nodeRun({ id: 'worker-1-next', nodeId: 'worker', nodeType: 'agent', iteration: 1, status: 'running', startedAt: null, finishedAt: null, payload: wait('worker-1-old') }),
+    ])
+    wire.scopes = [1, 2].map((roundIndex) => ({ id: `round-${roundIndex}`, runId: 'run', parentLoopNodeRunId: 'loop-parent', roundIndex, status: 'running', state: null, createdAt: 0, updatedAt: 0 }))
+    wire.failedAttempts = [
+      { nodeRunId: 'writer-1-old', nodeId: 'writer', scopeId: 'round-1', iteration: null, sessionId: 'writer-session-1', attempt: 1, kind: 'session', message: 'writer failure 1', sourceChain: ['writer cause 1'], recordedAt: 1, startedAt: 1, finishedAt: 2 },
+      { nodeRunId: 'writer-2-old', nodeId: 'writer', scopeId: 'round-2', iteration: null, sessionId: 'writer-session-2', attempt: 1, kind: 'session', message: 'writer failure 2', sourceChain: ['writer cause 2'], recordedAt: 2, startedAt: 2, finishedAt: 3 },
+      { nodeRunId: 'worker-0-old', nodeId: 'worker', scopeId: 'root:run', iteration: 0, sessionId: 'worker-session-0', attempt: 1, kind: 'session', message: 'worker failure 0', sourceChain: ['worker cause 0'], recordedAt: 3, startedAt: 3, finishedAt: 4 },
+      { nodeRunId: 'worker-1-old', nodeId: 'worker', scopeId: 'root:run', iteration: 1, sessionId: 'worker-session-1', attempt: 1, kind: 'session', message: 'worker failure 1', sourceChain: ['worker cause 1'], recordedAt: 4, startedAt: 4, finishedAt: 5 },
+    ]
+    const run = toGraphWorkflowRun(wire, graph)
+    for (const index of [0, 1]) {
+      const writer = run.rounds?.[index]?.nodeStates.writer
+      expect(writer?.status).toBe('retry_waiting')
+      expect(writer?.failedAttempts).toEqual([expect.objectContaining({
+        nodeRunId: `writer-${index + 1}-old`, sessionId: `writer-session-${index + 1}`, errorMessage: `writer failure ${index + 1}`,
+        sourceChain: [`writer cause ${index + 1}`], loopRoundIndex: index + 1, replacedBy: 'automatic_retry_scheduled',
+      })])
+      const worker = run.roundStates?.worker?.[index]
+      expect(worker?.status).toBe('retry_waiting')
+      expect(worker?.failedAttempts).toEqual([expect.objectContaining({
+        nodeRunId: `worker-${index}-old`, sessionId: `worker-session-${index}`, errorMessage: `worker failure ${index}`,
+        sourceChain: [`worker cause ${index}`], iteration: index, replacedBy: 'automatic_retry_scheduled',
+      })])
+    }
+    expect(run.nodeStates.writer).toEqual({ status: 'idle' })
+    expect(run.nodeStates.worker?.failedAttempts?.[0]).toMatchObject({ nodeRunId: 'worker-1-old', iteration: 1 })
   })
 
   it('overlays kickoff values only on the root Start, preserving Loop entry values', () => {

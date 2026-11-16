@@ -340,8 +340,8 @@ func foldCompletion(output *string, structured any) func([]byte, NodeRun) ([]byt
 	}
 }
 
-// FailNode retries eligible root Agents or records failure and propagates it to the owner.
-// A late callback is a no-op.
+// FailNode retries eligible root, Iteration or Loop Agents, or records failure and propagates it
+// to the owner. A late callback is a no-op.
 func (e *Engine) FailNode(ctx context.Context, runID, nodeRunID string, f Failure) error {
 	defer e.gate(runID)()
 	if err := e.fail(ctx, runID, nodeRunID, f); err != nil {

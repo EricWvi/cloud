@@ -180,6 +180,18 @@ func (f *fakeExecution) request(id string) execution.StartRequest {
 	return execution.StartRequest{}
 }
 
+// scope returns the execution scope the session's Start ran under.
+func (f *fakeExecution) scope(id string) execution.Scope {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, r := range f.started {
+		if s := f.sessions[id]; s != nil && s.caller.AttemptID == r.Caller.AttemptID {
+			return f.scopes[i]
+		}
+	}
+	return execution.Scope{}
+}
+
 func completed(answer string) execution.Result {
 	return execution.Result{Status: execution.StatusCompleted, Answer: answer, AnswerComplete: true, StopReason: "end_turn"}
 }

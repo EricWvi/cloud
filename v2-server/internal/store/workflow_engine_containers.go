@@ -125,7 +125,7 @@ func (s *Store) AdvanceWorkflowEngineContainer(ctx context.Context, runID, paren
 				if _, err := tx.Exec(ctx, `UPDATE v2_workflow_node_runs SET status='succeeded', payload=COALESCE(payload,'{}'::jsonb)||'{"stop_reason":"loop_exit"}'::jsonb, finished_at=now(), updated_at=now() WHERE id=$1`, exit.ID); err != nil {
 					return err
 				}
-				if _, err := tx.Exec(ctx, `UPDATE v2_workflow_node_runs SET status='cancelled', finished_at=now(), updated_at=now() WHERE scope_id=$1 AND deleted_at IS NULL AND status IN ('pending','running')`, in.ScopeID); err != nil {
+				if _, err := tx.Exec(ctx, `UPDATE v2_workflow_node_runs SET status='cancelled', finished_at=now(), updated_at=now(), payload=CASE WHEN payload ? 'retry_wait' THEN payload-'retry_wait' ELSE payload END WHERE scope_id=$1 AND deleted_at IS NULL AND status IN ('pending','running')`, in.ScopeID); err != nil {
 					return err
 				}
 			}

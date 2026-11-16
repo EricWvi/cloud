@@ -50,12 +50,12 @@ func unappliedAgentSettings(config object, at placement) []string {
 }
 
 // retryApplies is the single answer to "will v2 automatically retry this Agent node": its
-// policy would retry, it is not interactive, and it sits in the root graph. Loop and Iteration
-// members do not retry yet (#1169), and desktop never retries an interactive node
-// (node_runtime.rs:373-379 at ebd5b725). unappliedAgentSettings and the engine's retry decision
-// both call it with the node's placement, so the editor, the run payload and the runtime agree.
+// policy would retry and it is not interactive. Root, Loop-body and Iteration-region Agents all
+// apply; desktop never retries an interactive node (node_runtime.rs:373-379 at ebd5b725).
+// unappliedAgentSettings and the engine's retry decision both call it with the node's placement,
+// so the editor, the run payload and the runtime agree.
 func retryApplies(config object, at placement) bool {
-	return retryWouldRun(config) && !agentInteractive(config) && at == placement{}
+	return retryWouldRun(config) && !agentInteractive(config)
 }
 
 // agentInteractive reports whether an Agent is configured for a conversation a person drives.

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/agentruntime"
+	"github.com/wanglongan587/cloud/v2-server/internal/boot"
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/executionruntime"
 	"github.com/wanglongan587/cloud/v2-server/internal/nodeservices"
@@ -244,8 +245,14 @@ func run(addr, dbURL string, cleanup, fixture, testFixtures bool) (resultErr err
 	skillDone := make(chan struct{})
 	go func() { defer close(skillDone); runSkillReconciler(skillCtx, db, driver) }()
 	defer func() { cancelSkills(); <-skillDone }()
-	// Workflow runs never outlive the process: fail what the previous one left executing before
-	// serving, and stop observing turns before the execution runtime closes (defers run LIFO).
+	// Startup recovery settles what the previous process left live before serving (boot.Recover
+	// owns the order). Runs owned by a task — handling runs and decomposition runs — never outlive
+	// the process: their owners cancel them first, except a decomposition run at a submitted review,
+	// which the review recovery finishes and its decomposition adopts after the sweep. Of the other
+	// workflow runs, the sweep fails what was executing except an interrupted Iteration it can
+	// absorb, which it resumes under its frozen starter; that run, and a run frozen at a review
+	// form, outlive the process. Hosts stop observing turns before the execution runtime closes
+	// (defers run LIFO).
 	workflowRuns, e := workflowhost.NewHost(workflowhost.Config{Store: db, Execution: runtime, Catalog: runtime})
 	if e != nil {
 		return e
@@ -253,22 +260,13 @@ func run(addr, dbURL string, cleanup, fixture, testFixtures bool) (resultErr err
 	defer workflowRuns.Close()
 	taskWorkflows := taskworkflow.New(db, taskWorkflowRunner{workflowRunStarter{workflowRuns}})
 	defer taskWorkflows.Close()
-	if e := taskWorkflows.Recover(ctx); e != nil {
-		return e
-	}
-	if e := workflowRuns.Interrupt(ctx); e != nil {
-		return e
-	}
-	// Task runs, likewise, end what the previous process left live before serving.
 	taskRuns := taskrun.New(db, runtime, runtime, nil)
 	defer taskRuns.Close()
-	if e := taskRuns.Interrupt(ctx); e != nil {
-		return e
-	}
-	// Decompositions settle what the previous process left running, after its runs were interrupted.
 	decompositions := taskdecomp.New(db, workflowRunStarter{workflowRuns}, nil)
 	defer decompositions.Close()
-	if e := decompositions.Recover(ctx); e != nil {
+	if e := boot.Recover(ctx, boot.Hosts{
+		TaskWorkflows: taskWorkflows, Decompositions: decompositions, WorkflowRuns: workflowRuns, TaskRuns: taskRuns,
+	}); e != nil {
 		return e
 	}
 	options := withWorkflowDomain(server.Options{

@@ -6,8 +6,12 @@
 //
 // Writing the subtasks and ending the decomposition share one transaction guarded by the
 // decomposition still running, so a run reported finished twice, by the watcher, a page read and a
-// restart, writes its subtasks once. A decomposition never outlives its run: Recover settles what a
-// previous process left running, after the workflow host has interrupted its runs.
+// restart, writes its subtasks once. A decomposition does not outlive the process that started it,
+// with one exception: Recover runs before the workflow host's boot sweep, cancels every
+// decomposition run the previous process left live and fails its decomposition, so the sweep can
+// never absorb and resume one. The exception is a run whose review form was already submitted:
+// what remains of it is deterministic review work the host's review recovery replays, so Recover
+// leaves it running and Adopt, after the sweep, settles its decomposition from the run's outcome.
 package taskdecomp
 
 import (
@@ -49,11 +53,13 @@ type Store interface {
 	Task(ctx context.Context, tenant, id string) (store.Task, error)
 	PublishedWorkflowSnapshot(ctx context.Context, tenant, workflowID string) (store.WorkflowSnapshot, error)
 	CreateWorkflowRun(ctx context.Context, tenant, workflowID, snapshotID string, in store.WorkflowRunInput) (store.WorkflowRun, error)
+	CancelWorkflowRun(ctx context.Context, tenant, runID string) (store.WorkflowRun, error)
 	WorkflowRun(ctx context.Context, tenant, runID string) (store.WorkflowRun, error)
 	TaskDecompositions(ctx context.Context, tenant, taskID string) ([]store.TaskDecomposition, error)
 	TaskDecompositionByKey(ctx context.Context, tenant, taskID, user, key string) (store.TaskDecomposition, error)
 	LiveTaskDecomposition(ctx context.Context, tenant, taskID string) (store.TaskDecomposition, bool, error)
 	RunningTaskDecompositions(ctx context.Context) ([]store.TaskDecomposition, error)
+	RecoverableFormRuns(ctx context.Context) ([]string, error)
 	CreateTaskDecomposition(ctx context.Context, in store.NewTaskDecomposition) (store.TaskDecomposition, error)
 	SettleTaskDecomposition(ctx context.Context, id string, subtasks []store.Subtask, failure string) (store.TaskDecomposition, bool, error)
 }
@@ -202,21 +208,60 @@ func (h *Host) List(ctx context.Context, tenant, taskID string) ([]store.TaskDec
 	return items, nil
 }
 
-// Recover settles the decompositions a previous process left running. It must run after the
-// workflow host has interrupted that process's runs: a run that still has not ended then never
-// will, so its decomposition fails.
+// Recover settles the decompositions a previous process left running. A decomposition whose run
+// has ended settles from it. One whose run is at a submitted review form (the host's
+// RecoverableFormRuns) stays running for the review recovery and Adopt. Any other has its run
+// cancelled and fails, because decompositions do not cross processes. It must run before the
+// workflow host's boot sweep (see package boot): the sweep can absorb an interrupted Iteration run
+// and resume it, and a decomposition run it resumed would carry on after its decomposition failed
+// here, its subtasks never written. A submitted review's run is never absorbed: the sweep leaves
+// form runs alone, and the review recovery replays only deterministic work.
 func (h *Host) Recover(ctx context.Context) error {
 	items, e := h.store.RunningTaskDecompositions(ctx)
 	if e != nil {
 		return fmt.Errorf("recover task decompositions: %w", e)
 	}
+	reviews, e := h.store.RecoverableFormRuns(ctx)
+	if e != nil {
+		return fmt.Errorf("recover task decompositions: read submitted reviews: %w", e)
+	}
+	submitted := make(map[string]bool, len(reviews))
+	for _, id := range reviews {
+		submitted[id] = true
+	}
 	for _, d := range items {
-		if _, done := h.settle(ctx, d); done {
+		if _, done := h.settle(ctx, d); done || submitted[d.WorkflowRunID] {
 			continue
+		}
+		// A run that ended since the read above is already terminal; the failure below holds.
+		if _, e := h.store.CancelWorkflowRun(ctx, d.TenantID, d.WorkflowRunID); e != nil &&
+			!errors.Is(e, store.ErrWorkflowRunState) && !errors.Is(e, store.ErrWorkflowRunNotFound) {
+			return fmt.Errorf("cancel interrupted decomposition run: %w", e)
 		}
 		if _, _, e := h.store.SettleTaskDecomposition(ctx, d.ID, nil, "服务重启，拆分已中断，请重新拆分。"); e != nil {
 			return fmt.Errorf("interrupt task decomposition: %w", e)
 		}
+	}
+	return nil
+}
+
+// Adopt takes over the decompositions Recover left running, after the workflow host's boot sweep
+// has replayed their submitted reviews: each settles from its run's outcome now, or, if the run is
+// still running, is watched until it ends like a decomposition this process started. It must run
+// after the sweep and before serving requests (see package boot).
+func (h *Host) Adopt(ctx context.Context) error {
+	items, e := h.store.RunningTaskDecompositions(ctx)
+	if e != nil {
+		return fmt.Errorf("adopt task decompositions: %w", e)
+	}
+	for _, d := range items {
+		if _, done := h.settle(ctx, d); done {
+			continue
+		}
+		// Subscribe before the watcher's first read, so an end between the two is not missed.
+		events, cancel := h.runs.Subscribe(d.WorkflowRunID)
+		h.workers.Add(1)
+		go h.watch(d, events, cancel)
 	}
 	return nil
 }
