@@ -13,6 +13,7 @@ import {
   postApiV1TenantsTidSpacesSpaceIdPlugins,
 } from '@/api/spaces/spaces'
 import { useRole } from '@/app/auth/user'
+import { codeOf } from '@/lib/api-client'
 import { getListMcpQueryKey, useListMcp, installMcp, removeMcp } from '@/lib/mcp-api/generated'
 
 const useMarketScope = create<{
@@ -34,6 +35,19 @@ export const pluginKey = (plugin: {
 export const pluginInstalled = (selection?: SpacePlugin) =>
   selection?.desiredState === 'installed' &&
   selection.observedState === 'installed'
+
+// Install failures whose cause the user can act on. A Skill or workflow install downloads and
+// verifies its package before it answers, so an unreachable market and a broken package surface here.
+const mutationMessages: Record<string, string> = {
+  plugin_package_unavailable: '暂时无法从市场下载插件包，请稍后重试。',
+  plugin_package_invalid: '插件包校验失败或不包含可用的技能，无法安装。',
+}
+
+/** Replaces a plugin mutation's transport error with a readable message for known fault codes. */
+export function marketplaceError(error: unknown): unknown {
+  const message = mutationMessages[codeOf(error) ?? '']
+  return message ? new Error(message) : error
+}
 
 /**
  * Reads the current workspace's marketplace catalog and Space selections through generated Cloud
@@ -196,7 +210,7 @@ export function usePluginMarketplace() {
       catalog.isLoading ||
       selections.isLoading || mcpQuery.isLoading,
     error: tenants.error ?? spaces.error ?? catalog.error ?? selections.error ?? mcpQuery.error,
-    mutationError: install.error ?? remove.error,
+    mutationError: marketplaceError(install.error ?? remove.error),
     mutating: install.isPending || remove.isPending,
     resetErrors: () => {
       install.reset()

@@ -23,7 +23,7 @@ ID。`members/`、`skills/`、`roles/` 与 `data/marketplace.ts` 不使用它。
   `Retrieval`/`Credentials` 下载、校验并导入，来源来源和官方与否不加区别）；运行时预装的
   OpenCode、Claude Code 只读显示「运行时预装」，没有安装入口；市场 Agent、Hook 与合集
   只浏览并显示「暂不支持安装」（服务端拒绝新建这些选择，返回 `plugin_kind_not_installable`，
-  已有用户选择也不允许更新）。安装工作流会把工作流导入库并发布 v1，卸载保留工作流和历史。
+  已有用户选择也不允许更新）。安装工作流会把工作流导入库并发布 v1，卸载保留工作流和历史。Skill 与工作流安装会先由服务端下载并校验插件包：市场暂时不可达（`plugin_package_unavailable`）提示稍后重试，包校验失败或不含技能（`plugin_package_invalid`）提示无法安装，不留下安装选择。
   目录来自 v2-server 对 `ora-space/marketplace` 的真实 Git 同步，而不是前端内置数据。目录把来源发布的明暗主题
   图标嵌入快照；页面按插件类型分组，未发布图标的条目使用对应的类型图标。owner 可写，
   member 只读。`lib/demo/plugin-installs.ts` 只在 `VITE_DEMO_MOCK=1` 时给市场 Agent、Hook

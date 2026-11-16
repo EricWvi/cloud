@@ -298,6 +298,21 @@ it('installs and removes an official workflow through the server', async () => {
   await waitFor(() => expect(within(row).getByText('未安装')).toBeInTheDocument())
 })
 
+it('explains a workflow install whose package the market cannot serve', async () => {
+  installMarketplaceBackend({
+    catalog: [workflow],
+    installFailure: { status: 503, code: 'plugin_package_unavailable' },
+  })
+  const user = userEvent.setup()
+  renderSettingsPage(<PluginsPage />)
+  const row = await screen.findByRole('article', { name: '需求开发' })
+  await user.click(within(row).getByRole('button', { name: '安装' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    '暂时无法从市场下载插件包，请稍后重试。',
+  )
+  expect(within(row).getByText('未安装')).toBeInTheDocument()
+})
+
 it('installs a non-official workflow through the server like any workflow', async () => {
   const example = marketplaceEntry('ora-space.workflow-examples', {
     kind: 'workflow', title: 'Workflow Examples', sourceNamespace: 'official', version: '0.1.0',

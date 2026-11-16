@@ -250,6 +250,19 @@ it('installs and removes the source plugin from the skill row and keeps the docu
   ).toHaveAttribute('href', '/settings/plugins?plugin=demo%2Fwriting-kit')
 })
 
+it.each([
+  { status: 503, code: 'plugin_package_unavailable', message: '暂时无法从市场下载插件包，请稍后重试。' },
+  { status: 400, code: 'plugin_package_invalid', message: '插件包校验失败或不包含可用的技能，无法安装。' },
+])('explains a failed install ($code) and leaves the skill uninstalled', async ({ status, code, message }) => {
+  installMarketplaceBackend({ catalog: [writing], installFailure: { status, code } })
+  const user = userEvent.setup()
+  renderSettingsPage(<SkillsPage />)
+  const row = await screen.findByRole('article', { name: 'writing-guide' })
+  await user.click(within(row).getByRole('button', { name: '安装技能' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent(message)
+  expect(within(row).getByText('来源插件未安装')).toBeInTheDocument()
+})
+
 it('treats a selected market skill as waiting for delivery without a project node receipt', async () => {
   const backend = installMarketplaceBackend({
     catalog: [writing],
