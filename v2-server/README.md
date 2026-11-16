@@ -808,7 +808,7 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 | PUT /api/v1/tenants/{tid}/spaces/{sid}/mcp/settings | owner 以 revision 合并 values，clear 仅清除指定覆盖值，省略秘密保留原值 |
 | DELETE /api/v1/tenants/{tid}/spaces/{sid}/mcp | owner 按 revision 删除租户安装，后续节点无法再选择它 |
 
-设置复用 V2_MARKET_CREDENTIAL_KEY，以 AES-256-GCM 在写入 SQL 前密封，附加数据绑定租户与插件。密钥缺失或不可解密时返回 mcp_credentials_unavailable。读取接口隐藏 secret 设置的值及默认值，升级包会清空旧覆盖值。正在执行的节点拥有独立冻结快照，配置和卸载影响后续会话。
+设置复用 V2_MARKET_CREDENTIAL_KEY，以 AES-256-GCM 在写入 SQL 前密封，附加数据绑定租户与插件。密钥缺失或不可解密时返回 mcp_credentials_unavailable。读取接口隐藏 secret 设置的值及默认值；HTTP Authorization 或 Proxy-Authorization 引用的设置也视为秘密，兼容未声明 secret 的旧包。升级包会清空旧覆盖值。正在执行的节点拥有独立冻结快照，配置和卸载影响后续会话。
 
 工作流只下发启用且明确选择的 MCP。无选择时发送空集合语义，每个节点单独冻结包和设置，配置完整性失败会标出 plugin_id、setting_id 或 transport。Node 的 HTTP 与 session/load 能力错误以稳定码呈现，设置值不进入运行事件、Node ledger 或页面 DTO。会话恢复、live refresh 和宿主健康探测由后续生命周期实现承接。
 

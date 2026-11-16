@@ -26,9 +26,11 @@ func TestMCPInstallConfigureAndRemoveHTTP(t *testing.T) {
 	t.Setenv("V2_MARKET_CREDENTIAL_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{8}, 32)))
 	var archive bytes.Buffer
 	z := zip.NewWriter(&archive)
+	// Match the first official Tavily package: Windows ZIP paths and an
+	// Authorization reference with no explicit secret metadata.
 	for name, value := range map[string]string{
 		"orax.toml":          "identifier = \"fixture.search\"\nkind = \"mcp\"\nversion = \"1.0.0\"\n",
-		"assets/config.json": `{"schemaVersion":1,"settings":{"token":{"type":"string","title":"Token","description":"Authentication","secret":true,"required":true}},"transport":{"type":"http","url":"https://example.test/mcp","headers":{"Authorization":{"setting":"token"}}}}`,
+		`assets\config.json`: `{"schemaVersion":1,"settings":{"apiKey":{"type":"string","title":"API key","description":"Authentication","required":true}},"transport":{"type":"http","url":"https://example.test/mcp","headers":{"Authorization":{"setting":"apiKey","prefix":"Bearer "}}}}`,
 	} {
 		f, e := z.Create(name)
 		if e != nil {
@@ -98,8 +100,12 @@ func TestMCPInstallConfigureAndRemoveHTTP(t *testing.T) {
 	if resource["complete"] != false {
 		t.Fatal("missing config reported complete")
 	}
+	settings := resource["settings"].([]any)
+	if len(settings) != 1 || settings[0].(map[string]any)["secret"] != true {
+		t.Fatal("legacy authentication setting not secret")
+	}
 	const secret = "http-only-fixture-secret"
-	status, body = c.do("PUT", base+"/settings", map[string]any{"identifier": "official/fixture.search", "revision": resource["revision"], "values": map[string]any{"token": secret}})
+	status, body = c.do("PUT", base+"/settings", map[string]any{"identifier": "official/fixture.search", "revision": resource["revision"], "values": map[string]any{"apiKey": secret}})
 	if status != 200 {
 		t.Fatal(status, body)
 	}
@@ -107,8 +113,13 @@ func TestMCPInstallConfigureAndRemoveHTTP(t *testing.T) {
 	if resource["complete"] != true {
 		t.Fatal(body)
 	}
-	status, body = c.do("GET", list, nil)
 	serialized, _ := json.Marshal(body)
+	configured := resource["configuredSecrets"].([]any)
+	if bytes.Contains(serialized, []byte(secret)) || len(configured) != 1 || configured[0] != "apiKey" {
+		t.Fatal("write response exposed authentication setting")
+	}
+	status, body = c.do("GET", list, nil)
+	serialized, _ = json.Marshal(body)
 	if status != 200 || bytes.Contains(serialized, []byte(secret)) {
 		t.Fatal("read secret", status)
 	}
@@ -119,7 +130,8 @@ func TestMCPInstallConfigureAndRemoveHTTP(t *testing.T) {
 	storetest.SignIn(t, f.store, "mcp-member", "member", "member")
 	c.login("mcp-member")
 	status, body = c.do("GET", list, nil)
-	if status != 200 {
+	serialized, _ = json.Marshal(body)
+	if status != 200 || bytes.Contains(serialized, []byte(secret)) {
 		t.Fatal(status, body)
 	}
 	for _, method := range []string{"POST", "DELETE"} {

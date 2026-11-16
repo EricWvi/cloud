@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/wanglongan587/cloud/v2-server/internal/strictjson"
@@ -52,18 +54,28 @@ func VerifyMCPArchive(archive []byte, id, version string) (MCPDeclaration, error
 	seen := map[string]bool{}
 	var total uint64
 	for _, file := range z.File {
+		// Node's StrictRelativePath treats either separator as a path boundary. Keep
+		// the verified archive bytes intact, but use that same spelling for lookup
+		// and duplicate detection (older official packages were built on Windows).
+		name := strings.ReplaceAll(file.Name, "\\", "/")
+		if file.FileInfo().IsDir() {
+			name = strings.TrimRight(name, "/")
+		}
+		if name == "" || name == "." || !utf8.ValidString(name) || strings.IndexFunc(name, unicode.IsControl) >= 0 || path.IsAbs(name) || path.Clean(name) != name || name == ".." || strings.HasPrefix(name, "../") || hasMCPDrivePrefix(name) || file.Mode()&os.ModeSymlink != 0 {
+			return result, ErrPackage
+		}
 		if file.FileInfo().IsDir() {
 			continue
 		}
-		if seen[file.Name] || file.Mode()&os.ModeSymlink != 0 || path.IsAbs(file.Name) || path.Clean(file.Name) != file.Name || strings.Contains(file.Name, "\\") || strings.HasPrefix(file.Name, "../") {
+		if seen[name] {
 			return result, ErrPackage
 		}
-		seen[file.Name] = true
+		seen[name] = true
 		if file.UncompressedSize64 > 512<<20-total {
 			return result, ErrPackage
 		}
 		total += file.UncompressedSize64
-		switch file.Name {
+		switch name {
 		case "orax.toml":
 			raw, err := readZipEntry(file, maxManifestBytes)
 			if err != nil || toml.Unmarshal(raw, &manifest) != nil {
@@ -96,12 +108,28 @@ func VerifyMCPArchive(archive []byte, id, version string) (MCPDeclaration, error
 	if result.Transport != "http" && result.Transport != "stdio" {
 		return result, ErrPackage
 	}
+	// Existing published MCPs can omit the secret flag. Authentication header
+	// references are credentials even when the package omits that UI metadata.
+	credentials := map[string]bool{}
+	if result.Transport == "http" {
+		if headers, ok := raw.Transport["headers"].(map[string]any); ok {
+			for name, value := range headers {
+				if strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "Proxy-Authorization") {
+					if reference, ok := value.(map[string]any); ok {
+						if id, ok := reference["setting"].(string); ok {
+							credentials[id] = true
+						}
+					}
+				}
+			}
+		}
+	}
 	result.Settings = []MCPSetting{}
 	for id, setting := range raw.Settings {
 		if !mcpSettingID.MatchString(id) || strings.TrimSpace(setting.Title) == "" || strings.TrimSpace(setting.Description) == "" {
 			return result, ErrPackage
 		}
-		s := MCPSetting{ID: id, Type: setting.Type, Label: setting.Title, Description: setting.Description, Secret: setting.Secret, Required: setting.Required}
+		s := MCPSetting{ID: id, Type: setting.Type, Label: setting.Title, Description: setting.Description, Secret: setting.Secret || credentials[id], Required: setting.Required}
 		if s.Type != "string" && s.Type != "number" && s.Type != "boolean" {
 			return result, ErrPackage
 		}
@@ -140,6 +168,15 @@ func VerifyMCPArchive(archive []byte, id, version string) (MCPDeclaration, error
 	}
 	sort.Strings(result.References)
 	return result, nil
+}
+
+func hasMCPDrivePrefix(name string) bool {
+	for _, segment := range strings.Split(name, "/") {
+		if len(segment) >= 2 && segment[1] == ':' && ((segment[0] >= 'a' && segment[0] <= 'z') || (segment[0] >= 'A' && segment[0] <= 'Z')) {
+			return true
+		}
+	}
+	return false
 }
 
 // Reject duplicate members before metadata parsing so the form and Node agree on secrecy
