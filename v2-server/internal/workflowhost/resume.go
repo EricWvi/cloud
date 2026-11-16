@@ -84,6 +84,13 @@ func (h *Host) ResumeRun(ctx context.Context, scope server.WorkflowRunScope, run
 	if owner == "" {
 		owner = scope.UserID
 	}
+	// A run that a sibling failed may still have interactive nodes parked in this process, their
+	// rows pending and their sessions open. Close them before planning, so the resume restarts
+	// them like any other cancelled node instead of racing the sweep that would end the session
+	// of a node the resumed run still showed as awaiting input.
+	if st := h.state(runID); st != nil {
+		h.releaseOrphans(st, runID)
+	}
 	st, ok := h.admitResume(runID, execution.Scope{TenantID: scope.TenantID, UserID: owner})
 	if !ok {
 		// The rows may name a rule that refuses anyway; otherwise the bridge is still settling a
@@ -122,11 +129,23 @@ func (h *Host) settling(runID string) bool {
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	return st.active != nil || st.starting != nil || st.starters != 0
+	if st.active != nil || st.starting != nil || st.starters != 0 {
+		return true
+	}
+	// A completion still settling an interactive node makes admitResume refuse as well. Nodes
+	// merely parked under the stopped run do not: the resume closes them itself.
+	for _, n := range st.interactive {
+		if n.phase == phaseCompleting {
+			return true
+		}
+	}
+	return false
 }
 
 // admitResume registers the resumed run's execution owner and counts the resume as a start under
-// way. A run with an Agent start or turn still in flight in this process is refused. A leftover
+// way. A run with an Agent start or turn still in flight in this process is refused, and so is
+// one that still tracks an interactive node: a completion is settling it (ResumeRun released the
+// parked ones just before). A leftover
 // state is reused with its cancellation request cleared, because the run it belonged to has
 // closed, and its generation advanced: a worker still draining its queue keeps going, but a
 // dispatch queued before the resume carries the old generation, so neither the worker loop nor
@@ -142,7 +161,7 @@ func (h *Host) admitResume(runID string, scope execution.Scope) (*runState, bool
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.active != nil || st.starting != nil || st.starters != 0 {
+	if st.active != nil || st.starting != nil || st.starters != 0 || len(st.interactive) != 0 {
 		return nil, false
 	}
 	st.cancelling = false

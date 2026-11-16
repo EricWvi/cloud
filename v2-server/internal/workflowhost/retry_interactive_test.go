@@ -8,10 +8,11 @@ import (
 	"testing"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
 
-// interactiveRetryGraph makes the root Agent a interactive with an explicit policy that would
+// interactiveRetryGraph makes the root Agent interactive with an explicit policy that would
 // retry; desktop never retries an interactive node, whatever its policy
 // (desktop@ebd5b725 crates/application/src/workflow_run/engine/node_runtime.rs:373-379).
 func interactiveRetryGraph() string {
@@ -19,8 +20,10 @@ func interactiveRetryGraph() string {
 		`"roleId":"reviewer"`, `"roleId":"reviewer","interactive":true`, 1)
 }
 
-// A retryable failure of an interactive root Agent fails the attempt and the run: no waiting
-// attempt is inserted and the attempt is not soft-deleted into history.
+// A turn failure that would retry an automatic Agent leaves an interactive root Agent parked on
+// its only attempt: a person drives the node, so no waiting attempt is inserted and the attempt is
+// not soft-deleted into history. Setup failures, which do fail the node, are covered by
+// TestInteractiveSetupFailuresAreNotAutoRetryable.
 func TestInteractiveRootAgentNeverRetries(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -31,10 +34,10 @@ func TestInteractiveRootAgentNeverRetries(t *testing.T) {
 	session := f.exec.awaitStart(t)
 	attempt := f.exec.request(session).Caller.AttemptID
 	f.exec.finish(session, execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
-	run, rows := f.await(t, id, terminal)
+	run, rows := f.await(t, id, parked("a"))
 	a := node(rows, "a")
-	if run.Status != "failed" || a.ID != attempt || a.Status != "failed" || node(rows, "b").ID != "" {
-		t.Fatalf("run %s, a %+v, b %+v; want the run failed on its only attempt", run.Status, a, node(rows, "b"))
+	if run.Status != store.WorkflowRunAwaitingInput || a.ID != attempt || node(rows, "b").ID != "" {
+		t.Fatalf("run %s, a %+v, b %+v; want the run awaiting input on its only attempt", run.Status, a, node(rows, "b"))
 	}
 	var p map[string]json.RawMessage
 	if err := json.Unmarshal(a.Payload, &p); err != nil {
@@ -42,21 +45,21 @@ func TestInteractiveRootAgentNeverRetries(t *testing.T) {
 	}
 	for _, key := range []string{"retry_wait", "auto_retry", "retry_chain"} {
 		if _, ok := p[key]; ok {
-			t.Errorf("failed interactive attempt carries %s: %s", key, a.Payload)
+			t.Errorf("parked interactive attempt carries %s: %s", key, a.Payload)
 		}
 	}
 	history, err := f.s.WorkflowRunFailedAttempts(ctx, f.scope.TenantID, id)
 	if err != nil || len(history) != 0 {
-		t.Fatalf("history = %+v %v; an interactive failure must not be replaced", history, err)
+		t.Fatalf("history = %+v %v; an interactive turn failure must not be replaced", history, err)
 	}
 	if starts(f) != 1 {
 		t.Fatalf("starts = %d, want the single interactive attempt", starts(f))
 	}
 }
 
-// An interactive root Agent that succeeds records the run path's unapplied list, which equals the
-// analysis of its graph and leaves retry out: it is not a setting v2 skips, since no Ora retries
-// an interactive node.
+// An interactive root Agent that its starter completes records the run path's unapplied list,
+// which equals the analysis of its graph and leaves out both retry (no Ora retries an interactive
+// node) and interactive (v2 parks a root Agent for its starter).
 func TestInteractiveRootAgentDoesNotListRetry(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -66,6 +69,10 @@ func TestInteractiveRootAgentDoesNotListRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.exec.finish(f.exec.awaitStart(t), completed("draft"))
+	f.await(t, id, parked("a"))
+	if _, err := f.host.CompleteNode(ctx, f.scope, id, "a", false, "human"); err != nil {
+		t.Fatal(err)
+	}
 	f.exec.finish(f.exec.awaitStart(t), completed("review"))
 	run, rows := f.await(t, id, terminal)
 	if run.Status != "succeeded" {
@@ -87,10 +94,12 @@ func TestInteractiveRootAgentDoesNotListRetry(t *testing.T) {
 			analyzed = entry.Settings
 		}
 	}
-	if slices.Contains(p.Unapplied, "retry") || slices.Contains(analyzed, "retry") || !slices.Equal(p.Unapplied, analyzed) {
-		t.Fatalf("payload lists %v, analysis %v; want equal lists without retry", p.Unapplied, analyzed)
+	if !slices.Equal(p.Unapplied, analyzed) {
+		t.Fatalf("payload lists %v, analysis %v; want equal lists", p.Unapplied, analyzed)
 	}
-	if !slices.Contains(p.Unapplied, "interactive") {
-		t.Fatalf("payload lists %v; the interactive mode itself is still unapplied", p.Unapplied)
+	for _, setting := range []string{"retry", "interactive"} {
+		if slices.Contains(p.Unapplied, setting) {
+			t.Fatalf("payload lists %v; %s is applied to a root interactive Agent", p.Unapplied, setting)
+		}
 	}
 }

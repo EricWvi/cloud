@@ -290,6 +290,14 @@ type runState struct {
 	turnDone           chan struct{}
 	closedScopes       map[string]bool
 	scopeCleanupErrors map[string]error
+
+	// activeNodeRun is the attempt whose turn holds the slot, so a node's stop finds its turn.
+	activeNodeRun string
+	// turns are human follow-up turns waiting for the run's turn slot, before queued attempts.
+	turns []followUp
+	// interactive holds the root-scope interactive Agent nodes whose session is open between
+	// turns, by node ID. Process-local on purpose: a restart fails parked nodes.
+	interactive map[string]*interactiveNode
 }
 
 // queuedDispatch is one Agent attempt waiting for the run's worker, with the generation of the
@@ -371,19 +379,12 @@ func (h *Host) UpdateRunInput(ctx context.Context, scope server.WorkflowRunScope
 	return h.store.WorkflowRun(ctx, scope.TenantID, runID)
 }
 
-// CompleteNode remains the unsupported interactive-Agent completion endpoint.
-// Dynamic forms use their own versioned submission endpoint.
-func (h *Host) CompleteNode(ctx context.Context, scope server.WorkflowRunScope, runID, _ string, _ bool, _ string) (store.WorkflowRun, error) {
-	if _, err := h.store.WorkflowRun(ctx, scope.TenantID, runID); err != nil {
-		return store.WorkflowRun{}, err
-	}
-	return store.WorkflowRun{}, server.ErrWorkflowNodeNotAwaitingInput
-}
-
 // CancelRun stops the run's executing Agent turn and waits for execution to confirm it before
 // closing the run as cancelled. Without confirmation the run stays open and the caller learns
 // the stop is unconfirmed; the run still never advances, and its worker closes it as cancelled
-// once the turn ends.
+// once the turn ends. When no turn was executing and only a parked interactive session could not
+// be ended, no worker follows up: the run stays open, refusing every node action, until the
+// caller cancels again.
 func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, runID string) (store.WorkflowRun, error) {
 	// Look the run up in the caller's tenant before taking its lock, so an unknown or foreign id
 	// never creates lifecycle state.
@@ -401,7 +402,7 @@ func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, run
 	}
 	run.Status = status
 	st := h.state(runID)
-	if st != nil && (run.Status == store.WorkflowStatusPending || run.Status == store.WorkflowStatusRunning) {
+	if st != nil && (run.Status == store.WorkflowStatusPending || run.Status == store.WorkflowStatusRunning || run.Status == store.WorkflowRunAwaitingInput) {
 		stopCtx, cancel := context.WithTimeout(ctx, h.stopTimeout)
 		defer cancel()
 		ref, err := st.requestCancel(stopCtx)
@@ -413,6 +414,11 @@ func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, run
 				return store.WorkflowRun{}, fmt.Errorf("%w: %w", server.ErrWorkflowRunStopUnconfirmed, err)
 			}
 		}
+		// Parked interactive nodes keep their sessions open between turns; a cancelled run
+		// must not leave them open.
+		if err := h.endParked(stopCtx, st); err != nil {
+			return store.WorkflowRun{}, fmt.Errorf("%w: %w", server.ErrWorkflowRunStopUnconfirmed, err)
+		}
 	}
 	run, err = h.store.CancelWorkflowRun(ctx, scope.TenantID, runID)
 	if err == nil || errors.Is(err, store.ErrWorkflowRunState) {
@@ -423,6 +429,9 @@ func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, run
 	}
 	h.hub.Publish(runID)
 	if st != nil {
+		st.mu.Lock()
+		st.interactive = nil // their sessions ended above and CancelWorkflowRun closed their rows
+		st.mu.Unlock()
 		h.forgetFinished(runID, st)
 	}
 	return run, nil

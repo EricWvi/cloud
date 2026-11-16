@@ -169,6 +169,9 @@ func (h *handler) completeWorkflowNode(w http.ResponseWriter, r *http.Request, a
 // stays a 500 so an implementation bug is not reported as a client mistake.
 func workflowRunLifecycleFault(w http.ResponseWriter, err error, op string) {
 	var invalid *WorkflowRunInputInvalid
+	if interactiveNodeFault(w, err) {
+		return
+	}
 	switch {
 	case errors.Is(err, store.ErrWorkflowRunNotFound):
 		fault(w, http.StatusNotFound, "workflow_run_not_found")

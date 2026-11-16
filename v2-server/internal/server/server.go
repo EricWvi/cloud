@@ -202,6 +202,8 @@ func newRouter(h *handler) *router {
 	rt.tenant("POST /api/v2/tenants/{tid}/workflow-runs/{rid}/resume", h.resumeWorkflowRun)
 	rt.tenant("PATCH /api/v2/tenants/{tid}/workflow-runs/{rid}/input", h.updateWorkflowRunInput)
 	rt.tenant("POST /api/v2/tenants/{tid}/workflow-runs/{rid}/nodes/{nodeId}/complete", h.completeWorkflowNode)
+	rt.tenant("POST /api/v2/tenants/{tid}/workflow-runs/{rid}/nodes/{nodeId}/turns", h.sendWorkflowNodeTurn)
+	rt.tenant("POST /api/v2/tenants/{tid}/workflow-runs/{rid}/nodes/{nodeId}/stop", h.stopWorkflowNodeTurn)
 	rt.tenant("GET /api/v2/tenants/{tid}/workflow-runs/{rid}/nodes", h.listWorkflowRunNodes)
 	rt.tenant("GET /api/v2/tenants/{tid}/workflow-runs/{rid}/events", h.workflowRunEvents)
 	rt.tenant("GET /api/v2/tenants/{tid}/workflow-runs/{rid}/nodes/{nodeRunId}/events", h.workflowNodeEvents)

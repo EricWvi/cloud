@@ -16,7 +16,11 @@ import (
 )
 
 // fakeExecution scripts the shared execution service: every accepted Start opens a session whose
-// owning turn ends when the test calls finish. Hooks inject the faults a scenario needs.
+// owning turn ends when the test calls finish. Hooks inject the faults a scenario needs. It
+// follows executionruntime.Service: a workflow run's sessions stay live side by side in the run's
+// directory, and a Start or Append is refused while one of the run's turns runs; a turn that does
+// not complete ends a LifetimeTurn session, and a held one only when AgentLost; Cancel ends the
+// session and reports AgentLost.
 type fakeExecution struct {
 	executiontest.Stub
 
@@ -27,6 +31,12 @@ type fakeExecution struct {
 	ended    []string
 	cancels  []execution.Ref
 	next     int
+	// closed sessions accept no Append: End and Cancel (which ends an Agent session) close one,
+	// and so do the runtime's own ends described above.
+	closed   map[string]bool
+	appended []execution.AppendRequest
+	// appendedCh receives each accepted Append's session ID.
+	appendedCh chan string
 
 	// beforeStart runs before a Start is accepted; a non-nil error refuses it.
 	beforeStart func(execution.StartRequest) error
@@ -37,14 +47,15 @@ type fakeExecution struct {
 }
 
 type fakeSession struct {
-	ref    execution.Ref
-	caller execution.Caller
-	events chan execution.Event
-	result *execution.Result
+	ref      execution.Ref
+	caller   execution.Caller
+	lifetime execution.Lifetime
+	events   chan execution.Event
+	result   *execution.Result
 }
 
 func newFakeExecution() *fakeExecution {
-	f := &fakeExecution{sessions: map[string]*fakeSession{}, startedCh: make(chan string, 16)}
+	f := &fakeExecution{sessions: map[string]*fakeSession{}, startedCh: make(chan string, 16), closed: map[string]bool{}, appendedCh: make(chan string, 16)}
 	f.ListExecutorsFunc = func(context.Context, execution.Scope) ([]execution.Executor, error) {
 		return []execution.Executor{
 			{ID: "opencode:fixture", AgentID: "official/ora-space.opencode", AgentName: "OpenCode", PluginVersion: "0.6.11", Model: execution.Model{ID: "fixture", Name: "Fixture"}},
@@ -59,8 +70,10 @@ func newFakeExecution() *fakeExecution {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.ended = append(f.ended, id)
+		f.closed[id] = true
 		return nil
 	}
+	f.AppendFunc = f.appendTurn
 	f.ReadAttemptFunc = func(_ context.Context, _ execution.Scope, c execution.Caller) (execution.Turn, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -87,10 +100,14 @@ func (f *fakeExecution) start(_ context.Context, scope execution.Scope, req exec
 			return s.ref, nil // an identical caller attempt is idempotent
 		}
 	}
+	if req.Caller.Kind == execution.CallerWorkflow && f.turnRunning(req.Caller.ID, "") {
+		f.mu.Unlock()
+		return execution.Ref{}, execution.ErrWorkspaceBusy // the run's turn slot is taken
+	}
 	f.next++
 	s := &fakeSession{
 		ref:    execution.Ref{SessionID: fmt.Sprintf("session-%d", f.next), TurnID: fmt.Sprintf("turn-%d", f.next)},
-		caller: req.Caller, events: make(chan execution.Event, 4),
+		caller: req.Caller, lifetime: req.Lifetime, events: make(chan execution.Event, 4),
 	}
 	f.sessions[s.ref.SessionID] = s
 	f.started = append(f.started, req)
@@ -138,9 +155,57 @@ func (f *fakeExecution) finish(id string, r execution.Result) {
 	s := f.sessions[id]
 	if s.result == nil {
 		s.result = &r
+		if r.Status != execution.StatusCompleted && (r.AgentLost || s.lifetime != execution.LifetimeHeld) {
+			f.closed[id] = true
+		}
 	}
 	f.mu.Unlock()
 	s.events <- execution.Event{Ref: s.ref, Kind: execution.EventTurnEnded, Result: &r}
+}
+
+// appendTurn opens the session's next turn, as the real service's Append on a live session.
+func (f *fakeExecution) appendTurn(_ context.Context, _ execution.Scope, req execution.AppendRequest) (execution.Ref, error) {
+	f.mu.Lock()
+	s := f.sessions[req.SessionID]
+	switch {
+	case s == nil:
+		f.mu.Unlock()
+		return execution.Ref{}, execution.ErrNotFound
+	case f.closed[req.SessionID]:
+		f.mu.Unlock()
+		return execution.Ref{}, execution.ErrSessionEnded
+	case s.caller.AttemptID == req.Caller.AttemptID:
+		f.mu.Unlock()
+		return s.ref, nil
+	case s.result == nil, s.caller.Kind == execution.CallerWorkflow && f.turnRunning(s.caller.ID, req.SessionID):
+		f.mu.Unlock()
+		return execution.Ref{}, execution.ErrWorkspaceBusy
+	}
+	f.next++
+	s.ref = execution.Ref{SessionID: req.SessionID, TurnID: fmt.Sprintf("turn-%d", f.next)}
+	s.caller, s.result = req.Caller, nil
+	f.appended = append(f.appended, req)
+	f.mu.Unlock()
+	f.appendedCh <- req.SessionID
+	return s.ref, nil
+}
+
+// awaitAppend returns the session of the next accepted follow-up turn.
+func (f *fakeExecution) awaitAppend(t *testing.T) string {
+	t.Helper()
+	select {
+	case id := <-f.appendedCh:
+		return id
+	case <-time.After(5 * time.Second):
+		t.Fatal("no follow-up turn appended")
+		return ""
+	}
+}
+
+func (f *fakeExecution) isClosed(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closed[id]
 }
 
 func (f *fakeExecution) cancel(_ context.Context, _ execution.Scope, ref execution.Ref) (execution.Result, error) {
@@ -152,7 +217,17 @@ func (f *fakeExecution) cancel(_ context.Context, _ execution.Scope, ref executi
 			return execution.Result{}, err
 		}
 	}
-	r := execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}
+	f.mu.Lock()
+	if s := f.sessions[ref.SessionID]; s != nil && s.ref == ref && s.result != nil {
+		// Like the runtime, cancelling a turn that already ended returns its result and leaves
+		// the session as that turn left it.
+		r := *s.result
+		f.mu.Unlock()
+		return r, nil
+	}
+	f.closed[ref.SessionID] = true
+	f.mu.Unlock()
+	r := execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled", AgentLost: true}
 	f.finish(ref.SessionID, r)
 	return r, nil
 }
@@ -190,6 +265,17 @@ func (f *fakeExecution) scope(id string) execution.Scope {
 		}
 	}
 	return execution.Scope{}
+}
+
+// turnRunning reports whether a live session of the workflow run, other than except, has a turn
+// in flight: a run's turns share one slot. Callers hold f.mu.
+func (f *fakeExecution) turnRunning(runID, except string) bool {
+	for id, s := range f.sessions {
+		if id != except && s.caller.Kind == execution.CallerWorkflow && s.caller.ID == runID && s.result == nil && !f.closed[id] {
+			return true
+		}
+	}
+	return false
 }
 
 func completed(answer string) execution.Result {

@@ -542,10 +542,10 @@ func TestLifecycleLocksAreReleasedAndNeverCreatedForUnknownRuns(t *testing.T) {
 // any store read, and a released slot leaves nothing in flight.
 func TestBeginStartRefusesADispatchFromAReplacedGeneration(t *testing.T) {
 	st := &runState{generation: 2}
-	if st.beginStart("", 1) {
+	if st.beginStart("", "attempt", 1) {
 		t.Fatal("a dispatch queued before the resume reserved the start slot")
 	}
-	if !st.beginStart("", 2) {
+	if !st.beginStart("", "attempt", 2) {
 		t.Fatal("a current dispatch was refused the start slot")
 	}
 	st.releaseStart()

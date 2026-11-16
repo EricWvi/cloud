@@ -145,12 +145,16 @@ func TestWorkflowRunsOverHTTP(t *testing.T) {
 	}
 
 	_, detail := call("GET", "/api/v2/tenants/"+tid+"/workflow-runs/"+runID, nil)
-	if len(detail["nodes"].([]any)) != 0 || len(detail["scopes"].([]any)) != 0 || len(detail["conditionDecisions"].(map[string]any)) != 0 || len(detail["iterationConditionDecisions"].(map[string]any)) != 0 {
+	if len(detail["nodes"].([]any)) != 0 || len(detail["scopes"].([]any)) != 0 || len(detail["conditionDecisions"].(map[string]any)) != 0 || len(detail["iterationConditionDecisions"].(map[string]any)) != 0 || detail["startedBy"] != nil {
 		t.Fatalf("empty detail = %v", detail)
 	}
 
 	// The execution bridge owns starting and dispatching; parking is what turns the run into the
-	// derived awaitingInput the page renders.
+	// derived awaitingInput the page renders. The starter it records is the one member who may
+	// talk to the parked node, so the detail names them.
+	if err := s.SetWorkflowStarter(ctx, tid, runID, me["id"].(string)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.StartWorkflowRun(ctx, tid, runID); err != nil {
 		t.Fatal(err)
 	}
@@ -163,8 +167,8 @@ func TestWorkflowRunsOverHTTP(t *testing.T) {
 	}
 	_, detail = call("GET", "/api/v2/tenants/"+tid+"/workflow-runs/"+runID, nil)
 	run = detail["run"].(map[string]any)
-	if run["status"] != "awaitingInput" || run["startedAt"] == nil {
-		t.Fatalf("derived status = %v", run)
+	if run["status"] != "awaitingInput" || run["startedAt"] == nil || detail["startedBy"] != me["id"] {
+		t.Fatalf("derived status = %v, started by %v", run, detail["startedBy"])
 	}
 	nodes := detail["nodes"].([]any)
 	if len(nodes) != 1 {

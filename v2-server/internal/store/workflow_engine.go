@@ -446,8 +446,10 @@ func (s *Store) UpdateWorkflowEngineRunInput(ctx context.Context, runID string, 
 // InterruptWorkflowRuns fails every attempt and run a previous process left executing, before
 // the process serves requests: every run that is running (or pending with started work) is
 // failed in one set-based update, including a run with no active node row left between a
-// completion and its next wave. Frozen root reviews are excluded and recovered separately;
-// every other non-terminal attempt fails without replaying an Agent. A waiting retry fails too,
+// completion and its next wave. Frozen root reviews are excluded and recovered separately, unless
+// their run also holds an Agent attempt that is not terminal (one running, or an interactive node
+// parked as pending): no Agent survives the process, so such a run fails like any other. Every
+// other non-terminal attempt fails without replaying an Agent. A waiting retry fails too,
 // losing its wait marker, because restart never re-arms a retry timer. It returns every run it
 // failed or whose active rows it failed.
 func (s *Store) InterruptWorkflowRuns(ctx context.Context, message string, detail func(attempt int, node []byte) ([]byte, error)) ([]string, error) {
@@ -475,11 +477,15 @@ func (s *Store) InterruptWorkflowRunsWithRecovery(
 }
 
 // interruptRunsSQL fails every run the previous process left running (or pending with started
-// work) except the absorbed IDs, returning the IDs it failed. It is one set-based statement so a
-// run left between a completion and its next wave — which has no active node row — is still failed.
+// work) except the absorbed IDs ($2), returning the IDs it failed. It is one set-based statement so
+// a run left between a completion and its next wave — which has no active node row — is still
+// failed. A run with a frozen review is spared unless the sweep failed its rows ($3): those runs
+// held an unfinished Agent attempt (see interruptibleRun), which is failed by now and so cannot
+// be asked about again here.
 const interruptRunsSQL = `
 	UPDATE v2_workflow_runs SET status = 'failed', error = $1, finished_at = now(), updated_at = now()
-	WHERE deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM v2_workflow_forms f WHERE f.run_id=v2_workflow_runs.id)
+	WHERE deleted_at IS NULL
+		AND (NOT EXISTS (SELECT 1 FROM v2_workflow_forms f WHERE f.run_id=v2_workflow_runs.id) OR id = ANY($3::uuid[]))
 		AND (status = 'running' OR (status = 'pending' AND state->'current_nodes' <> '[]'::jsonb))
 		AND NOT (id = ANY($2::uuid[]))
 	RETURNING id::text`
@@ -502,7 +508,7 @@ func (s *Store) interruptWorkflowRuns(
 		rows, err := tx.Query(ctx, `
 			SELECT `+prefixed("n", workflowNodeRunColumns)+`
 			FROM v2_workflow_node_runs n JOIN v2_workflow_runs r ON r.id = n.run_id
-			WHERE n.deleted_at IS NULL AND n.status IN ('pending', 'running') AND r.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM v2_workflow_forms f WHERE f.run_id=r.id)
+			WHERE n.deleted_at IS NULL AND n.status IN ('pending', 'running') AND r.deleted_at IS NULL AND (`+interruptibleRun("r")+`)
 			ORDER BY n.run_id, n.created_at
 			FOR UPDATE OF n`)
 		if err != nil {
@@ -567,6 +573,7 @@ func (s *Store) interruptWorkflowRuns(
 				}
 			}
 		}
+		swept := []string{}
 		for _, runID := range runIDs {
 			if absorbed[runID] {
 				continue
@@ -574,6 +581,7 @@ func (s *Store) interruptWorkflowRuns(
 			if err := failInterruptedNodes(ctx, tx, runID, byRun[runID], message, detail); err != nil {
 				return err
 			}
+			swept = append(swept, runID)
 		}
 		absorbedIDs := []string{}
 		for id := range absorbed {
@@ -582,7 +590,7 @@ func (s *Store) interruptWorkflowRuns(
 		// The sweep reports every run it decided about: those with active rows, absorbed or
 		// failed, then those the run UPDATE failed without any.
 		interrupted = append(interrupted, runIDs...)
-		failed, err := tx.Query(ctx, interruptRunsSQL, message, absorbedIDs)
+		failed, err := tx.Query(ctx, interruptRunsSQL, message, absorbedIDs, swept)
 		if err != nil {
 			return fmt.Errorf("interrupt runs: %w", err)
 		}
@@ -624,6 +632,13 @@ func failInterruptedNodes(ctx context.Context, tx pgx.Tx, runID string, nodes []
 		}
 	}
 	return nil
+}
+
+// interruptibleRun is the SQL condition, on the run aliased run, that a restart fails the run's
+// unfinished work: it has no frozen review, or it has an Agent attempt still pending or running.
+func interruptibleRun(run string) string {
+	return `NOT EXISTS (SELECT 1 FROM v2_workflow_forms f WHERE f.run_id=` + run + `.id) OR EXISTS (SELECT 1 FROM v2_workflow_node_runs a
+		WHERE a.run_id=` + run + `.id AND a.deleted_at IS NULL AND a.node_type='agent' AND a.status IN ('pending', 'running'))`
 }
 
 // prefixed qualifies a column list with a table alias.

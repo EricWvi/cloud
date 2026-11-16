@@ -489,6 +489,114 @@ func TestInterruptWorkflowRunsRefusesToAbsorbWithoutAStarter(t *testing.T) {
 	}
 }
 
+// A frozen review survives a restart, but no Agent does: a run that has a form row and also an
+// Agent attempt still pending (an interactive node parked) or running fails like any other run.
+// Publication keeps Agents ahead of the form today (validateFormPlacement), so this guards the
+// rule rather than a reachable graph.
+func TestInterruptWorkflowRunsFailsAgentsBesideAReview(t *testing.T) {
+	s := storetest.Open(t)
+	user, tenant := storetest.Login(t, s, "engine-interrupt-review")
+	ctx := context.Background()
+	answer := ""
+	review := func(title string, agent string) (store.WorkflowRun, []store.WorkflowNodeRun) {
+		t.Helper()
+		run := pendingRun(t, s, user, tenant, title)
+		if _, err := s.StartWorkflowEngineRun(ctx, run.ID, store.WorkflowEngineStart{NodeID: "start", NodeType: "start"}, keep); err != nil {
+			t.Fatal(err)
+		}
+		nodes, _ := s.WorkflowEngineNodeRuns(ctx, run.ID)
+		if _, err := s.CompleteWorkflowEngineNode(ctx, run.ID, nodes[0].ID, &answer, keep, func(raw []byte, _ store.WorkflowNodeRun) ([]byte, error) { return raw, nil }); err != nil {
+			t.Fatal(err)
+		}
+		starts := []store.WorkflowEngineStart{{NodeID: "review", NodeType: "form"}}
+		if agent != "" {
+			starts = append(starts, store.WorkflowEngineStart{NodeID: "a", NodeType: "agent"})
+		}
+		wave, err := s.StartWorkflowEngineNodes(ctx, run.ID, starts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.OpenWorkflowForm(ctx, run.ID, wave[0].ID, store.WorkflowForm{ReviewerID: user, Config: json.RawMessage(`{}`), Findings: json.RawMessage(`[]`), Report: "r"}); err != nil {
+			t.Fatal(err)
+		}
+		if agent == store.WorkflowStatusPending {
+			moved, err := s.MoveWorkflowEngineNode(ctx, run.ID, wave[1].ID, store.WorkflowStatusRunning, store.WorkflowStatusPending,
+				func([]byte) ([]byte, error) { return []byte(`{"interactive":{"turns":1}}`), nil })
+			if err != nil || !moved {
+				t.Fatalf("park = %v %v", moved, err)
+			}
+		}
+		return run, wave
+	}
+	parked, parkedWave := review("交互节点停住", store.WorkflowStatusPending)
+	running, _ := review("Agent 执行中", store.WorkflowStatusRunning)
+	waiting, waitingWave := review("只等审阅", "")
+	interrupted, err := s.InterruptWorkflowRuns(ctx, "进程重启，运行中断", func(int, []byte) ([]byte, error) {
+		return []byte(`{"error_detail":{"kind":"interrupted_by_restart"}}`), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(interrupted)
+	want := []string{parked.ID, running.ID}
+	slices.Sort(want)
+	if !slices.Equal(interrupted, want) {
+		t.Fatalf("interrupted = %v, want the runs with Agent work %v", interrupted, want)
+	}
+	nodes, _ := s.WorkflowEngineNodeRuns(ctx, parked.ID)
+	for _, n := range nodes {
+		if n.ID == parkedWave[1].ID && (n.Status != store.WorkflowStatusFailed || string(normalize(t, n.Payload)) != `{"error_detail":{"kind":"interrupted_by_restart"}}`) {
+			t.Fatalf("parked attempt = %+v", n)
+		}
+	}
+	if c, _ := s.WorkflowEngineContext(ctx, waiting.ID); c.Run.Status != store.WorkflowStatusRunning {
+		t.Fatalf("a run waiting only for its review changed to %s", c.Run.Status)
+	}
+	if nodes, _ := s.WorkflowEngineNodeRuns(ctx, waiting.ID); nodes[1].ID != waitingWave[0].ID || nodes[1].Status != store.WorkflowStatusPending {
+		t.Fatalf("the waiting review = %+v", nodes)
+	}
+}
+
+// Closing an orphan settles only an attempt that is still pending or running: a finished attempt
+// of the stopped run keeps its own outcome.
+func TestCloseOrphanedWorkflowNodeLeavesFinishedAttempts(t *testing.T) {
+	s := storetest.Open(t)
+	user, tenant := storetest.Login(t, s, "engine-orphan")
+	ctx := context.Background()
+	run := pendingRun(t, s, user, tenant, "孤儿")
+	if _, err := s.StartWorkflowEngineRun(ctx, run.ID, store.WorkflowEngineStart{NodeID: "start", NodeType: "start"}, keep); err != nil {
+		t.Fatal(err)
+	}
+	nodes, _ := s.WorkflowEngineNodeRuns(ctx, run.ID)
+	answer := "完成"
+	if _, err := s.CompleteWorkflowEngineNode(ctx, run.ID, nodes[0].ID, &answer, keep, func(raw []byte, _ store.WorkflowNodeRun) ([]byte, error) { return raw, nil }); err != nil {
+		t.Fatal(err)
+	}
+	wave, err := s.StartWorkflowEngineNodes(ctx, run.ID, []store.WorkflowEngineStart{{NodeID: "a", NodeType: "agent"}, {NodeID: "c", NodeType: "agent"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.FailWorkflowEngineNode(ctx, run.ID, wave[1].ID, "兄弟失败", nil, func(int, []byte, []byte) ([]byte, error) { return []byte(`{}`), nil }); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{nodes[0].ID, wave[1].ID} {
+		if closed, err := s.CloseOrphanedWorkflowNode(ctx, run.ID, id); err != nil || closed {
+			t.Fatalf("closing finished attempt %s = %v %v", id, closed, err)
+		}
+	}
+	if closed, err := s.CloseOrphanedWorkflowNode(ctx, run.ID, wave[0].ID); err != nil || !closed {
+		t.Fatalf("closing the live attempt = %v %v", closed, err)
+	}
+	after, _ := s.WorkflowEngineNodeRuns(ctx, run.ID)
+	got := map[string]string{}
+	for _, n := range after {
+		got[n.NodeID] = n.Status
+	}
+	if got["start"] != store.WorkflowStatusSucceeded || got["c"] != store.WorkflowStatusFailed || got["a"] != store.WorkflowStatusCancelled {
+		t.Fatalf("statuses = %v", got)
+	}
+}
+
 func TestWorkflowEngineAbandonClosesOnlyUnstartedAttemptsOfEndedRuns(t *testing.T) {
 	s := storetest.Open(t)
 	user, tenant := storetest.Login(t, s, "engine-abandon")
