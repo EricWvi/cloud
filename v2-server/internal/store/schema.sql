@@ -123,6 +123,15 @@ CREATE TABLE IF NOT EXISTS v2_plugin_catalog (
 	PRIMARY KEY (source_namespace, identifier)
 );
 
+-- Skill names a package materializes at runtime (its assets/<name>/SKILL.md directories), recorded
+-- when the package is installed so the settings page can compare user skills against the names the
+-- runtime actually projects. plugin_id is the full "namespace/identifier" of the skill package.
+CREATE TABLE IF NOT EXISTS v2_plugin_skills (
+	plugin_id  text NOT NULL,
+	skill_name text NOT NULL,
+	PRIMARY KEY (plugin_id, skill_name)
+);
+
 -- The v2 stand-in for the shared Space Agent directory: one row per plugin installed in a space.
 -- Agent squad members reference the id of an agent row whose observed state is installed. The
 -- columns mirror the contract's SpacePlugin so every installed market package can be read from

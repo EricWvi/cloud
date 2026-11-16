@@ -102,7 +102,7 @@ seed 在 [`demo/`](demo/README.md)：`env.go` 是上表和重置、准备本地 
 | `GET /api/v1/tenants/{tid}/spaces` | 契约 | 当前用户所在工作区的空间，一页返回全部；v2 每个租户一个「演示空间」，`role` 取调用者的工作区角色；非成员 `404 not_found` |
 | `GET /api/v1/tenants/{tid}/spaces/{sid}/plugins/catalog` | 契约 | 从 `ora-space/marketplace` 的 `registry/**/orax.toml` 同步的真实市场快照，包含 Agent；启动时先同步，之后每 5 分钟刷新并原子替换 PostgreSQL 目录。成员可读 |
 | `GET /api/v1/tenants/{tid}/spaces/{sid}/plugins` | 契约 | 当前空间的全部活动插件选择，包括显式移除的行；空间不属于调用者的工作区时 `403 forbidden` |
-| `POST /api/v1/tenants/{tid}/spaces/{sid}/plugins` | 契约 | owner 安装目录中的 Skill 或工作流插件；其他类型（市场 Agent、Hook、合集等）在此接口只读；MCP 使用独立租户接口，返回 `400 plugin_kind_not_installable`（已有市场 Agent 选择的更新同样拒绝；预装 Agent 返回 `409 plugin_runtime_managed`）。工作流包由服务端按来源自己的 `Retrieval`/`Credentials` 下载并校验 `.orax`，导入其中的工作流并发布 `v1`；已有同名工作流时自动改名为「名称（插件）」并递增序号，不改动已有定义。重复安装幂等，卸载不删除已导入工作流。升级工作流包时，仍保持导入原样（草稿和生效版本都未改动）的工作流会更新草稿并发布新的顺序版本；用户已保存或发布过编辑的定义保持原样。Skill 立即记录为空间选择，不等项目 Node 确认。支持版本保护与 `Idempotency-Key` 重放 |
+| `POST /api/v1/tenants/{tid}/spaces/{sid}/plugins` | 契约 | owner 安装目录中的 Skill 或工作流插件；其他类型（市场 Agent、Hook、合集等）在此接口只读；MCP 使用独立租户接口，返回 `400 plugin_kind_not_installable`（已有市场 Agent 选择的更新同样拒绝；预装 Agent 返回 `409 plugin_runtime_managed`）。工作流包由服务端按来源自己的 `Retrieval`/`Credentials` 下载并校验 `.orax`，导入其中的工作流并发布 `v1`；已有同名工作流时自动改名为「名称（插件）」并递增序号，不改动已有定义。重复安装幂等，卸载不删除已导入工作流。升级工作流包时，仍保持导入原样（草稿和生效版本都未改动）的工作流会更新草稿并发布新的顺序版本；用户已保存或发布过编辑的定义保持原样。Skill 安装同样按来源下载并校验 `.orax`，把包内 `assets/<name>/SKILL.md` 的技能名记录到目录条目（`packMembers`，设置页同名提示用），再立即记录为空间选择，不等项目 Node 确认。支持版本保护与 `Idempotency-Key` 重放 |
 | `DELETE /api/v1/tenants/{tid}/spaces/{sid}/plugins` | 契约 | owner 移除 Skill 或工作流选择。Skill 删除整条选择行，立即不再出现在设置页和工作流节点的技能候选里；工作流选择保留 `desiredState=removed` 行；工作流及其历史保留为用户数据。预装 Agent 返回 `409 plugin_runtime_managed`；要求版本与幂等键 |
 
 ## 契约之外
@@ -145,6 +145,9 @@ seed 在 [`demo/`](demo/README.md)：`env.go` 是上表和重置、准备本地 
 `.opencode/skills/<name>/SKILL.md` 和 `.claude/skills/<name>/SKILL.md`。项目已有同名目录时保留
 项目内容；市场 Skill 与用户技能同名时**市场优先**：该用户技能不写入、会话照常启动，只在日志
 里带名字记录跳过，设置页会把这只用户技能标记出来提示改名；已经启动的会话保留启动时的副本。
+设置页拿到的同名名单来自服务端：安装 Skill 包时会下载并校验 `.orax`，把其中
+`assets/<name>/SKILL.md` 的技能名记录到目录条目（`packMembers`），与运行时的物化名完全一致，
+不依赖 README 解析；单技能包即使标题与技能名不同也按技能名匹配。
 市场 Skill 安装会替换同名且只由 Ora 物化出来的旧目录（旧的用户技能目录登记在 `.git/info/exclude`
 自己的标题段下，识别为服务写出的才替换），项目自带的同名技能则保留，安装返回失败并带技能名。
 Ora 实际创建的技能目录和市场技能链接会追加到该工作副本自己的 `.git/info/exclude`（不改项目的 `.gitignore`，保留已有规则），所以 Agent 的 `git add -A` 不会提交它们，工作区「变更」也不显示；项目自带的技能和 Agent 自己的改动照常可见。v2 的导入只支持

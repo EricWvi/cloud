@@ -51,6 +51,41 @@ description = "A workflow."
 	return f.Name()
 }
 
+func skillPluginArchive(t *testing.T, identifier, version string, skillNames ...string) string {
+	t.Helper()
+	f, e := os.CreateTemp(t.TempDir(), "skill-*.orax")
+	if e != nil {
+		t.Fatal(e)
+	}
+	z := zip.NewWriter(f)
+	manifest, e := z.Create("orax.toml")
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, _ = manifest.Write([]byte(`resolver = 1
+title = "Matt Pocock Skills"
+identifier = "` + identifier + `"
+namespace = "official"
+kind = "skill"
+version = "` + version + `"
+description = "Engineering skills"
+`))
+	for _, name := range skillNames {
+		document, e := z.Create("assets/" + name + "/SKILL.md")
+		if e != nil {
+			t.Fatal(e)
+		}
+		_, _ = document.Write([]byte("---\nname: " + name + "\ndescription: " + name + "\n---\n\n" + name + "\n"))
+	}
+	if e := z.Close(); e != nil {
+		t.Fatal(e)
+	}
+	if e := f.Close(); e != nil {
+		t.Fatal(e)
+	}
+	return f.Name()
+}
+
 func seedTestPluginCatalog(t *testing.T, s *store.Store) {
 	t.Helper()
 	if e := s.ReplacePluginCatalog(context.Background(), []pluginmarket.Entry{
@@ -66,7 +101,30 @@ func seedTestPluginCatalog(t *testing.T, s *store.Store) {
 }
 
 func TestPluginMarketHTTP(t *testing.T) {
-	f := newSquadServer(t)
+	// The Skill install downloads the package to record the names its archive materializes, so
+	// serve a real (validated) archive here.
+	archive := skillPluginArchive(t, "mattpocock.skills", "1.3.1", "tdd", "code-review", "prototype")
+	raw, e := os.ReadFile(archive)
+	if e != nil {
+		t.Fatal(e)
+	}
+	f := newSquadServerWith(t, server.Options{
+		SessionTTL: time.Hour,
+		DownloadPluginPackage: func(_ context.Context, _ string, _ string, _ pluginmarket.Retrieval, _ pluginmarket.Credentials) (string, error) {
+			file, e := os.CreateTemp(t.TempDir(), "download-*.orax")
+			if e != nil {
+				return "", e
+			}
+			if _, e := file.Write(raw); e != nil {
+				_ = file.Close()
+				return "", e
+			}
+			if e := file.Close(); e != nil {
+				return "", e
+			}
+			return file.Name(), nil
+		},
+	})
 	c := newContractClient(t, f.srv.URL)
 	c.login()
 	tenant := c.tenant()
@@ -133,6 +191,27 @@ func TestPluginMarketHTTP(t *testing.T) {
 		t.Fatalf("installed = %v", resource)
 	}
 	version := resource["version"].(float64)
+
+	// The catalog entry for an installed Skill package carries the names its archive materializes
+	// at runtime (assets/<name>/SKILL.md), so the settings page matches user skills against them.
+	status, body = c.do("GET", base+"/catalog", nil)
+	if status != 200 {
+		t.Fatalf("catalog = %d %v", status, body)
+	}
+	for _, raw := range body["items"].([]any) {
+		entry := raw.(map[string]any)
+		if entry["sourceNamespace"] != "official" || entry["identifier"] != "mattpocock.skills" {
+			continue
+		}
+		members, _ := entry["packMembers"].([]any)
+		got := make([]string, 0, len(members))
+		for _, m := range members {
+			got = append(got, m.(string))
+		}
+		if strings.Join(got, ",") != "code-review,prototype,tdd" {
+			t.Fatalf("packMembers = %v", got)
+		}
+	}
 
 	status, replay := c.doHeaders("POST", base, input, map[string]string{
 		"Idempotency-Key": "install-skill",

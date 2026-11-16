@@ -49,6 +49,8 @@ type Store interface {
 	PluginCatalog(ctx context.Context, tenant, space string) ([]store.PluginCatalogEntry, time.Time, error)
 	InstallSpacePlugin(ctx context.Context, tenant, space, caller, path, key string, in store.PluginInstallInput) (store.SpacePlugin, error)
 	PluginPackageSource(ctx context.Context, tenant, space, identifier string) (store.PluginPackageSource, error)
+	UpsertPluginSkills(ctx context.Context, pluginID string, names []string) error
+	InstalledPluginSkillNames(ctx context.Context, tenant, space string) (map[string][]string, error)
 	InstallWorkflowPlugin(ctx context.Context, tenant, space, caller, path, key string, in store.PluginInstallInput, documents []pluginmarket.WorkflowDocument, validate func(string) error) (store.SpacePlugin, error)
 	RemoveSpacePlugin(ctx context.Context, tenant, space, caller, path, key string, in store.PluginRemoveInput) (store.SpacePlugin, error)
 	ListSkills(ctx context.Context, tenant, caller string) ([]store.Skill, error)
