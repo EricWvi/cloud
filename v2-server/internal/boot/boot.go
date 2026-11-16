@@ -1,8 +1,8 @@
 // Package boot orders the startup recovery of what a previous process left live, so main and the
 // tests that pin the order run the same sequence.
 //
-// The workflow host's sweep may absorb an interrupted Iteration run and resume it (desktop's
-// composite recovery), so after the sweep some workflow runs outlive the process that started
+// The workflow host's sweep may absorb an interrupted Iteration or pending LoopExit cleanup and
+// resume it (desktop's composite recovery), so some workflow runs outlive the process that started
 // them. Runs owned by a task — a task's handling run and a task decomposition's run — must not:
 // their owners settle them first, cancelling every one still live, so the sweep never absorbs
 // one and its owner's record cannot disagree with a run that carries on. It also holds after a

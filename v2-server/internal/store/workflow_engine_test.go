@@ -387,13 +387,13 @@ func TestInterruptWorkflowRunsFailsARunWithoutActiveRows(t *testing.T) {
 			if mode == "plain" {
 				interrupted, err = s.InterruptWorkflowRuns(ctx, "进程重启，运行中断", detail)
 			} else {
-				absorb := func(string, []store.WorkflowNodeRun) map[string]bool {
+				absorb := func(string, []store.WorkflowNodeRun, []store.WorkflowScope) map[string]bool {
 					if mode == "absorb-none" {
 						return nil
 					}
 					return map[string]bool{}
 				}
-				interrupted, err = s.InterruptWorkflowRunsWithIterationRecovery(ctx, "进程重启，运行中断", detail, absorb)
+				interrupted, err = s.InterruptWorkflowRunsWithRecovery(ctx, "进程重启，运行中断", detail, absorb)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -461,9 +461,11 @@ func TestInterruptWorkflowRunsRefusesToAbsorbWithoutAStarter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.InterruptWorkflowRunsWithIterationRecovery(ctx, "进程重启，运行中断",
+	if _, err := s.InterruptWorkflowRunsWithRecovery(ctx, "进程重启，运行中断",
 		func(int, []byte) ([]byte, error) { return []byte(`{}`), nil },
-		func(string, []store.WorkflowNodeRun) map[string]bool { return map[string]bool{member.ID: true} }); err != nil {
+		func(string, []store.WorkflowNodeRun, []store.WorkflowScope) map[string]bool {
+			return map[string]bool{member.ID: true}
+		}); err != nil {
 		t.Fatal(err)
 	}
 	c, err := s.WorkflowEngineContext(ctx, run.ID)
