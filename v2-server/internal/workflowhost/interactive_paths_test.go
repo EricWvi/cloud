@@ -451,6 +451,98 @@ func TestFollowUpBesideAFailingSiblingClosesWithTheRun(t *testing.T) {
 	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
 }
 
+// A follow-up accepted just before a sibling failed the run does not run: its goroutine sees the
+// stopped run, and the refused park ends the session and closes the row.
+func TestAcceptedFollowUpDoesNotRunAfterTheRunFailed(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	var once, entered sync.Once
+	waiting, released := make(chan struct{}), make(chan struct{})
+	release := func() { once.Do(func() { close(released) }) }
+	t.Cleanup(release)
+	f.host.followingUp = func(nodeID string) {
+		if nodeID == "a" {
+			entered.Do(func() { close(waiting) })
+			<-released
+		}
+	}
+	runID := f.run(t, parallelInteractive, nil)
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	started := f.exec.awaitStarts(t, 2)
+	a, c := started["a"], started["c"]
+	f.exec.finish(a, completed("在"))
+	f.await(t, runID, parked("a"))
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "刚发出"); err != nil {
+		t.Fatal(err)
+	}
+	<-waiting
+	f.exec.finish(c, execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
+	f.await(t, runID, func(r store.WorkflowRun, _ []store.WorkflowNodeRun) bool {
+		return r.Status == store.WorkflowStatusFailed
+	})
+	release()
+	run, nodes := f.await(t, runID, func(r store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "a").Status == store.WorkflowStatusCancelled
+	})
+	if run.Status != store.WorkflowStatusFailed || node(nodes, "c").Status != store.WorkflowStatusFailed || !f.exec.isClosed(a) {
+		t.Fatalf("run %s, C = %s, A closed = %v", run.Status, node(nodes, "c").Status, f.exec.isClosed(a))
+	}
+	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
+	f.exec.mu.Lock()
+	appended := len(f.exec.appended)
+	f.exec.mu.Unlock()
+	if appended != 0 {
+		t.Fatal("the follow-up ran under the failed run")
+	}
+}
+
+// Cancelling a run stops an executing follow-up beside an automatic sibling. The follow-up's stop is
+// confirmed and its turn ends first, but the sibling's is not: the run stays open until that last
+// turn ends, then closes as cancelled.
+func TestCancelledFollowUpDoesNotCloseTheRunBeforeItsSibling(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	runID := f.run(t, parallelInteractive, nil)
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	started := f.exec.awaitStarts(t, 2)
+	a, c := started["a"], started["c"]
+	f.exec.finish(a, completed("在"))
+	f.await(t, runID, parked("a"))
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "说着"); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.awaitAppend(t)
+	f.exec.onCancel = func(ref execution.Ref) error {
+		if ref.SessionID == c {
+			return execution.ErrStopUnconfirmed
+		}
+		return nil
+	}
+	if _, err := f.host.CancelRun(ctx, f.scope, runID); !errors.Is(err, server.ErrWorkflowRunStopUnconfirmed) {
+		t.Fatalf("cancel with one unconfirmed stop = %v", err)
+	}
+	// A's follow-up has ended and settled; C still executes, so the run stays open.
+	st := f.host.state(runID)
+	waitUntil(t, func() bool {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		return len(st.attempts) == 1 && st.dispatched == 1
+	})
+	if run, _ := f.s.WorkflowRun(ctx, f.scope.TenantID, runID); run.Status != store.WorkflowStatusRunning {
+		t.Fatalf("the follow-up closed the run while a sibling's stop is unconfirmed: %s", run.Status)
+	}
+	f.exec.finish(c, execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"})
+	run, nodes := f.await(t, runID, terminal)
+	if run.Status != store.WorkflowStatusCancelled || node(nodes, "a").Status != store.WorkflowStatusCancelled || node(nodes, "c").Status != store.WorkflowStatusCancelled {
+		t.Fatalf("run %s nodes %+v", run.Status, nodes)
+	}
+	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
+}
+
 // A stop whose cancellation execution does not confirm still ends the session once the turn ends:
 // the node parks for completion and takes no further turn.
 func TestUnconfirmedStopOfAFollowUpStillEndsTheSession(t *testing.T) {

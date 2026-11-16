@@ -343,6 +343,9 @@ func (h *Host) SendNodeTurn(ctx context.Context, scope server.WorkflowRunScope, 
 // runFollowUp executes one human turn registered as a and parks the node after it.
 func (h *Host) runFollowUp(st *runState, a *attemptState, f followUp) {
 	n := f.node
+	if h.followingUp != nil {
+		h.followingUp(n.d.Node.ID)
+	}
 	// Another node may have failed the run since the turn was accepted. Like an attempt (see
 	// runAgent), check with the turn registered, and run no turn for a run that stopped; the park
 	// is then refused, which ends the session and closes the row.

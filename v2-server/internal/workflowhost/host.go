@@ -63,6 +63,8 @@ type Host struct {
 	resuming func(runID string)
 	// dispatching, when set (tests only), runs first in every Agent attempt's goroutine.
 	dispatching func(workflow.AgentDispatch)
+	// followingUp, when set (tests only), runs first in every accepted follow-up's goroutine.
+	followingUp func(nodeID string)
 }
 
 // lifecycleLock is one run's cancel/resume lock and the number of callers holding or waiting.
