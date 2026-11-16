@@ -141,6 +141,9 @@ test('Loop and Iteration retry waits and replaced sessions stay in their selecte
     await db.query(`UPDATE v2_workflow_runs SET status='running',state='{"current_nodes":["loop"]}',started_at=now() WHERE id=$1`, [rid])
     await page.goto(`/chat?run=${rid}`)
     const pane = page.getByRole('region', { name: '工作流运行' })
+    // Select the waiting round explicitly: an earlier snapshot may have focused round 1.
+    await pane.getByRole('button', { name: /反馈循环:/ }).click()
+    await pane.getByRole('button', { name: /第 2 轮 ·/ }).click()
     await expect(pane.locator('[data-retry-wait="compact"]').first()).toBeVisible(firstRender)
 
     const openLoop = async (round: number) => {
