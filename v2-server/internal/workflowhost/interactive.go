@@ -640,12 +640,20 @@ func (h *Host) endParked(ctx context.Context, st *runState) error {
 // runs again, and a node stays tracked until then: ResumeRun, which releases the orphans itself
 // before it admits the resume, never finds the run's state empty while another caller is still
 // about to end a session, and a node the resumed run kept is left alone with its session.
+//
+// A node with a turn in flight is left to that turn, like an automatic sibling that keeps running
+// when another node fails the run: an executing turn finishes and its park is refused, which ends
+// the session and closes the row; a turn not yet executing sees the stopped run and does not run.
 func (h *Host) releaseOrphans(st *runState, runID string) {
 	st.mu.Lock()
+	inFlight := map[string]bool{}
+	for _, a := range st.attempts {
+		inFlight[a.nodeRun] = true
+	}
 	nodes := make([]*interactiveNode, 0, len(st.interactive))
 	for _, n := range st.interactive {
-		if n.phase == phaseCompleting {
-			continue // the completion settles it
+		if n.phase == phaseCompleting || inFlight[n.d.NodeRunID] {
+			continue // the completion or the turn settles it
 		}
 		nodes = append(nodes, n)
 	}

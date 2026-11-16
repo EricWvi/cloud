@@ -429,6 +429,18 @@ func TestFollowUpBesideAFailingSiblingClosesWithTheRun(t *testing.T) {
 	f.await(t, runID, func(r store.WorkflowRun, _ []store.WorkflowNodeRun) bool {
 		return r.Status == store.WorkflowStatusFailed
 	})
+	// C's attempt has returned and swept the run's orphans; A's follow-up still executes, so the
+	// sweep leaves it to its turn instead of ending the session underneath it.
+	st := f.host.state(runID)
+	waitUntil(t, func() bool {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		return len(st.attempts) == 1 && st.dispatched == 1
+	})
+	f.host.forgetFinished(runID, st)
+	if row := f.nodeRow(t, runID, "a"); row.Status != store.WorkflowStatusRunning || f.exec.isClosed(a) {
+		t.Fatalf("A = %s, closed = %v while its follow-up executes", row.Status, f.exec.isClosed(a))
+	}
 	f.exec.finish(a, completed("晚了"))
 	run, nodes := f.await(t, runID, func(r store.WorkflowRun, n []store.WorkflowNodeRun) bool {
 		return node(n, "a").Status == store.WorkflowStatusCancelled
