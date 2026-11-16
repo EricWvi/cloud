@@ -225,6 +225,7 @@ func TestRealWorkflowSelectedMCP(t *testing.T) {
 	f := &fixture{s: db, host: host, scope: server.WorkflowRunScope{TenantID: tenant, UserID: user}, project: project.ID}
 	graph := strings.Replace(twoAgents, `"modelId":"Other Model"`, `"modelId":"fixture"`, 1)
 	graph = strings.Replace(graph, `"roleId":"reviewer"`, `"mcps":[{"mcpId":"official/fixture.workflow-mcp","enabled":true}]`, 1)
+	graph = strings.Replace(graph, `"prompt":"审阅这段初稿：{{#a.output#}}"`, `"prompt":"审阅这段初稿：{{#a.output#}}","mcps":[{"mcpId":"official/fixture.workflow-mcp","enabled":false}]`, 1)
 	runID := f.run(t, graph, str("Use the selected MCP probe."))
 	if _, err := host.StartRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
@@ -292,13 +293,13 @@ func TestRealWorkflowSelectedMCP(t *testing.T) {
 			Code          string `json:"code"`
 			PluginID      string `json:"plugin_id"`
 			SettingID     string `json:"setting_id"`
-			AutoRetryable bool   `json:"auto_retryable"`
+			AutoRetryable *bool  `json:"auto_retryable"`
 		} `json:"error_detail"`
 	}
 	if err := json.Unmarshal(failed.Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if run.Status != store.WorkflowStatusFailed || failed.SessionID != nil || payload.Detail.Code != "mcp_setting_missing" || payload.Detail.PluginID != installed.ID || payload.Detail.SettingID != "token" || payload.Detail.AutoRetryable {
+	if run.Status != store.WorkflowStatusFailed || failed.SessionID != nil || payload.Detail.Code != "mcp_setting_missing" || payload.Detail.PluginID != installed.ID || payload.Detail.SettingID != "token" || payload.Detail.AutoRetryable == nil || *payload.Detail.AutoRetryable {
 		t.Fatalf("unexpected MCP configuration failure: run=%s node=%+v detail=%+v", run.Status, failed, payload.Detail)
 	}
 }
