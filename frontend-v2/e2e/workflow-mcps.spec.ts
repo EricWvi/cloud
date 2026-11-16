@@ -82,6 +82,7 @@ test('the deployed UI installs a real MCP and preserves its workflow binding aft
   const name = `MCP 真实安装-${Date.now()}`
   const response = await page.request.post(base, { data: { name, graph: null } })
   expect(response.status()).toBe(201)
+  const workflowId = (await response.json()).workflow.id
   await page.goto('/workflows')
   await page.getByRole('complementary', { name: '工作流列表' }).getByRole('button', { name, exact: true }).click()
   await expect(page.getByLabel('工作流名称', { exact: true })).toHaveValue(name)
@@ -92,7 +93,12 @@ test('the deployed UI installs a real MCP and preserves its workflow binding aft
   await page.getByRole('button', { name: '添加 MCP', exact: true }).click()
   await page.getByRole('option', { name: /official\/ora-space.tavily-search/ }).click()
   await expect(page.getByRole('switch', { name: /Tavily/ })).toBeChecked()
-  await expect(page.getByText(/已实时保存/)).toBeVisible()
+  // The prior "saved" label can remain visible until the debounced save starts. Confirm
+  // this exact binding is durable before removing the package and reloading the editor.
+  await expect.poll(async () => {
+    const draft = (await (await page.request.get(`${base}/${workflowId}/draft`)).json()).snapshot
+    return JSON.parse(draft.graph).nodes.find((node: { id: string }) => node.id === agentNodeId)?.data.agentConfig.mcps
+  }).toEqual([{ mcpId: 'official/ora-space.tavily-search', enabled: true }])
   await page.screenshot({ path: info.outputPath('1201-mcp.png'), animations: 'disabled' })
   const installed = (await (await page.request.get(`/api/v1/tenants/${tid}/mcp`)).json()).items.find((item: { id: string }) => item.id === 'official/ora-space.tavily-search')
   expect(JSON.stringify(installed)).not.toContain('mcp-e2e-fixture-token')
