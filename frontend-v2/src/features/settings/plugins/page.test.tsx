@@ -132,6 +132,7 @@ it('installs and configures a tenant MCP through the server, keeping secrets wri
   })
   const user = userEvent.setup()
   renderSettingsPage(<PluginsPage />)
+  expect(await screen.findByText(/启用 MCP 的节点暂时无法运行/)).toBeInTheDocument()
   const row = await screen.findByRole('article', { name: 'GitHub 工具' })
   await user.click(within(row).getByRole('button', { name: '安装' }))
   await waitFor(() => expect(within(row).getByText('已安装')).toBeInTheDocument())

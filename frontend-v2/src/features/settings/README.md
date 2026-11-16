@@ -9,7 +9,7 @@
 小队页（`squads/`，`/settings/squads`）管理工作区内人和 Agent 的协作编组，数据来自候选契约 `v2-server/squads.openapi.json`，客户端在 `src/lib/squads-api`（协作页指派任务和按小队切换也用它），`npm run api:generate:squads` 生成。列表显示有效的人类成员、Agent 成员与维护者计数，详情按类型列成员、职责、维护者与 leader，并保留已退出历史；工作区 owner 和本队维护者可编辑、归档、加入成员与可执行的 Space Agent、移除成员，任何成员可以自己退出，维护者可以交接维护者标记、设置 Agent leader。已删除的账号由 v2-server 结束其成员关系，并且不再出现在小队里，「已退出」历史也不列出。小队关系不授予私人模型、Git 凭据或运行时权限。`?squad=<id>` 直接打开那个小队；协作页的旧地址 `/collaboration/squads` 会重定向过来。弹窗和基础样式来自 `src/components/panel/`，与协作页共用。
 
 成员、Plugins、技能、登录状态与浏览器主题偏好来自真实接口。Plugins 使用 Cloud
-契约的目录、空间选择和卸载路由；市场技能与来源插件共享同一份空间选择。Skill 的下载、校验和安装由节点回执确认，尚未确认时显示等待状态。技能、工作流与 MCP 插件通过服务端安装。MCP 使用租户共享的安装记录和设置，空间 owner 可安装、修改和移除；秘密只写不读，表单显示是否已配置。Node 在会话开始前安装选定的精确版本。运行时预装 Agent、市场 Agent、Hook 与合集仍使用各自的展示规则。模型连接和角色只保存在当前浏览器，部署版隐藏这两页（见上文）。不存在请求失败后自动切换假数据的逻辑。
+契约的目录、空间选择和卸载路由；市场技能与来源插件共享同一份空间选择。Skill 的下载、校验和安装由节点回执确认，尚未确认时显示等待状态。技能、工作流与 MCP 插件通过服务端安装。MCP 使用租户共享的安装记录和设置，空间 owner 可安装、修改和移除；秘密只写不读，表单显示是否已配置。当前安装、配置和节点选择可保存；非空 MCP 执行在运行时拒绝：Node 缺少 session_mcp_lifecycle 时返回 mcp_node_capability_missing，有能力但服务端尚未实现生命周期时返回 mcp_lifecycle_not_ready。空 MCP 选择不受此门禁影响。运行时预装 Agent、市场 Agent、Hook 与合集仍使用各自的展示规则。模型连接和角色只保存在当前浏览器，部署版隐藏这两页（见上文）。不存在请求失败后自动切换假数据的逻辑。
 
 `lib/settings-demo/` 是本机模型连接和角色的共享存储边界，键包含版本、当前用户 ID 和空间
 ID；Settings 与工作流的角色选择读同一份快照。`members/`、`skills/` 与
@@ -67,6 +67,6 @@ localStorage，再更新 TanStack Query 缓存。schema 2、3、4 的旧快照�
 `e2e/multiuser.spec.ts` 覆盖 owner 邀请（含邀请入队）、被邀请者登录、未邀请邮箱被拒与
 member 被服务端拒绝。模型连接和角色的资源操作仍只保存在当前浏览器。
 
-插件市场区分空间选择与项目实际结果。来源管理使用临时市场契约生成的客户端；空间选择供插件和技能页面共享。当前会进入项目运行时的市场类型包括 Skill 和 MCP；可执行 Agent 仍只有系统预装的 OpenCode 和 Claude Code；市场 Agent、Hook 与合集只浏览，服务端拒绝新建或更新这些选择。默认构建里没有任何预装或演示安装：`VITE_DEMO_MOCK=1` 时 `lib/demo/plugin-installs.ts` 才为市场 Agent、Hook 和预装 Agent 提供浏览器本地演示安装（3–5 秒等待，只写 localStorage，不发请求）。插件详情列出各项目等待、成功或失败的状态。移除市场仅隐藏可安装目录，不移除空间中已有选择。
+插件市场区分空间选择与项目实际结果。来源管理使用临时市场契约生成的客户端；空间选择供插件和技能页面共享。Skill 会进入项目运行时；MCP 的非空执行须待 Node 与服务端完整生命周期接入，当前不会静默忽略选择后继续执行；可执行 Agent 仍只有系统预装的 OpenCode 和 Claude Code；市场 Agent、Hook 与合集只浏览，服务端拒绝新建或更新这些选择。默认构建里没有任何预装或演示安装：`VITE_DEMO_MOCK=1` 时 `lib/demo/plugin-installs.ts` 才为市场 Agent、Hook 和预装 Agent 提供浏览器本地演示安装（3–5 秒等待，只写 localStorage，不发请求）。插件详情列出各项目等待、成功或失败的状态。移除市场仅隐藏可安装目录，不移除空间中已有选择。
 
 MCP 客户端由 orval.mcp.config.ts 从 v2-server/mcp.openapi.json 生成，安装与配置成功后刷新设置页和工作流 MCP 目录。秘密输入保存在表单内存，保存成功后清空。修改设置携带 revision，冲突由服务端拒绝。

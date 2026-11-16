@@ -439,7 +439,7 @@ export default function PluginsPage() {
           </p>
         )}
         <p className="text-sm text-muted-foreground">
-          技能、工作流和 MCP 通过服务端安装。MCP 安装与配置由团队共享。
+          技能、工作流和 MCP 通过服务端安装。MCP 安装与配置由团队共享；启用 MCP 的节点暂时无法运行，需等待 Node 与服务端支持完整生命周期。
         </p>
         <div className="settings-toolbar">
           {market.spaces.length > 1 && (
@@ -700,7 +700,7 @@ export default function PluginsPage() {
           <p className="rounded-lg bg-muted p-3 text-xs leading-relaxed text-muted-foreground">
             {installable(selected)
               ? selected.kind === 'mcp'
-                ? 'MCP 安装与配置适用于整个团队。工作流仅使用节点启用的 MCP，运行时在项目 Node 安装对应版本。'
+                ? 'MCP 安装与配置适用于整个团队。当前可保存配置和节点选择；启用 MCP 的节点暂时无法运行，需等待 Node 与服务端支持完整生命周期。'
                 : selected.kind === 'workflow'
                 ? '安装会导入工作流并发布初始版本，可在工作流库中运行。'
                 : '空间选择适用于该空间的项目。 只有项目节点确认后才显示已安装。'
