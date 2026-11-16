@@ -73,15 +73,17 @@ func TestWorkflowDomainServesAnalyzeAndPublish(t *testing.T) {
 	if status != http.StatusOK || !reflect.DeepEqual(analysis, want) {
 		t.Fatalf("analyze spare chain = %d %v, want %v", status, analysis, want)
 	}
-	// Role is the setting v2 is not working on applying; prompt and tool stay unsupported, as on desktop.
+	// An enabled MCP is still saved but unapplied; prompt and tool stay unsupported, as on desktop.
+	// Roles are applied now, so a role reference alone lists nothing here.
 	unapplied := `{"nodes":[{"id":"start","data":{"kind":"start"}},
 		{"id":"writer","data":{"kind":"agent","agentConfig":{"prompt":"x","roleId":"reviewer",
+			"mcps":[{"mcpId":"official/tavily","enabled":true}],
 			"retry":{"enabled":false,"maxRetries":2,"initialDelaySeconds":10}}}},
 		{"id":"tool","data":{"kind":"tool"}},{"id":"spare","data":{"kind":"prompt"}}],
 		"edges":[{"source":"start","target":"writer"},{"source":"writer","target":"tool"}]}`
 	status, analysis = call("POST", base+"/analyze", map[string]any{"graph": unapplied})
 	want = map[string]any{"unusedNodeIds": []any{"spare"}, "unrecognizedNodes": []any{},
-		"unappliedSettings": []any{map[string]any{"nodeId": "writer", "settings": []any{"role"}}},
+		"unappliedSettings": []any{map[string]any{"nodeId": "writer", "settings": []any{"mcp"}}},
 		"unsupportedNodes":  []any{map[string]any{"nodeId": "tool", "kind": "tool"}}}
 	if status != http.StatusOK || !reflect.DeepEqual(analysis, want) {
 		t.Fatalf("analyze unapplied and unsupported = %d %v, want %v", status, analysis, want)
