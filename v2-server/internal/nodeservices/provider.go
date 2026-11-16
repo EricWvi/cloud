@@ -163,7 +163,14 @@ func (p *RemoteProvider) CompleteObserved(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", content)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(flushWriter{w}, idleReader{resp.Body, idle, p.idle}); err != nil {
+	_, err = io.Copy(flushWriter{w}, idleReader{resp.Body, idle, p.idle})
+	if err == nil {
+		// net/http passes a body's io.EOF through even after the request was cancelled, so a stream
+		// a limit or the caller cut off can still end cleanly here: it only completed if nothing
+		// cancelled it first.
+		err = context.Cause(ctx)
+	}
+	if err != nil {
 		reason := "interrupted"
 		switch cause := context.Cause(ctx); {
 		case errors.Is(cause, errIdleTimeout), errors.Is(cause, errMaxDuration):

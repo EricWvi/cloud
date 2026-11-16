@@ -30,6 +30,23 @@ async function createRun(page: Page, graph?: string): Promise<{ tid: string, rid
 
 const database = () => new Client({ connectionString: process.env.E2E_DATABASE_URL ?? 'postgres://ora:ora-local@127.0.0.1:55432/ora_v2_e2e?sslmode=disable' })
 
+/**
+ * Opens a replaced attempt's session and returns the error code its node events stream answered.
+ * The UI follows the stream with an EventSource, which Chromium aborts as soon as it sees a non-200
+ * status, so the browser keeps that response's body only when it arrived with the headers; reading
+ * it is a race. The browser's own response proves which node the UI asked for and that it was
+ * refused; the code comes from the same URL requested again in the same signed-in context.
+ */
+async function openedSessionError(page: Page, nodeRunId: string, open: () => Promise<void>): Promise<string> {
+  const stream = page.waitForResponse((res) => res.url().includes(`/nodes/${nodeRunId}/events`))
+  await open()
+  const response = await stream
+  expect(response.status()).toBe(404)
+  const again = await page.request.get(response.url())
+  expect(again.status()).toBe(404)
+  return (await again.json()).code
+}
+
 test('root retry wait counts down and retains replaced attempt sessions and failure causes', async ({ page }) => {
   const { tid, rid } = await createRun(page)
   const db = database()
@@ -61,11 +78,9 @@ test('root retry wait counts down and retains replaced attempt sessions and fail
     await page.screenshot({ path: resolve('../.tmp/screens/root-retry-wait.png'), animations: 'disabled', fullPage: true })
     await history.scrollIntoViewIfNeeded()
     await page.screenshot({ path: resolve('../.tmp/screens/root-retry-history.png'), animations: 'disabled', fullPage: true })
-    const events = page.waitForResponse((res) => res.url().includes(`/nodes/${previous}/events`))
-    await history.getByText(`查看会话 · ${session}`).click()
     // A fixture session is absent from execution; its replaced row was found and ownership is
     // still enforced. A wrong lookup would return workflow_node_run_not_found instead.
-    expect((await (await events).json()).code).toBe('workflow_node_session_not_found')
+    expect(await openedSessionError(page, previous, () => history.getByText(`查看会话 · ${session}`).click())).toBe('workflow_node_session_not_found')
     await page.reload()
     await expect(pane.locator('[data-retry-waiting]').first()).toBeVisible()
   } finally {
@@ -141,9 +156,7 @@ test('Loop and Iteration retry waits and replaced sessions stay in their selecte
     const secondLoop = await openLoop(2)
     await secondLoop.history.scrollIntoViewIfNeeded()
     await page.screenshot({ path: resolve('../.tmp/screens/container-retry-loop-round-2.png'), animations: 'disabled', fullPage: true })
-    const loopEvents = page.waitForResponse((res) => res.url().includes(`/nodes/${secondLoop.expected.previous}/events`))
-    await secondLoop.history.getByText(`查看会话 · ${secondLoop.expected.session}`).click()
-    expect((await (await loopEvents).json()).code).toBe('workflow_node_session_not_found')
+    expect(await openedSessionError(page, secondLoop.expected.previous, () => secondLoop.history.getByText(`查看会话 · ${secondLoop.expected.session}`).click())).toBe('workflow_node_session_not_found')
     await page.reload()
     const firstLoop = await openLoop(1)
     await firstLoop.history.scrollIntoViewIfNeeded()

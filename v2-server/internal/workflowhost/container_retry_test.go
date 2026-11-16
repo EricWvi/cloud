@@ -361,6 +361,8 @@ func TestLoopExitCancelsWaitingRetryMarker(t *testing.T) {
 		t.Fatalf("rounds %+v: %v", rounds, err)
 	}
 	wait, payload := containerWait(t, f, id, rounds[0].ID, "writer", nil)
+	// Commit the break only after the failure callback's scheduling pass, as the engine would.
+	awaitWorkerDrained(t, f, id)
 	// The committed break takes precedence while the sibling waits for its retry.
 	if _, err := f.s.StartWorkflowEngineNodes(ctx, id, []store.WorkflowEngineStart{{NodeID: "exit", NodeType: "loopExit", ScopeID: rounds[0].ID}}); err != nil {
 		t.Fatal(err)

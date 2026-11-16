@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
@@ -312,6 +313,28 @@ func wakeContainerRetryExpectError(t *testing.T, f *fixture, clock interface{ St
 	}
 }
 
+// awaitWorkerDrained waits until the host's worker for a still-running run has finished handling
+// its last Agent turn, including the engine callback and the scheduling pass that callback runs.
+func awaitWorkerDrained(t *testing.T, f *fixture, runID string) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		st := f.host.state(runID)
+		if st == nil {
+			t.Fatal("the run's host state is gone: the run is no longer running")
+		}
+		st.mu.Lock()
+		drained := !st.working && st.active == nil && st.starting == nil
+		st.mu.Unlock()
+		if drained {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the run's worker never finished its turn")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // A dispatch failure after a wake must fail the attempt and run a scheduling pass, so
 // the container settles instead of the run hanging on a failed row nothing drives. A Loop member
 // is used because a corrupt round state breaks the dispatch only, while `schedule` still runs and
@@ -330,6 +353,10 @@ func TestWakeDispatchFailureSettlesTheContainer(t *testing.T) {
 		t.Fatalf("rounds = %+v %v", rounds, err)
 	}
 	wait, payload := containerWait(t, f, id, rounds[0].ID, "writer", nil)
+	// The wait is visible as soon as the failure callback commits it, but the callback then still
+	// runs a scheduling pass; corrupting the state before that pass ends would let it fail the Loop
+	// and cancel the wait before the wake this test is about.
+	awaitWorkerDrained(t, f, id)
 	// Corrupt the round state after the wait is armed (valid JSON, but the Loop pool is gone):
 	// the wake commits the start, the dispatch cannot decode the scope state and must fail the
 	// attempt, and the scheduling pass then fails the Loop through the same decode.

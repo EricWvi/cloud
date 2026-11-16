@@ -36,6 +36,14 @@ async function publishRun(page: import('@playwright/test').Page, name: string, r
   return { tenant, projectId: project.id, workflow, run }
 }
 
+/**
+ * Waits until the run pane shows its run succeeded. When the pane sees a run finish it drops every
+ * pin and puts the form back on stage, so a node picked before that edge is replaced by the form.
+ */
+async function finished(page: import('@playwright/test').Page) {
+  await expect(page.getByRole('region', { name: '工作流运行' }).locator('header').getByText('成功', { exact: true })).toBeVisible({ timeout: 30_000 })
+}
+
 test('review → tasks → task page, with draft, bulk, filters and reuse on the second night', async ({ page }) => {
   test.setTimeout(180_000)
   await page.goto('/chat')
@@ -101,7 +109,9 @@ test('review → tasks → task page, with draft, bulk, filters and reuse on the
   await expect(reloaded.getByText('已确认无需处理，不会创建任务。')).toBeVisible()
   await expect(reloaded.getByText('已由 协作空间 Owner 确认')).toBeVisible()
 
-  // CreateTasks lists the same two problems, by title, with links.
+  // CreateTasks lists the same two problems, by title, with links. A run that finishes returns its
+  // stage to the form, so pick the node only once the pane has seen the run finish.
+  await finished(page)
   await page.getByRole('button', { name: '创建或关联协作任务' }).first().click()
   const tasks = page.getByRole('region', { name: '任务处理结果' })
   await expect(tasks.getByText('源码中存在硬编码令牌')).toBeVisible()
@@ -109,11 +119,19 @@ test('review → tasks → task page, with draft, bulk, filters and reuse on the
   await expect(tasks.getByText('使用 eval 执行动态代码')).toHaveCount(0)
   await expect(tasks.getByText('新建 2')).toBeVisible()
 
-  // The task page keeps the source of the inspection.
+  // The task page keeps the source of the inspection: a durable link listed in its Workflow tab
+  // that opens this very run inside the tab, not a /chat?run= line in the description.
   await tasks.getByRole('link', { name: '打开任务' }).first().click()
   await expect(page.getByRole('heading', { name: '源码中存在硬编码令牌' })).toBeVisible()
-  await expect(page.getByText(`/chat?run=${run}`)).toBeVisible()
   expect(page.url()).toContain('/collaboration/tasks/')
+  await expect(page.locator('.mc-description')).not.toContainText('/chat?run=')
+  await page.getByRole('tab', { name: /^工作流/ }).click()
+  const sources = page.getByRole('list', { name: '工作流运行记录' })
+  await expect(sources.getByRole('listitem')).toHaveCount(1)
+  await expect(sources).toContainText('巡检来源 · v1')
+  await sources.getByRole('button', { name: /^查看工作流运行 巡检端到端 / }).click()
+  await expect(page).toHaveURL(new RegExp(`[?&]workflow=${run}(&|$)`))
+  await expect(page.getByRole('region', { name: '报告与问题确认' }).getByText('已提交')).toBeVisible()
 
   // The same findings on a later night link to the open tasks instead of creating new ones.
   const tenant = ((await (await page.request.get('/api/v1/me/tenants')).json()) as { items: { id: string }[] }).items[0]!.id
@@ -131,6 +149,7 @@ test('review → tasks → task page, with draft, bulk, filters and reuse on the
   await expect(again.getByLabel('指派给', { exact: true })).toHaveCount(3)
   await again.getByRole('button', { name: '确认并生成任务' }).click()
   await expect(again.getByText('已提交')).toBeVisible({ timeout: 30_000 })
+  await finished(page)
   await page.getByRole('button', { name: '创建或关联协作任务' }).first().click()
   await expect(page.getByRole('region', { name: '任务处理结果' }).getByText('关联 2')).toBeVisible()
   await expect(page.getByRole('region', { name: '任务处理结果' }).getByText('新建 1')).toBeVisible()
@@ -148,6 +167,7 @@ test('a run with no findings asks for one confirmation and creates nothing', asy
   await form.getByRole('button', { name: '确认无问题并继续' }).click()
   await expect(form.getByText('已提交')).toBeVisible({ timeout: 30_000 })
   await expect(form.getByRole('link', { name: '打开任务' })).toHaveCount(0)
+  await finished(page)
   await page.getByRole('button', { name: '创建或关联协作任务' }).first().click()
   await expect(page.getByRole('region', { name: '任务处理结果' }).getByText('没有需要创建的任务')).toBeVisible()
 })
