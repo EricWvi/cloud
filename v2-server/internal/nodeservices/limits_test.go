@@ -1,12 +1,14 @@
 package nodeservices
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -91,36 +93,188 @@ func readCutOff(t *testing.T, p Provider) (string, time.Duration) {
 	return string(data), time.Since(began)
 }
 
+// fakeTimer replaces wall-clock sleeps for deterministic limit tests.
+type fakeTimer struct {
+	mu      sync.Mutex
+	stopped bool
+	resets  []time.Duration
+	notify  chan struct{}
+	fn      func()
+}
+
+func newFakeTimer(fn func()) *fakeTimer {
+	return &fakeTimer{notify: make(chan struct{}, 1), fn: fn}
+}
+
+func (f *fakeTimer) Stop() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	wasActive := !f.stopped
+	f.stopped = true
+	return wasActive
+}
+
+func (f *fakeTimer) Reset(d time.Duration) bool {
+	f.mu.Lock()
+	wasActive := !f.stopped
+	f.stopped = false
+	f.resets = append(f.resets, d)
+	f.mu.Unlock()
+	select {
+	case f.notify <- struct{}{}:
+	default:
+	}
+	return wasActive
+}
+
+func (f *fakeTimer) fire() {
+	f.mu.Lock()
+	if f.stopped {
+		f.mu.Unlock()
+		return
+	}
+	f.stopped = true
+	fn := f.fn
+	f.mu.Unlock()
+	fn()
+}
+
+func (f *fakeTimer) resetCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.resets)
+}
+
+func (f *fakeTimer) waitResets(ctx context.Context, want int) bool {
+	for {
+		if f.resetCount() >= want {
+			return true
+		}
+		select {
+		case <-f.notify:
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
 func TestRemoteProviderIdleTimeoutAbortsResponse(t *testing.T) {
-	stopped := make(chan struct{}, 2)
+	const idleLimit = 300 * time.Millisecond
+	const totalLimit = time.Minute
+	for _, name := range []string{"direct", "wrapped"} {
+		t.Run(name, func(t *testing.T) {
+			stopped := make(chan struct{}, 1)
+			var mu sync.Mutex
+			var idleTimer *fakeTimer
+			idleReady := make(chan *fakeTimer, 1)
+			chunksDelivered := make(chan struct{})
+
+			upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				var timer *fakeTimer
+				select {
+				case timer = <-idleReady:
+				case <-r.Context().Done():
+					return
+				}
+				for i := range 3 {
+					_, _ = fmt.Fprintf(flushWriter{w}, "data: {\"n\":%d}\n\n", i)
+					if !timer.waitResets(r.Context(), i+1) {
+						return
+					}
+				}
+				close(chunksDelivered)
+				<-r.Context().Done()
+				stopped <- struct{}{}
+			}))
+			defer upstream.Close()
+
+			p, err := NewRemoteProvider(upstream.URL, "backend-key", upstream.Client().Transport)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := p.SetLimits(idleLimit, totalLimit); err != nil {
+				t.Fatal(err)
+			}
+			p.afterFunc = func(d time.Duration, fn func()) limitTimer {
+				timer := newFakeTimer(fn)
+				if d == idleLimit {
+					mu.Lock()
+					idleTimer = timer
+					mu.Unlock()
+					idleReady <- timer
+				}
+				return timer
+			}
+
+			ctx := t.Context()
+			go func() {
+				select {
+				case <-chunksDelivered:
+					mu.Lock()
+					timer := idleTimer
+					mu.Unlock()
+					timer.fire()
+				case <-ctx.Done():
+				}
+			}()
+
+			var provider Provider = p
+			if name == "wrapped" {
+				provider = unwrapping{p}
+			}
+			data, elapsed := readCutOff(t, provider)
+			if !strings.Contains(data, `{"n":2}`) || elapsed > 5*time.Second {
+				t.Fatalf("%s: idle cut after %s with %q", name, elapsed, data)
+			}
+			select {
+			case <-stopped:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s: upstream call not cancelled", name)
+			}
+		})
+	}
+}
+
+// Even when an HTTP/1.1 TLS upstream responds to cancellation by returning cleanly (emitting a
+// chunked EOF before the client socket finishes closing), CompleteObserved must still mark the
+// response cut rather than reporting normal completion.
+func TestRemoteProviderCancelledStreamWithCleanUpstreamEOFStillAborts(t *testing.T) {
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		for i := range 3 {
-			_, _ = fmt.Fprintf(flushWriter{w}, "data: {\"n\":%d}\n\n", i)
-			time.Sleep(100 * time.Millisecond)
-		}
+		_, _ = io.WriteString(flushWriter{w}, "data: {\"n\":0}\n\n")
 		<-r.Context().Done()
-		stopped <- struct{}{}
 	}))
 	defer upstream.Close()
 	p, err := NewRemoteProvider(upstream.URL, "backend-key", upstream.Client().Transport)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Chunks 100ms apart stay under the idle limit; the stall after them does not.
-	if err := p.SetLimits(300*time.Millisecond, time.Minute); err != nil {
+	const idleLimit = 300 * time.Millisecond
+	if err := p.SetLimits(idleLimit, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	for name, provider := range map[string]Provider{"direct": p, "wrapped": unwrapping{p}} {
-		data, elapsed := readCutOff(t, provider)
-		if !strings.Contains(data, `{"n":2}`) || elapsed > 5*time.Second {
-			t.Fatalf("%s: idle cut after %s with %q", name, elapsed, data)
+	idleReady := make(chan *fakeTimer, 1)
+	p.afterFunc = func(d time.Duration, fn func()) limitTimer {
+		timer := newFakeTimer(fn)
+		if d == idleLimit {
+			idleReady <- timer
 		}
+		return timer
+	}
+	ctx := t.Context()
+	go func() {
 		select {
-		case <-stopped:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("%s: upstream call not cancelled", name)
+		case timer := <-idleReady:
+			if timer.waitResets(ctx, 1) {
+				timer.fire()
+			}
+		case <-ctx.Done():
 		}
+	}()
+	data, _ := readCutOff(t, p)
+	if !strings.Contains(data, `{"n":0}`) {
+		t.Fatalf("missing first chunk: %q", data)
 	}
 }
 
