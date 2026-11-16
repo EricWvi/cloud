@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -72,6 +73,7 @@ type PluginPackageSource struct {
 	Entry       PluginCatalogEntry
 	Locator     string
 	Digest      string
+	Target      string
 	Retrieval   pluginmarket.Retrieval
 	Credentials pluginmarket.Credentials
 }
@@ -192,6 +194,15 @@ func (s *Store) SpacePlugins(ctx context.Context, tenant, space string) ([]Space
 // PluginPackageSource returns the frozen download location for a marketplace entry. It resolves
 // package credentials, so only the owner-only install route may call it.
 func (s *Store) PluginPackageSource(ctx context.Context, tenant, space, id string) (PluginPackageSource, error) {
+	return s.pluginPackageSource(ctx, tenant, space, id, false)
+}
+
+// MCPPackageSource resolves the host-target package through the existing market credentials.
+func (s *Store) MCPPackageSource(ctx context.Context, tenant, space, id string) (PluginPackageSource, error) {
+	return s.pluginPackageSource(ctx, tenant, space, id, true)
+}
+
+func (s *Store) pluginPackageSource(ctx context.Context, tenant, space, id string, mcp bool) (PluginPackageSource, error) {
 	if e := requireSpace(ctx, s.pool, tenant, space); e != nil {
 		return PluginPackageSource{}, e
 	}
@@ -208,8 +219,24 @@ func (s *Store) PluginPackageSource(ctx context.Context, tenant, space, id strin
 		return PluginPackageSource{}, fmt.Errorf("decode catalog entry: %w", e)
 	}
 	source := PluginPackageSource{Entry: entry}
-	if kind != "workflow" {
+	if kind != "workflow" && !(mcp && kind == "mcp") {
 		return source, nil
+	}
+	if kind == "mcp" && (entry.URL == nil || entry.SHA256 == nil) {
+		target := map[string]string{"amd64": "x86_64-unknown-linux-gnu", "arm64": "aarch64-unknown-linux-gnu"}[runtime.GOARCH]
+		raw, _ := json.Marshal(entry.Targets)
+		var targets []pluginmarket.ReleaseTarget
+		if json.Unmarshal(raw, &targets) != nil {
+			return PluginPackageSource{}, ErrPluginVersionUnavailable
+		}
+		for _, candidate := range targets {
+			if candidate.Target == target {
+				entry.URL = &candidate.URL
+				entry.SHA256 = &candidate.SHA256
+				source.Target = target
+				break
+			}
+		}
 	}
 	if entry.URL == nil || entry.SHA256 == nil || *entry.URL == "" || *entry.SHA256 == "" {
 		return PluginPackageSource{}, ErrPluginVersionUnavailable

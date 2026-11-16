@@ -151,6 +151,9 @@ func TestEveryTenantRouteRequiresTenantAccess(t *testing.T) {
 
 	// The owner-only operations are exactly these; a new one is a decision, so it changes this list.
 	want := []string{
+		"POST /api/v1/tenants/{tid}/spaces/{sid}/mcp",
+		"PUT /api/v1/tenants/{tid}/spaces/{sid}/mcp/settings",
+		"DELETE /api/v1/tenants/{tid}/spaces/{sid}/mcp",
 		"POST /api/v2/tenants/{tid}/members",
 		"POST /api/v1/tenants/{tid}/spaces/{sid}/plugins/sources",
 		"PATCH /api/v1/tenants/{tid}/spaces/{sid}/plugins/sources/{source}",
