@@ -2,6 +2,7 @@ package workflowhost
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -113,7 +114,7 @@ func TestPendingLoopExitDoesNotRecoverAnEndedRun(t *testing.T) {
 }
 
 func TestRestartDoesNotAbsorbAnInvalidOrInactiveLoopExit(t *testing.T) {
-	for _, variant := range []string{"invalid state", "inactive round"} {
+	for _, variant := range []string{"invalid state", "invalid result", "missing exit facts", "inactive round"} {
 		t.Run(variant, func(t *testing.T) {
 			f := newFixture(t)
 			ctx := context.Background()
@@ -121,6 +122,16 @@ func TestRestartDoesNotAbsorbAnInvalidOrInactiveLoopExit(t *testing.T) {
 			status, state := store.WorkflowStatusRunning, round.State
 			if variant == "invalid state" {
 				state = []byte(`{"exit":{"nodeRunId":"exit"},"variablePool":null}`)
+			} else if variant == "invalid result" || variant == "missing exit facts" {
+				exit := json.RawMessage(`{"nodeRunId":"exit","requestedAt":0,"result":{"Bogus":{}}}`)
+				if variant == "missing exit facts" {
+					exit = json.RawMessage(`{"result":{"Ok":{}}}`)
+				}
+				var err error
+				state, err = workflow.MergePayload(state, map[string]any{"exit": exit})
+				if err != nil {
+					t.Fatal(err)
+				}
 			} else {
 				status = store.WorkflowStatusSucceeded
 			}
@@ -129,10 +140,63 @@ func TestRestartDoesNotAbsorbAnInvalidOrInactiveLoopExit(t *testing.T) {
 			}
 			bootProcess(t, f)
 			run, rows := f.await(t, id, terminal)
-			if run.Status != store.WorkflowStatusFailed || node(rows, "loop").Status != store.WorkflowStatusFailed || node(rows, "out").ID != "" || starts(f) != 1 {
+			if run.Status != store.WorkflowStatusFailed || run.Error == nil || *run.Error != interruptedMessage || node(rows, "loop").Status != store.WorkflowStatusFailed || errorKind(t, node(rows, "loop")) != "interrupted_by_restart" || node(rows, "out").ID != "" || starts(f) != 1 {
 				t.Fatalf("invalid break survived: %+v %+v", run, rows)
 			}
 		})
+	}
+}
+
+func TestRestartInterruptsOrdinaryLoopBetweenMemberCompletionAndAdvance(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	id := f.run(t, loopGraph, nil)
+	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.awaitStart(t)
+	rounds, err := f.s.WorkflowEngineLoopRounds(ctx, id)
+	if err != nil || len(rounds) != 1 || workflow.HasPendingLoopExit(rounds[0].State) {
+		t.Fatalf("ordinary round = %+v %v", rounds, err)
+	}
+	awaitScopeSession(t, f, id, rounds[0].ID, "writer")
+	f.host.Close()
+	children, err := f.s.WorkflowEngineScopeNodes(ctx, id, rounds[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := node(children, "writer")
+	// Commit the member and its output pool, then crash before advancing the Loop. This leaves
+	// only the Loop parent active: absorbing every running Loop would now finish it successfully.
+	output := str("done")
+	changed, err := f.s.CompleteWorkflowEngineNode(ctx, id, writer.ID, output,
+		func(raw []byte) ([]byte, error) { return raw, nil },
+		func(raw []byte, member store.WorkflowNodeRun) ([]byte, error) {
+			p, _, err := workflow.DecodeRunPayload(raw)
+			if err != nil {
+				return nil, err
+			}
+			if err := p.Complete(member.NodeID, member.NodeType, member.Iteration, output, nil); err != nil {
+				return nil, err
+			}
+			return workflow.MergePayload(raw, map[string]any{"variablePool": p.VariablePool})
+		})
+	if err != nil || !changed {
+		t.Fatalf("member completion = %v %v", changed, err)
+	}
+	children, err = f.s.WorkflowEngineScopeNodes(ctx, id, rounds[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, child := range children {
+		if child.Status != store.WorkflowStatusSucceeded {
+			t.Fatalf("member still active: %+v", child)
+		}
+	}
+	bootProcess(t, f)
+	run, rows := f.await(t, id, terminal)
+	if run.Status != store.WorkflowStatusFailed || run.Error == nil || *run.Error != interruptedMessage || node(rows, "loop").Status != store.WorkflowStatusFailed || errorKind(t, node(rows, "loop")) != "interrupted_by_restart" || node(rows, "out").ID != "" || starts(f) != 1 {
+		t.Fatalf("ordinary Loop survived the boot sweep: %+v %+v", run, rows)
 	}
 }
 

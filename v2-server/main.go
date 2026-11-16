@@ -249,9 +249,9 @@ func run(addr, dbURL string, cleanup, fixture, testFixtures bool) (resultErr err
 	// owns the order). Runs owned by a task — handling runs and decomposition runs — never outlive
 	// the process: their owners cancel them first, except a decomposition run at a submitted review,
 	// which the review recovery finishes and its decomposition adopts after the sweep. Of the other
-	// workflow runs, the sweep fails what was executing except an interrupted Iteration it can
-	// absorb, which it resumes under its frozen starter; that run, and a run frozen at a review
-	// form, outlive the process. Hosts stop observing turns before the execution runtime closes
+	// workflow runs, the sweep fails what was executing except an interrupted Iteration or pending
+	// LoopExit cleanup it can absorb and resume under its frozen starter. Those runs and runs frozen
+	// at a review form outlive the process. Hosts stop observing turns before the execution runtime closes
 	// (defers run LIFO).
 	workflowRuns, e := workflowhost.NewHost(workflowhost.Config{Store: db, Execution: runtime, Catalog: runtime})
 	if e != nil {
