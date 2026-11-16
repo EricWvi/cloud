@@ -180,6 +180,16 @@ func TestRemovingSourceClearsPlanCredentials(t *testing.T) {
 	if e := f.db.QueryRow(f.ctx, `select credentials is not null from v2_skill_plans where selection_id=$1`, selection.ID).Scan(&stored); e != nil || !stored {
 		t.Fatalf("plan credentials stored=%t err=%v", stored, e)
 	}
+	// Delivery keeps the custom source's own frozen retrieval and credentials; the official proxy
+	// setting does not apply to it.
+	if _, e := f.db.Exec(f.ctx, `insert into v2_projects(id,tenant_id,data,plugin_space_id) values('private-project',$1,'{}',$2)`, f.tenant, space); e != nil {
+		t.Fatal(e)
+	}
+	t.Setenv("V2_MARKET_SOCKS_PROXY", "socks5://127.0.0.1:1")
+	jobs, e := f.store.SkillJobs(f.ctx)
+	if e != nil || len(jobs) != 1 || jobs[0].Retrieval != in.Retrieval || len(jobs[0].Credentials) == 0 {
+		t.Fatalf("custom delivery job = %+v %v, want retrieval %+v with credentials", jobs, e, in.Retrieval)
+	}
 	if e := f.store.ChangeMarket(f.ctx, f.tenant, space, namespace, "DELETE", store.MarketSource{}); e != nil {
 		t.Fatal(e)
 	}

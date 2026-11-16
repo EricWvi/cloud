@@ -32,7 +32,7 @@ V2_LOGIN=email go run .                # 开发模式，监听 127.0.0.1:8090
 | `V2_PLUGIN_MARKETPLACE_URL` | `https://github.com/ora-space/marketplace` | 未设置使用开发默认，显式空字符串关闭官方源；插件市场 Git HTTPS 地址；禁止携带凭据、query 或 fragment。离线测试直接构造 Syncer 使用本地仓库 |
 | `V2_PLUGIN_MARKETPLACE_BRANCH` | `main` | 市场同步分支；启动时浅克隆并拉取，之后按间隔快进工作副本 |
 | `V2_PLUGIN_MARKETPLACE_INTERVAL` | `5m` | 市场刷新间隔；必须为正 duration。失败时保留上一版 PostgreSQL 快照 |
-| `V2_MARKET_SOCKS_PROXY` | 未设置 | 自定义来源启用代理时使用的部署级 SOCKS5 地址；Git 与 Skill 包下载都使用，客户端只把已校验的公网 IP 交给代理。设置了合法的 `socks5://` 地址时，安装官方市场的 Skill 和工作流包时的下载也走它；未设置或不合法时官方包直连 |
+| `V2_MARKET_SOCKS_PROXY` | 未设置 | 自定义来源启用代理时使用的部署级 SOCKS5 地址；Git 与 Skill 包下载都使用，客户端只把已校验的公网 IP 交给代理。设置了合法的 `socks5://` 地址时，安装官方市场的 Skill 和工作流包、以及向项目 Node 下发官方 Skill 时的下载也走它；未设置或不合法时官方包直连 |
 | `V2_MARKET_CREDENTIAL_KEY` | 未设置 | 来源凭据、租户 MCP 设置与私有项目仓库令牌的 AES-256-GCM 密钥（Base64 编码的 32 字节）；保存 MCP 设置、启用 S3 来源、自定义来源 Git 认证或私有项目仓库令牌时必须持久提供 |
 | `V2_NODE_ASSETS_DIR` | 未设置 | `task v2:node:prepare` 生成的固定 Node、reaper、Deno、OpenCode 和 Claude Code 资源；未设置时只启用纯模型路径 |
 | `V2_MODEL_BASE_URL` / `V2_MODEL_API_KEY` / `V2_MODEL_NAME` | 未设置 | 可选的一组 HTTPS OpenAI 兼容 provider；必须同时设置，OpenCode 与纯模型共用，清单只公开模型名称与版本 |
@@ -870,7 +870,7 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 
 空间选择冻结 Skill 的来源、版本、目标平台和 SHA-256，已上线的项目 Node 通过 `install_plugins` / `remove_plugins` 接收并应用。状态不经过 Node：选择写入即为已安装，删除选择行即为移除，所以没有绑定项目、Node 离线或项目还没应用时，设置页和工作流节点的技能候选照常反映选择结果。历史项目绑定到同一租户的默认演示空间；创建项目可传 `spaceId`，省略则沿用默认演示空间。目录升级不会改变现有选择。成员可读项目回执；项目回执只记录交付情况，不再决定空间的已安装状态。
 
-下载限制为公网 HTTPS、归属来源的 S3 SigV4 或直接 HTTPS；DNS 域名经本地透明代理的 fake-IP（`198.18.0.0/15`）应答时仍固定该地址，字面量地址不放宽。校验摘要和归档中的 Skill 标识、版本后，才通过节点已有的包服务交付。网络、临时 HTTP 状态、Node 中途退出等可恢复错误会按 5 秒起步、最长 5 分钟的指数退避自动重试；摘要不符、包校验失败等确定错误立即失败，并把可定位的安全摘要写入项目回执和服务端日志，不影响空间选择本身。技能在项目工作副本的 `.opencode/skills`、`.claude/skills` 中发现；已有项目文件不被覆盖。同名时市场优先：仅由 Ora 物化出来的旧用户技能目录（登记在服务自己的 exclude 标题段下）被市场链接替换，项目自带的技能保留并向服务端返回带技能名的冲突。Agent 的固定运行时版本保持独立；市场 Agent、Hook 和其他未验证类型仅供浏览，MCP 使用租户安装接口。
+下载限制为公网 HTTPS、归属来源的 S3 SigV4 或直接 HTTPS；DNS 域名经本地透明代理的 fake-IP（`198.18.0.0/15`）应答时仍固定该地址，字面量地址不放宽。官方市场的包在每次下发时按当前部署配置选择下载方式：设了合法的 `V2_MARKET_SOCKS_PROXY` 时走该代理，否则直连，与安装时一致，所以改动代理设置对已有安装计划同样生效；自定义来源沿用其计划冻结的下载方式和凭据。校验摘要和归档中的 Skill 标识、版本后，才通过节点已有的包服务交付。网络、临时 HTTP 状态、Node 中途退出等可恢复错误会按 5 秒起步、最长 5 分钟的指数退避自动重试；摘要不符、包校验失败等确定错误立即失败，并把可定位的安全摘要写入项目回执和服务端日志，不影响空间选择本身。技能在项目工作副本的 `.opencode/skills`、`.claude/skills` 中发现；已有项目文件不被覆盖。同名时市场优先：仅由 Ora 物化出来的旧用户技能目录（登记在服务自己的 exclude 标题段下）被市场链接替换，项目自带的技能保留并向服务端返回带技能名的冲突。Agent 的固定运行时版本保持独立；市场 Agent、Hook 和其他未验证类型仅供浏览，MCP 使用租户安装接口。
 
 与 Desktop 的差异：
 
