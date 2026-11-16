@@ -288,10 +288,9 @@ func TestRealWorkflowMCPLifecycleGate(t *testing.T) {
 	if err := json.Unmarshal(blocked.Payload, &blockedPayload); err != nil {
 		t.Fatal(err)
 	}
-	if run.Status != store.WorkflowStatusFailed || blockedPayload.Detail.Code != "mcp_node_capability_missing" || blockedPayload.Detail.AutoRetryable == nil || *blockedPayload.Detail.AutoRetryable || provider.calls.Load() != 0 || node(attempts, "b").SessionID != nil {
-		t.Fatalf("pinned Node must reject nonempty MCP before running an Agent: run=%s detail=%+v calls=%d", run.Status, blockedPayload.Detail, provider.calls.Load())
+	if run.Status != store.WorkflowStatusFailed || blockedPayload.Detail.Code != "mcp_lifecycle_not_ready" || blockedPayload.Detail.AutoRetryable == nil || *blockedPayload.Detail.AutoRetryable || provider.calls.Load() != 0 || blocked.SessionID != nil || node(attempts, "b").SessionID != nil {
+		t.Fatalf("Controller must reject nonempty MCP before creating a session: run=%s detail=%+v calls=%d", run.Status, blockedPayload.Detail, provider.calls.Load())
 	}
-	assertPublicRecords(blocked)
 	// Explicitly disabling both bindings leaves the old Node path usable, including
 	// the shared-checkout handoff between the two real Agent sessions.
 	disabled := strings.Replace(graph, `"enabled":true`, `"enabled":false`, 1)

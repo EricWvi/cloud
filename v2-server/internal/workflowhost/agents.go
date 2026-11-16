@@ -425,9 +425,12 @@ func (h *Host) settle(d workflow.AgentDispatch, r execution.Result, ex resolvedE
 }
 
 func mcpFailure(err error) workflow.Failure {
-	failure := workflow.Failure{Kind: workflow.FailureMissingAgentConfig, Message: "mcp_plugin_missing", Code: "mcp_plugin_missing"}
+	// Infrastructure and authorization errors are retryable execution failures. Never expose
+	// their raw text (which may contain SQL or credentials) as a public MCP diagnostic.
+	failure := workflow.Failure{Kind: workflow.FailureSession, Message: "execution could not resolve MCP configuration"}
 	var setup *execution.MCPFailure
 	if errors.As(err, &setup) && execution.IsMCPFailureCode(setup.Code) {
+		failure.Kind = workflow.FailureMissingAgentConfig
 		failure.Message, failure.Code = setup.Code, setup.Code
 		failure.PluginID, failure.SettingID, failure.Transport = setup.PluginID, setup.SettingID, setup.Transport
 	}

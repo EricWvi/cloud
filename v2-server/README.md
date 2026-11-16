@@ -812,7 +812,7 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 
 每个租户与插件的 revision 独立递增，卸载后保留版本计数。重新安装不会复用旧 revision，旧页面提交的设置或删除请求返回版本冲突；升级已有数据库时先从当前安装记录回填版本计数。
 
-工作流只解析启用且明确选择的 MCP。无选择时发送空集合语义，每个节点单独冻结包和设置，配置完整性失败会标出 plugin_id、setting_id 或 transport。生命周期门禁在 clone、安装会话插件和 Agent Start 之前拒绝非空选择；设置值不进入运行事件、Node ledger 或页面 DTO。会话恢复、live refresh 和宿主健康探测由后续生命周期实现承接。真实 Node 验收使用 `TEST_DATABASE_URL`、`V2_NODE_ASSETS_DIR` 运行 `go test -race -run TestRealWorkflowMCPLifecycleGate ./internal/workflowhost`，验证当前 pin 拒绝非空选择、禁用绑定后两节点正常执行及公开记录无配置值泄漏。
+工作流只解析启用且明确选择的 MCP。无选择时发送空集合语义。当前每个节点只读取包元数据和设置，不加载 archive；配置完整性失败会标出 plugin_id、setting_id 或 transport，数据库或权限错误仍是可重试的执行失败。Controller 生命周期门禁以 `mcp_lifecycle_not_ready` 在复制包、结束上一会话、创建 Session/Turn 和启动 Agent 之前拒绝非空选择；Node 边界另外保留能力检查。设置值不进入运行事件、Node ledger 或页面 DTO。会话恢复、live refresh 和宿主健康探测由后续生命周期实现承接；开启门禁时也需接入按 generation 获取包的流程。真实 Node 验收使用 `TEST_DATABASE_URL`、`V2_NODE_ASSETS_DIR` 运行 `go test -race -run TestRealWorkflowMCPLifecycleGate ./internal/workflowhost`，验证非空选择在创建会话前拒绝、禁用绑定后两节点正常执行及公开记录无配置值泄漏。
 
 ### 项目 Skill 安装
 

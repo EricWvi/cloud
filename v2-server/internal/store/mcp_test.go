@@ -3,6 +3,7 @@ package store_test
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -90,6 +91,10 @@ func TestTenantMCPRevisionSurvivesRemovalAndMigration(t *testing.T) {
 		t.Fatal("reinstallation reused a prior revision", current.Revision, err)
 	}
 	for _, stale := range []int64{old.Revision, legacyRevision} {
+		older, olderArchive := mcpPackage(t, "1.0.0")
+		if _, err := migrated.InstallTenantMCP(f.ctx, a, space, older, olderArchive, stale); !errors.Is(err, store.ErrConflict) {
+			t.Fatal("old editor replaced new installation", stale, err)
+		}
 		if _, err := migrated.SetTenantMCPSettings(f.ctx, a, space, old.ID, stale, map[string]any{"apiKey": "stale-key"}, nil); !errors.Is(err, store.ErrConflict) {
 			t.Fatal("old editor changed new installation", stale, err)
 		}
@@ -134,6 +139,23 @@ func TestTenantMCPRevisionSurvivesRemovalAndMigration(t *testing.T) {
 	reinstalled, err := migrated.InstallTenantMCP(f.ctx, a, space, source, archive, 0)
 	if err != nil || reinstalled.Revision <= configured.Revision {
 		t.Fatal("settings revision collided after reinstallation", err)
+	}
+}
+
+func TestWorkflowMCPResolutionPreservesDatabaseFailures(t *testing.T) {
+	f := newSquadFixture(t)
+	owner := f.login(t, "mcp-owner", "owner")
+	if _, err := f.db.Exec(f.ctx, `INSERT INTO v2_projects(id,tenant_id,data) VALUES('project',$1,'{}')`, f.tenant); err != nil {
+		t.Fatal(err)
+	}
+	// A failed SELECT is not evidence that the selected plugin is missing.
+	if _, err := f.db.Exec(f.ctx, `ALTER TABLE v2_tenant_mcps RENAME TO unavailable_mcps`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := f.store.ResolveWorkflowMCP(f.ctx, execution.Scope{TenantID: f.tenant, UserID: owner}, "project", []string{"official/example.search"})
+	var setup *execution.MCPFailure
+	if err == nil || errors.As(err, &setup) {
+		t.Fatal("database failure became a configuration diagnostic", err)
 	}
 }
 
@@ -207,6 +229,14 @@ func TestTenantMCPConfigurationIsSharedSealedAndVersioned(t *testing.T) {
 	if selection.Packages[0].Digest != strings.ToLower(source.Digest) {
 		t.Fatal("digest was not canonical")
 	}
+	if len(selection.Packages[0].Archive) != 0 {
+		t.Fatal("closed lifecycle gate must not load package archives")
+	}
+	cancelled, cancel := context.WithCancel(f.ctx)
+	cancel()
+	if _, err := f.store.ResolveWorkflowMCP(cancelled, scope, "mcp-project", []string{item.ID}); !errors.Is(err, context.Canceled) {
+		t.Fatal("cancellation lost its infrastructure error", err)
+	}
 	frozen, _ := json.Marshal(selection)
 	if bytes.Contains(frozen, []byte(secret)) || bytes.Contains(frozen, archive) {
 		t.Fatal("snapshot persisted secret or archive")
@@ -216,6 +246,21 @@ func TestTenantMCPConfigurationIsSharedSealedAndVersioned(t *testing.T) {
 	}
 	if _, err = f.store.ResolveWorkflowMCP(f.ctx, scope, "missing-project", []string{item.ID}); err == nil {
 		t.Fatal("missing project allowed")
+	}
+	var otherTenant string
+	if err := f.db.QueryRow(f.ctx, `INSERT INTO tenants(name) VALUES('MCP isolated tenant') RETURNING id`).Scan(&otherTenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(f.ctx, `INSERT INTO v2_projects(id,tenant_id,data) VALUES('other-mcp-project',$1,'{}')`, otherTenant); err != nil {
+		t.Fatal(err)
+	}
+	otherScope := execution.Scope{TenantID: otherTenant, UserID: member}
+	if _, err := f.store.ResolveWorkflowMCP(f.ctx, otherScope, "mcp-project", []string{item.ID}); !errors.Is(err, execution.ErrNotFound) {
+		t.Fatal("cross-tenant project resolved", err)
+	}
+	var missing *execution.MCPFailure
+	if _, err := f.store.ResolveWorkflowMCP(f.ctx, otherScope, "other-mcp-project", []string{item.ID}); !errors.As(err, &missing) || missing.Code != "mcp_plugin_missing" {
+		t.Fatal("another tenant's installation resolved", err)
 	}
 	other := m
 	other.TenantID = "11111111-1111-4111-8111-111111111111"

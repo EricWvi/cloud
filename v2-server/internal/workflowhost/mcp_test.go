@@ -3,12 +3,31 @@ package workflowhost
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
+	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
+
+func TestMCPResolutionInfrastructureErrorsRemainRetryable(t *testing.T) {
+	for _, err := range []error{context.Canceled, context.DeadlineExceeded, store.ErrForbidden, execution.ErrNotFound, errors.New("database commit failed: private detail"), fmt.Errorf("begin: %w", context.Canceled)} {
+		failure := mcpFailure(err)
+		detail := failure.Detail(1, false, time.Unix(0, 0))
+		if failure.Kind != workflow.FailureSession || failure.Code != "" || detail["auto_retryable"] != true || failure.Message != "execution could not resolve MCP configuration" {
+			t.Fatalf("infrastructure error misclassified or exposed: %+v", failure)
+		}
+	}
+	for _, code := range []string{"mcp_plugin_missing", "mcp_setting_missing"} {
+		failure := mcpFailure(fmt.Errorf("resolve: %w", &execution.MCPFailure{Code: code, PluginID: "official/acme.tools"}))
+		if failure.Code != code || failure.Detail(1, false, time.Unix(0, 0))["auto_retryable"] != false {
+			t.Fatalf("typed setup error lost classification: %+v", failure)
+		}
+	}
+}
 
 func TestMCPLifecycleGateFailuresAreExplicitAndNotRetryable(t *testing.T) {
 	for _, code := range []string{"mcp_node_capability_missing", "mcp_lifecycle_not_ready"} {

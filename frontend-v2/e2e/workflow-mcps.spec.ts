@@ -128,7 +128,7 @@ test('an enabled unavailable MCP fails with actionable diagnostics', async ({ pa
   await page.screenshot({ path: info.outputPath('1201-mcp-failure.png'), animations: 'disabled' })
 })
 
-test('the pinned Node rejects a configured MCP without lifecycle capability', async ({ page }, info) => {
+test('the Controller rejects a configured MCP before creating a session', async ({ page }, info) => {
   test.setTimeout(180_000)
   await page.setViewportSize({ width: 1600, height: 1000 })
   await page.goto('/settings/plugins')
@@ -137,7 +137,7 @@ test('the pinned Node rejects a configured MCP without lifecycle capability', as
   const sid = (await (await page.request.get(`/api/v1/tenants/${tid}/spaces`)).json()).items[0].id
   const base = `/api/v2/tenants/${tid}`
   const executors = (await (await page.request.get(`${base}/chat/executors`)).json()).items
-  test.skip(executors.length === 0, 'prepared Node assets are required for the pinned Node capability gate')
+  test.skip(executors.length === 0, 'prepared Node assets are required for the Agent executor catalog')
   // The current pin lacks session_mcp_lifecycle. A Node upgrade that implements that contract must
   // replace this rejection expectation with lifecycle acceptance, not merely advertise session_mcp.
   const identifier = 'official/ora-space.tavily-search'
@@ -161,23 +161,22 @@ test('the pinned Node rejects a configured MCP without lifecycle capability', as
   expect(JSON.stringify(saved)).not.toContain('mcp-e2e-lifecycle-fixture-token')
 
   try {
-    const rid = await startMcpRun(page, base, executors[0], identifier, '已配置 MCP 的 Node 能力检查')
+    const rid = await startMcpRun(page, base, executors[0], identifier, '已配置 MCP 的生命周期门禁')
     const detail = async () => (await page.request.get(`${base}/workflow-runs/${rid}`)).json()
     await expect.poll(async () => (await detail()).run.status, { timeout: 120_000 }).toBe('failed')
     const result = await detail()
     const node = result.nodes.find((item: { nodeId: string }) => item.nodeId === 'agent')
     const failure = JSON.parse(node.payload).error_detail
-    expect(failure).toMatchObject({ code: 'mcp_node_capability_missing', auto_retryable: false, attempt: 1 })
+    expect(failure).toMatchObject({ code: 'mcp_lifecycle_not_ready', auto_retryable: false, attempt: 1 })
     expect(failure.plugin_id).toBeUndefined()
     expect(failure.transport).toBeUndefined()
-    // Cloud allocates the session record before Driver.Run rejects the Node capability.
-    expect(node.sessionId).toBeTruthy()
+    expect(node.sessionId).toBeNull()
     expect(JSON.stringify(result)).not.toContain('mcp-e2e-lifecycle-fixture-token')
-    const diagnostics = await openMcpFailure(page, rid, '已配置 MCP 的 Node 能力检查')
-    await expect(diagnostics).toContainText('mcp_node_capability_missing')
-    await expect(diagnostics).toContainText('当前 Node 缺少 MCP 生命周期能力，请更新 Node 后重试。')
+    const diagnostics = await openMcpFailure(page, rid, '已配置 MCP 的生命周期门禁')
+    await expect(diagnostics).toContainText('mcp_lifecycle_not_ready')
+    await expect(diagnostics).toContainText('当前服务尚未支持 MCP 生命周期，暂时无法运行带 MCP 的节点。')
     await expect(diagnostics).not.toContainText('mcp_plugin_missing')
-    await page.screenshot({ path: info.outputPath('1201-mcp-node-capability.png'), animations: 'disabled' })
+    await page.screenshot({ path: info.outputPath('1201-mcp-lifecycle.png'), animations: 'disabled' })
   } finally {
     expect((await page.request.delete(mcpPath, { data: { identifier, revision: saved.revision } })).ok()).toBe(true)
   }

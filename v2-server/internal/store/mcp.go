@@ -265,14 +265,16 @@ func (s *Store) RemoveTenantMCP(ctx context.Context, access Access, space, id st
 	return err
 }
 
-// ResolveWorkflowMCP freezes tenant-owned package bytes and memory-only overrides for one node.
+// ResolveWorkflowMCP freezes tenant-owned metadata and memory-only overrides for one node.
+// Do not load archives while execution's lifecycle admission gate is closed. Opening that
+// gate requires generation-aware package acquisition as well as Controller event support.
 func (s *Store) ResolveWorkflowMCP(ctx context.Context, scope execution.Scope, project string, ids []string) (*execution.MCPSelection, error) {
 	result := &execution.MCPSelection{Bindings: []execution.MCPBinding{}, Packages: []execution.MCPPackage{}}
 	if len(ids) == 0 {
 		return result, nil
 	}
 	if _, err := s.GetProject(ctx, scope, project); err != nil {
-		return nil, ErrForbidden
+		return nil, err
 	}
 	if len(ids) > 16 {
 		return nil, &execution.MCPFailure{Code: "mcp_selection_invalid"}
@@ -290,9 +292,12 @@ func (s *Store) ResolveWorkflowMCP(ctx context.Context, scope execution.Scope, p
 		var pkg execution.MCPPackage
 		var raw, sealed []byte
 		pkg.PluginID = id
-		err := tx.QueryRow(ctx, `SELECT plugin_version,digest,target,archive,declaration,settings FROM v2_tenant_mcps WHERE tenant_id=$1 AND plugin_id=$2`, scope.TenantID, id).Scan(&pkg.PluginVersion, &pkg.Digest, &pkg.Target, &pkg.Archive, &raw, &sealed)
-		if err != nil {
+		err := tx.QueryRow(ctx, `SELECT plugin_version,digest,target,declaration,settings FROM v2_tenant_mcps WHERE tenant_id=$1 AND plugin_id=$2`, scope.TenantID, id).Scan(&pkg.PluginVersion, &pkg.Digest, &pkg.Target, &raw, &sealed)
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, &execution.MCPFailure{Code: "mcp_plugin_missing", PluginID: id}
+		}
+		if err != nil {
+			return nil, err
 		}
 		var declaration pluginmarket.MCPDeclaration
 		if json.Unmarshal(raw, &declaration) != nil {

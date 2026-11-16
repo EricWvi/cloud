@@ -120,10 +120,16 @@ func (s *Service) Start(ctx context.Context, scope execution.Scope, req executio
 	if req.MCP != nil && req.Caller.Kind != execution.CallerWorkflow {
 		return execution.Ref{}, execution.ErrInvalidRequest
 	}
-	req.MCP = req.MCP.Clone()
 	if err := req.MCP.Validate(); err != nil {
 		return execution.Ref{}, err
 	}
+	// Controller generation admission and lifecycle events are not implemented yet. Reject
+	// before copying packages, stopping an idle predecessor, or persisting a Session/Turn.
+	// The driver's independent Node capability gate remains defense in depth.
+	if req.MCP != nil && len(req.MCP.Bindings) != 0 {
+		return execution.Ref{}, &execution.MCPFailure{Code: "mcp_lifecycle_not_ready"}
+	}
+	req.MCP = req.MCP.Clone()
 	return s.start(ctx, scope, req.Caller, req.Prompt, &req.Target, req.ExecutorID, req.AgentID, req.ModelID, req.Skills, req.MCP, req.Lifetime)
 }
 
