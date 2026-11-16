@@ -33,11 +33,21 @@ const reviewing = marketplaceEntry('reviewing', {
   readme: '# review\n\n代码审查，用于说明同名冲突。',
 })
 
+// A single-skill package whose readme title differs from the name its archive materializes at
+// runtime (assets/<name>/SKILL.md), as the top-skills.* packages do; the server fills packMembers
+// with the runtime name.
+const codeReviewPackage = marketplaceEntry('top-skills.code-review-and-quality', {
+  kind: 'skill',
+  title: 'Code Review and Quality',
+  readme: '# Code Review and Quality\n\n多轴代码评审。',
+  packMembers: ['code-review-and-quality'],
+})
+
 const pocock = marketplaceEntry('mattpocock.skills', {
   kind: 'skill',
   title: 'Matt Pocock Skills',
-  readme:
-    '# Matt Pocock Skills\n\n## Included skills\n\n- tdd\n- code-review\n- prototype\n',
+  readme: '# Matt Pocock Skills\n\nMatt 的技能合集。',
+  packMembers: ['tdd', 'code-review', 'prototype'],
 })
 
 const skillFile = (
@@ -52,6 +62,18 @@ const skillFile = (
   )
 
 beforeEach(() => localStorage.clear())
+
+it('marks a user skill shadowed by a single-skill package whose title differs from its runtime name', async () => {
+  installMarketplaceBackend({
+    catalog: [codeReviewPackage],
+    selections: [marketplaceSelection(codeReviewPackage)],
+    skills: [serverSkill({ id: '00000000-0000-4000-8000-000000000803', name: 'code-review-and-quality' })],
+  })
+  renderSettingsPage(<SkillsPage />)
+  expect(
+    await screen.findByText(/与本空间已安装的市场 Skill「code-review-and-quality」同名/),
+  ).toBeInTheDocument()
+})
 
 it('marks a user skill shadowed by a bundled market Skill name', async () => {
   installMarketplaceBackend({
