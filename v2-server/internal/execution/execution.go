@@ -69,6 +69,7 @@ type Target struct {
 // independently; ExecutorID is retained for older frozen configs that selected the pair as one
 // binding. Neither form contains provider credentials or executable paths.
 type StartRequest struct {
+	MCP        *MCPSelection
 	Skills     *Skills
 	Caller     Caller
 	Target     Target
@@ -124,8 +125,9 @@ const (
 // StopReason retains the protocol reason separately. FailureCode is a stable, sanitized code,
 // never an infrastructure error string. Consumers decide how these map to their domain status.
 type Result struct {
-	Status Status
-	Answer string
+	MCPFailure *MCPFailure `json:",omitempty"`
+	Status     Status
+	Answer     string
 	// AnswerComplete is true only after authoritative full-result retrieval. Completed
 	// requires true; missing, damaged or over-limit history produces failed + a reason.
 	AnswerComplete bool
@@ -174,7 +176,8 @@ type Turn struct {
 // Session is shared execution metadata; page titles, ordering and deletion remain page-owned.
 // EndedAt means the execution session can no longer accept Append, not merely that a turn ended.
 type Session struct {
-	Skills *Skills `json:",omitempty"`
+	MCP    *MCPSelection `json:",omitempty"`
+	Skills *Skills       `json:",omitempty"`
 	ID     string
 	// Target/Executor are nil only for model-only sessions. Selection snapshots never
 	// change when the configured catalog changes; no credentials are retained here.

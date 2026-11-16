@@ -44,6 +44,7 @@ type Client struct {
 	heartbeatDone chan struct{}
 	closeOnce     sync.Once
 	previews      bool
+	capabilities  map[string]bool
 }
 
 // Dial negotiates Node v1 and required capabilities before starting heartbeats.
@@ -107,6 +108,7 @@ func (c *Client) accept(message Message) error {
 		return errors.New("Node granted thread previews it cannot send")
 	}
 	c.identity, c.previews = accepted.Node, accepted.Previews
+	c.capabilities = capabilities
 	return nil
 }
 
@@ -115,6 +117,9 @@ func (c *Client) Identity() Identity { return c.identity }
 
 // ThreadPreviews reports whether both peers opted into thread_preview messages.
 func (c *Client) ThreadPreviews() bool { return c.previews }
+
+// Supports reports an immutable capability advertised by the current Node incarnation.
+func (c *Client) Supports(capability string) bool { return c.capabilities[capability] }
 
 // Send serializes commands and heartbeats and bounds every frame write. Successful return
 // means bytes were sent, not that Node admitted or completed the command.

@@ -58,6 +58,10 @@ Agent 把被切断的模型请求当成网络失败原样重发（OpenCode 0.6.1
 
 ## 验证
 
+工作流显式 MCP 选择经 `execution.MCPSelection` 进入会话。启动前核验有序规范身份、精确版本、16 项和 64 KiB 上限，并要求当前 Node 广告 `session_mcp`。已冻结的安装包经现有 package listener 和 `install_plugins` 交付，收到匹配身份与版本的安装回执后，才把完整 `spec.mcp` 交给 Node 解析。空选择省略协议字段，后续节点使用各自的选择。
+
+设置值仅驻留会话内存并进入启动帧，停止后释放内存引用。包安装帧、准备文件和执行持久快照均不含设置值。Node 返回的 MCP setup 失败保留稳定 code 以及可选 `plugin_id`、`setting_id`、`transport`，工作流将其映射为可手动恢复、禁止自动重试的配置失败。
+
 包级 `go vet` / `go test -race` 验证登记恢复、拒绝未知路径和 symlink、保留工作文件、runtime 锁及无效终态不能确认停止。
 
 fake IPC 测试通过同一个 Receive dispatcher 覆盖控制回复、Start/Append、事件持久化与 ACK、End 终态、传输断开及准备失败重试；它不启动真实 Node 进程，不能替代下述组合验收。

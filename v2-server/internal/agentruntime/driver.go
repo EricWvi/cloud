@@ -165,6 +165,12 @@ func (d *Driver) run(ctx context.Context, scope execution.Scope, session executi
 	defer func() { timing.finish(time.Now()) }()
 	a, err := d.session(ctx, scope, session, project, turn.Caller.Kind, timing)
 	if err != nil {
+		var mcp *execution.MCPFailure
+		if errors.As(err, &mcp) {
+			result := failed(mcp.Code)
+			result.MCPFailure = mcp
+			return result, err
+		}
 		if ctx.Err() != nil {
 			return d.cancelledRun(session.ID, ctx.Err())
 		}

@@ -147,6 +147,9 @@ func (d *Driver) session(ctx context.Context, scope execution.Scope, session exe
 			if a.prepareErr = installed.wait(prepare, p); a.prepareErr != nil {
 				return
 			}
+			if a.prepareErr = p.prepareMCP(prepare, session.MCP); a.prepareErr != nil {
+				return
+			}
 			if session.Skills != nil {
 				if err := p.applyWorkflowSkills(a.checkout.path, session.WorkspaceID, *session.Skills, siblings); err != nil {
 					a.prepareErr = err
@@ -220,6 +223,9 @@ func (a *agentSession) submit(turn, text string, fresh bool) error {
 		if configuration != nil {
 			spec["agent_configuration"] = configuration
 		}
+		if a.frozen.MCP != nil && len(a.frozen.MCP.Bindings) > 0 {
+			spec["mcp"] = mcpSpec(a.frozen.MCP)
+		}
 		return a.project.send("start_agent_session", a.execution, map[string]any{"spec": spec})
 	}
 	return a.project.send("submit_user_turn", a.execution, map[string]any{"node_id": a.project.nodeID(), "command_id": "turn-" + digest(turn), "turn": map[string]any{"turn_id": turn, "content": content}})
@@ -258,9 +264,12 @@ func (a *agentSession) requestEnd() {
 
 func (a *agentSession) markStopped() {
 	a.stopOnce.Do(func() {
+		a.commandMu.Lock()
 		a.mu.Lock()
 		a.ended = true
+		a.frozen.MCP = nil
 		a.mu.Unlock()
+		a.commandMu.Unlock()
 		if a.project != nil {
 			if a.project.services != nil {
 				a.project.services.End(a.execution)
@@ -339,9 +348,12 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 		var ended struct {
 			Kind   string
 			Result struct {
-				Reason string
-				Detail string
-				Node   node.Identity
+				Reason    string
+				Node      node.Identity
+				Detail    string
+				PluginID  string `json:"plugin_id"`
+				SettingID string `json:"setting_id"`
+				Transport string
 			}
 		}
 		validReason := func(reason string) bool {
@@ -363,6 +375,10 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 				// Node refused only this session at admission; the checkout's other sessions and
 				// the control connection are untouched. Its stable code says why.
 				result = failed(ended.Result.Detail)
+			}
+			if ended.Result.Reason == "agent_failed" && execution.IsMCPFailureCode(ended.Result.Detail) {
+				result = failed(ended.Result.Detail)
+				result.MCPFailure = &execution.MCPFailure{Code: ended.Result.Detail, PluginID: ended.Result.PluginID, SettingID: ended.Result.SettingID, Transport: ended.Result.Transport}
 			}
 			if ended.Result.Reason == "cancelled" || ended.Result.Reason == "user_ended" {
 				result = execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}

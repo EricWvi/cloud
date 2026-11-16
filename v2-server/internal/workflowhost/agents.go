@@ -160,6 +160,11 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 		fail(workflow.Failure{Kind: workflow.FailureMissingAgentConfig, Message: err.Error()})
 		return
 	}
+	mcp, err := h.store.ResolveWorkflowMCP(h.ctx, st.scope, d.ProjectID, cfg.MCPs)
+	if err != nil {
+		fail(mcpFailure(err))
+		return
+	}
 	executor, failure := h.resolveExecutor(st.scope, cfg)
 	if failure != nil {
 		fail(*failure)
@@ -172,6 +177,7 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 	}
 	caller := execution.Caller{Kind: execution.CallerWorkflow, ID: d.RunID, NodeID: d.Node.ID, AttemptID: d.NodeRunID}
 	request := execution.StartRequest{
+		MCP:    mcp,
 		Skills: skills, Caller: caller, Target: execution.Target{ProjectID: d.ProjectID},
 		ExecutorID: executor.executor.ID, Prompt: agentPrompt(d, task),
 	}
@@ -195,6 +201,11 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 	if err != nil {
 		if cancelling {
 			h.finishCancel(st, d.RunID)
+			return
+		}
+		var setup *execution.MCPFailure
+		if errors.As(err, &setup) {
+			fail(mcpFailure(err))
 			return
 		}
 		fail(workflow.Failure{Kind: workflow.FailureSession, Message: "execution refused to start the Agent: " + publicReason(err)})
@@ -370,6 +381,10 @@ func (h *Host) end(scope execution.Scope, sessionID string) error {
 // settle maps the turn's result onto the engine like desktop's report_outcome. Only an
 // authoritative complete answer can succeed; the stop reason then decides as desktop does.
 func (h *Host) settle(d workflow.AgentDispatch, r execution.Result, ex resolvedExecutor, cfg workflow.AgentConfig, task string) {
+	if r.MCPFailure != nil {
+		h.fail(d, mcpFailure(r.MCPFailure))
+		return
+	}
 	var output *string
 	if r.Answer != "" {
 		output = &r.Answer
@@ -407,6 +422,16 @@ func (h *Host) settle(d workflow.AgentDispatch, r execution.Result, ex resolvedE
 	default:
 		h.fail(d, workflow.Failure{Kind: workflow.FailureUnknownStopReason, Message: "agent stopped for a reason this Ora version does not recognize", Output: output})
 	}
+}
+
+func mcpFailure(err error) workflow.Failure {
+	failure := workflow.Failure{Kind: workflow.FailureMissingAgentConfig, Message: "mcp_plugin_missing", Code: "mcp_plugin_missing"}
+	var setup *execution.MCPFailure
+	if errors.As(err, &setup) && execution.IsMCPFailureCode(setup.Code) {
+		failure.Message, failure.Code = setup.Code, setup.Code
+		failure.PluginID, failure.SettingID, failure.Transport = setup.PluginID, setup.SettingID, setup.Transport
+	}
+	return failure
 }
 
 // completionKeys are the attempt payload keys a successful Agent writes: desktop's stop_reason,
