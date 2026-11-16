@@ -223,14 +223,11 @@ func TestRetryWaitIndependentBranchCancelRestartAndClose(t *testing.T) {
 			if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 				t.Fatal(err)
 			}
-			first := f.exec.awaitStart(t)
-			f.exec.finish(first, execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
+			// The independent branches execute concurrently; a's wait does not hold b.
+			started := f.exec.awaitStarts(t, 2)
+			f.exec.finish(started["a"], execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
 			row, p := waiting(t, f, id)
-			other := f.exec.awaitStart(t)
-			if f.exec.request(other).Caller.NodeID != "b" {
-				t.Fatal("independent branch did not continue")
-			}
-			f.exec.finish(other, completed("independent"))
+			f.exec.finish(started["b"], completed("independent"))
 			f.await(t, id, func(_ store.WorkflowRun, rows []store.WorkflowNodeRun) bool {
 				return node(rows, "b").Status == "succeeded"
 			})
@@ -346,9 +343,10 @@ func TestRetryWaitAbandonedWhenAnotherBranchFailsTheRun(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	f.exec.finish(f.exec.awaitStart(t), execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
+	started := f.exec.awaitStarts(t, 2)
+	f.exec.finish(started["a"], execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
 	row, p := waiting(t, f, id)
-	other := f.exec.awaitStart(t)
+	other := started["b"]
 	if err := f.host.engine.FailNode(ctx, id, f.exec.request(other).Caller.AttemptID, workflow.Failure{Kind: workflow.FailureRepository, Message: "b broke"}); err != nil {
 		t.Fatal(err)
 	}
@@ -464,12 +462,10 @@ func TestUnconfirmedStopFencesOnlyEligibleRetries(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	f.exec.finish(f.exec.awaitStart(t), execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
+	started := f.exec.awaitStarts(t, 2)
+	f.exec.finish(started["a"], execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
 	row, p := waiting(t, f, id)
-	other := f.exec.awaitStart(t)
-	if f.exec.request(other).Caller.NodeID != "b" {
-		t.Fatal("independent branch did not continue")
-	}
+	other := started["b"]
 	f.exec.onCancel = func(execution.Ref) error { return execution.ErrStopUnconfirmed }
 	if _, err := f.host.CancelRun(ctx, f.scope, id); !errors.Is(err, server.ErrWorkflowRunStopUnconfirmed) {
 		t.Fatalf("cancel = %v", err)
@@ -498,14 +494,14 @@ func TestUnconfirmedStopFencesOnlyEligibleRetries(t *testing.T) {
 	if fenced, _ := f.host.engine.HeldRetries(id); !fenced {
 		t.Fatal("the fence was dropped before the cancelled turn ended")
 	}
-	// The turn ending closes the cancellation (finishCancel) on the run's worker, which releases
-	// the fence. Closing the host instead would cancel the worker's context first.
+	// The turn ending closes the cancellation (finishCancel) on its attempt, which releases the
+	// fence. Closing the host instead would cancel the attempt's context first.
 	f.exec.finish(other, completed("late"))
 	awaitReleased(t, f, id)
 }
 
 // awaitReleased waits until the engine holds neither a fence nor a timer for the run, as it must
-// once a worker closed the run's cancellation.
+// once an attempt closed the run's cancellation.
 func awaitReleased(t *testing.T, f *fixture, runID string) {
 	t.Helper()
 	deadline := time.After(5 * time.Second)
@@ -638,17 +634,14 @@ func TestRetryableFailureAfterTheRunFailedSchedulesNothing(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	session := f.exec.awaitStart(t)
-	if f.exec.request(session).Caller.NodeID != "a" {
-		t.Fatalf("expected a first, got %s", f.exec.request(session).Caller.NodeID)
-	}
+	started := f.exec.awaitStarts(t, 2)
+	session := started["a"]
 	aAttempt := f.exec.request(session).Caller.AttemptID
-	// The host runs one Agent turn per run at a time, so b's attempt waits in the queue; failing
-	// it non-retryably fails the run while a executes.
-	_, rows := f.await(t, id, func(_ store.WorkflowRun, rows []store.WorkflowNodeRun) bool { return node(rows, "b").ID != "" })
-	if err := f.host.engine.FailNode(ctx, id, node(rows, "b").ID, workflow.Failure{Kind: workflow.FailureRepository, Message: "b broke"}); err != nil {
+	// b executes beside a; failing it non-retryably fails the run while a executes.
+	if err := f.host.engine.FailNode(ctx, id, f.exec.request(started["b"]).Caller.AttemptID, workflow.Failure{Kind: workflow.FailureRepository, Message: "b broke"}); err != nil {
 		t.Fatal(err)
 	}
+	f.exec.finish(started["b"], completed("late"))
 	if run, _ := f.await(t, id, terminal); run.Status != store.WorkflowStatusFailed {
 		t.Fatalf("run = %s", run.Status)
 	}
@@ -668,8 +661,8 @@ func TestRetryableFailureAfterTheRunFailedSchedulesNothing(t *testing.T) {
 	if err != nil || len(history) != 0 {
 		t.Fatalf("history = %+v %v, want none", history, err)
 	}
-	if n := starts(f); n != 1 {
-		t.Fatalf("started %d sessions, want only a's", n)
+	if n := starts(f); n != 2 {
+		t.Fatalf("started %d sessions, want only a's and b's", n)
 	}
 }
 

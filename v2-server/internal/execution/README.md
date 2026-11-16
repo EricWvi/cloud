@@ -29,7 +29,7 @@ chat 的 ID 是 conversation，workflow 是 run，schedule 是 occurrence；容�
 `Target` 只有 ProjectID，调用方不选择 Workspace。后端按以下粒度创建目录，并将生成的 WorkspaceID 记入 Session：
 
 - 每个 chat 会话一个目录；定时任务每次触发创建独立会话和目录。
-- 同一 Scope 下 `CallerWorkflow.ID` 相同的一次工作流运行共用目录，同时最多执行一轮（其余返回 `ErrWorkspaceBusy`）；目录里可以同时有多个活会话：下一个节点 Start 不结束之前的会话，各会话由调用方各自 End。这依赖 Node 的 `shared_checkout_sessions` 能力（同一 checkout 最多 8 个未结束的会话，超出的那个会话被 Node 拒绝，只有它自己失败）。
+- 同一 Scope 下 `CallerWorkflow.ID` 相同的一次工作流运行共用目录，每个会话同时最多执行一轮（同一会话的其余轮次返回 `ErrWorkspaceBusy`），不同会话的轮次可以同时执行；目录里可以同时有多个活会话：下一个节点 Start 不结束之前的会话，各会话由调用方各自 End。这依赖 Node 的 `shared_checkout_sessions` 能力（同一 checkout 最多 8 个未结束的会话，超出的那个会话被 Node 拒绝，只有它自己失败）。
 - 不同对话和不同 workflow run 不争抢目录，即使它们属于同一个项目。
 - 模型直连的 Session.WorkspaceID 为空。
 

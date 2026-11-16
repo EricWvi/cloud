@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
@@ -440,14 +439,11 @@ func TestSiblingFailureClosesTheParkedNode(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
 	}
-	// The run's turns share one slot in wave order: C starts once A parked.
-	a := f.exec.awaitStart(t)
-	if f.exec.request(a).Caller.NodeID != "a" {
-		t.Fatalf("first turn belongs to %s", f.exec.request(a).Caller.NodeID)
-	}
+	// A and C execute concurrently; C fails once A parked.
+	started := f.exec.awaitStarts(t, 2)
+	a, c := started["a"], started["c"]
 	f.exec.finish(a, completed("在"))
 	f.await(t, runID, parked("a"))
-	c := f.exec.awaitStart(t)
 	f.exec.finish(c, execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
 	sessions := map[string]string{"a": a}
 	_, nodes := f.await(t, runID, func(r store.WorkflowRun, n []store.WorkflowNodeRun) bool {
@@ -618,8 +614,8 @@ func TestUnreadableTurnEndsTheSessionAndParks(t *testing.T) {
 
 // H1: a sibling branch that starts its Agent while an interactive node is parked leaves the
 // node's session open: the run's sessions stay live side by side in its directory. A follow-up
-// sent while the sibling's turn runs waits for the run's turn slot and then reaches the same
-// session, and the node completes with that answer.
+// sent while the sibling's turn runs reaches the same session at once, and the node completes with
+// that answer.
 func TestSiblingStartLeavesTheParkedSessionOpen(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -632,12 +628,12 @@ func TestSiblingStartLeavesTheParkedSessionOpen(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
 	}
-	draft := f.exec.awaitStart(t)
+	started := f.exec.awaitStarts(t, 2)
+	draft, side := started["draft"], started["side"]
 	if f.exec.request(draft).Lifetime != execution.LifetimeHeld {
 		t.Fatal("the interactive node did not hold its session")
 	}
 	f.exec.finish(draft, completed("初稿"))
-	side := f.exec.awaitStart(t)
 	if f.exec.request(side).Lifetime != execution.LifetimeTurn {
 		t.Fatal("an automatic node held its session")
 	}
@@ -645,19 +641,20 @@ func TestSiblingStartLeavesTheParkedSessionOpen(t *testing.T) {
 	if p := interactivePayload(t, node(nodes, "draft")); f.exec.isClosed(draft) || p["session_ended"] != false || p["completable"] != true || p["turns"] != float64(1) {
 		t.Fatalf("the sibling's start touched the parked session: closed = %v, summary = %v", f.exec.isClosed(draft), p)
 	}
-	// The sibling's turn holds the run's slot, so the follow-up is accepted and waits for it.
+	// The follow-up runs beside the sibling's executing turn, in the node's own session.
 	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "draft", "继续"); err != nil {
 		t.Fatalf("turn while the sibling runs = %v", err)
 	}
-	select {
-	case id := <-f.exec.appendedCh:
-		t.Fatalf("the follow-up reached %s while the sibling's turn held the slot", id)
-	case <-time.After(100 * time.Millisecond):
-	}
-	f.exec.finish(side, completed("旁支好了"))
 	if id := f.exec.awaitAppend(t); id != draft {
 		t.Fatalf("the follow-up went to %s, want the node's own session %s", id, draft)
 	}
+	if f.exec.isClosed(side) {
+		t.Fatal("the follow-up disturbed the sibling's executing turn")
+	}
+	f.exec.finish(side, completed("旁支好了"))
+	f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "side").Status == store.WorkflowStatusSucceeded
+	})
 	if !f.exec.isClosed(side) || f.exec.isClosed(draft) {
 		t.Fatalf("after the sibling's turn: side closed = %v, draft closed = %v", f.exec.isClosed(side), f.exec.isClosed(draft))
 	}
@@ -693,22 +690,8 @@ func TestSiblingFailureDuringCompletionClosesTheNode(t *testing.T) {
  {"id":"c","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"并行","retry":{"enabled":false,"maxRetries":0,"initialDelaySeconds":1}}}}
 ],"edges":[{"source":"start","target":"a"},{"source":"start","target":"c"}]}`
 	// C fails before it starts a session (its executor list is unavailable), so A's session stays
-	// open; C waits in that list until A's completion is inside End.
-	list := f.exec.ListExecutorsFunc
-	calls, cListing, failC := 0, make(chan struct{}), make(chan struct{})
-	var listMu sync.Mutex
-	f.exec.ListExecutorsFunc = func(ctx context.Context, scope execution.Scope) ([]execution.Executor, error) {
-		listMu.Lock()
-		calls++
-		second := calls == 2
-		listMu.Unlock()
-		if second {
-			close(cListing)
-			<-failC
-			return nil, execution.ErrUnavailable
-		}
-		return list(ctx, scope)
-	}
+	// open; C's attempt is held until A's completion is inside End.
+	cHeld, failC := f.holdDispatchOf(t, "c")
 	runID := f.run(t, graph, nil)
 	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
@@ -716,7 +699,10 @@ func TestSiblingFailureDuringCompletionClosesTheNode(t *testing.T) {
 	a := f.exec.awaitStart(t)
 	f.exec.finish(a, completed("在"))
 	f.await(t, runID, parked("a"))
-	<-cListing
+	<-cHeld
+	f.exec.ListExecutorsFunc = func(context.Context, execution.Scope) ([]execution.Executor, error) {
+		return nil, execution.ErrUnavailable // only C lists from here on
+	}
 	ending, releaseEnd := make(chan struct{}), make(chan struct{})
 	end := f.exec.EndFunc
 	f.exec.EndFunc = func(ctx context.Context, scope execution.Scope, id string) error {
@@ -733,7 +719,7 @@ func TestSiblingFailureDuringCompletionClosesTheNode(t *testing.T) {
 	completed := make(chan error, 1)
 	go func() { _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); completed <- err }()
 	<-ending
-	close(failC)
+	failC()
 	f.await(t, runID, func(r store.WorkflowRun, n []store.WorkflowNodeRun) bool {
 		return r.Status == store.WorkflowStatusFailed && node(n, "c").Status == store.WorkflowStatusFailed
 	})

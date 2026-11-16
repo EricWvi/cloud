@@ -496,22 +496,21 @@ func TestLoopChildFailureAndCancellationCloseScope(t *testing.T) {
 		t.Run(fmt.Sprint(cancel), func(t *testing.T) {
 			f := newFixture(t)
 			ctx := context.Background()
-			graph := strings.Replace(loopGraph, `{"id":"out"`, `{"id":"sibling","data":{"kind":"agent","containerId":"loop","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"queued sibling"}}},{"id":"out"`, 1)
+			graph := strings.Replace(loopGraph, `{"id":"out"`, `{"id":"sibling","data":{"kind":"agent","containerId":"loop","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"same-wave sibling"}}},{"id":"out"`, 1)
 			graph = strings.Replace(graph, `{"source":"entry","target":"writer"}`, `{"source":"entry","target":"writer"},{"source":"entry","target":"sibling"}`, 1)
 			id := f.run(t, graph, nil)
 			if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 				t.Fatal(err)
 			}
-			session := f.exec.awaitStart(t)
+			// The same-wave sibling executes concurrently with the writer.
+			sessions := f.exec.awaitStarts(t, 2)
+			session := sessions["writer"]
 			rounds, err := f.s.WorkflowEngineLoopRounds(ctx, id)
 			if err != nil {
 				t.Fatal(err)
 			}
 			awaitScopeSession(t, f, id, rounds[0].ID, "writer")
-			children, err := f.s.WorkflowEngineScopeNodes(ctx, id, rounds[0].ID)
-			if err != nil || node(children, "sibling").Status != "running" {
-				t.Fatalf("expected a queued same-wave sibling: %+v %v", children, err)
-			}
+			awaitScopeSession(t, f, id, rounds[0].ID, "sibling")
 			status := "failed"
 			if cancel {
 				status = "cancelled"
@@ -528,10 +527,26 @@ func TestLoopChildFailureAndCancellationCloseScope(t *testing.T) {
 			if run.Status != status || node(roots, "loop").Status != status || *rounds[0].Status != status {
 				t.Fatalf("run %s parent %s scope %s", run.Status, node(roots, "loop").Status, *rounds[0].Status)
 			}
-			children, err = f.s.WorkflowEngineScopeNodes(ctx, id, rounds[0].ID)
+			children, err := f.s.WorkflowEngineScopeNodes(ctx, id, rounds[0].ID)
 			sibling := node(children, "sibling")
-			if err != nil || sibling.Status != "cancelled" || sibling.SessionID != nil {
-				t.Fatalf("queued sibling was not cancelled with its scope: %+v %v", sibling, err)
+			if err != nil || sibling.Status != "cancelled" || sibling.SessionID == nil || *sibling.SessionID != sessions["sibling"] {
+				t.Fatalf("executing sibling was not cancelled with its scope: %+v %v", sibling, err)
+			}
+			if cancel {
+				f.exec.mu.Lock()
+				cancelled := len(f.exec.cancels)
+				f.exec.mu.Unlock()
+				if cancelled != 2 {
+					t.Fatalf("cancelling the run stopped %d turns, want both", cancelled)
+				}
+			} else {
+				// The scope closed while the sibling executed; its late answer changes nothing.
+				f.exec.finish(sessions["sibling"], completed("late"))
+				f.await(t, id, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(id) == nil })
+				children, _ = f.s.WorkflowEngineScopeNodes(ctx, id, rounds[0].ID)
+				if late := node(children, "sibling"); late.Status != "cancelled" || late.Output != nil {
+					t.Fatalf("late sibling answer changed the closed scope: %+v", late)
+				}
 			}
 			if !cancel {
 				if sibling.Error == nil || *sibling.Error != `{"reason":"sibling_failed"}` {

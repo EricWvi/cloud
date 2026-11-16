@@ -18,7 +18,8 @@ import (
 // fakeExecution scripts the shared execution service: every accepted Start opens a session whose
 // owning turn ends when the test calls finish. Hooks inject the faults a scenario needs. It
 // follows executionruntime.Service: a workflow run's sessions stay live side by side in the run's
-// directory, and a Start or Append is refused while one of the run's turns runs; a turn that does
+// directory and take their turns concurrently, and an Append is refused while its own session's
+// turn runs; a turn that does
 // not complete ends a LifetimeTurn session, and a held one only when AgentLost; Cancel ends the
 // session and reports AgentLost.
 type fakeExecution struct {
@@ -100,10 +101,6 @@ func (f *fakeExecution) start(_ context.Context, scope execution.Scope, req exec
 			return s.ref, nil // an identical caller attempt is idempotent
 		}
 	}
-	if req.Caller.Kind == execution.CallerWorkflow && f.turnRunning(req.Caller.ID, "") {
-		f.mu.Unlock()
-		return execution.Ref{}, execution.ErrWorkspaceBusy // the run's turn slot is taken
-	}
 	f.next++
 	s := &fakeSession{
 		ref:    execution.Ref{SessionID: fmt.Sprintf("session-%d", f.next), TurnID: fmt.Sprintf("turn-%d", f.next)},
@@ -177,7 +174,7 @@ func (f *fakeExecution) appendTurn(_ context.Context, _ execution.Scope, req exe
 	case s.caller.AttemptID == req.Caller.AttemptID:
 		f.mu.Unlock()
 		return s.ref, nil
-	case s.result == nil, s.caller.Kind == execution.CallerWorkflow && f.turnRunning(s.caller.ID, req.SessionID):
+	case s.result == nil:
 		f.mu.Unlock()
 		return execution.Ref{}, execution.ErrWorkspaceBusy
 	}
@@ -244,6 +241,18 @@ func (f *fakeExecution) awaitStart(t *testing.T) string {
 	}
 }
 
+// awaitStarts returns the next n accepted sessions by node ID. Sibling Agents start concurrently,
+// so their order is not part of any test's expectation.
+func (f *fakeExecution) awaitStarts(t *testing.T, n int) map[string]string {
+	t.Helper()
+	sessions := map[string]string{}
+	for range n {
+		id := f.awaitStart(t)
+		sessions[f.request(id).Caller.NodeID] = id
+	}
+	return sessions
+}
+
 func (f *fakeExecution) request(id string) execution.StartRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -265,17 +274,6 @@ func (f *fakeExecution) scope(id string) execution.Scope {
 		}
 	}
 	return execution.Scope{}
-}
-
-// turnRunning reports whether a live session of the workflow run, other than except, has a turn
-// in flight: a run's turns share one slot. Callers hold f.mu.
-func (f *fakeExecution) turnRunning(runID, except string) bool {
-	for id, s := range f.sessions {
-		if id != except && s.caller.Kind == execution.CallerWorkflow && s.caller.ID == runID && s.result == nil && !f.closed[id] {
-			return true
-		}
-	}
-	return false
 }
 
 func completed(answer string) execution.Result {

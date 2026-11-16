@@ -27,15 +27,14 @@ type Config struct {
 	Now func() time.Time
 	// StopTimeout bounds waiting for execution to confirm a cancellation; zero means 30s.
 	StopTimeout time.Duration
-	// BusyRetry bounds how long an Agent start waits for the run's previous turn to release the
-	// shared directory; zero means 10s.
+	// BusyRetry bounds how long an interactive node's follow-up turn waits for its session's
+	// previous turn to finish cleaning up; zero means 10s.
 	BusyRetry time.Duration
 }
 
 // Host executes workflow runs in this process and implements server.WorkflowRunHost. Every run
 // is driven by the stateless engine; the host only keeps what cannot outlive the process: who
-// started each run (execution sessions are scoped to that user), its queued Agent attempts and
-// the turn currently executing.
+// started each run (execution sessions are scoped to that user) and its turns in flight.
 type Host struct {
 	store       *store.Store
 	exec        execution.Service
@@ -62,6 +61,8 @@ type Host struct {
 	// resuming, when set (tests only), runs inside ResumeRun once it holds the run's lifecycle
 	// lock and has admitted the resume, before the resume transaction.
 	resuming func(runID string)
+	// dispatching, when set (tests only), runs first in every Agent attempt's goroutine.
+	dispatching func(workflow.AgentDispatch)
 }
 
 // lifecycleLock is one run's cancel/resume lock and the number of callers holding or waiting.
@@ -278,33 +279,31 @@ type runState struct {
 	starters   int
 	cancelling bool
 	// generation counts the resumes of this run in this process. A dispatch carries the generation
-	// it was queued in, so one queued before a cancellation and a resume can never start a turn
-	// for the attempt the resume soft-deleted (see beginStart).
+	// it was dispatched in, so one dispatched before a cancellation and a resume can never start a
+	// turn for the attempt the resume soft-deleted (see beginStart).
 	generation uint64
-	queue      []queuedDispatch
-	working    bool
-	// starting is closed when an in-flight Start returns, so a cancellation can learn its ref.
-	starting           chan struct{}
-	active             *execution.Ref
-	activeScope        string
-	turnDone           chan struct{}
+	// dispatched counts the goroutines of attempts and follow-up turns that have not returned.
+	dispatched int
+	// attempts are the turns starting or executing, by caller attempt: Agent attempts and the
+	// follow-up turns of interactive nodes. They execute concurrently.
+	attempts           map[string]*attemptState
 	closedScopes       map[string]bool
 	scopeCleanupErrors map[string]error
 
-	// activeNodeRun is the attempt whose turn holds the slot, so a node's stop finds its turn.
-	activeNodeRun string
-	// turns are human follow-up turns waiting for the run's turn slot, before queued attempts.
-	turns []followUp
 	// interactive holds the root-scope interactive Agent nodes whose session is open between
 	// turns, by node ID. Process-local on purpose: a restart fails parked nodes.
 	interactive map[string]*interactiveNode
 }
 
-// queuedDispatch is one Agent attempt waiting for the run's worker, with the generation of the
-// run state it was dispatched in.
-type queuedDispatch struct {
-	d          workflow.AgentDispatch
-	generation uint64
+// attemptState is one turn from just before its Start (or Append) until it ended.
+type attemptState struct {
+	nodeRun string // the node run the turn belongs to, so a node's stop finds its turn
+	scope   string
+	// starting is closed when the in-flight Start returns, so a cancellation can learn its ref.
+	starting chan struct{}
+	ref      *execution.Ref
+	// done is closed once the turn ended (or never started).
+	done chan struct{}
 }
 
 // register records who is starting a run and counts the start under way. A run that already
@@ -379,10 +378,10 @@ func (h *Host) UpdateRunInput(ctx context.Context, scope server.WorkflowRunScope
 	return h.store.WorkflowRun(ctx, scope.TenantID, runID)
 }
 
-// CancelRun stops the run's executing Agent turn and waits for execution to confirm it before
-// closing the run as cancelled. Without confirmation the run stays open and the caller learns
-// the stop is unconfirmed; the run still never advances, and its worker closes it as cancelled
-// once the turn ends. When no turn was executing and only a parked interactive session could not
+// CancelRun stops every executing Agent turn of the run at once and waits for execution to confirm
+// all of them before closing the run as cancelled. Without confirmation the run stays open and the
+// caller learns the stop is unconfirmed; the run still never advances, and an attempt closes it as
+// cancelled once its turn ends. When no turn was executing and only a parked interactive session could not
 // be ended, no worker follows up: the run stays open, refusing every node action, until the
 // caller cancels again.
 func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, runID string) (store.WorkflowRun, error) {
@@ -405,14 +404,12 @@ func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, run
 	if st != nil && (run.Status == store.WorkflowStatusPending || run.Status == store.WorkflowStatusRunning || run.Status == store.WorkflowRunAwaitingInput) {
 		stopCtx, cancel := context.WithTimeout(ctx, h.stopTimeout)
 		defer cancel()
-		ref, err := st.requestCancel(stopCtx)
+		refs, err := st.requestCancel(stopCtx)
 		if err != nil {
 			return store.WorkflowRun{}, fmt.Errorf("%w: %w", server.ErrWorkflowRunStopUnconfirmed, err)
 		}
-		if ref != nil {
-			if _, err := h.exec.Cancel(stopCtx, st.scope, *ref); err != nil {
-				return store.WorkflowRun{}, fmt.Errorf("%w: %w", server.ErrWorkflowRunStopUnconfirmed, err)
-			}
+		if err := h.cancelTurns(stopCtx, st.scope, refs); err != nil {
+			return store.WorkflowRun{}, fmt.Errorf("%w: %w", server.ErrWorkflowRunStopUnconfirmed, err)
 		}
 		// Parked interactive nodes keep their sessions open between turns; a cancelled run
 		// must not leave them open.
@@ -437,13 +434,28 @@ func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, run
 	return run, nil
 }
 
-// requestCancel marks the run cancelling, so no further Agent starts, and returns the turn that
-// is executing. A Start already in flight is awaited, since its turn exists once it returns.
-func (st *runState) requestCancel(ctx context.Context) (*execution.Ref, error) {
+// requestCancel marks the run cancelling, so no further turn starts, and returns the turns that
+// are executing. Starts already in flight are awaited, since their turns exist once they return.
+func (st *runState) requestCancel(ctx context.Context) ([]execution.Ref, error) {
 	st.mu.Lock()
 	st.cancelling = true
-	for st.starting != nil {
-		starting := st.starting
+	return st.awaitStarts(ctx, func(*attemptState) bool { return true })
+}
+
+// awaitStarts waits until no selected turn is still starting and returns the refs of the selected
+// turns executing. Called with mu held; returns with it released.
+func (st *runState) awaitStarts(ctx context.Context, selected func(*attemptState) bool) ([]execution.Ref, error) {
+	for {
+		var starting chan struct{}
+		for _, a := range st.attempts {
+			if selected(a) && a.starting != nil {
+				starting = a.starting
+				break
+			}
+		}
+		if starting == nil {
+			break
+		}
 		st.mu.Unlock()
 		select {
 		case <-starting:
@@ -453,11 +465,29 @@ func (st *runState) requestCancel(ctx context.Context) (*execution.Ref, error) {
 		st.mu.Lock()
 	}
 	defer st.mu.Unlock()
-	if st.active == nil {
-		return nil, nil
+	var refs []execution.Ref
+	for _, a := range st.attempts {
+		if selected(a) && a.ref != nil {
+			refs = append(refs, *a.ref)
+		}
 	}
-	ref := *st.active
-	return &ref, nil
+	return refs, nil
+}
+
+// cancelTurns cancels the turns concurrently and reports an error unless execution confirmed every
+// stop: a run's sibling Agents end together, not one after another.
+func (h *Host) cancelTurns(ctx context.Context, scope execution.Scope, refs []execution.Ref) error {
+	errs := make([]error, len(refs))
+	var wg sync.WaitGroup
+	for i, ref := range refs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = h.exec.Cancel(ctx, scope, ref)
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 // lifecycleError translates the engine's refusals into the HTTP layer's lifecycle errors.

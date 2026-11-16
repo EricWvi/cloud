@@ -199,7 +199,8 @@ func TestBootFailsALeftoverIterationOwnerOfAFailedRun(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	outer := f.exec.awaitStart(t)
+	// The outer Agent and the Iteration member execute concurrently.
+	outer := f.exec.awaitStarts(t, 2)["outer"]
 	f.await(t, id, func(_ store.WorkflowRun, rows []store.WorkflowNodeRun) bool {
 		return iterationRow(rows, "worker", 0).ID != ""
 	})

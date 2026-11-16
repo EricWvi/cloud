@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -26,30 +25,20 @@ const parallelInteractive = `{"nodes":[
  {"id":"c","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"并行","retry":{"enabled":false,"maxRetries":0,"initialDelaySeconds":1}}}}
 ],"edges":[{"source":"start","target":"a"},{"source":"start","target":"c"}]}`
 
-// holdSecondListing makes the second executor listing (C's, after A's) wait until release is
-// called, then answer as usual or, with fail, refuse. It returns a channel closed once C is
-// waiting there; release also runs at cleanup, so a failing test never strands the worker.
-func (f *fixture) holdSecondListing(t *testing.T, fail bool) (<-chan struct{}, func()) {
+// holdDispatchOf makes the attempt of nodeID wait, before it does anything, until release is
+// called. It returns a channel closed once the attempt is waiting; release also runs at cleanup,
+// so a failing test never strands the attempt.
+func (f *fixture) holdDispatchOf(t *testing.T, nodeID string) (<-chan struct{}, func()) {
 	t.Helper()
-	list := f.exec.ListExecutorsFunc
-	var mu sync.Mutex
-	var once sync.Once
-	calls, waiting, released := 0, make(chan struct{}), make(chan struct{})
+	var once, entered sync.Once
+	waiting, released := make(chan struct{}), make(chan struct{})
 	release := func() { once.Do(func() { close(released) }) }
 	t.Cleanup(release)
-	f.exec.ListExecutorsFunc = func(ctx context.Context, scope execution.Scope) ([]execution.Executor, error) {
-		mu.Lock()
-		calls++
-		second := calls == 2
-		mu.Unlock()
-		if second {
-			close(waiting)
+	f.host.dispatching = func(d workflow.AgentDispatch) {
+		if d.Node.ID == nodeID {
+			entered.Do(func() { close(waiting) })
 			<-released
-			if fail {
-				return nil, execution.ErrUnavailable
-			}
 		}
-		return list(ctx, scope)
 	}
 	return waiting, release
 }
@@ -63,81 +52,45 @@ func (f *fixture) nodeRow(t *testing.T, runID, id string) store.WorkflowNodeRun 
 	return node(nodes, id)
 }
 
-// R2: a follow-up the starter sent runs before an attempt queued behind it: a person is waiting
-// for the answer, and the run's turns share one slot.
-func TestFollowUpRunsBeforeQueuedAttempts(t *testing.T) {
+// R2: a follow-up the starter sent runs at once, beside a sibling's executing turn: each node's
+// turns are its own session's, and the run's sessions execute concurrently.
+func TestFollowUpRunsBesideASiblingTurn(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	runID := f.run(t, parallelInteractive, nil)
 	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
 	}
-	a := f.exec.awaitStart(t)
-	// The first turn's summary is published once the session is bound; past that, the next
-	// publication is A's park.
-	f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
-		return interactivePayload(t, node(n, "a")) != nil
-	})
-	st := f.host.state(runID)
-	// Hold the hub so the worker stops inside A's park, right after the node becomes claimable
-	// and before it dequeues C; meanwhile the starter's follow-up joins the queue.
-	hub := f.host.Hub()
-	hub.mu.Lock()
-	held := true
-	t.Cleanup(func() {
-		if held {
-			hub.mu.Unlock()
-		}
-	})
+	started := f.exec.awaitStarts(t, 2)
+	a, c := started["a"], started["c"]
 	f.exec.finish(a, completed("在"))
-	var n *interactiveNode
-	waitUntil(t, func() bool {
-		st.mu.Lock()
-		defer st.mu.Unlock()
-		if tracked := st.interactive["a"]; tracked != nil && tracked.phase == phaseParked {
-			n = tracked
-		}
-		return n != nil
-	})
-	if _, err := f.s.MoveWorkflowEngineNode(ctx, runID, n.d.NodeRunID, store.WorkflowStatusPending, store.WorkflowStatusRunning,
-		func(node []byte) ([]byte, error) { return node, nil }); err != nil {
+	f.await(t, runID, parked("a"))
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "先回我"); err != nil {
 		t.Fatal(err)
 	}
-	st.mu.Lock()
-	if len(st.queue) != 1 || st.queue[0].d.Node.ID != "c" {
-		st.mu.Unlock()
-		t.Fatalf("queue = %+v, want C waiting", st.queue)
-	}
-	n.phase = phaseTurn
-	n.seq++
-	caller := execution.Caller{Kind: execution.CallerWorkflow, ID: runID, NodeID: "a", AttemptID: n.d.NodeRunID + "/turn-" + strconv.Itoa(n.seq)}
-	st.turns = append(st.turns, followUp{node: n, caller: caller, prompt: execution.TextPrompt("先回我")})
-	st.mu.Unlock()
-	held = false
-	hub.mu.Unlock()
-
 	if id := f.exec.awaitAppend(t); id != a {
 		t.Fatalf("follow-up went to %s", id)
 	}
-	select {
-	case id := <-f.exec.startedCh:
-		t.Fatalf("C's session %s started before the follow-up settled", id)
-	default:
+	if f.exec.isClosed(c) {
+		t.Fatal("the follow-up disturbed C's executing turn")
 	}
 	f.exec.finish(a, completed("回你了"))
-	c := f.exec.awaitStart(t)
-	if f.exec.request(c).Caller.NodeID != "c" {
-		t.Fatalf("second session belongs to %s", f.exec.request(c).Caller.NodeID)
+	f.await(t, runID, parked("a"))
+	f.exec.finish(c, completed("好"))
+	_, nodes := f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "c").Status == store.WorkflowStatusSucceeded
+	})
+	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != false {
+		t.Fatalf("A after both turns = %v, want parked with its session open", p)
 	}
 }
 
-// R3b, R7: while C is still being prepared (no session yet), the starter's follow-up to A waits in
-// the queue. Stopping it withdraws it: no Append ever reaches the session, which ends, and the
-// node parks for completion. A turn refused because the run stopped leaves the node claimable.
-func TestStopWithdrawsAQueuedFollowUp(t *testing.T) {
+// R3b, R7: while C is still being prepared (no session yet), the starter's follow-up to A runs at
+// once. Stopping it ends the session, and the node parks for completion with its first answer.
+func TestStopEndsAFollowUpWhileASiblingIsPrepared(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	waiting, release := f.holdSecondListing(t, false)
+	waiting, release := f.holdDispatchOf(t, "c")
 	runID := f.run(t, parallelInteractive, nil)
 	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
@@ -146,11 +99,14 @@ func TestStopWithdrawsAQueuedFollowUp(t *testing.T) {
 	f.exec.finish(a, completed("在"))
 	f.await(t, runID, parked("a"))
 	<-waiting
-	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "排着"); err != nil {
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "不用等 C"); err != nil {
 		t.Fatal(err)
 	}
+	if id := f.exec.awaitAppend(t); id != a {
+		t.Fatalf("follow-up went to %s", id)
+	}
 	if _, err := f.host.StopNodeTurn(ctx, f.scope, runID, "a"); err != nil {
-		t.Fatalf("stopping a queued follow-up = %v", err)
+		t.Fatalf("stopping the follow-up = %v", err)
 	}
 	_, nodes := f.await(t, runID, parked("a"))
 	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != true || p["completable"] != true || !f.exec.isClosed(a) {
@@ -159,18 +115,12 @@ func TestStopWithdrawsAQueuedFollowUp(t *testing.T) {
 	release()
 	c := f.exec.awaitStart(t)
 	f.exec.finish(c, completed("好"))
-	f.exec.mu.Lock()
-	appended := len(f.exec.appended)
-	f.exec.mu.Unlock()
-	if appended != 0 {
-		t.Fatal("the withdrawn follow-up reached the session")
-	}
 }
 
 func TestTurnRefusedByAStoppedRunLeavesTheNodeClaimable(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	waiting, release := f.holdSecondListing(t, true)
+	waiting, release := f.holdDispatchOf(t, "c")
 	runID := f.run(t, parallelInteractive, nil)
 	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
@@ -179,7 +129,7 @@ func TestTurnRefusedByAStoppedRunLeavesTheNodeClaimable(t *testing.T) {
 	f.exec.finish(a, completed("在"))
 	f.await(t, runID, parked("a"))
 	<-waiting
-	// C fails the run while its attempt is still in the worker, before the worker's sweep.
+	// C fails the run while its attempt is still held, before the attempt's sweep.
 	c := f.nodeRow(t, runID, "c")
 	if err := f.host.engine.FailNode(ctx, runID, c.ID, workflow.Failure{Kind: workflow.FailureSession, Message: "旁支失败"}); err != nil {
 		t.Fatal(err)
@@ -209,7 +159,8 @@ func TestRefusedParkClosesTheNode(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
 	}
-	a := f.exec.awaitStart(t)
+	started := f.exec.awaitStarts(t, 2)
+	a := started["a"]
 	c := f.nodeRow(t, runID, "c")
 	if err := f.host.engine.FailNode(ctx, runID, c.ID, workflow.Failure{Kind: workflow.FailureSession, Message: "旁支失败"}); err != nil {
 		t.Fatal(err)
@@ -221,6 +172,7 @@ func TestRefusedParkClosesTheNode(t *testing.T) {
 	if node(nodes, "a").Status != store.WorkflowStatusCancelled || !f.exec.isClosed(a) {
 		t.Fatalf("A = %+v closed = %v", node(nodes, "a"), f.exec.isClosed(a))
 	}
+	f.exec.finish(started["c"], completed("晚了")) // C executed beside A; its late answer ends it
 	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
 }
 
@@ -367,10 +319,10 @@ func TestResumeRestartsANodeParkedWhenTheRunFailed(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
 	}
-	a := f.exec.awaitStart(t)
+	started := f.exec.awaitStarts(t, 2)
+	a, c := started["a"], started["c"]
 	f.exec.finish(a, completed("在"))
 	f.await(t, runID, parked("a"))
-	c := f.exec.awaitStart(t)
 	f.exec.finish(c, execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
 	_, nodes := f.await(t, runID, func(r store.WorkflowRun, n []store.WorkflowNodeRun) bool {
 		return r.Status == store.WorkflowStatusFailed && node(n, "a").Status == store.WorkflowStatusCancelled
@@ -381,8 +333,10 @@ func TestResumeRestartsANodeParkedWhenTheRunFailed(t *testing.T) {
 	if _, err := f.host.ResumeRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
 	}
-	again := f.exec.awaitStart(t)
-	if again == a || f.exec.request(again).Caller.NodeID != "a" || !f.exec.isClosed(a) {
+	// The resume restarts the cancelled A and the failed C, which execute concurrently again.
+	resumed := f.exec.awaitStarts(t, 2)
+	again := resumed["a"]
+	if again == "" || again == a || !f.exec.isClosed(a) {
 		t.Fatalf("resumed A runs in %s (was %s, closed = %v), node %s", again, a, f.exec.isClosed(a), f.exec.request(again).Caller.NodeID)
 	}
 	f.exec.finish(again, completed("重来"))
@@ -390,7 +344,7 @@ func TestResumeRestartsANodeParkedWhenTheRunFailed(t *testing.T) {
 	if row := node(nodes, "a"); row.ID == first || interactivePayload(t, row)["turns"] != float64(1) {
 		t.Fatalf("resumed A = %+v, want a new attempt on its first turn", row)
 	}
-	f.exec.finish(f.exec.awaitStart(t), completed("旁支好了"))
+	f.exec.finish(resumed["c"], completed("旁支好了"))
 	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
 		t.Fatal(err)
 	}
@@ -400,15 +354,15 @@ func TestResumeRestartsANodeParkedWhenTheRunFailed(t *testing.T) {
 	}
 }
 
-// The window the sweep leaves open: the run has failed, but the worker has not yet closed the
-// parked node (it is still busy with the sibling). A resume in that window must not keep a row
+// The window the sweep leaves open: the run has failed, but nothing has closed the parked node yet
+// (the sibling's attempt is still in flight). A resume in that window must not keep a row
 // that reads as awaiting input while its session is about to be ended. ResumeRun closes the
 // parked node itself first, so the resumed run restarts it; the worker's late sweep then finds
 // the run running and leaves the new attempt alone.
 func TestResumeBeforeTheSweepRestartsTheParkedNode(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	waiting, release := f.holdSecondListing(t, true)
+	waiting, release := f.holdDispatchOf(t, "c")
 	runID := f.run(t, parallelInteractive, nil)
 	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
@@ -418,7 +372,7 @@ func TestResumeBeforeTheSweepRestartsTheParkedNode(t *testing.T) {
 	_, nodes := f.await(t, runID, parked("a"))
 	first := node(nodes, "a").ID
 	<-waiting
-	// C fails the run while its attempt is still in the worker, before the worker's sweep.
+	// C fails the run while its attempt is still held, before the attempt's sweep.
 	c := f.nodeRow(t, runID, "c")
 	if err := f.host.engine.FailNode(ctx, runID, c.ID, workflow.Failure{Kind: workflow.FailureSession, Message: "旁支失败"}); err != nil {
 		t.Fatal(err)
@@ -432,7 +386,7 @@ func TestResumeBeforeTheSweepRestartsTheParkedNode(t *testing.T) {
 	if !f.exec.isClosed(a) {
 		t.Fatal("the resume kept the parked node's old session")
 	}
-	// The worker leaves the stale dispatch of C, sweeps, and goes on to the resumed attempts.
+	// C's stale dispatch is dropped; the resumed attempts start.
 	release()
 	again := f.exec.awaitStart(t)
 	if f.exec.request(again).Caller.NodeID != "a" || again == a {
@@ -453,47 +407,44 @@ func TestResumeBeforeTheSweepRestartsTheParkedNode(t *testing.T) {
 	}
 }
 
-// A follow-up that waited behind a sibling's turn does not run once that sibling failed the run:
-// no turn reaches the session, which ends, and the row closes instead of staying running under
-// the failed run (where it would also keep a resume from failure refused).
-func TestQueuedFollowUpDoesNotRunAfterTheRunFailed(t *testing.T) {
+// A follow-up executing beside a sibling that fails the run does not park the node again under the
+// failed run: its session ends and the row closes instead of staying running under the failed run
+// (where it would also keep a resume from failure refused).
+func TestFollowUpBesideAFailingSiblingClosesWithTheRun(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	runID := f.run(t, parallelInteractive, nil)
 	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
 	}
-	a := f.exec.awaitStart(t)
+	started := f.exec.awaitStarts(t, 2)
+	a, c := started["a"], started["c"]
 	f.exec.finish(a, completed("在"))
 	f.await(t, runID, parked("a"))
-	c := f.exec.awaitStart(t)
-	// C's turn holds the run's slot, so the follow-up is accepted and queued.
-	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "排着"); err != nil {
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "并行着"); err != nil {
 		t.Fatal(err)
 	}
+	f.exec.awaitAppend(t)
 	f.exec.finish(c, execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
-	run, nodes := f.await(t, runID, func(r store.WorkflowRun, n []store.WorkflowNodeRun) bool {
-		return r.Status == store.WorkflowStatusFailed && node(n, "a").Status == store.WorkflowStatusCancelled
+	f.await(t, runID, func(r store.WorkflowRun, _ []store.WorkflowNodeRun) bool {
+		return r.Status == store.WorkflowStatusFailed
 	})
-	if node(nodes, "c").Status != store.WorkflowStatusFailed || !f.exec.isClosed(a) {
+	f.exec.finish(a, completed("晚了"))
+	run, nodes := f.await(t, runID, func(r store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "a").Status == store.WorkflowStatusCancelled
+	})
+	if run.Status != store.WorkflowStatusFailed || node(nodes, "c").Status != store.WorkflowStatusFailed || !f.exec.isClosed(a) {
 		t.Fatalf("run %s, C = %s, A closed = %v", run.Status, node(nodes, "c").Status, f.exec.isClosed(a))
 	}
 	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
-	f.exec.mu.Lock()
-	appended := len(f.exec.appended)
-	f.exec.mu.Unlock()
-	if appended != 0 {
-		t.Fatal("the follow-up ran under the failed run")
-	}
 }
 
-// Stopping a queued follow-up takes it out of the queue, so the node must be parked even when
-// ending its session is not confirmed: otherwise nothing would ever settle it, and every later
-// turn, stop and completion would be refused while its row stayed running.
-func TestStopOfAQueuedFollowUpParksEvenWhenEndIsUnconfirmed(t *testing.T) {
+// A stop whose cancellation execution does not confirm still ends the session once the turn ends:
+// the node parks for completion and takes no further turn.
+func TestUnconfirmedStopOfAFollowUpStillEndsTheSession(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	waiting, release := f.holdSecondListing(t, false)
+	waiting, release := f.holdDispatchOf(t, "c")
 	runID := f.run(t, parallelInteractive, nil)
 	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
@@ -502,35 +453,35 @@ func TestStopOfAQueuedFollowUpParksEvenWhenEndIsUnconfirmed(t *testing.T) {
 	f.exec.finish(a, completed("在"))
 	f.await(t, runID, parked("a"))
 	<-waiting
-	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "排着"); err != nil {
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "说着"); err != nil {
 		t.Fatal(err)
 	}
-	end := f.exec.EndFunc
-	f.exec.EndFunc = func(ctx context.Context, scope execution.Scope, id string) error {
-		if id == a {
+	f.exec.awaitAppend(t)
+	f.exec.onCancel = func(ref execution.Ref) error {
+		if ref.SessionID == a {
 			return execution.ErrStopUnconfirmed
 		}
-		return end(ctx, scope, id)
+		return nil
 	}
 	if _, err := f.host.StopNodeTurn(ctx, f.scope, runID, "a"); !errors.Is(err, server.ErrWorkflowRunStopUnconfirmed) {
-		t.Fatalf("stop with an unconfirmed End = %v, want stop unconfirmed", err)
+		t.Fatalf("stop with an unconfirmed cancel = %v, want stop unconfirmed", err)
 	}
+	f.exec.onCancel = nil
+	f.exec.finish(a, completed("说完了"))
 	_, nodes := f.await(t, runID, parked("a"))
-	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != true || p["completable"] != true {
-		t.Fatalf("summary = %v, want parked for completion", p)
+	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != true || p["completable"] != true || !f.exec.isClosed(a) {
+		t.Fatalf("summary = %v closed = %v, want parked for completion", p, f.exec.isClosed(a))
 	}
 	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "还能说吗"); !errors.Is(err, server.ErrWorkflowNodeSessionEnded) {
 		t.Fatalf("turn after the stop = %v, want session ended", err)
 	}
-	f.exec.EndFunc = end
 	release()
 	f.exec.finish(f.exec.awaitStart(t), completed("好"))
 	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
 		t.Fatalf("completion after the stop = %v", err)
 	}
-	run, nodes := f.await(t, runID, terminal)
-	if run.Status != store.WorkflowStatusSucceeded || *node(nodes, "a").Output != "在" {
-		t.Fatalf("run %s, A %+v", run.Status, node(nodes, "a"))
+	if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusSucceeded {
+		t.Fatalf("run %s", run.Status)
 	}
 }
 

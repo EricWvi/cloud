@@ -212,11 +212,10 @@ func TestRestartWithARootAgentBesideTheIterationFailsTheRun(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	// v2 runs one Agent turn at a time: the first session is the queued outer Agent or the
-	// worker; both must be running when the process dies.
-	f.exec.awaitStart(t)
+	// The outer Agent and the worker execute concurrently; both are running when the process dies.
+	f.exec.awaitStarts(t, 2)
 	f.await(t, id, func(_ store.WorkflowRun, rows []store.WorkflowNodeRun) bool {
-		return node(rows, "iter").ID != "" && node(rows, "worker").ID != ""
+		return node(rows, "outer").SessionID != nil && node(rows, "worker").SessionID != nil
 	})
 	restartHost(t, f)
 	run, rows := f.await(t, id, terminal)
@@ -228,8 +227,8 @@ func TestRestartWithARootAgentBesideTheIterationFailsTheRun(t *testing.T) {
 			t.Fatalf("%s = %+v", rowID, node(rows, rowID))
 		}
 	}
-	if starts(f) != 1 {
-		t.Fatalf("restart replayed %d sessions", starts(f))
+	if starts(f) != 2 {
+		t.Fatalf("restart replayed sessions: %d started", starts(f))
 	}
 }
 
@@ -313,8 +312,9 @@ func wakeContainerRetryExpectError(t *testing.T, f *fixture, clock interface{ St
 	}
 }
 
-// awaitWorkerDrained waits until the host's worker for a still-running run has finished handling
-// its last Agent turn, including the engine callback and the scheduling pass that callback runs.
+// awaitWorkerDrained waits until every Agent attempt of a still-running run has finished handling
+// its turn, including the engine callback and the scheduling pass that callback runs: an attempt's
+// goroutine stays counted in dispatched until both returned.
 func awaitWorkerDrained(t *testing.T, f *fixture, runID string) {
 	t.Helper()
 	for deadline := time.Now().Add(5 * time.Second); ; {
@@ -323,13 +323,13 @@ func awaitWorkerDrained(t *testing.T, f *fixture, runID string) {
 			t.Fatal("the run's host state is gone: the run is no longer running")
 		}
 		st.mu.Lock()
-		drained := !st.working && st.active == nil && st.starting == nil
+		drained := st.dispatched == 0 && len(st.attempts) == 0
 		st.mu.Unlock()
 		if drained {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("the run's worker never finished its turn")
+			t.Fatal("the run's attempts never finished their turns")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -512,10 +512,9 @@ func TestIterationWaitCancelAndAbandonment(t *testing.T) {
 		f := newFixture(t)
 		clock := retryClock(t, f)
 		ctx := context.Background()
-		// The root Agent's turn always runs before the Iteration member's (the host queue
-		// follows dispatch order, and the member's row is only created in the pass after the
-		// Iteration owner's). Hold that turn, arm the member's wait behind it, then fail the
-		// turn: the run failure must abandon the Iteration wait.
+		// The root Agent and the Iteration member execute concurrently. Hold the root turn, fail
+		// the member's attempt into a retry wait, then fail the root turn: the run failure must
+		// abandon the Iteration wait.
 		graph := retryContainer(iterationGraph("continue", []string{"one"}, 50))
 		graph = strings.Replace(graph, `{"id":"iter"`, `{"id":"outer","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"outer",`+containerRetryDisabled+`}}},
 		 {"id":"iter"`, 1)
@@ -524,11 +523,11 @@ func TestIterationWaitCancelAndAbandonment(t *testing.T) {
 		if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 			t.Fatal(err)
 		}
-		outer := f.exec.awaitStart(t)
-		if f.exec.request(outer).Caller.NodeID != "outer" {
-			t.Fatalf("started %s, want the outer Agent", f.exec.request(outer).Caller.NodeID)
+		outer := f.exec.awaitStarts(t, 2)["outer"]
+		if outer == "" {
+			t.Fatal("the outer Agent did not start")
 		}
-		// Arm the member's retry while the outer turn holds the queue.
+		// Arm the member's retry while the outer turn executes.
 		f.await(t, id, func(_ store.WorkflowRun, rows []store.WorkflowNodeRun) bool {
 			return iterationRow(rows, "worker", 0).ID != ""
 		})
@@ -548,7 +547,7 @@ func TestIterationWaitCancelAndAbandonment(t *testing.T) {
 		}
 		abandoned(t, iterationRow(rows, "worker", 0), wait.ID)
 		wakeContainerRetry(t, f, clock, id, payload, wait)
-		if starts(f) != 1 {
+		if starts(f) != 2 {
 			t.Fatalf("an abandoned Iteration wait started a session: %d", starts(f))
 		}
 	})

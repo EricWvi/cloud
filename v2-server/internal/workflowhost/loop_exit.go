@@ -3,12 +3,10 @@ package workflowhost
 import (
 	"context"
 	"fmt"
-
-	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 )
 
 // CleanupLoopExit fences new starts in this scope before asynchronously draining its active
-// turn. It never waits under the engine gate: that turn may need the gate for its late callback.
+// turns. It never waits under the engine gate: that turn may need the gate for its late callback.
 func (h *Host) CleanupLoopExit(runID, parentID, scopeID string) {
 	st := h.state(runID)
 	if st == nil {
@@ -44,39 +42,33 @@ func (h *Host) CleanupLoopExit(runID, parentID, scopeID string) {
 }
 
 func (h *Host) drainLoopScope(ctx context.Context, st *runState, scopeID string) error {
+	inScope := func(a *attemptState) bool { return a.scope == scopeID }
 	st.mu.Lock()
-	for st.activeScope == scopeID && st.starting != nil {
-		started := st.starting
-		st.mu.Unlock()
+	refs, err := st.awaitStarts(ctx, inScope)
+	if err != nil {
+		return err
+	}
+	st.mu.Lock()
+	var done []<-chan struct{}
+	for _, a := range st.attempts {
+		if inScope(a) && a.ref != nil {
+			done = append(done, a.done)
+		}
+	}
+	st.mu.Unlock()
+	if err := h.cancelTurns(ctx, st.scope, refs); err != nil {
+		return err
+	}
+	// Each attempt owns its End and is forgotten only after that call. Merely cancelling the
+	// turns is not enough to advance while their session/workspace cleanup is still under way.
+	for _, d := range done {
 		select {
-		case <-started:
+		case <-d:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-		st.mu.Lock()
 	}
-	var ref *execution.Ref
-	var done <-chan struct{}
-	if st.activeScope == scopeID && st.active != nil {
-		copy := *st.active
-		ref = &copy
-		done = st.turnDone
-	}
-	st.mu.Unlock()
-	if ref == nil {
-		return st.scopeCleanupError(scopeID)
-	}
-	if _, err := h.exec.Cancel(ctx, st.scope, *ref); err != nil {
-		return err
-	}
-	// The worker owns End and clears its slot only after that call. Merely cancelling the turn
-	// is not enough to advance while its session/workspace cleanup is still under way.
-	select {
-	case <-done:
-		return st.scopeCleanupError(scopeID)
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return st.scopeCleanupError(scopeID)
 }
 
 func (st *runState) scopeCleanupError(scopeID string) error {

@@ -27,11 +27,11 @@ import (
 //
 // Every transition of one node is claimed under runState.mu through interactiveNode.phase, so a
 // follow-up turn, a completion and a stop never act on the same node at once: exactly one claim
-// wins and the others see the phase it left. Turns still execute on the run's worker, which owns
-// the run's single turn slot in the shared directory. The directory itself holds several live
-// sessions: a parked node keeps its session while the run's other Agents start, run and end
-// theirs beside it (the Node's shared_checkout_sessions capability, which the Agent driver
-// requires), so the starter's next message reaches the same session whatever ran in between.
+// wins and the others see the phase it left. A follow-up turn executes at once, concurrently with
+// the run's other Agents, as each node's turn is its own session's: the directory holds several
+// live sessions (the Node's shared_checkout_sessions capability, which the Agent driver requires),
+// and a parked node keeps its session while the run's other Agents start, run and end theirs
+// beside it, so the starter's next message reaches the same session whatever ran in between.
 
 // interactivePhase is what an interactive node is doing.
 type interactivePhase int
@@ -79,13 +79,11 @@ type interactiveNode struct {
 	stopping bool
 }
 
-// followUp is one human turn waiting for the run's turn slot, with the generation of the run
-// state it was queued in (see queuedDispatch).
+// followUp is one human turn of an interactive node.
 type followUp struct {
-	node       *interactiveNode
-	caller     execution.Caller
-	prompt     execution.Prompt
-	generation uint64
+	node   *interactiveNode
+	caller execution.Caller
+	prompt execution.Prompt
 }
 
 // endedNormally is the legacy end_turn rule: only a complete EndTurn answer can be accepted.
@@ -156,8 +154,8 @@ func (n *interactiveNode) summary() map[string]any {
 // other session that could not start, resumable once the cause is gone, instead of parking with
 // neither a conversation nor an answer. A session that was lost after its Agent started still
 // parks, as desktop keeps a crashed turn awaiting input.
-func (h *Host) settleInteractiveTurn(st *runState, n *interactiveNode, result execution.Result, err error) {
-	if st.endTurn(nil) {
+func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interactiveNode, result execution.Result, err error) {
+	if st.endTurn(a, nil) {
 		h.end(st.scope, n.session)
 		h.finishCancel(st, n.d.RunID)
 		return
@@ -277,8 +275,8 @@ func (st *runState) nodeOf(nodeID string) (*interactiveNode, error) {
 	return nil, server.ErrWorkflowNodeNotAwaitingInput
 }
 
-// SendNodeTurn claims a parked node for a human turn, marks it running and queues the turn on the
-// run's worker. The answer arrives over the node's session; the node parks again after it.
+// SendNodeTurn claims a parked node for a human turn, marks it running and starts the turn. The
+// answer arrives over the node's session; the node parks again after it.
 func (h *Host) SendNodeTurn(ctx context.Context, scope server.WorkflowRunScope, runID, nodeID, content string) (store.WorkflowRun, error) {
 	st, err := h.starter(ctx, scope, runID)
 	if err != nil {
@@ -324,34 +322,37 @@ func (h *Host) SendNodeTurn(ctx context.Context, scope server.WorkflowRunScope, 
 		st.mu.Unlock()
 		return store.WorkflowRun{}, server.ErrWorkflowNodeNotAwaitingInput
 	}
-	st.turns = append(st.turns, followUp{node: n, caller: caller, prompt: execution.TextPrompt(content), generation: st.generation})
-	if !st.working {
-		st.working = true
-		h.workers.Add(1)
-		go h.work(runID, st)
+	// Registered before the goroutine runs, so a stop arriving first finds the turn starting.
+	a := st.register(caller.AttemptID, n.d.NodeRunID, "", st.generation)
+	if a == nil {
+		st.mu.Unlock()
+		return store.WorkflowRun{}, server.ErrWorkflowNodeNotAwaitingInput
 	}
+	st.dispatched++
+	h.workers.Add(1)
+	go func() {
+		defer h.settled(runID, st)
+		h.runFollowUp(st, a, followUp{node: n, caller: caller, prompt: execution.TextPrompt(content)})
+	}()
 	st.mu.Unlock()
 	return h.store.WorkflowRun(ctx, scope.TenantID, runID)
 }
 
-// runFollowUp executes one human turn on the worker and parks the node after it.
-func (h *Host) runFollowUp(st *runState, f followUp) {
+// runFollowUp executes one human turn registered as a and parks the node after it.
+func (h *Host) runFollowUp(st *runState, a *attemptState, f followUp) {
 	n := f.node
-	if !st.beginStart("", n.d.NodeRunID, f.generation) {
-		return // cancelling: the run's cancellation ends the session and closes the row
-	}
-	// The turn waited behind another node's: that node may have failed the run meanwhile. Like a
-	// queued attempt (see runAgent), check with the slot reserved, and run no turn for a run that
-	// stopped; the park is then refused, which ends the session and closes the row.
+	// Another node may have failed the run since the turn was accepted. Like an attempt (see
+	// runAgent), check with the turn registered, and run no turn for a run that stopped; the park
+	// is then refused, which ends the session and closes the row.
 	if h.runStopped(h.ctx, n.d.RunID) {
-		st.releaseStart()
+		st.releaseStart(a)
 		h.park(st, n)
 		return
 	}
 	ref, err := h.appendTurn(st.scope, execution.AppendRequest{SessionID: n.session, Caller: f.caller, Prompt: f.prompt})
-	if st.endStart(ref, err) {
+	if st.endStart(a, ref, err) {
 		if err == nil {
-			st.endTurn(nil)
+			st.endTurn(a, nil)
 		}
 		h.end(st.scope, n.session)
 		h.finishCancel(st, n.d.RunID)
@@ -373,10 +374,11 @@ func (h *Host) runFollowUp(st *runState, f followUp) {
 		return
 	}
 	result, err := h.awaitTurn(st.scope, ref, f.caller)
-	h.settleInteractiveTurn(st, n, result, err)
+	h.settleInteractiveTurn(st, a, n, result, err)
 }
 
-// appendTurn is start's busy wait for a follow-up turn.
+// appendTurn waits out ErrWorkspaceBusy while the session's previous turn finishes cleaning up:
+// its terminal event is published before the execution worker releases the session.
 func (h *Host) appendTurn(scope execution.Scope, req execution.AppendRequest) (execution.Ref, error) {
 	deadline := time.Now().Add(h.busyRetry)
 	for {
@@ -394,8 +396,7 @@ func (h *Host) appendTurn(scope execution.Scope, req execution.AppendRequest) (e
 
 // StopNodeTurn stops the turn an interactive node is executing. The pinned Node can only stop a
 // turn by ending its session (execution.Service.Cancel), so the node then parks for completion
-// without further turns; the run itself keeps running. A turn still queued behind another node's
-// never starts: it is withdrawn and the session ended the same way.
+// without further turns; the run itself keeps running. A turn still starting is awaited first.
 func (h *Host) StopNodeTurn(ctx context.Context, scope server.WorkflowRunScope, runID, nodeID string) (store.WorkflowRun, error) {
 	st, err := h.starter(ctx, scope, runID)
 	if err != nil {
@@ -406,64 +407,50 @@ func (h *Host) StopNodeTurn(ctx context.Context, scope server.WorkflowRunScope, 
 	}
 	stopCtx, cancel := context.WithTimeout(ctx, h.stopTimeout)
 	defer cancel()
-	ref, queued, err := st.turnOf(stopCtx, nodeID)
+	ref, err := st.turnOf(stopCtx, nodeID)
 	if err != nil {
 		return store.WorkflowRun{}, err
 	}
-	switch {
-	case queued != nil:
-		queued.sessionEnded = true // owned by this call: the job left the queue under st.mu
-		endErr := h.end(st.scope, queued.session)
-		// The turn left the queue, so nothing else settles the node: park it whatever End said.
-		// It takes no further turn either way.
-		h.park(st, queued)
-		if endErr != nil {
-			return store.WorkflowRun{}, fmt.Errorf("%w: %w", server.ErrWorkflowRunStopUnconfirmed, endErr)
-		}
-	default:
-		if _, err := h.exec.Cancel(stopCtx, st.scope, ref); err != nil {
-			return store.WorkflowRun{}, fmt.Errorf("%w: %w", server.ErrWorkflowRunStopUnconfirmed, err)
-		}
+	if _, err := h.exec.Cancel(stopCtx, st.scope, ref); err != nil {
+		return store.WorkflowRun{}, fmt.Errorf("%w: %w", server.ErrWorkflowRunStopUnconfirmed, err)
 	}
 	return h.store.WorkflowRun(ctx, scope.TenantID, runID)
 }
 
-// turnOf finds the turn nodeID is executing (marking the node stopping, so the turn's end ends the
-// session), waiting out a start in flight, or withdraws its follow-up from the queue (returned as
-// queued, with sessionEnded already set under st.mu).
-func (st *runState) turnOf(ctx context.Context, nodeID string) (execution.Ref, *interactiveNode, error) {
+// turnOf finds the turn nodeID is executing, marking the node stopping so the turn's end ends the
+// session, and waits out a start in flight.
+func (st *runState) turnOf(ctx context.Context, nodeID string) (execution.Ref, error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	for {
 		n, err := st.nodeOf(nodeID)
 		if err != nil || n.phase != phaseTurn {
-			return execution.Ref{}, nil, server.ErrWorkflowNodeTurnNotRunning
+			return execution.Ref{}, server.ErrWorkflowNodeTurnNotRunning
 		}
-		if st.starting != nil && st.activeNodeRun == n.d.NodeRunID {
-			starting := st.starting
+		var turn *attemptState
+		for _, a := range st.attempts {
+			if a.nodeRun == n.d.NodeRunID {
+				turn = a
+			}
+		}
+		if turn != nil && turn.starting != nil {
+			starting := turn.starting
 			st.mu.Unlock()
 			select {
 			case <-starting:
 			case <-ctx.Done():
 				st.mu.Lock()
-				return execution.Ref{}, nil, fmt.Errorf("%w: %w", server.ErrWorkflowRunStopUnconfirmed, ctx.Err())
+				return execution.Ref{}, fmt.Errorf("%w: %w", server.ErrWorkflowRunStopUnconfirmed, ctx.Err())
 			}
 			st.mu.Lock()
 			continue
 		}
-		if st.active != nil && st.activeNodeRun == n.d.NodeRunID {
+		if turn != nil && turn.ref != nil {
 			n.stopping = true
-			return *st.active, nil, nil
+			return *turn.ref, nil
 		}
-		for i, f := range st.turns {
-			if f.node == n {
-				st.turns = append(st.turns[:i:i], st.turns[i+1:]...)
-				n.sessionEnded = true
-				return execution.Ref{}, n, nil
-			}
-		}
-		// Between dequeue and start, or between the turn's end and its park: nothing to stop.
-		return execution.Ref{}, nil, server.ErrWorkflowNodeTurnNotRunning
+		// Before its registration, or between the turn's end and its park: nothing to stop.
+		return execution.Ref{}, server.ErrWorkflowNodeTurnNotRunning
 	}
 }
 

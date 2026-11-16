@@ -277,7 +277,7 @@ type Stream interface {
 // returning its Ref. Their contexts control this call, not the subsequent execution lifetime.
 // Within a scope, repeating an identical caller attempt and request returns the original Ref;
 // changing its target, executor, session or prompt returns ErrConflict without dispatching again.
-// ErrWorkspaceBusy means the previous turn in this session or workflow run is still active.
+// ErrWorkspaceBusy means the previous turn in this session (or conversation) is still active.
 // Different conversations and workflow runs do not compete for a directory, even in one project.
 // Pages own their queues; this service does not enqueue a rejected request.
 type Service interface {
@@ -285,7 +285,8 @@ type Service interface {
 	// A workflow run's sessions share its directory and stay live side by side: Start never
 	// ends the run's earlier sessions, which their caller ends. The Node allows it through its
 	// shared_checkout_sessions capability and refuses only a session over its per-checkout
-	// limit. A run still executes one turn at a time (ErrWorkspaceBusy).
+	// limit. Each session executes one turn at a time (ErrWorkspaceBusy); the run's sessions
+	// execute theirs concurrently.
 	Start(context.Context, Scope, StartRequest) (Ref, error)
 	StartModel(context.Context, Scope, ModelStartRequest) (Ref, error)
 	// Append keeps the execution mode/binding; ended sessions return ErrSessionEnded.

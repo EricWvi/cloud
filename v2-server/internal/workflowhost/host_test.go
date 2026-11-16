@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
@@ -305,25 +304,82 @@ func TestRefusedBindingEndsTheSession(t *testing.T) {
 	}
 }
 
-func TestBusyWorkspaceIsWaitedOut(t *testing.T) {
+// Sibling Agents of one run execute concurrently in its shared directory, as desktop's: both
+// start before either finishes, each in its own session, and each session ends on its own.
+func TestSiblingAgentsExecuteConcurrently(t *testing.T) {
 	f := newFixture(t)
-	busy := 2
-	f.exec.beforeStart = func(execution.StartRequest) error {
-		if busy > 0 {
-			busy--
-			return execution.ErrWorkspaceBusy
-		}
-		return nil
-	}
-	runID := f.run(t, twoAgents, str("输入"))
+	runID := f.run(t, parallelAgents, nil)
 	if _, err := f.host.StartRun(context.Background(), f.scope, runID); err != nil {
 		t.Fatal(err)
 	}
-	f.exec.finish(f.exec.awaitStart(t), completed("A"))
-	f.exec.finish(f.exec.awaitStart(t), completed("B"))
-	if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusSucceeded || len(f.exec.started) != 2 {
-		t.Fatalf("run %s after %d starts", run.Status, len(f.exec.started))
+	sessions := f.exec.awaitStarts(t, 2)
+	if sessions["a"] == "" || sessions["b"] == "" || sessions["a"] == sessions["b"] {
+		t.Fatalf("siblings did not start concurrently in their own sessions: %v", sessions)
 	}
+	if f.exec.request(sessions["a"]).Target != f.exec.request(sessions["b"]).Target {
+		t.Fatal("siblings target different projects")
+	}
+	f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "a").SessionID != nil && node(n, "b").SessionID != nil
+	})
+	f.exec.finish(sessions["b"], completed("B"))
+	f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "b").Status == store.WorkflowStatusSucceeded
+	})
+	f.exec.mu.Lock()
+	ended := append([]string(nil), f.exec.ended...)
+	f.exec.mu.Unlock()
+	if len(ended) != 1 || ended[0] != sessions["b"] {
+		t.Fatalf("finishing B ended %v, want only B's session", ended)
+	}
+	f.exec.finish(sessions["a"], completed("A"))
+	run, nodes := f.await(t, runID, terminal)
+	if run.Status != store.WorkflowStatusSucceeded || *node(nodes, "a").SessionID != sessions["a"] || *node(nodes, "b").SessionID != sessions["b"] {
+		t.Fatalf("run %s nodes %+v", run.Status, nodes)
+	}
+}
+
+// Cancelling a run stops every executing sibling turn and closes the run once all are confirmed.
+func TestCancelStopsEverySiblingTurn(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	runID := f.run(t, parallelAgents, nil)
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	sessions := f.exec.awaitStarts(t, 2)
+	f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "a").SessionID != nil && node(n, "b").SessionID != nil
+	})
+	// The first stop is not confirmed: the run stays open and says so.
+	unconfirmed := sessions["a"]
+	f.exec.onCancel = func(ref execution.Ref) error {
+		if ref.SessionID == unconfirmed {
+			return execution.ErrStopUnconfirmed
+		}
+		return nil
+	}
+	if _, err := f.host.CancelRun(ctx, f.scope, runID); !errors.Is(err, server.ErrWorkflowRunStopUnconfirmed) {
+		t.Fatalf("cancel with one unconfirmed stop = %v", err)
+	}
+	if run, _ := f.s.WorkflowRun(ctx, f.scope.TenantID, runID); run.Status != store.WorkflowStatusRunning {
+		t.Fatalf("an unconfirmed stop closed the run: %s", run.Status)
+	}
+	unconfirmed = ""
+	run, err := f.host.CancelRun(ctx, f.scope, runID)
+	if err != nil || run.Status != store.WorkflowStatusCancelled {
+		t.Fatalf("cancel = %+v, %v", run, err)
+	}
+	f.exec.mu.Lock()
+	stopped := map[string]bool{}
+	for _, ref := range f.exec.cancels {
+		stopped[ref.SessionID] = true
+	}
+	f.exec.mu.Unlock()
+	if !stopped[sessions["a"]] || !stopped[sessions["b"]] {
+		t.Fatalf("cancel stopped %v, want both siblings", stopped)
+	}
+	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
 }
 
 func TestRestartInterruptsExecutingRuns(t *testing.T) {
@@ -398,34 +454,41 @@ func TestLifecycleAuthorizesAndTranslatesRefusals(t *testing.T) {
 	}
 }
 
-// parallelAgents fans Start out to two Agents; v2 executes them one at a time.
+// parallelAgents fans Start out to two Agents, which execute concurrently.
 const parallelAgents = `{"nodes":[
  {"id":"start","data":{"kind":"start"}},
  {"id":"a","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"A"}}},
  {"id":"b","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"B"}}}
 ],"edges":[{"source":"start","target":"a"},{"source":"start","target":"b"}]}`
 
-func TestQueuedSiblingOfAFailedNodeNeverStarts(t *testing.T) {
+// A sibling already executing when another node fails the run keeps running and records its
+// result, as desktop does; the run stays failed and is released once the sibling ends.
+func TestSiblingOfAFailedNodeKeepsItsResult(t *testing.T) {
 	f := newFixture(t)
 	runID := f.run(t, strings.Replace(parallelAgents, `"prompt":"A"`, `"prompt":"A","retry":{"enabled":false,"maxRetries":2,"initialDelaySeconds":10}`, 1), nil)
 	if _, err := f.host.StartRun(context.Background(), f.scope, runID); err != nil {
 		t.Fatal(err)
 	}
-	first := f.exec.awaitStart(t)
-	f.exec.finish(first, execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
-	run, nodes := f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
-		return node(n, "b").Status == store.WorkflowStatusCancelled
+	sessions := f.exec.awaitStarts(t, 2)
+	f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "a").SessionID != nil && node(n, "b").SessionID != nil
 	})
-	if run.Status != store.WorkflowStatusFailed || node(nodes, "a").Status != store.WorkflowStatusFailed {
-		t.Fatalf("run %s, a %+v", run.Status, node(nodes, "a"))
+	f.exec.finish(sessions["a"], execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
+	run, nodes := f.await(t, runID, func(r store.WorkflowRun, _ []store.WorkflowNodeRun) bool {
+		return r.Status == store.WorkflowStatusFailed
+	})
+	if node(nodes, "a").Status != store.WorkflowStatusFailed || node(nodes, "b").Status != store.WorkflowStatusRunning {
+		t.Fatalf("run %s, a %+v, b %+v", run.Status, node(nodes, "a"), node(nodes, "b"))
 	}
-	if b := node(nodes, "b"); b.SessionID != nil || b.FinishedAt == nil {
-		t.Fatalf("queued sibling = %+v", b)
+	if f.host.state(runID) == nil {
+		t.Fatal("the run's state was dropped while its sibling still executes")
 	}
-	select {
-	case id := <-f.exec.startedCh:
-		t.Fatalf("the sibling of a failed node started session %s", id)
-	case <-time.After(100 * time.Millisecond):
+	f.exec.finish(sessions["b"], completed("B"))
+	run, nodes = f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "b").Status == store.WorkflowStatusSucceeded
+	})
+	if run.Status != store.WorkflowStatusFailed || node(nodes, "b").Output == nil || *node(nodes, "b").Output != "B" {
+		t.Fatalf("run %s, b %+v", run.Status, node(nodes, "b"))
 	}
 	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
 }

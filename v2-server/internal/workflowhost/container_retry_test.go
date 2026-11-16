@@ -291,13 +291,12 @@ func TestLoopSiblingFailureAbandonsWaitingRetry(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	f.exec.finish(f.exec.awaitStart(t), execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
+	// The writer and its sibling execute concurrently.
+	started := f.exec.awaitStarts(t, 2)
+	f.exec.finish(started["writer"], execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
 	rounds, _ := f.s.WorkflowEngineLoopRounds(ctx, id)
 	wait, payload := containerWait(t, f, id, rounds[0].ID, "writer", nil)
-	siblingSession := f.exec.awaitStart(t)
-	if f.exec.request(siblingSession).Caller.NodeID != "sibling" {
-		t.Fatalf("started %s, want sibling", f.exec.request(siblingSession).Caller.NodeID)
-	}
+	siblingSession := started["sibling"]
 	if err := f.host.engine.FailNode(ctx, id, f.exec.request(siblingSession).Caller.AttemptID, workflow.Failure{Kind: workflow.FailureRepository, Message: "sibling broke"}); err != nil {
 		t.Fatal(err)
 	}
@@ -481,13 +480,14 @@ func TestResumeCancelsTheTimerOfAWaitASiblingFailureAbandoned(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	f.exec.finish(f.exec.awaitStart(t), sessionFailed)
+	started := f.exec.awaitStarts(t, 2)
+	f.exec.finish(started["writer"], sessionFailed)
 	rounds, err := f.s.WorkflowEngineLoopRounds(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	containerWait(t, f, id, rounds[0].ID, "writer", nil)
-	sibling := f.exec.awaitStart(t)
+	sibling := started["sibling"]
 	if err := f.host.engine.FailNode(ctx, id, f.exec.request(sibling).Caller.AttemptID, workflow.Failure{Kind: workflow.FailureRepository, Message: "sibling broke"}); err != nil {
 		t.Fatal(err)
 	}
