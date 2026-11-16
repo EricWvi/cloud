@@ -28,6 +28,11 @@ async function createRun(page: Page, graph?: string): Promise<{ tid: string, rid
   return { tid, rid: (await run.json()).run.id }
 }
 
+// The first render after a navigation waits on the page's whole request chain (session, tenants,
+// projects, run list, snapshot, then the run itself), measured at 3-4s on a loaded 4-CPU machine;
+// like the other run-page specs, it gets the run page's first-render budget, not the 5s default.
+const firstRender = { timeout: 30_000 }
+
 const database = () => new Client({ connectionString: process.env.E2E_DATABASE_URL ?? 'postgres://ora:ora-local@127.0.0.1:55432/ora_v2_e2e?sslmode=disable' })
 
 /**
@@ -64,7 +69,7 @@ test('root retry wait counts down and retains replaced attempt sessions and fail
     await db.query(`UPDATE v2_workflow_runs SET status='running',state='{"current_nodes":["agent"]}',started_at=now() WHERE id=$1`, [rid])
     await page.goto(`/chat?run=${rid}`)
     const pane = page.getByRole('region', { name: '工作流运行' })
-    await expect(pane.locator('[data-retry-waiting]').first()).toBeVisible()
+    await expect(pane.locator('[data-retry-waiting]').first()).toBeVisible(firstRender)
     const countdown = pane.locator('[data-retry-waiting]').first()
     const label = await countdown.textContent()
     await expect.poll(() => countdown.textContent()).not.toBe(label)
@@ -82,7 +87,7 @@ test('root retry wait counts down and retains replaced attempt sessions and fail
     // still enforced. A wrong lookup would return workflow_node_run_not_found instead.
     expect(await openedSessionError(page, previous, () => history.getByText(`查看会话 · ${session}`).click())).toBe('workflow_node_session_not_found')
     await page.reload()
-    await expect(pane.locator('[data-retry-waiting]').first()).toBeVisible()
+    await expect(pane.locator('[data-retry-waiting]').first()).toBeVisible(firstRender)
   } finally {
     await db.query(`UPDATE v2_workflow_runs SET status='cancelled',finished_at=now() WHERE id=$1`, [rid])
     await db.query(`UPDATE v2_workflow_node_runs SET status='cancelled',payload=payload-'retry_wait' WHERE run_id=$1 AND deleted_at IS NULL`, [rid])
@@ -136,7 +141,7 @@ test('Loop and Iteration retry waits and replaced sessions stay in their selecte
     await db.query(`UPDATE v2_workflow_runs SET status='running',state='{"current_nodes":["loop"]}',started_at=now() WHERE id=$1`, [rid])
     await page.goto(`/chat?run=${rid}`)
     const pane = page.getByRole('region', { name: '工作流运行' })
-    await expect(pane.locator('[data-retry-wait="compact"]').first()).toBeVisible()
+    await expect(pane.locator('[data-retry-wait="compact"]').first()).toBeVisible(firstRender)
 
     const openLoop = async (round: number) => {
       await pane.getByRole('button', { name: /反馈循环:/ }).click()
