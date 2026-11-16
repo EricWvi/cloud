@@ -311,6 +311,13 @@ func TestDialNegotiatesThreadPreviews(t *testing.T) {
 		if wantType := map[bool]string{false: "agent_session_ended", true: "thread_preview"}[want]; m.Type != wantType {
 			t.Fatalf("previews=%v received %q", want, m.Type)
 		}
+		// With previews the session end still follows the preview. Reading it also means the peer
+		// has written its last frame, so closing cannot break a write still in flight.
+		if want {
+			if m, err = client.Receive(ctx); err != nil || m.Type != "agent_session_ended" {
+				t.Fatalf("previews=true then received %q, %v; want agent_session_ended", m.Type, err)
+			}
+		}
 		client.Close()
 		cancel()
 		if err := <-done; err != nil {
