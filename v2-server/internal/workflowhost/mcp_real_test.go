@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,11 +32,12 @@ import (
 
 const mcpFixtureSecret = "workflow-mcp-private-token"
 
-// The model deterministically selects the discovered MCP tool. Node, OpenCode, the MCP child
-// process, configuration delivery, PostgreSQL and workflow transitions use production code.
-type workflowMCPModel struct{}
+// The model detects any selected MCP tool. The pinned Node lacks the lifecycle capability,
+// so nonempty selections must fail before a model request, while disabled selections still run.
+type workflowMCPModel struct{ calls atomic.Int64 }
 
-func (workflowMCPModel) Complete(w http.ResponseWriter, r *http.Request, model nodeservices.Model) {
+func (m *workflowMCPModel) Complete(w http.ResponseWriter, r *http.Request, model nodeservices.Model) {
+	m.calls.Add(1)
 	var req struct {
 		Stream   bool `json:"stream"`
 		Messages []struct {
@@ -131,7 +133,7 @@ for line in sys.stdin:
 	return archive.Bytes(), hex.EncodeToString(digest[:])
 }
 
-func TestRealWorkflowSelectedMCP(t *testing.T) {
+func TestRealWorkflowMCPLifecycleGate(t *testing.T) {
 	assets := os.Getenv("V2_NODE_ASSETS_DIR")
 	if assets == "" {
 		t.Skip("set V2_NODE_ASSETS_DIR for real Node and OpenCode")
@@ -169,7 +171,8 @@ func TestRealWorkflowSelectedMCP(t *testing.T) {
 	}
 	models = executionruntime.WithFixtureModels(models)
 	model := models["fixture"]
-	model.Binding.Provider = workflowMCPModel{}
+	provider := &workflowMCPModel{}
+	model.Binding.Provider = provider
 	models["fixture"] = model
 	gitPath, err := exec.CommandContext(ctx, "git", "--exec-path").Output()
 	if err != nil {
@@ -230,34 +233,31 @@ func TestRealWorkflowSelectedMCP(t *testing.T) {
 	if _, err := host.StartRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
 	}
-	events, unsubscribe := host.Hub().Subscribe(runID)
-	defer unsubscribe()
-	for {
-		run, err := db.WorkflowRun(ctx, tenant, runID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if terminal(run, nil) {
-			if run.Status != store.WorkflowStatusSucceeded {
-				nodes, _ := db.WorkflowEngineNodeRuns(ctx, runID)
-				t.Fatalf("workflow failed: %+v nodes %+v", run, nodes)
+	awaitRun := func(id string) (store.WorkflowRun, []store.WorkflowNodeRun) {
+		events, unsubscribe := host.Hub().Subscribe(id)
+		defer unsubscribe()
+		for {
+			run, err := db.WorkflowRun(ctx, tenant, id)
+			if err != nil {
+				t.Fatal(err)
 			}
-			break
-		}
-		select {
-		case <-events:
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
+			if terminal(run, nil) {
+				nodes, err := db.WorkflowEngineNodeRuns(ctx, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return run, nodes
+			}
+			select {
+			case <-events:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
 		}
 	}
-	nodes, err := db.WorkflowEngineNodeRuns(ctx, runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for id, want := range map[string]string{"a": "MCP_SETTINGS_RECEIVED", "b": "MCP_NOT_SELECTED"} {
-		n := node(nodes, id)
-		if n.Output == nil || !strings.Contains(*n.Output, want) {
-			t.Fatalf("node %s output=%v want %s", id, n.Output, want)
+	assertPublicRecords := func(n store.WorkflowNodeRun) {
+		if n.SessionID == nil {
+			t.Fatal("expected a retained execution session")
 		}
 		session, err := service.ReadSession(ctx, scope, *n.SessionID)
 		if err != nil {
@@ -277,6 +277,39 @@ func TestRealWorkflowSelectedMCP(t *testing.T) {
 			}
 		}
 	}
+	run, attempts := awaitRun(runID)
+	blocked := node(attempts, "a")
+	var blockedPayload struct {
+		Detail struct {
+			Code          string `json:"code"`
+			AutoRetryable *bool  `json:"auto_retryable"`
+		} `json:"error_detail"`
+	}
+	if err := json.Unmarshal(blocked.Payload, &blockedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != store.WorkflowStatusFailed || blockedPayload.Detail.Code != "mcp_node_capability_missing" || blockedPayload.Detail.AutoRetryable == nil || *blockedPayload.Detail.AutoRetryable || provider.calls.Load() != 0 || node(attempts, "b").SessionID != nil {
+		t.Fatalf("pinned Node must reject nonempty MCP before running an Agent: run=%s detail=%+v calls=%d", run.Status, blockedPayload.Detail, provider.calls.Load())
+	}
+	assertPublicRecords(blocked)
+	// Explicitly disabling both bindings leaves the old Node path usable, including
+	// the shared-checkout handoff between the two real Agent sessions.
+	disabled := strings.Replace(graph, `"enabled":true`, `"enabled":false`, 1)
+	emptyRun := f.run(t, disabled, str("Run without MCP."))
+	if _, err := host.StartRun(ctx, f.scope, emptyRun); err != nil {
+		t.Fatal(err)
+	}
+	run, attempts = awaitRun(emptyRun)
+	if run.Status != store.WorkflowStatusSucceeded {
+		t.Fatalf("disabled MCP workflow failed: %+v nodes %+v", run, attempts)
+	}
+	for _, id := range []string{"a", "b"} {
+		n := node(attempts, id)
+		if n.Output == nil || !strings.Contains(*n.Output, "MCP_NOT_SELECTED") {
+			t.Fatalf("node %s output=%v: disabled MCP was available", id, n.Output)
+		}
+		assertPublicRecords(n)
+	}
 	// A later run must recheck configuration, fail before starting the Agent, and retain
 	// identifiers that let the operator repair the setting without exposing its old value.
 	if _, err := db.SetTenantMCPSettings(ctx, access, project.SpaceID, installed.ID, configured.Revision, nil, []string{"token"}); err != nil {
@@ -286,7 +319,7 @@ func TestRealWorkflowSelectedMCP(t *testing.T) {
 	if _, err := host.StartRun(ctx, f.scope, failedRun); err != nil {
 		t.Fatal(err)
 	}
-	run, attempts := f.await(t, failedRun, terminal)
+	run, attempts = awaitRun(failedRun)
 	failed := node(attempts, "a")
 	var payload struct {
 		Detail struct {
