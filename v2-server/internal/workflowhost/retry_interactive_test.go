@@ -34,11 +34,7 @@ func TestInteractiveRootAgentNeverRetries(t *testing.T) {
 	session := f.exec.awaitStart(t)
 	attempt := f.exec.request(session).Caller.AttemptID
 	f.exec.finish(session, execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
-	// The fixture reads the run before its nodes. Wait for both observations to settle;
-	// seeing the newly parked node alone can accompany the preceding running run view.
-	run, rows := f.await(t, id, func(run store.WorkflowRun, rows []store.WorkflowNodeRun) bool {
-		return run.Status == store.WorkflowRunAwaitingInput && parked("a")(run, rows)
-	})
+	run, rows := f.await(t, id, awaitingInput("a"))
 	a := node(rows, "a")
 	if run.Status != store.WorkflowRunAwaitingInput || a.ID != attempt || node(rows, "b").ID != "" {
 		t.Fatalf("run %s, a %+v, b %+v; want the run awaiting input on its only attempt", run.Status, a, node(rows, "b"))

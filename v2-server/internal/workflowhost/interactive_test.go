@@ -37,6 +37,15 @@ func parked(id string) func(store.WorkflowRun, []store.WorkflowNodeRun) bool {
 	}
 }
 
+// awaitingInput also waits for the run projection. The fixture reads the run before its
+// nodes, so a newly parked node can accompany a preceding running run view. Keep parked
+// separate for tests where another branch is still executing beside an interactive node.
+func awaitingInput(id string) func(store.WorkflowRun, []store.WorkflowNodeRun) bool {
+	return func(run store.WorkflowRun, rows []store.WorkflowNodeRun) bool {
+		return run.Status == store.WorkflowRunAwaitingInput && parked(id)(run, rows)
+	}
+}
+
 func interactivePayload(t *testing.T, n store.WorkflowNodeRun) map[string]any {
 	t.Helper()
 	var p struct {
@@ -251,7 +260,7 @@ func TestStopEndsTheSessionAndCompletesWithTheLastNormalTurn(t *testing.T) {
 	if _, err := f.host.StopNodeTurn(ctx, f.scope, runID, "a"); err != nil {
 		t.Fatal(err)
 	}
-	run, nodes := f.await(t, runID, parked("a"))
+	run, nodes := f.await(t, runID, awaitingInput("a"))
 	if run.Status != "awaitingInput" {
 		t.Fatalf("stopping the turn moved the run to %s", run.Status)
 	}
@@ -476,7 +485,7 @@ func TestAgentEndedFirstTurnParksAndTheConversationContinues(t *testing.T) {
 			}
 			a := f.exec.awaitStart(t)
 			f.exec.finish(a, result)
-			run, nodes := f.await(t, runID, parked("a"))
+			run, nodes := f.await(t, runID, awaitingInput("a"))
 			p := interactivePayload(t, node(nodes, "a"))
 			if run.Status != "awaitingInput" || p["completable"] != false || p["session_ended"] != false || p["blocker"].(map[string]any)["reason"] != blockerTurnNotCompleted || errorKind(t, node(nodes, "a")) != "" {
 				t.Fatalf("run %s, summary %v: want parked, open and not completable", run.Status, p)
@@ -548,7 +557,7 @@ func TestLostFirstTurnParksWithoutAnAnswer(t *testing.T) {
 	}
 	a := f.exec.awaitStart(t)
 	f.exec.finish(a, execution.Result{Status: execution.StatusFailed, FailureCode: "agent_transport_closed", AgentLost: true})
-	run, nodes := f.await(t, runID, parked("a"))
+	run, nodes := f.await(t, runID, awaitingInput("a"))
 	p := interactivePayload(t, node(nodes, "a"))
 	if run.Status != "awaitingInput" || p["session_ended"] != true || p["completable"] != false || p["blocker"].(map[string]any)["reason"] != blockerNoCompletedTurn || errorKind(t, node(nodes, "a")) != "" {
 		t.Fatalf("run %s, summary %v: want parked with the session ended", run.Status, p)
