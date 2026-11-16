@@ -1,6 +1,6 @@
 # 固定 Node 执行适配
 
-`Driver` 接收已入库的 `execution.Session` / `Turn`，连接 desktop `dcff8afe418c19184f1c7dca45192911aa22d232` 的真实 Node。权限、接收与目录分配、事件序号、SQL 历史及页面接口由调用方负责；本包不创建内存版业务 store，也不重放重启前的 prompt。
+`Driver` 接收已入库的 `execution.Session` / `Turn`，连接 `scripts/prepare-node.sh` 固定版本的真实 Node。权限、接收与目录分配、事件序号、SQL 历史及页面接口由调用方负责；本包不创建内存版业务 store，也不重放重启前的 prompt。
 
 ```go
 driver, err := agentruntime.New(agentruntime.Options{
@@ -58,9 +58,11 @@ Agent 把被切断的模型请求当成网络失败原样重发（OpenCode 0.6.1
 
 ## 验证
 
-工作流显式 MCP 选择经 `execution.MCPSelection` 进入会话。启动前核验有序规范身份、精确版本、16 项和 64 KiB 上限，并要求当前 Node 广告 `session_mcp`。已冻结的安装包经现有 package listener 和 `install_plugins` 交付，收到匹配身份与版本的安装回执后，才把完整 `spec.mcp` 交给 Node 解析。空选择省略协议字段，后续节点使用各自的选择。
+工作流显式 MCP 选择经 `execution.MCPSelection` 进入会话。启动前核验有序规范身份、精确版本、16 项和 64 KiB 上限；非空选择要求当前 Node 同时广告 `agent_session`、`session_mcp`、`session_mcp_lifecycle`。缺能力返回 `mcp_node_capability_missing`，不降级为冻结 setup。空选择省略 MCP 协议字段，禁用的工作流绑定不计入选择，仍可按原能力运行。
 
-设置值仅驻留会话内存并进入启动帧，停止后释放内存引用。包安装帧、准备文件和执行持久快照均不含设置值。Node 返回的 MCP setup 失败保留稳定 code 以及可选 `plugin_id`、`setting_id`、`transport`，工作流将其映射为可手动恢复、禁止自动重试的配置失败。
+当前固定 Node `c5265072` 没有 `session_mcp_lifecycle`。即使用其他资源目录提供了具有该能力的 Node，Controller 尚未接入 generation 准入、可靠 `SessionTurnFailed` 及新协议派发，也返回 `mcp_lifecycle_not_ready`；两种拒绝都发生在 clone、安装会话所需插件和 Agent Start 之前。当前非空 MCP 工作流暂不能执行，租户安装和配置可以独立使用。后续生命周期接入完成后才能移除 Controller 门禁，同时启用 `mcp_lifecycle:true` 和对应轮次协议，不能仅通过能力检查后继续发送冻结 setup。
+
+包安装与 `spec.mcp` 构造保留为独立接缝及单测，未接入当前被拒绝的启动路径。设置值仅驻留会话内存，停止后释放引用；包安装帧、准备文件和执行持久快照均不含设置值。MCP 失败保留稳定 code 以及可选 `plugin_id`、`setting_id`、`transport`，工作流将其映射为可手动恢复、禁止自动重试的配置失败。这些测试不代表生命周期、刷新或健康探测已经实现。
 
 包级 `go vet` / `go test -race` 验证登记恢复、拒绝未知路径和 symlink、保留工作文件、runtime 锁及无效终态不能确认停止。
 

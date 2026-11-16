@@ -13,7 +13,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/nodeservices"
 )
 
-func (p *projectRuntime) prepareMCP(ctx context.Context, selected *execution.MCPSelection) error {
+func (p *projectRuntime) prepareMCP(selected *execution.MCPSelection) error {
 	if selected == nil || len(selected.Bindings) == 0 {
 		return nil
 	}
@@ -21,25 +21,14 @@ func (p *projectRuntime) prepareMCP(ctx context.Context, selected *execution.MCP
 		return err
 	}
 	capable, ok := p.ipc().(interface{ Supports(string) bool })
-	if !ok || !capable.Supports("session_mcp") || !capable.Supports("agent_session") {
+	// Cloud v2 must not downgrade a nonempty selection to a frozen setup on older Nodes.
+	if !ok || !capable.Supports("session_mcp") || !capable.Supports("agent_session") || !capable.Supports("session_mcp_lifecycle") {
 		return &execution.MCPFailure{Code: "mcp_node_capability_missing"}
 	}
-	p.skillsMu.Lock()
-	defer p.skillsMu.Unlock()
-	for _, binding := range selected.Bindings {
-		var archive *execution.MCPPackage
-		for i := range selected.Packages {
-			candidate := &selected.Packages[i]
-			if candidate.PluginID == binding.PluginID && candidate.PluginVersion == binding.PluginVersion {
-				archive = candidate
-				break
-			}
-		}
-		if archive == nil || p.installMCP(ctx, *archive) != nil {
-			return &execution.MCPFailure{Code: "mcp_plugin_missing", PluginID: binding.PluginID}
-		}
-	}
-	return nil
+	// Lifecycle startup also requires generation admission and reliable SessionTurnFailed
+	// consumption. Until that Controller integration is available, even a newer Node must
+	// not receive a frozen setup as an implicit fallback.
+	return &execution.MCPFailure{Code: "mcp_lifecycle_not_ready"}
 }
 
 // installMCP stages only package bytes. Settings never enter files, package URLs or install frames.

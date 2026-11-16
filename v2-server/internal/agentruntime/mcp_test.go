@@ -7,8 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
@@ -24,80 +22,127 @@ func ipcMCP() *execution.MCPSelection {
 	}
 }
 
-func TestMCPFrameDeliveryAndNextSessionIsolation(t *testing.T) {
+func TestMCPSpecSerializesOnlyTheSelectedBindings(t *testing.T) {
+	// This tests only construction. Cloud must not start MCP sessions until lifecycle
+	// admission and reliable turn failures are supported by both ends.
+	selection := ipcMCP()
+	data, err := json.Marshal(mcpSpec(selection))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"plugin_id":"official/acme.tools","plugin_version":"1.0.0","settings":{"token":"MCP_SECRET_MARKER"}}]`
+	if string(data) != want {
+		t.Fatalf("unexpected MCP frame: %d bytes", len(data))
+	}
+	empty, err := json.Marshal(mcpSpec(&execution.MCPSelection{}))
+	if err != nil || string(empty) != "[]" {
+		t.Fatal("empty selection inherited previous bindings")
+	}
+}
+
+func TestMCPPackageInstallationKeepsSettingsOutOfControlFrames(t *testing.T) {
 	h := newIPCHarness(t, nil)
 	ctx := ipcContext(t)
-	session := h.session("mcp-session", "workspace")
-	session.MCP = ipcMCP()
+	session := h.session("plain-session", "workspace")
 	done := startIPCRun(h, ctx, session, "first", discardIPCEvent)
 	f := receiveIPC(t, h.created)
 	start := nextIPCCommand(t, f, "start_agent_session")
-	var payload struct {
-		Spec struct {
-			MCP []struct {
-				PluginID      string `json:"plugin_id"`
-				PluginVersion string `json:"plugin_version"`
-				Settings      map[string]any
-			}
-		}
-	}
-	if json.Unmarshal(start.Payload, &payload) != nil || len(payload.Spec.MCP) != 1 || payload.Spec.MCP[0].Settings["token"] != "MCP_SECRET_MARKER" || payload.Spec.MCP[0].PluginID != "official/acme.tools" {
-		t.Fatalf("missing explicit wire selection: %d bytes", len(start.Payload))
-	}
 	f.finishTurn(t, start, "first", "done")
 	if result := receiveIPC(t, done); result.err != nil {
 		t.Fatal(result.err)
 	}
-	ended := make(chan error, 1)
-	go func() { ended <- h.driver.End(ctx, session.ID) }()
-	f.terminal(nextIPCCommand(t, f, "end_session"))
-	if err := receiveIPC(t, ended); err != nil {
+	selection := ipcMCP()
+	if err := f.project.installMCP(ctx, selection.Packages[0]); err != nil {
 		t.Fatal(err)
 	}
-	next := h.session("empty-session", "workspace")
-	next.MCP = &execution.MCPSelection{}
-	done = startIPCRun(h, ctx, next, "second", discardIPCEvent)
-	start = nextIPCCommand(t, f, "start_agent_session")
-	var empty map[string]json.RawMessage
-	var envelope struct{ Spec json.RawMessage }
-	_ = json.Unmarshal(start.Payload, &envelope)
-	_ = json.Unmarshal(envelope.Spec, &empty)
-	if _, exists := empty["mcp"]; exists {
-		t.Fatal("next session inherited MCP")
+	install := nextIPCCommand(t, f, "install_plugins")
+	if !bytes.Contains(install.Payload, []byte("official/acme.tools")) || !bytes.Contains(install.Payload, []byte("1.0.0")) {
+		t.Fatal("package identity did not reach install_plugins")
 	}
-	f.finishTurn(t, start, "second", "done")
-	receiveIPC(t, done)
-	data, err := os.ReadFile(filepath.Join(f.project.root, "node-events.jsonl"))
-	if err != nil {
-		t.Fatal(err)
+	if bytes.Contains(install.Payload, []byte("MCP_SECRET_MARKER")) || bytes.Contains(install.Payload, []byte("settings")) {
+		t.Fatal("package installation received session settings")
 	}
-	if bytes.Contains(data, []byte("MCP_SECRET_MARKER")) {
-		t.Fatal("settings leaked to journal")
+	invalid := selection.Packages[0]
+	invalid.Digest = "incorrect"
+	if err := f.project.installMCP(ctx, invalid); err == nil {
+		t.Fatal("invalid package digest accepted")
 	}
 }
 
-func TestMCPRejectsUnsupportedNodeAndMissingPackageBeforeStart(t *testing.T) {
-	for _, code := range []string{"mcp_node_capability_missing", "mcp_plugin_missing"} {
-		t.Run(code, func(t *testing.T) {
+func TestMCPRejectsBeforeStartUntilBothPeersSupportLifecycle(t *testing.T) {
+	for _, tc := range []struct {
+		name, missingCapability, code string
+	}{
+		{"missing agent session", "agent_session", "mcp_node_capability_missing"},
+		{"missing session MCP", "session_mcp", "mcp_node_capability_missing"},
+		{"frozen setup only", "session_mcp_lifecycle", "mcp_node_capability_missing"},
+		{"lifecycle Node without Controller integration", "", "mcp_lifecycle_not_ready"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			h := newIPCHarness(t, func(f *fakeNodeIPC, _ node.Message) bool {
-				f.mcpUnsupported.Store(code == "mcp_node_capability_missing")
+				f.missingCapability.Store(&tc.missingCapability)
 				return false
 			})
 			s := h.session("mcp", "workspace")
 			s.MCP = ipcMCP()
-			if code == "mcp_plugin_missing" {
-				s.MCP.Packages = nil
-			}
 			done := startIPCRun(h, ipcContext(t), s, "first", discardIPCEvent)
 			f := receiveIPC(t, h.created)
 			result := receiveIPC(t, done)
-			if result.result.FailureCode != code || result.result.MCPFailure == nil {
+			if result.result.FailureCode != tc.code || result.result.MCPFailure == nil {
 				t.Fatalf("wrong failure: %+v", result.result)
 			}
 			for len(f.sent) > 0 {
-				if m := <-f.sent; m.Type == "start_agent_session" {
-					t.Fatal("started with unsupported MCP")
+				m := <-f.sent
+				if m.Type == "start_agent_session" || m.Type == "clone_repository" {
+					t.Fatal("started preparing a session with unsupported MCP")
 				}
+				if m.Type == "install_plugins" {
+					var payload struct {
+						Spec struct{ Plugins []json.RawMessage }
+					}
+					if err := json.Unmarshal(m.Payload, &payload); err != nil || len(payload.Spec.Plugins) != 0 {
+						t.Fatal("installed packages before the MCP capability gate")
+					}
+				}
+				if bytes.Contains(m.Payload, []byte("official/acme.tools")) || bytes.Contains(m.Payload, []byte("MCP_SECRET_MARKER")) {
+					t.Fatal("rejected MCP selection reached the Node")
+				}
+			}
+		})
+	}
+}
+
+func TestEmptyMCPDoesNotRequireLifecycleCapability(t *testing.T) {
+	for _, present := range []bool{false, true} {
+		name := "omitted"
+		if present {
+			name = "empty"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newIPCHarness(t, func(f *fakeNodeIPC, _ node.Message) bool {
+				missing := "session_mcp_lifecycle"
+				f.missingCapability.Store(&missing)
+				return false
+			})
+			s := h.session("empty-mcp", "workspace")
+			if present {
+				s.MCP = &execution.MCPSelection{}
+			}
+			done := startIPCRun(h, ipcContext(t), s, "first", discardIPCEvent)
+			f := receiveIPC(t, h.created)
+			start := nextIPCCommand(t, f, "start_agent_session")
+			var payload struct{ Spec map[string]json.RawMessage }
+			if err := json.Unmarshal(start.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"mcp", "mcp_lifecycle"} {
+				if _, exists := payload.Spec[field]; exists {
+					t.Fatalf("empty selection sent %s to a legacy Node", field)
+				}
+			}
+			f.finishTurn(t, start, "first", "done")
+			if result := receiveIPC(t, done); result.err != nil || result.result.Status != execution.StatusCompleted {
+				t.Fatalf("empty selection failed: %+v", result)
 			}
 		})
 	}

@@ -109,6 +109,9 @@ func (d *Driver) session(ctx context.Context, scope execution.Scope, session exe
 				a.prepareErr = execution.ErrUnavailable
 				return
 			}
+			if a.prepareErr = p.prepareMCP(session.MCP); a.prepareErr != nil {
+				return
+			}
 			p.mu.Lock()
 			if p.fatal {
 				p.mu.Unlock()
@@ -145,9 +148,6 @@ func (d *Driver) session(ctx context.Context, scope execution.Scope, session exe
 			// The install overlaps the clone; this stage is only what remains of it.
 			timing.enter(stagePlugin, time.Now())
 			if a.prepareErr = installed.wait(prepare, p); a.prepareErr != nil {
-				return
-			}
-			if a.prepareErr = p.prepareMCP(prepare, session.MCP); a.prepareErr != nil {
 				return
 			}
 			if session.Skills != nil {

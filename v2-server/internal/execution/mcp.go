@@ -56,7 +56,7 @@ func (f *MCPFailure) Error() string { return f.Code }
 // IsMCPFailureCode accepts only the fixed setup failures exposed by Controller and Node.
 func IsMCPFailureCode(code string) bool {
 	switch code {
-	case "mcp_plugin_missing", "mcp_setting_missing", "mcp_http_capability_missing", "mcp_load_session_missing", "mcp_node_capability_missing", "mcp_selection_invalid":
+	case "mcp_plugin_missing", "mcp_setting_missing", "mcp_http_capability_missing", "mcp_load_session_missing", "mcp_node_capability_missing", "mcp_lifecycle_not_ready", "mcp_selection_invalid":
 		return true
 	}
 	return false

@@ -27,22 +27,32 @@ import (
 // The fake replaces only the IPC peer and supervisor proof. The dispatcher, control waits,
 // session ownership, history reader, journal, publication and lifecycle are the real driver.
 type fakeNodeIPC struct {
-	project        *projectRuntime
-	id             node.Identity
-	in             chan node.Message
-	sent           chan node.Message
-	acked          chan node.Message
-	closed         chan struct{}
-	once           sync.Once
-	stopOK         atomic.Bool
-	stops          atomic.Int32
-	history        map[string][]json.RawMessage
-	seq            map[string]uint64
-	hook           func(*fakeNodeIPC, node.Message) bool
-	mcpUnsupported atomic.Bool
+	project           *projectRuntime
+	id                node.Identity
+	in                chan node.Message
+	sent              chan node.Message
+	acked             chan node.Message
+	closed            chan struct{}
+	once              sync.Once
+	stopOK            atomic.Bool
+	stops             atomic.Int32
+	history           map[string][]json.RawMessage
+	seq               map[string]uint64
+	hook              func(*fakeNodeIPC, node.Message) bool
+	missingCapability atomic.Pointer[string]
 }
 
-func (f *fakeNodeIPC) Supports(capability string) bool { return !f.mcpUnsupported.Load() }
+func (f *fakeNodeIPC) Supports(capability string) bool {
+	if missing := f.missingCapability.Load(); missing != nil && *missing == capability {
+		return false
+	}
+	switch capability {
+	case "agent_session", "session_mcp", "session_mcp_lifecycle":
+		return true
+	default:
+		return false
+	}
+}
 
 func (f *fakeNodeIPC) Identity() node.Identity { return f.id }
 func (f *fakeNodeIPC) Close() error {

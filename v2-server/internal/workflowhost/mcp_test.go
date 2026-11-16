@@ -4,10 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 )
+
+func TestMCPLifecycleGateFailuresAreExplicitAndNotRetryable(t *testing.T) {
+	for _, code := range []string{"mcp_node_capability_missing", "mcp_lifecycle_not_ready"} {
+		t.Run(code, func(t *testing.T) {
+			failure := mcpFailure(&execution.MCPFailure{Code: code})
+			detail := failure.Detail(1, false, time.Unix(0, 0))
+			if detail["code"] != code || detail["auto_retryable"] != false || detail["resumable"] != true {
+				t.Fatalf("capability gate lost its failure contract: %+v", detail)
+			}
+		})
+	}
+}
 
 func TestMCPSetupFailureRetainsIdentifiersAndCannotAutoRetry(t *testing.T) {
 	f := newFixture(t)
