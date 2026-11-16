@@ -1178,3 +1178,25 @@ func TestDriverIPCEndRetiresNodeMarkedForRebuild(t *testing.T) {
 	}
 	h.driver.Rebuild("unknown") // An unknown or settled session is a no-op.
 }
+
+// A session that was prepared but never started has no physical Agent, so ending it needs no
+// stop proof, even from a Node that is marked for rebuild and cannot be stopped right now.
+func TestDriverIPCEndOfANeverStartedSessionNeedsNoStopProofFromAMarkedNode(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	old := stuckEnd(t, h, ctx, "first")
+	// A turn cancelled during preparation leaves its session in this state.
+	idle := h.session("idle", "workspace-idle")
+	if _, err := h.driver.session(ctx, h.scope, idle, h.config, execution.CallerChat, newPreparation(execution.Ref{SessionID: idle.ID, TurnID: "turn"}, discardIPCEvent)); err != nil {
+		t.Fatal(err)
+	}
+	h.driver.Rebuild("first")
+	old.stopOK.Store(false)
+	defer old.stopOK.Store(true)
+	if err := h.driver.End(ctx, idle.ID); err != nil {
+		t.Fatalf("End of a never-started session on a marked Node: %v", err)
+	}
+	if old.stops.Load() != 0 {
+		t.Fatalf("End of a never-started session asked the supervisor to stop the Node: calls=%d", old.stops.Load())
+	}
+}

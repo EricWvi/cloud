@@ -427,10 +427,36 @@ func TestRuntimeInvalidResultKeepsWhetherItsAgentWasLost(t *testing.T) {
 	}
 }
 
-func TestRuntimeCancelAndEndStoreAnUnsavedResultThemselves(t *testing.T) {
+func TestRuntimeEndStoresAnUnsavedResultBeforeEndingTheSession(t *testing.T) {
 	f := runtimeDatabase(t, nil)
 	flaky := brokenResultWrites(t, f, -1)
-	f.service.concludeInterval = time.Hour // Only the explicit calls below may store the results.
+	f.service.concludeInterval = time.Hour // Only End below may store the result.
+	ref := startModel(t, f, modelRequest("ended", "first", "hello"))
+	waitUnsaved(t, f, ref.SessionID)
+	flaky.failures.Store(0)
+	// The turn has no stored result yet, so the session cannot end before End writes it.
+	if err := f.service.End(f.ctx, f.scope, ref.SessionID); err != nil {
+		t.Fatalf("End of a session with an unstored result: %v", err)
+	}
+	turn, err := f.service.ReadAttempt(f.ctx, f.scope, execution.Caller{Kind: execution.CallerChat, ID: "ended", AttemptID: "first"})
+	if err != nil || turn.Result == nil || turn.Result.Status != execution.StatusCompleted {
+		t.Fatalf("End did not store the unsaved result: %+v err=%v", turn, err)
+	}
+	if session, err := f.service.ReadSession(f.ctx, f.scope, ref.SessionID); err != nil || session.EndedAt == nil {
+		t.Fatalf("End left the session open: %+v err=%v", session, err)
+	}
+	f.service.mu.Lock()
+	_, unsaved := f.service.unsaved[ref.SessionID]
+	f.service.mu.Unlock()
+	if unsaved {
+		t.Fatal("End kept a result it had already stored")
+	}
+}
+
+func TestRuntimeCancelStoresAnUnsavedResultItself(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	flaky := brokenResultWrites(t, f, -1)
+	f.service.concludeInterval = time.Hour // Only Cancel below may store the result.
 	cancelled := startModel(t, f, modelRequest("cancelled", "first", "hello"))
 	waitUnsaved(t, f, cancelled.SessionID)
 	flaky.failures.Store(0)
@@ -455,11 +481,43 @@ func TestRuntimeCancelAndEndStoreAnUnsavedResultThemselves(t *testing.T) {
 
 func TestRuntimeCloseJoinsPendingResultWrites(t *testing.T) {
 	f := runtimeDatabase(t, nil)
-	brokenResultWrites(t, f, -1)
+	flaky := brokenResultWrites(t, f, -1)
+	// Once the worker has gone, every write is a background one. Those notice cancellation
+	// late, as a database call can, so Close returns before one only if it does not wait.
+	var late atomic.Bool
+	var writing atomic.Int32
+	entered := make(chan struct{}, 1)
+	f.service.finishTurn = func(ctx context.Context, scope execution.Scope, ref execution.Ref, result execution.Result) (execution.Result, error) {
+		if !late.Load() {
+			return flaky.finish(ctx, scope, ref, result)
+		}
+		writing.Add(1)
+		defer writing.Add(-1)
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		time.Sleep(100 * time.Millisecond)
+		return execution.Result{}, ctx.Err()
+	}
 	ref := startModel(t, f, modelRequest("chat", "first", "hello"))
 	waitUnsaved(t, f, ref.SessionID)
+	late.Store(true)
+	select {
+	case <-entered:
+	case <-f.ctx.Done():
+		t.Fatal("no background result write started")
+	}
 	if err := f.service.Close(f.ctx); err != nil {
 		t.Fatalf("Close with a result write still pending: %v", err)
+	}
+	if n := writing.Load(); n != 0 {
+		t.Fatalf("Close returned with %d result write(s) still running", n)
+	}
+	time.Sleep(3 * f.service.concludeInterval)
+	if n := writing.Load(); n != 0 {
+		t.Fatal("a result write started after Close")
 	}
 }
 
