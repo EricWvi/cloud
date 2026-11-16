@@ -24,6 +24,7 @@ func TestCredentialsCannotMoveToAnotherSource(t *testing.T) {
 	}
 }
 func TestOfficialSourceRetrieval(t *testing.T) {
+	t.Setenv("V2_MARKET_SOCKS_PROXY", "")
 	r := OfficialSourceRetrieval()
 	if r.Mode != "direct_https" || r.UseProxy {
 		t.Fatalf("unproxied official retrieval = %+v", r)

@@ -572,3 +572,49 @@ func TestWorkflowPluginHTTPInstallAndRemoveKeepWorkflow(t *testing.T) {
 		t.Fatalf("remove deleted workflows: %+v %v", workflows, e)
 	}
 }
+
+// A Skill install that cannot read its package fails without leaving a selection behind: an
+// unreachable market is retryable (503), a package without discoverable skills is invalid (400).
+func TestSkillInstallFailsWithoutPartialSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		download func(t *testing.T) (string, error)
+		status   int
+		code     string
+	}{
+		{"unreachable market", func(*testing.T) (string, error) { return "", pluginmarket.ErrTransient }, 503, "plugin_package_unavailable"},
+		{"no discoverable skills", func(t *testing.T) (string, error) {
+			return skillPluginArchive(t, "mattpocock.skills", "1.3.1"), nil
+		}, 400, "plugin_package_invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSquadServerWith(t, server.Options{
+				SessionTTL: time.Hour,
+				DownloadPluginPackage: func(context.Context, string, string, pluginmarket.Retrieval, pluginmarket.Credentials) (string, error) {
+					return tc.download(t)
+				},
+			})
+			c := newContractClient(t, f.srv.URL)
+			c.login()
+			tenant := c.tenant()
+			_, body := c.do("GET", "/api/v1/tenants/"+tenant+"/spaces", nil)
+			space := body["items"].([]any)[0].(map[string]any)["id"].(string)
+			base := "/api/v1/tenants/" + tenant + "/spaces/" + space + "/plugins"
+			status, body := c.doHeaders("POST", base, map[string]any{
+				"identifier": "official/mattpocock.skills", "pluginVersion": "1.3.1", "version": 0,
+			}, map[string]string{"Idempotency-Key": "install-skill"})
+			if status != tc.status || body["code"] != tc.code {
+				t.Fatalf("install = %d %v, want %d %s", status, body, tc.status, tc.code)
+			}
+			status, body = c.do("GET", base, nil)
+			if status != 200 {
+				t.Fatalf("plugins = %d %v", status, body)
+			}
+			for _, raw := range body["items"].([]any) {
+				if raw.(map[string]any)["identifier"] == "mattpocock.skills" {
+					t.Fatalf("failed install left a selection: %v", raw)
+				}
+			}
+		})
+	}
+}

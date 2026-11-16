@@ -33,6 +33,12 @@ func TestSkillPluginSourceCarriesPackageLocator(t *testing.T) {
 	if e != nil || source.Entry.Kind != "skill" || source.Locator != entry.URL || source.Digest != entry.SHA256 {
 		t.Fatalf("package source = %+v %v", source, e)
 	}
+	// An official package downloads through the deployment's SOCKS proxy once one is configured.
+	t.Setenv("V2_MARKET_SOCKS_PROXY", "socks5://127.0.0.1:1")
+	source, e = f.store.PluginPackageSource(f.ctx, f.tenant, space, "official/top-skills.code-review-and-quality")
+	if e != nil || !source.Retrieval.UseProxy {
+		t.Fatalf("proxied package source = %+v %v", source, e)
+	}
 }
 
 func TestWorkflowPluginImportsAndKeepsWorkflowsOnRemoval(t *testing.T) {
