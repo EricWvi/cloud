@@ -34,14 +34,16 @@ func (c *silentEnd) Send(ctx context.Context, m node.Message) error {
 	return c.nodeClient.Send(ctx, m)
 }
 
-// processesUnder lists live processes whose executable or working directory is inside root.
-func processesUnder(t *testing.T, root string) []int {
+// processesUnder maps each live process whose executable or working directory is inside root to
+// its kernel start time, so a later check cannot mistake a reused PID for a survivor. Node and
+// reaper run from copies inside root; the Agent runs from the assets with only its cwd there.
+func processesUnder(t *testing.T, root string) map[int]string {
 	t.Helper()
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var pids []int
+	found := map[int]string{}
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil {
@@ -49,13 +51,19 @@ func processesUnder(t *testing.T, root string) []int {
 		}
 		for _, link := range []string{"exe", "cwd"} {
 			target, err := os.Readlink(filepath.Join("/proc", entry.Name(), link))
-			if err == nil && strings.HasPrefix(target, root+string(filepath.Separator)) {
-				pids = append(pids, pid)
-				break
+			if err != nil || !strings.HasPrefix(target, root+string(filepath.Separator)) {
+				continue
 			}
+			// Field 22 of stat, counted after the parenthesised command name, is the start time.
+			stat, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
+			if fields := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+1:])); err == nil && len(fields) > 19 {
+				found[pid] = fields[19]
+				t.Logf("process %d under the project root via %s: %s", pid, link, target)
+			}
+			break
 		}
 	}
-	return pids
+	return found
 }
 
 func TestRealRebuildRetiresUnacknowledgedNodeBeforeNextSession(t *testing.T) {
@@ -162,11 +170,9 @@ func TestRealRebuildRetiresUnacknowledgedNodeBeforeNextSession(t *testing.T) {
 	if replacement.IncarnationID == old.IncarnationID {
 		t.Fatal("next session reused the Node marked for rebuild")
 	}
-	for _, pid := range oldProcesses {
-		if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err == nil {
-			if exe, _ := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe")); strings.HasPrefix(exe, root) {
-				t.Fatalf("old Node process %d (%s) survived the rebuild", pid, exe)
-			}
+	for pid, started := range processesUnder(t, root) {
+		if oldProcesses[pid] == started {
+			t.Fatalf("process %d of the old Node survived the rebuild", pid)
 		}
 	}
 	if err := d.End(ctx, "first"); err != nil {
