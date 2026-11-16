@@ -211,13 +211,19 @@ func historyLine(sequence int, kind string, extra map[string]any) json.RawMessag
 }
 func (f *fakeNodeIPC) finishTurn(t *testing.T, command node.Message, turnID, answer string) {
 	t.Helper()
+	f.finishTurnAs(t, command, turnID, answer, "end_turn")
+}
+
+// finishTurnAs settles the turn with Node's stop reason stop.
+func (f *fakeNodeIPC) finishTurnAs(t *testing.T, command node.Message, turnID, answer, stop string) {
+	t.Helper()
 	lines := f.history[command.ExecutionID]
 	if len(lines) == 0 {
 		lines = append(lines, historyLine(0, "meta", map[string]any{"sessionId": command.ExecutionID, "schemaVersion": 2}))
 	}
 	lines = append(lines, historyLine(len(lines), "update", map[string]any{"update": map[string]any{"sessionUpdate": "user_message_chunk", "content": map[string]string{"type": "text", "text": "prompt"}}}))
 	lines = append(lines, historyLine(len(lines), "update", map[string]any{"update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]string{"type": "text", "text": answer}}}))
-	end := historyLine(len(lines), "turnEnded", map[string]any{"stop_reason": "end_turn"})
+	end := historyLine(len(lines), "turnEnded", map[string]any{"stop_reason": stop})
 	lines = append(lines, end)
 	f.history[command.ExecutionID] = lines
 	path := filepath.Join(f.project.root, "w", "n", "sessions", command.ExecutionID[:2], command.ExecutionID[2:4], command.ExecutionID+".jsonl")
@@ -242,10 +248,17 @@ func (f *fakeNodeIPC) finishTurn(t *testing.T, command node.Message, turnID, ans
 	payload, _ := json.Marshal(map[string]any{"turn_id": turnID, "history_sequence": len(lines) - 1, "record": end})
 	f.in <- node.Message{Type: "thread_event", Version: 1, OperationID: command.OperationID, ExecutionID: command.ExecutionID, Sequence: &sequence, Payload: payload}
 }
-func (f *fakeNodeIPC) terminal(command node.Message) {
+func (f *fakeNodeIPC) terminal(command node.Message) { f.terminalAs(command, "user_ended", "") }
+
+// terminalAs ends the execution with Node's reason and, when set, its bounded detail code.
+func (f *fakeNodeIPC) terminalAs(command node.Message, reason, detail string) {
 	f.seq[command.ExecutionID]++
 	sequence := f.seq[command.ExecutionID]
-	payload, _ := json.Marshal(map[string]any{"kind": "agent_session_ended", "result": map[string]any{"reason": "user_ended", "node": f.id}})
+	result := map[string]any{"reason": reason, "node": f.id}
+	if detail != "" {
+		result["detail"] = detail
+	}
+	payload, _ := json.Marshal(map[string]any{"kind": "agent_session_ended", "result": result})
 	f.in <- node.Message{Type: "agent_session_ended", Version: 1, OperationID: command.OperationID, ExecutionID: command.ExecutionID, Sequence: &sequence, Payload: payload}
 }
 
@@ -325,6 +338,34 @@ func TestDriverIPCFullTurnPublicationAppendAndEnd(t *testing.T) {
 	}
 	if err := h.driver.End(ctx, session.ID); err != nil {
 		t.Fatalf("End is not idempotent: %v", err)
+	}
+}
+
+// A turn the Agent ended without completing (a refusal) reports no error and leaves the physical
+// Agent ready for the next turn, so a held workflow session can keep talking. A session that ends
+// while a turn runs reports the turn as AgentLost with ErrSessionEnded, so nobody keeps it.
+func TestDriverIPCAgentEndedTurnKeepsTheAgentButALostSessionDoesNot(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	session := h.session("session", "workspace")
+	done := startIPCRun(h, ctx, session, "first", discardIPCEvent)
+	f := receiveIPC(t, h.created)
+	start := nextIPCCommand(t, f, "start_agent_session")
+	f.finishTurnAs(t, start, "first", "I cannot", "refusal")
+	first := receiveIPC(t, done)
+	if first.err != nil || first.result.Status != execution.StatusFailed || first.result.FailureCode != "agent_turn_incomplete" || first.result.AgentLost {
+		t.Fatalf("refused turn: %+v", first)
+	}
+	receiveIPC(t, f.acked)
+	secondDone := startIPCRun(h, ctx, session, "second", discardIPCEvent)
+	appendCommand := nextIPCCommand(t, f, "submit_user_turn")
+	if appendCommand.ExecutionID != start.ExecutionID {
+		t.Fatal("the turn after a refusal replaced the physical Agent")
+	}
+	f.terminal(appendCommand)
+	second := receiveIPC(t, secondDone)
+	if !errors.Is(second.err, execution.ErrSessionEnded) || !second.result.AgentLost || second.result.NotStarted || second.result.Status != execution.StatusCancelled {
+		t.Fatalf("turn of a session that ended under it: %+v", second)
 	}
 }
 
@@ -409,8 +450,8 @@ func TestDriverIPCRetriesFailedPreparationAndWorkspaceReservation(t *testing.T) 
 	ctx := ipcContext(t)
 	session := h.session("session", "workspace")
 	first := receiveIPC(t, startIPCRun(h, ctx, session, "first", discardIPCEvent))
-	if !errors.Is(first.err, execution.ErrUnavailable) {
-		t.Fatalf("transient clone failure = %+v", first)
+	if !errors.Is(first.err, execution.ErrUnavailable) || !first.result.NotStarted {
+		t.Fatalf("transient clone failure = %+v, want a turn marked NotStarted", first)
 	}
 	f := receiveIPC(t, h.created)
 	failedClone := nextIPCCommand(t, f, "clone_repository")
@@ -535,10 +576,10 @@ func TestDriverIPCEndDisconnectedSessionStopsProjectBeforeWorkspaceReuse(t *test
 	a := h.driver.sessions[session.ID]
 	h.driver.mu.Unlock()
 	old.project.mu.Lock()
-	owner := old.project.owners[session.WorkspaceID]
+	_, owner := old.project.owners[session.WorkspaceID][session.ID]
 	old.project.mu.Unlock()
-	if !retained || owner != session.ID {
-		t.Fatalf("unconfirmed End released project or workspace: retained=%v owner=%q", retained, owner)
+	if !retained || !owner {
+		t.Fatalf("unconfirmed End released project or workspace: retained=%v owner=%v", retained, owner)
 	}
 	select {
 	case <-a.stopped:
@@ -820,5 +861,138 @@ func TestDemoWarmCheckoutIsClaimedOnceByChat(t *testing.T) {
 	next := nextIPCCommand(t, f, "clone_repository")
 	if got := run("two", execution.CallerChat); got != next.ExecutionID || got == first.ExecutionID {
 		t.Fatalf("second chat did not receive an independent replenished checkout: %s", got)
+	}
+}
+
+// A workflow run's sessions share the run's checkout side by side (the Node's
+// shared_checkout_sessions capability): the second session starts on the first one's checkout
+// without ending it, each takes further turns, and ending one leaves the other live.
+func TestDriverIPCWorkflowSessionsShareACheckout(t *testing.T) {
+	var cloneCalls atomic.Int32
+	h := newIPCHarness(t, func(_ *fakeNodeIPC, m node.Message) bool {
+		if m.Type == "clone_repository" {
+			cloneCalls.Add(1)
+		}
+		return false
+	})
+	ctx := ipcContext(t)
+	run := func(session execution.Session, turn string) <-chan ipcRunOutcome {
+		done := make(chan ipcRunOutcome, 1)
+		go func() {
+			result, err := h.driver.Run(ctx, h.scope, session, execution.Turn{
+				Ref: execution.Ref{SessionID: session.ID, TurnID: turn}, Prompt: execution.TextPrompt("prompt"),
+				Caller: execution.Caller{Kind: execution.CallerWorkflow, ID: "run", AttemptID: turn},
+			}, discardIPCEvent)
+			done <- ipcRunOutcome{result, err}
+		}()
+		return done
+	}
+	checkoutOf := func(command node.Message) string {
+		var payload struct {
+			Spec struct {
+				Checkout string `json:"checkout_execution_id"`
+			} `json:"spec"`
+		}
+		if err := json.Unmarshal(command.Payload, &payload); err != nil || payload.Spec.Checkout == "" {
+			t.Fatalf("start_agent_session payload %s: %v", command.Payload, err)
+		}
+		return payload.Spec.Checkout
+	}
+	parked, side := h.session("parked", "run-workspace"), h.session("side", "run-workspace")
+	done := run(parked, "parked-1")
+	f := receiveIPC(t, h.created)
+	parkedStart := nextIPCCommand(t, f, "start_agent_session")
+	f.finishTurn(t, parkedStart, "parked-1", "draft")
+	if got := receiveIPC(t, done); got.err != nil || got.result.Answer != "draft" {
+		t.Fatalf("first session: %+v", got)
+	}
+
+	done = run(side, "side-1")
+	sideStart := nextIPCCommand(t, f, "start_agent_session")
+	if checkoutOf(sideStart) != checkoutOf(parkedStart) || cloneCalls.Load() != 1 {
+		t.Fatalf("the run's second session did not share the checkout: %s vs %s, clones = %d", checkoutOf(sideStart), checkoutOf(parkedStart), cloneCalls.Load())
+	}
+	f.finishTurn(t, sideStart, "side-1", "side work")
+	if got := receiveIPC(t, done); got.err != nil || got.result.Answer != "side work" {
+		t.Fatalf("second session beside a live one: %+v", got)
+	}
+	h.driver.mu.Lock()
+	live := h.driver.sessions[parked.ID]
+	h.driver.mu.Unlock()
+	select {
+	case <-live.stopped:
+		t.Fatal("starting the run's second session stopped the first")
+	default:
+	}
+
+	ended := make(chan error, 1)
+	go func() { ended <- h.driver.End(ctx, side.ID) }()
+	if end := nextIPCCommand(t, f, "end_session"); end.ExecutionID != sideStart.ExecutionID {
+		t.Fatalf("ended execution %s, want the second session's %s", end.ExecutionID, sideStart.ExecutionID)
+	} else {
+		f.terminal(end)
+	}
+	if err := receiveIPC(t, ended); err != nil {
+		t.Fatal(err)
+	}
+	// The first session takes its next turn in the same Agent conversation.
+	done = run(parked, "parked-2")
+	next := nextIPCCommand(t, f, "submit_user_turn")
+	if next.ExecutionID != parkedStart.ExecutionID {
+		t.Fatalf("follow-up went to execution %s, want %s", next.ExecutionID, parkedStart.ExecutionID)
+	}
+	f.finishTurn(t, parkedStart, "parked-2", "final")
+	if got := receiveIPC(t, done); got.err != nil || got.result.Answer != "final" {
+		t.Fatalf("follow-up after the sibling ended: %+v", got)
+	}
+	h.driver.mu.Lock()
+	project := h.driver.projects["project"]
+	h.driver.mu.Unlock()
+	project.mu.Lock()
+	owners := len(project.owners["run-workspace"])
+	project.mu.Unlock()
+	if owners != 1 {
+		t.Fatalf("workspace owners = %d, want only the live session", owners)
+	}
+}
+
+// Node refuses the session over a checkout's limit by ending only that execution, with a stable
+// detail and the control connection open. The turn fails with that code as a lost Agent, and the
+// run's other session on the checkout keeps working.
+func TestDriverIPCCheckoutRefusalEndsOnlyTheRefusedSession(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	run := func(session execution.Session, turn string) <-chan ipcRunOutcome {
+		done := make(chan ipcRunOutcome, 1)
+		go func() {
+			result, err := h.driver.Run(ctx, h.scope, session, execution.Turn{
+				Ref: execution.Ref{SessionID: session.ID, TurnID: turn}, Prompt: execution.TextPrompt("prompt"),
+				Caller: execution.Caller{Kind: execution.CallerWorkflow, ID: "run", AttemptID: turn},
+			}, discardIPCEvent)
+			done <- ipcRunOutcome{result, err}
+		}()
+		return done
+	}
+	live, refused := h.session("live", "run-workspace"), h.session("refused", "run-workspace")
+	done := run(live, "live-1")
+	f := receiveIPC(t, h.created)
+	liveStart := nextIPCCommand(t, f, "start_agent_session")
+	f.finishTurn(t, liveStart, "live-1", "ready")
+	if got := receiveIPC(t, done); got.err != nil {
+		t.Fatalf("first session: %+v", got)
+	}
+	done = run(refused, "refused-1")
+	f.terminalAs(nextIPCCommand(t, f, "start_agent_session"), "agent_failed", "checkout_session_limit")
+	got := receiveIPC(t, done)
+	if !errors.Is(got.err, execution.ErrSessionEnded) || !got.result.AgentLost || got.result.NotStarted || got.result.Status != execution.StatusFailed || got.result.FailureCode != "checkout_session_limit" {
+		t.Fatalf("refused session: %+v", got)
+	}
+	done = run(live, "live-2")
+	if next := nextIPCCommand(t, f, "submit_user_turn"); next.ExecutionID != liveStart.ExecutionID {
+		t.Fatalf("follow-up went to execution %s, want %s", next.ExecutionID, liveStart.ExecutionID)
+	}
+	f.finishTurn(t, liveStart, "live-2", "still here")
+	if got := receiveIPC(t, done); got.err != nil || got.result.Answer != "still here" {
+		t.Fatalf("the live session after its sibling was refused: %+v", got)
 	}
 }

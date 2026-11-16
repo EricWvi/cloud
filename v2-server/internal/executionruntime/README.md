@@ -15,7 +15,8 @@ Start/StartModel/Append 以当前租户授权（`TenantAccess`，store 在记录
 观察者已收到持久化的 turn_ended、但原 worker 尚在 ACK/收尾时，Append 等待该 worker 退出后
 重新检查授权、会话和 attempt，再接收下一轮；等待遵从请求 context，不提前释放目录或重叠派发。
 原轮尚无持久终态时仍立即返回 Busy，已存在的同 attempt 重试仍直接返回原 Ref。
-不同对话、定时触发各有自己的 checkout；同一 workflow run 复用一个 checkout，换节点前先 End 旧会话。
+不同对话、定时触发各有自己的 checkout；同一 workflow run 复用一个 checkout，run 的各个会话在里面并存：换节点时不结束之前的会话（`LifetimeHeld` 的交互节点会话因此能一直等到发起人回来），每个会话由调用方自己 End；一个 run 同时仍只执行一轮。调用方 End 失败的会话不会再被下一个节点的 Start 顺带结束，它留在 checkout 上并占 Node 的一个会话名额，直到进程重启。Node 以 `shared_checkout_sessions` 能力允许同一 checkout 上有多个 Agent 会话。
+没有完成的 Agent 轮次结束 `LifetimeTurn` 会话；`LifetimeHeld` 会话只在 driver 报错（Agent 丢失）时结束，runtime 自己写的结果此时带 `AgentLost`。
 只支持文本 prompt；附件、权限询问、运行中切换模型尚不支持。
 
 公共读取、Cancel 和 End 只按原归属（租户与用户）定位，不再检查租户授权：页面请求已由 HTTP 租户路由授权。执行中撤权后不能再接收新轮次。

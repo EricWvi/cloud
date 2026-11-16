@@ -24,7 +24,7 @@ func TestWorkflowSkillsReplacePreviousNodeAndPreserveProjectFiles(t *testing.T) 
 	a := execution.Skills{Documents: []execution.SkillDocument{{Name: "first", Description: "first skill", Content: "FIRST"}}}
 	b := execution.Skills{Documents: []execution.SkillDocument{{Name: "second", Description: "second skill", Content: "SECOND"}}}
 	for _, selection := range []execution.Skills{a, b, {}} {
-		if err := p.applyWorkflowSkills(checkout, "run", selection); err != nil {
+		if err := p.applyWorkflowSkills(checkout, "run", selection, nil); err != nil {
 			t.Fatal(err)
 		}
 		for _, base := range []string{".opencode", ".claude"} {
@@ -48,18 +48,18 @@ func TestWorkflowSkillsReplacePreviousNodeAndPreserveProjectFiles(t *testing.T) 
 func TestWorkflowSkillsRefuseMissingPackageAndEditedDocument(t *testing.T) {
 	p := &projectRuntime{root: t.TempDir()}
 	checkout := t.TempDir()
-	if err := p.applyWorkflowSkills(checkout, "run", execution.Skills{Plugins: []execution.SkillPlugin{{ID: "official/missing", Version: "1.0.0"}}}); err == nil {
+	if err := p.applyWorkflowSkills(checkout, "run", execution.Skills{Plugins: []execution.SkillPlugin{{ID: "official/missing", Version: "1.0.0"}}}, nil); err == nil {
 		t.Fatal("missing package accepted")
 	}
 	selection := execution.Skills{Documents: []execution.SkillDocument{{Name: "review", Description: "review", Content: "original"}}}
-	if err := p.applyWorkflowSkills(checkout, "run", selection); err != nil {
+	if err := p.applyWorkflowSkills(checkout, "run", selection, nil); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(checkout, ".opencode/skills/review/SKILL.md")
 	if err := os.WriteFile(path, []byte("user edit"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.applyWorkflowSkills(checkout, "run", execution.Skills{}); err == nil {
+	if err := p.applyWorkflowSkills(checkout, "run", execution.Skills{}, nil); err == nil {
 		t.Fatal("edited file removed")
 	}
 	if data, _ := os.ReadFile(path); string(data) != "user edit" {
@@ -82,7 +82,7 @@ func TestWorkflowSkillsSelectOnlyRequestedInstalledPackage(t *testing.T) {
 	if err := writeSkillIndex(p.linksPath(), links); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.applyWorkflowSkills(checkout, "run", execution.Skills{Plugins: []execution.SkillPlugin{{ID: "official/one", Version: "1.0.0"}}}); err != nil {
+	if err := p.applyWorkflowSkills(checkout, "run", execution.Skills{Plugins: []execution.SkillPlugin{{ID: "official/one", Version: "1.0.0"}}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, base := range []string{".opencode", ".claude"} {
@@ -94,16 +94,63 @@ func TestWorkflowSkillsSelectOnlyRequestedInstalledPackage(t *testing.T) {
 		}
 	}
 	// A subsequent node may select a personal Skill with the same name as the old package.
-	if err := p.applyWorkflowSkills(checkout, "run", execution.Skills{Documents: []execution.SkillDocument{{Name: "one", Description: "Personal", Content: "PERSONAL"}}}); err != nil {
+	if err := p.applyWorkflowSkills(checkout, "run", execution.Skills{Documents: []execution.SkillDocument{{Name: "one", Description: "Personal", Content: "PERSONAL"}}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if data, err := os.ReadFile(filepath.Join(checkout, ".opencode/skills/one/SKILL.md")); err != nil || !strings.Contains(string(data), "PERSONAL") {
 		t.Fatal("package was not replaced by selected personal skill", err)
 	}
-	if err := p.applyWorkflowSkills(checkout, "run", execution.Skills{}); err != nil {
+	if err := p.applyWorkflowSkills(checkout, "run", execution.Skills{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(checkout, ".opencode/skills/one")); !os.IsNotExist(err) {
 		t.Fatal("disabled package remains")
+	}
+}
+
+// A session that is still live in the run's checkout (an interactive node waiting for its
+// starter) keeps its skills projected when the run's next node starts with its own. The starting
+// node's version wins a shared name, and a sibling's skill goes with the first projection after
+// its session ended.
+func TestWorkflowSkillsKeepLiveSiblingSkills(t *testing.T) {
+	p := &projectRuntime{root: t.TempDir()}
+	checkout := t.TempDir()
+	read := func(name string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(checkout, ".opencode/skills", name, "SKILL.md"))
+		if os.IsNotExist(err) {
+			return ""
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	parked := execution.Skills{Documents: []execution.SkillDocument{
+		{Name: "draft", Description: "draft", Content: "PARKED-DRAFT"}, {Name: "shared", Description: "shared", Content: "PARKED-SHARED"},
+	}}
+	next := execution.Skills{Documents: []execution.SkillDocument{
+		{Name: "review", Description: "review", Content: "NEXT-REVIEW"}, {Name: "shared", Description: "shared", Content: "NEXT-SHARED"},
+	}}
+	if err := p.applyWorkflowSkills(checkout, "run", parked, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.applyWorkflowSkills(checkout, "run", next, []execution.Skills{parked}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(read("draft"), "PARKED-DRAFT") || !strings.Contains(read("review"), "NEXT-REVIEW") || !strings.Contains(read("shared"), "NEXT-SHARED") {
+		t.Fatalf("draft = %q, review = %q, shared = %q", read("draft"), read("review"), read("shared"))
+	}
+	if len(next.Documents) != 2 {
+		t.Fatalf("the starting session's selection was changed: %+v", next)
+	}
+	// The parked session ended: the next node's projection no longer carries its skills.
+	if err := p.applyWorkflowSkills(checkout, "run", execution.Skills{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"draft", "review", "shared"} {
+		if read(name) != "" {
+			t.Fatalf("skill %s outlived its sessions", name)
+		}
 	}
 }

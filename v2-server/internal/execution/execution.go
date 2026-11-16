@@ -76,7 +76,24 @@ type StartRequest struct {
 	ModelID    string
 	ExecutorID string
 	Prompt     Prompt
+	// Lifetime says when the service may end the session on its own; the zero value is
+	// LifetimeTurn. Only a workflow Agent session may be held.
+	Lifetime Lifetime
 }
+
+// Lifetime says when the execution service may end an Agent session without being asked.
+type Lifetime string
+
+const (
+	// LifetimeTurn is the default: a turn that does not complete ends the session.
+	LifetimeTurn Lifetime = ""
+	// LifetimeHeld keeps a workflow session live after a turn the Agent itself ended without
+	// completing (refused, truncated, an unknown stop or a cancellation the caller did not ask
+	// for), so the caller can keep talking. A turn that loses the Agent (a crash, a dropped
+	// stream, a failed write) still ends the session. The run starting another session does
+	// not: a run's sessions share its directory side by side (see Start).
+	LifetimeHeld Lifetime = "held"
+)
 
 // AppendRequest adds a turn to a live session, retaining its workspace and executor binding.
 // A new caller attempt is required. Dead sessions cannot be silently recreated or replayed.
@@ -117,6 +134,31 @@ type Result struct {
 	// Usage is absent for the fixed Node route, which does not relay PromptResponse.usage.
 	// Model-only providers may normalize reported counters to ACP Usage. Never invent zeroes.
 	Usage json.RawMessage
+	// AgentLost means the turn ended because its Agent session is gone (a crash, a dropped
+	// stream, an unreadable history, an ended or stopped session): no further turn can follow,
+	// whatever the session's Lifetime. A turn the Agent itself ended, completed or not, leaves it
+	// false.
+	AgentLost bool `json:",omitempty"`
+	// NotStarted means the turn failed before its session's Agent ever started: the project,
+	// checkout, plugin or Skills could not be prepared. It comes with AgentLost on a session's
+	// first turn, and tells a caller that there was never a session to keep, as opposed to one
+	// that was lost while it worked.
+	NotStarted bool `json:",omitempty"`
+}
+
+// Failure codes of a turn whose session Node refused to admit to, or could not hand over, a
+// checkout that other sessions may share: a restore holds the checkout, it already has its limit
+// of unfinished sessions, or its tree is nested too deep to hand over. They are Node's stable
+// terminal details; only the refused session ends, the checkout's other sessions keep working.
+const (
+	FailureCheckoutBusy         = "checkout_busy"
+	FailureCheckoutSessionLimit = "checkout_session_limit"
+	FailureCheckoutTooDeep      = "checkout_too_deep"
+)
+
+// CheckoutRefused reports whether code is one of Node's checkout refusals.
+func CheckoutRefused(code string) bool {
+	return code == FailureCheckoutBusy || code == FailureCheckoutSessionLimit || code == FailureCheckoutTooDeep
 }
 
 // Turn is the readable record of one accepted prompt. Result is nil only while running.
@@ -237,6 +279,10 @@ type Stream interface {
 // Pages own their queues; this service does not enqueue a rejected request.
 type Service interface {
 	// Start clones a directory for this conversation or reuses this workflow run's directory.
+	// A workflow run's sessions share its directory and stay live side by side: Start never
+	// ends the run's earlier sessions, which their caller ends. The Node allows it through its
+	// shared_checkout_sessions capability and refuses only a session over its per-checkout
+	// limit. A run still executes one turn at a time (ErrWorkspaceBusy).
 	Start(context.Context, Scope, StartRequest) (Ref, error)
 	StartModel(context.Context, Scope, ModelStartRequest) (Ref, error)
 	// Append keeps the execution mode/binding; ended sessions return ErrSessionEnded.
