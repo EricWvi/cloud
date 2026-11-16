@@ -57,6 +57,16 @@ type pending struct {
 // session fails; the delays sum to a short database outage, not an indefinite wait.
 var finishRetryDelays = []time.Duration{time.Second, 2 * time.Second}
 
+// stopTimeout is the service's own budget for one physical stop. Callers may wait less, and a
+// caller without a deadline never waits longer.
+var stopTimeout = 30 * time.Second
+
+// stopCall is one shared attempt to confirm a session's physical stop.
+type stopCall struct {
+	done chan struct{}
+	err  error
+}
+
 type worker struct {
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -81,6 +91,7 @@ type Service struct {
 	held       map[string]bool
 	ending     map[string]bool
 	unsaved    map[string]pending
+	stops      map[string]*stopCall
 	finishTurn func(context.Context, execution.Scope, execution.Ref, execution.Result) (execution.Result, error)
 	closed     bool
 }
@@ -108,7 +119,7 @@ func New(ctx context.Context, cfg Config) (*Service, error) {
 	}
 	owned, cancel := context.WithCancel(ctx)
 	return &Service{db: cfg.Store, models: models, agent: cfg.Agent, ctx: owned, cancel: cancel, finishTurn: cfg.Store.FinishExecutionTurn,
-		workers: map[string]*worker{}, groups: map[string]string{}, workspaces: map[string]string{}, held: map[string]bool{}, ending: map[string]bool{}, unsaved: map[string]pending{}}, nil
+		workers: map[string]*worker{}, groups: map[string]string{}, workspaces: map[string]string{}, held: map[string]bool{}, ending: map[string]bool{}, unsaved: map[string]pending{}, stops: map[string]*stopCall{}}, nil
 }
 
 // Start validates the project and freezes a binding before recording the first Agent turn.
@@ -434,16 +445,14 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 			s.mu.Unlock()
 		}
 		if session.Target != nil && (err != nil || broken) {
-			finish, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			if endErr := s.agent.End(finish, session.ID); endErr != nil {
-				// Only this project's Node is untrusted; its next session or End retires it.
-				s.agent.Rebuild(session.ID)
+			if s.stopAgent(context.Background(), session.ID) != nil {
 				err = errors.Join(err, execution.ErrStopUnconfirmed)
 			} else if err == nil {
 				// An unstored turn would make this conflict; a later End stores it first.
-				err = s.db.EndExecutionSession(finish, scope, session.ID)
+				write, stop := context.WithTimeout(context.Background(), 10*time.Second)
+				err = s.db.EndExecutionSession(write, scope, session.ID)
+				stop()
 			}
-			cancel()
 			s.mu.Lock()
 			delete(s.held, session.ID)
 			s.mu.Unlock()
@@ -472,6 +481,43 @@ func (s *Service) finish(scope execution.Scope, ref execution.Ref, result execut
 			return err
 		case <-time.After(finishRetryDelays[attempt]):
 		}
+	}
+}
+
+// stopAgent confirms a session's physical stop within the service's own budget. Concurrent
+// callers share one attempt and may stop waiting when their context ends; the attempt itself
+// continues. So a caller that gives up early never marks a healthy Node, a caller without a
+// deadline never waits forever, and a stop the Node does not confirm within the budget marks
+// only that project's Node for rebuild. The caller must not hold mu.
+func (s *Service) stopAgent(ctx context.Context, sid string) error {
+	s.mu.Lock()
+	call := s.stops[sid]
+	if call == nil {
+		call = &stopCall{done: make(chan struct{})}
+		s.stops[sid] = call
+		go func() {
+			budget, cancel := context.WithTimeout(context.Background(), stopTimeout)
+			call.err = s.agent.End(budget, sid)
+			cancel()
+			if call.err != nil {
+				// Only this project's Node is untrusted; its next session or End retires it.
+				s.agent.Rebuild(sid)
+			}
+			s.mu.Lock()
+			delete(s.stops, sid)
+			s.mu.Unlock()
+			close(call.done)
+		}()
+	}
+	s.mu.Unlock()
+	select {
+	case <-call.done:
+		if call.err != nil {
+			return execution.ErrStopUnconfirmed
+		}
+		return nil
+	case <-ctx.Done():
+		return execution.ErrStopUnconfirmed
 	}
 }
 
@@ -627,7 +673,7 @@ func (s *Service) End(ctx context.Context, scope execution.Scope, sid string) er
 		}
 	}
 	if session.Target != nil {
-		if err := s.agent.End(ctx, sid); err != nil {
+		if err := s.stopAgent(ctx, sid); err != nil {
 			return execution.ErrStopUnconfirmed
 		}
 	}

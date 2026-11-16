@@ -365,3 +365,180 @@ func TestRuntimeAgentResultWriteFailureStopsOnlyThatAgent(t *testing.T) {
 		t.Fatalf("Cancel did not store the original result: %+v err=%v", turn, err)
 	}
 }
+
+func shortStopTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := stopTimeout
+	stopTimeout = d
+	t.Cleanup(func() { stopTimeout = old })
+}
+
+// silentStopFixture runs turns that complete normally on an Agent whose End stays unconfirmed
+// until the test releases it, as a Node that swallows end_session would.
+func silentStopFixture(t *testing.T) (*runtimeFixture, *failureAgent, execution.Result) {
+	t.Helper()
+	f := runtimeDatabase(t, nil)
+	if err := f.service.Close(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	completed := execution.Result{Status: execution.StatusCompleted, Answer: "complete", AnswerComplete: true, StopReason: "end_turn"}
+	a := &failureAgent{result: completed, endEntered: make(chan string, 8), allowEnd: make(chan struct{})}
+	t.Cleanup(a.release)
+	var err error
+	if f.service, err = New(f.ctx, Config{Store: f.db, Models: f.models, Agent: a}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"project", "other"} {
+		if _, err := f.db.CreateProject(f.ctx, f.scope, store.Project{ID: id, Name: id, RepositoryURL: "https://example.com/" + id + ".git", Commit: "fixed", MirrorPath: "/fake/" + id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return f, a, completed
+}
+
+func projectChat(id, project string) execution.StartRequest {
+	return execution.StartRequest{Caller: execution.Caller{Kind: execution.CallerChat, ID: id, AttemptID: "first"}, Target: execution.Target{ProjectID: project}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("run")}
+}
+
+func workflowNode(node string) execution.StartRequest {
+	return execution.StartRequest{Caller: execution.Caller{Kind: execution.CallerWorkflow, ID: "workflow", NodeID: node, AttemptID: node}, Target: execution.Target{ProjectID: "project"}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("run")}
+}
+
+func startAgentTurn(t *testing.T, f *runtimeFixture, req execution.StartRequest, want execution.Result) execution.Ref {
+	t.Helper()
+	ref, err := f.service.Start(f.ctx, f.scope, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, _ := observeTurn(t, f, ref, 0); !reflect.DeepEqual(result, want) {
+		t.Fatalf("turn %+v: %+v", req.Caller, result)
+	}
+	return ref
+}
+
+func TestRuntimeStopBudgetAfterACompletedTurnMarksOnlyThatNode(t *testing.T) {
+	shortStopTimeout(t, 150*time.Millisecond)
+	f, a, completed := silentStopFixture(t)
+
+	// An explicit End after a normally completed turn: the service's budget, not the caller's
+	// far deadline, bounds the wait, and running out of it marks the Node.
+	chat := startAgentTurn(t, f, projectChat("chat", "project"), completed)
+	began := time.Now()
+	if err := f.service.End(context.Background(), f.scope, chat.SessionID); !errors.Is(err, execution.ErrStopUnconfirmed) {
+		t.Fatalf("End on a silent Node: %v", err)
+	}
+	if waited := time.Since(began); waited > 5*time.Second {
+		t.Fatalf("End without a caller deadline waited %s", waited)
+	}
+	if got := a.rebuilds(); !slices.Equal(got, []string{chat.SessionID}) {
+		t.Fatalf("unconfirmed End did not mark its Node for rebuild: %v", got)
+	}
+
+	// A workflow run is not held up by a node it could not stop: the session stays open, only
+	// its Node is marked, and the run's next node starts beside it on the same directory.
+	first := startAgentTurn(t, f, workflowNode("first"), completed)
+	if err := f.service.End(context.Background(), f.scope, first.SessionID); !errors.Is(err, execution.ErrStopUnconfirmed) {
+		t.Fatalf("End of a workflow node on a silent Node: %v", err)
+	}
+	if got := a.rebuilds(); !slices.Equal(got, []string{chat.SessionID, first.SessionID}) {
+		t.Fatalf("unconfirmed End of a workflow node did not mark its Node for rebuild: %v", got)
+	}
+	stuck, err := f.service.ReadSession(f.ctx, f.scope, first.SessionID)
+	if err != nil || stuck.EndedAt != nil {
+		t.Fatalf("unconfirmed stop advertised ended: %+v err=%v", stuck, err)
+	}
+	next := startAgentTurn(t, f, workflowNode("next"), completed)
+	if session, err := f.service.ReadSession(f.ctx, f.scope, next.SessionID); err != nil || session.WorkspaceID != stuck.WorkspaceID {
+		t.Fatalf("next node left the run's directory: %+v err=%v", session, err)
+	}
+
+	// Once the stop is confirmed, the same Ends succeed.
+	a.release()
+	for _, sid := range []string{chat.SessionID, first.SessionID} {
+		if err := f.service.End(f.ctx, f.scope, sid); err != nil {
+			t.Fatal(err)
+		}
+		if session, err := f.service.ReadSession(f.ctx, f.scope, sid); err != nil || session.EndedAt == nil {
+			t.Fatalf("confirmed stop did not end the session: %+v err=%v", session, err)
+		}
+	}
+}
+
+func TestRuntimeImpatientCallerNeverMarksASlowNode(t *testing.T) {
+	f, a, completed := silentStopFixture(t)
+	chat := startAgentTurn(t, f, projectChat("chat", "project"), completed)
+	impatient, cancel := context.WithTimeout(f.ctx, 20*time.Millisecond)
+	defer cancel()
+	if err := f.service.End(impatient, f.scope, chat.SessionID); !errors.Is(err, execution.ErrStopUnconfirmed) {
+		t.Fatalf("End that stopped waiting: %v", err)
+	}
+	// The Node was only slow: its confirmation still settles the shared attempt.
+	a.release()
+	if err := f.service.End(f.ctx, f.scope, chat.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.rebuilds(); len(got) != 0 {
+		t.Fatalf("a caller's short deadline marked a healthy Node: %v", got)
+	}
+}
+
+// A stop the Node has not confirmed yet is waited for outside the admission lock, so it holds
+// up nothing but its own session: not the catalog, other projects, or its run's next node.
+func TestRuntimePendingStopHoldsUpNothingButItsOwnSession(t *testing.T) {
+	f, a, completed := silentStopFixture(t)
+	first := startAgentTurn(t, f, workflowNode("first"), completed)
+	ended := make(chan error, 1)
+	go func() { ended <- f.service.End(f.ctx, f.scope, first.SessionID) }()
+	select {
+	case sid := <-a.endEntered:
+		if sid != first.SessionID {
+			t.Fatalf("End stopped the wrong Agent: %s", sid)
+		}
+	case <-f.ctx.Done():
+		t.Fatal(f.ctx.Err())
+	}
+
+	prompt, cancel := context.WithTimeout(f.ctx, 5*time.Second)
+	defer cancel()
+	if _, err := f.service.ListModels(prompt, f.scope); err != nil {
+		t.Fatalf("catalog during a pending stop: %v", err)
+	}
+	if _, err := f.service.ListExecutors(prompt, f.scope); err != nil {
+		t.Fatalf("executors during a pending stop: %v", err)
+	}
+	if _, err := f.service.StartModel(prompt, f.scope, modelRequest("model-chat", "first", "hello")); err != nil {
+		t.Fatalf("model conversation during a pending stop: %v", err)
+	}
+	other, err := f.service.Start(prompt, f.scope, projectChat("other-chat", "other"))
+	if err != nil {
+		t.Fatalf("other project during a pending stop: %v", err)
+	}
+	if result, _ := observeTurn(t, f, other, 0); !reflect.DeepEqual(result, completed) {
+		t.Fatalf("other project's turn during a pending stop: %+v", result)
+	}
+	next, err := f.service.Start(prompt, f.scope, workflowNode("next"))
+	if err != nil {
+		t.Fatalf("the run's next node during a pending stop: %v", err)
+	}
+	if result, _ := observeTurn(t, f, next, 0); !reflect.DeepEqual(result, completed) {
+		t.Fatalf("the run's next node: %+v", result)
+	}
+	if _, err := f.service.Append(prompt, f.scope, execution.AppendRequest{SessionID: first.SessionID, Caller: workflowNode("late").Caller, Prompt: execution.TextPrompt("late")}); !errors.Is(err, execution.ErrSessionEnded) {
+		t.Fatalf("session accepted a turn while being ended: %v", err)
+	}
+	select {
+	case err := <-ended:
+		t.Fatalf("End returned before its stop was confirmed: %v", err)
+	default:
+	}
+
+	a.release()
+	select {
+	case err := <-ended:
+		if err != nil {
+			t.Fatalf("End after the stop was confirmed: %v", err)
+		}
+	case <-f.ctx.Done():
+		t.Fatal(f.ctx.Err())
+	}
+}
