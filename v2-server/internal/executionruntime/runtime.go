@@ -98,6 +98,8 @@ type Service struct {
 	ending            map[string]bool
 	unsaved           map[string]pending
 	stops             map[string]*stopCall
+	stopping          sync.WaitGroup
+	joined            bool
 	concluding        sync.WaitGroup
 	finishRetryDelays []time.Duration
 	concludeInterval  time.Duration
@@ -561,14 +563,22 @@ func (s *Service) concludeLater(scope execution.Scope, sid string, stopped bool)
 // callers share one attempt and may stop waiting when their context ends; the attempt itself
 // continues. So a caller that gives up early never marks a healthy Node, a caller without a
 // deadline never waits forever, and a stop the Node does not confirm within the budget marks
-// only that project's Node for rebuild. The caller must not hold mu.
+// only that project's Node for rebuild. Close joins every attempt, and none starts once it has.
+// The caller must not hold mu.
 func (s *Service) stopAgent(ctx context.Context, sid string) error {
 	s.mu.Lock()
 	call := s.stops[sid]
 	if call == nil {
+		if s.joined {
+			// Close has already stopped every Agent through the driver.
+			s.mu.Unlock()
+			return execution.ErrStopUnconfirmed
+		}
 		call = &stopCall{done: make(chan struct{})}
 		s.stops[sid] = call
+		s.stopping.Add(1)
 		go func() {
+			defer s.stopping.Done()
 			budget, cancel := context.WithTimeout(context.Background(), s.stopTimeout)
 			call.err = s.agent.End(budget, sid)
 			cancel()
@@ -761,20 +771,26 @@ func (s *Service) Close(ctx context.Context) error {
 		case <-w.done:
 		}
 	}
+	// Every worker has gone, so only End and Cancel could still start a stop.
+	s.mu.Lock()
+	s.joined = true
+	s.mu.Unlock()
 	var err error
 	if s.agent != nil {
 		err = s.agent.Close(ctx)
 	}
-	// Background result writes use the database; they stop with s.ctx and are joined here.
-	concluded := make(chan struct{})
+	// Nothing of the service outlives Close: a stop attempt runs on its own budget and a
+	// background result write uses the database, so both are joined here.
+	settled := make(chan struct{})
 	go func() {
+		s.stopping.Wait()
 		s.concluding.Wait()
-		close(concluded)
+		close(settled)
 	}()
 	select {
 	case <-ctx.Done():
 		return errors.Join(err, ctx.Err())
-	case <-concluded:
+	case <-settled:
 	}
 	return err
 }

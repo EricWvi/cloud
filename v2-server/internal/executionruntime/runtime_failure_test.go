@@ -463,6 +463,49 @@ func TestRuntimeCloseJoinsPendingResultWrites(t *testing.T) {
 	}
 }
 
+func TestRuntimeCloseJoinsAStopStillInFlight(t *testing.T) {
+	f, a, completed := silentStopFixture(t)
+	chat := startAgentTurn(t, f, projectChat("chat", "project"), completed)
+	impatient, cancel := context.WithTimeout(f.ctx, 20*time.Millisecond)
+	defer cancel()
+	if err := f.service.End(impatient, f.scope, chat.SessionID); !errors.Is(err, execution.ErrStopUnconfirmed) {
+		t.Fatalf("End that stopped waiting: %v", err)
+	}
+	// The caller left; the attempt it started is still asking the Node to stop.
+	closed := make(chan error, 1)
+	go func() { closed <- f.service.Close(f.ctx) }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned while a stop was still in flight: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	a.release()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-f.ctx.Done():
+		t.Fatal("Close did not return after the stop settled")
+	}
+	f.service.mu.Lock()
+	running := len(f.service.stops)
+	f.service.mu.Unlock()
+	if running != 0 {
+		t.Fatalf("Close returned with %d stop attempt(s) still running", running)
+	}
+	// Nothing starts behind Close: a late End is refused instead of leaving a new attempt.
+	for len(a.endEntered) > 0 {
+		<-a.endEntered
+	}
+	if err := f.service.End(f.ctx, f.scope, chat.SessionID); !errors.Is(err, execution.ErrStopUnconfirmed) {
+		t.Fatalf("End after Close: %v", err)
+	}
+	if len(a.endEntered) != 0 {
+		t.Fatal("End after Close started a new stop attempt")
+	}
+}
+
 // silentStopFixture runs turns that complete normally on an Agent whose End stays unconfirmed
 // until the test releases it, as a Node that swallows end_session would.
 func silentStopFixture(t *testing.T) (*runtimeFixture, *failureAgent, execution.Result) {

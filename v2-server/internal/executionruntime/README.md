@@ -38,8 +38,10 @@ Agent Cancel 使用固定 Node 的 EndSession，因此会结束整个物理会�
 - 物理停止由服务自己限时 30s，worker 收尾、End 和 Cancel 对同一会话共用一次尝试：调用方可以提前放弃等待，尝试本身继续，
   所以调用方的短 deadline 不会把只是回复慢的 Node 标坏，没有 deadline 的调用方也不会一直等。到时仍未确认就调用 driver 的 `Rebuild`，
   只把该项目的 Node 标为需要重建；同一项目的下一个会话或之后的 End 先由 supervisor 确认旧进程树停止，再起新 Node。
-  该会话保持结束中；同一 workflow run 的后继节点照常开始，不受它阻挡。
-- 等待停止都在接收锁之外，期间不阻塞其他会话和项目的接收、清单和 Close。
+  一个项目只有一个 Node，停掉旧进程树会连带停掉同一项目里其他还在运行的会话，其他项目不受影响。
+  该会话保持结束中；同一 workflow run 的后继节点照常开始，不受它阻挡。Close 等所有还在进行的停止尝试和后台补写退出后才返回，
+  之后不再发起新的停止尝试，晚到的 End 返回 StopUnconfirmed。
+- 等待停止都在接收锁之外，期间不阻塞其他会话和项目的接收和清单。
 Close 取消并 join worker，再关闭 Agent driver，必须在数据库关闭前完成。
 
 `ModelsFromEnvironment` 只返回真实配置：`V2_MODEL_*` 和 `V2_ANTHROPIC_MODEL_*` 各可提供一个 provider
