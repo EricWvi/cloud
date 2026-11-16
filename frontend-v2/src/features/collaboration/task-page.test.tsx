@@ -78,6 +78,7 @@ beforeEach(() => {
   targets.items = [
     { type: 'user', id: 'user-2', displayName: '鲍勃', description: '工作区成员', interactionDescriptor: { mode: 'mention', requiresTask: false, formRef: null } },
     { type: 'agent', id: 'agent-1', displayName: 'Claude Code', description: 'official/ora-space.claude', interactionDescriptor: { mode: 'task', requiresTask: true, formRef: null } },
+    { type: 'workflow', id: 'wf-1', displayName: '代码评审流程', description: '已发布工作流 · v1', interactionDescriptor: { mode: 'form', requiresTask: false, formRef: 'wf-1' } },
   ]
   vi.mocked(api.getTask).mockResolvedValue(task())
   vi.mocked(api.getTaskTimeline).mockResolvedValue(empty)
@@ -218,6 +219,7 @@ it('keeps another member to comments while someone else owns the run', async () 
   await userEvent.type(input, '@')
   const menu = await screen.findByRole('listbox', { name: '@ 对象' })
   expect(within(menu).getByRole('option', { name: /Claude Code/ })).toBeDisabled()
+  expect(within(menu).queryByRole('option', { name: /代码评审流程/ })).not.toBeInTheDocument()
   await userEvent.type(input, '鲍')
   await userEvent.click(within(await screen.findByRole('listbox', { name: '@ 对象' })).getByRole('option', { name: /鲍勃/ }))
   await userEvent.type(input, '看起来不错')
