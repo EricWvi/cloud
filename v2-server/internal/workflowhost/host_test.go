@@ -386,6 +386,78 @@ func TestCancelStopsEverySiblingTurn(t *testing.T) {
 	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
 }
 
+func TestRestartInterruptsExecutingRuns(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	runID := f.run(t, twoAgents, str("输入"))
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.awaitStart(t)
+	f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool { return node(n, "a").SessionID != nil })
+	f.host.Close() // the process stops while A executes
+
+	next := f.newHost(t)
+	if err := next.Interrupt(ctx); err != nil {
+		t.Fatal(err)
+	}
+	run, _ := f.s.WorkflowRun(ctx, f.scope.TenantID, runID)
+	nodes, _ := f.s.WorkflowEngineNodeRuns(ctx, runID)
+	if run.Status != store.WorkflowStatusFailed || errorKind(t, node(nodes, "a")) != "interrupted_by_restart" {
+		t.Fatalf("run %s node %+v", run.Status, node(nodes, "a"))
+	}
+	if _, err := next.StartRun(ctx, f.scope, runID); !errors.Is(err, server.ErrWorkflowRunNotStartable) {
+		t.Fatalf("restart an interrupted run = %v", err)
+	}
+}
+
+func TestLifecycleAuthorizesAndTranslatesRefusals(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	graph := `{"nodes":[{"id":"start","data":{"kind":"start","inputVariables":[{"name":"topic","valueType":"string","required":true}]}},{"id":"out","data":{"kind":"output"}}],"edges":[{"source":"start","target":"out"}]}`
+	runID := f.run(t, graph, nil)
+	stranger := server.WorkflowRunScope{TenantID: "00000000-0000-0000-0000-000000000000", UserID: f.scope.UserID}
+	if _, err := f.host.StartRun(ctx, stranger, runID); !errors.Is(err, store.ErrWorkflowRunNotFound) {
+		t.Fatalf("foreign start = %v", err)
+	}
+	if _, err := f.host.CancelRun(ctx, stranger, runID); !errors.Is(err, store.ErrWorkflowRunNotFound) {
+		t.Fatalf("foreign cancel = %v", err)
+	}
+
+	var invalid *server.WorkflowRunInputInvalid
+	if _, err := f.host.UpdateRunInput(ctx, f.scope, runID, nil, map[string]json.RawMessage{"nope": json.RawMessage(`"x"`)}); !errors.As(err, &invalid) || invalid.Variable != "nope" || invalid.Reason != "undeclared" {
+		t.Fatalf("undeclared input = %v", err)
+	}
+	if _, err := f.host.StartRun(ctx, f.scope, runID); !errors.As(err, &invalid) || invalid.Variable != "topic" {
+		t.Fatalf("missing required input = %v", err)
+	}
+	if _, err := f.host.UpdateRunInput(ctx, f.scope, runID, str("开工"), map[string]json.RawMessage{"topic": json.RawMessage(`"支付"`)}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := f.host.StartRun(ctx, f.scope, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run, _ = f.await(t, runID, terminal); run.Status != store.WorkflowStatusSucceeded {
+		t.Fatalf("swift-only run = %+v", run)
+	}
+	if _, err := f.host.UpdateRunInput(ctx, f.scope, runID, str("太晚"), nil); !errors.Is(err, server.ErrWorkflowRunNotEditable) {
+		t.Fatalf("late input = %v", err)
+	}
+	if _, err := f.host.StartRun(ctx, f.scope, runID); !errors.Is(err, server.ErrWorkflowRunNotStartable) {
+		t.Fatalf("second start = %v", err)
+	}
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "out", false, "human"); !errors.Is(err, server.ErrWorkflowNodeNotAwaitingInput) {
+		t.Fatalf("complete = %v", err)
+	}
+	if _, err := f.host.CancelRun(ctx, f.scope, runID); !errors.Is(err, store.ErrWorkflowRunState) {
+		t.Fatalf("cancel a succeeded run = %v", err)
+	}
+	if f.host.state(runID) != nil {
+		t.Fatal("a finished run kept its process state")
+	}
+}
+
 // parallelAgents fans Start out to two Agents, which execute concurrently.
 const parallelAgents = `{"nodes":[
  {"id":"start","data":{"kind":"start"}},
