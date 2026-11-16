@@ -169,6 +169,9 @@ export function RunTheaterPathRail({
                 !showResultAct &&
                 (stage.nodeId === primaryId || containsPrimary);
               const waiting = state.status === "awaiting_input";
+              // v2 parks interactive Agent nodes with a session summary; they wait for the starter.
+              const awaitingInput =
+                waiting && state.interactiveSession !== undefined;
               const retryWait =
                 state.status === "retry_waiting" ? state.retryWait : undefined;
               const active = activeIdSet.has(stage.nodeId);
@@ -216,13 +219,18 @@ export function RunTheaterPathRail({
                     aria-label={`${node.data.title}: ${
                       retryWait !== undefined
                         ? retryWaitAttemptText(t, retryWait)
-                        : t(tone.labelKey)
+                        : t(awaitingInput ? "workflowRun.v2.interactive.awaitingBadge" : tone.labelKey)
                     }`}
                   >
                     <RunStatusMark status={state.status} quiet />
                     <span className="truncate font-sans text-xs font-medium leading-snug">
                       {node.data.title}
                     </span>
+                    {awaitingInput && (
+                      <span className="shrink-0 text-[10px] font-medium text-warning">
+                        {t("workflowRun.v2.interactive.awaitingBadge")}
+                      </span>
+                    )}
                     {retryWait !== undefined && (
                       <RunRetryWaitLabel
                         wait={retryWait}
