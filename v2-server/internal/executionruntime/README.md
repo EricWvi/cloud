@@ -15,7 +15,7 @@ Start/StartModel/Append 以当前租户授权（`TenantAccess`，store 在记录
 观察者已收到持久化的 turn_ended、但原 worker 尚在 ACK/收尾时，Append 等待该 worker 退出后
 重新检查授权、会话和 attempt，再接收下一轮；等待遵从请求 context，不提前释放目录或重叠派发。
 原轮尚无持久终态时仍立即返回 Busy，已存在的同 attempt 重试仍直接返回原 Ref。
-不同对话、定时触发各有自己的 checkout；同一 workflow run 复用一个 checkout，run 的各个会话在里面并存：换节点时不结束之前的会话（`LifetimeHeld` 的交互节点会话因此能一直等到发起人回来），每个会话由调用方自己 End；它们的轮次可以同时执行。调用方 End 失败的会话不会再被下一个节点的 Start 顺带结束，它留在 checkout 上并占 Node 的一个会话名额，直到进程重启。Node 以 `shared_checkout_sessions` 能力允许同一 checkout 上有多个 Agent 会话。
+不同对话、定时触发各有自己的 checkout；同一 workflow run 复用一个 checkout，run 的各个会话在里面并存：换节点时不结束之前的会话（`LifetimeHeld` 的交互节点会话因此能一直等到发起人回来），每个会话由调用方自己 End；它们的轮次可以同时执行。调用方 End 失败的会话不会再被下一个节点的 Start 顺带结束，它留在 checkout 上并占 Node 的一个会话名额，直到该项目的 Node 被重建（见下文）或进程重启。Node 以 `shared_checkout_sessions` 能力允许同一 checkout 上有多个 Agent 会话。
 没有完成的 Agent 轮次结束 `LifetimeTurn` 会话；`LifetimeHeld` 会话只在 driver 报错（Agent 丢失）时结束，runtime 自己写的结果此时带 `AgentLost`。
 只支持文本 prompt；附件、权限询问、运行中切换模型尚不支持。
 
@@ -26,7 +26,13 @@ Subscribe 从持久 cursor 轮询，关闭观察者不停止 worker；会话结�
 
 Agent Cancel 使用固定 Node 的 EndSession，因此会结束整个物理会话；纯模型 Cancel 仅取消指定轮。
 取消旧的已完成 Ref 只返回原结果。End 等 worker 与物理停止确认后再写 session_ended；
-停止或终态写入无法确认时保留目录、阻止后续接收，返回 StopUnconfirmed 或 Unavailable。
+停止或终态写入无法确认时保留目录、阻止该会话后续接收，返回 StopUnconfirmed 或 Unavailable。
+
+一轮的失败只影响它自己的会话，不让整个服务停止接收：
+- 终态写入失败先重试两次（间隔 1s、2s，每次 10s 上限）；仍失败时该会话不再接收新轮次，有项目的会话停止物理 Agent。
+  没写进去的结果留在内存，之后对该会话的 End 或 Cancel 先补写它，再结束会话；进程重启前没补上的按重启中断处理。
+- 30s 内确认不了物理 Agent 已停止时，调用 driver 的 `Rebuild`，只把该项目的 Node 标为需要重建；同一项目的下一个会话或之后的 End
+  先由 supervisor 确认旧进程树停止，再起新 Node。该会话保持结束中；同一 workflow run 的后继节点照常开始，不受它阻挡。
 Close 取消并 join worker，再关闭 Agent driver，必须在数据库关闭前完成。
 
 `ModelsFromEnvironment` 只返回真实配置：`V2_MODEL_*` 和 `V2_ANTHROPIC_MODEL_*` 各可提供一个 provider
@@ -42,12 +48,12 @@ fixture 目录只由 `WithFixtureModels` 显式合入，供 fixture-check、编�
 OpenAI 协议的 `fixture` 与 Messages 协议的 `messages-fixture` 分别生成 `opencode:fixture` 和
 `claude:fixture`。正常启动不调用这个函数。
 公开清单只有模型名/绑定版本和执行器选择，不返回 provider 地址、密钥或本地路径。
-服务关闭、后台持久化失败或停止未确认时，清单也返回 Unavailable，供消费侧阻止新触发。
+服务关闭时，清单也返回 Unavailable，供消费侧阻止新触发；单个会话的终态写入失败或停止未确认不影响清单。
 
 ## 验证
 
 普通包测试使用独立的真实 PostgreSQL schema，覆盖 attempt 幂等、并发接收、事件续读、多轮、
-取消、停止失败门禁、撤权后的公开控制拒绝与内部终态结算、关闭重开后的完整历史。
+取消、停止失败只围住该会话、终态写入的重试与补写、撤权后的公开控制拒绝与内部终态结算、关闭重开后的完整历史。
 `TestRealServiceAgentPostgresRestartAndConcurrentConversations` 在显式配置 `V2_NODE_ASSETS_DIR` 后
 通过真实固定 Node/OpenCode 与 fixture 模型验证 shell 文件、双 checkout、End 和重启读回。
 `TestRealClaudeCodeRunsTheMessagesFixture` 用同样的资产让固定 Claude Code 走 Messages fixture：

@@ -46,6 +46,7 @@ func (a *handoffAgent) Run(ctx context.Context, _ execution.Scope, _ execution.S
 }
 
 func (*handoffAgent) End(context.Context, string) error { return nil }
+func (*handoffAgent) Rebuild(string)                    {}
 func (*handoffAgent) Close(context.Context) error       { return nil }
 
 func nextHandoffCall(t *testing.T, f *runtimeFixture, agent *handoffAgent) *handoffCall {
