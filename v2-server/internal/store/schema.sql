@@ -700,3 +700,16 @@ CREATE TABLE IF NOT EXISTS v2_tenant_mcps (
  settings bytea,
  PRIMARY KEY(tenant_id,plugin_id)
 );
+
+-- Keep the optimistic-lock generation after uninstall, so an old editor cannot
+-- update or remove a later installation of the same tenant/plugin identity.
+CREATE TABLE IF NOT EXISTS v2_tenant_mcp_revisions (
+ tenant_id uuid NOT NULL REFERENCES tenants(id),
+ plugin_id text NOT NULL,
+ revision bigint NOT NULL,
+ PRIMARY KEY(tenant_id,plugin_id)
+);
+INSERT INTO v2_tenant_mcp_revisions(tenant_id,plugin_id,revision)
+ SELECT tenant_id,plugin_id,revision FROM v2_tenant_mcps
+ ON CONFLICT(tenant_id,plugin_id) DO UPDATE
+ SET revision=GREATEST(v2_tenant_mcp_revisions.revision,excluded.revision);

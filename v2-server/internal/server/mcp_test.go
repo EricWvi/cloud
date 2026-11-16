@@ -22,14 +22,14 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
 )
 
-func TestMCPInstallConfigureAndRemoveHTTP(t *testing.T) {
-	t.Setenv("V2_MARKET_CREDENTIAL_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{8}, 32)))
+func httpMCPPackage(t *testing.T, version string) ([]byte, string) {
+	t.Helper()
 	var archive bytes.Buffer
 	z := zip.NewWriter(&archive)
 	// Match the first official Tavily package: Windows ZIP paths and an
 	// Authorization reference with no explicit secret metadata.
 	for name, value := range map[string]string{
-		"orax.toml":          "identifier = \"fixture.search\"\nkind = \"mcp\"\nversion = \"1.0.0\"\n",
+		"orax.toml":          "identifier = \"fixture.search\"\nkind = \"mcp\"\nversion = \"" + version + "\"\n",
 		`assets\config.json`: `{"schemaVersion":1,"settings":{"apiKey":{"type":"string","title":"API key","description":"Authentication","required":true}},"transport":{"type":"http","url":"https://example.test/mcp","headers":{"Authorization":{"setting":"apiKey","prefix":"Bearer "}}}}`,
 	} {
 		f, e := z.Create(name)
@@ -43,15 +43,23 @@ func TestMCPInstallConfigureAndRemoveHTTP(t *testing.T) {
 	}
 	sum := sha256.Sum256(archive.Bytes())
 	digest := hex.EncodeToString(sum[:])
+	return archive.Bytes(), digest
+}
+
+func TestMCPInstallConfigureAndRemoveHTTP(t *testing.T) {
+	t.Setenv("V2_MARKET_CREDENTIAL_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{8}, 32)))
+	archive, digest := httpMCPPackage(t, "1.0.0")
+	upgrade, upgradeDigest := httpMCPPackage(t, "2.0.0")
+	packages := map[string][]byte{digest: archive, upgradeDigest: upgrade}
 	f := newSquadServerWith(t, server.Options{SessionTTL: time.Hour, DownloadPluginPackage: func(ctx context.Context, locator, sha string, r pluginmarket.Retrieval, c pluginmarket.Credentials) (string, error) {
-		if sha != digest || locator != "https://example.test/search.orax" {
+		if packages[sha] == nil || locator != "https://example.test/search.orax" {
 			t.Fatal("wrong package source")
 		}
 		file, e := os.CreateTemp(t.TempDir(), "mcp-*.orax")
 		if e != nil {
 			return "", e
 		}
-		_, e = file.Write(archive.Bytes())
+		_, e = file.Write(packages[sha])
 		_ = file.Close()
 		return file.Name(), e
 	}})
@@ -97,6 +105,7 @@ func TestMCPInstallConfigureAndRemoveHTTP(t *testing.T) {
 		t.Fatal(status, body)
 	}
 	resource := body["resource"].(map[string]any)
+	initialRevision := resource["revision"]
 	if resource["complete"] != false {
 		t.Fatal("missing config reported complete")
 	}
@@ -148,5 +157,23 @@ func TestMCPInstallConfigureAndRemoveHTTP(t *testing.T) {
 	status, body = c.do("GET", list, nil)
 	if status != 200 || len(body["items"].([]any)) != 0 {
 		t.Fatal(status, body)
+	}
+	entry.Version, entry.SHA256 = "2.0.0", upgradeDigest
+	if err := f.store.ReplacePluginCatalog(f.ctx, []pluginmarket.Entry{entry}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	status, body = c.do("POST", base, map[string]any{"identifier": "official/fixture.search", "pluginVersion": "2.0.0"})
+	if status != 200 || body["resource"].(map[string]any)["revision"].(float64) <= resource["revision"].(float64) {
+		t.Fatal("reinstallation reused prior revision", status, body)
+	}
+	for _, stale := range []any{initialRevision, resource["revision"]} {
+		status, body = c.do("PUT", base+"/settings", map[string]any{"identifier": "official/fixture.search", "revision": stale, "values": map[string]any{"apiKey": "stale-key"}})
+		if status != 409 || body["code"] != "version_conflict" {
+			t.Fatal("old editor changed new installation", status, body)
+		}
+		status, body = c.do("DELETE", base, map[string]any{"identifier": "official/fixture.search", "revision": stale})
+		if status != 409 || body["code"] != "version_conflict" {
+			t.Fatal("old editor removed new installation", status, body)
+		}
 	}
 }

@@ -144,10 +144,14 @@ func (s *Store) InstallTenantMCP(ctx context.Context, access Access, space strin
 		if revision != oldRevision {
 			return ErrConflict
 		}
+		nextRevision, err := allocateMCPRevision(ctx, tx, access.TenantID, entry.ID, oldRevision)
+		if err != nil {
+			return err
+		}
 		_, err = tx.Exec(ctx, `INSERT INTO v2_tenant_mcps(tenant_id,plugin_id,name,plugin_version,revision,digest,target,archive,declaration,settings)
-		 VALUES($1,$2,$3,$4,1,$5,$6,$7,$8,NULL)
+		 VALUES($1,$2,$3,$4,$9,$5,$6,$7,$8,NULL)
 		 ON CONFLICT(tenant_id,plugin_id) DO UPDATE SET name=excluded.name,plugin_version=excluded.plugin_version,
-		 revision=v2_tenant_mcps.revision+1,digest=excluded.digest,target=excluded.target,archive=excluded.archive,declaration=excluded.declaration,settings=NULL`, access.TenantID, entry.ID, entry.Title, entry.Version, source.Digest, source.Target, archive, raw)
+		 revision=excluded.revision,digest=excluded.digest,target=excluded.target,archive=excluded.archive,declaration=excluded.declaration,settings=NULL`, access.TenantID, entry.ID, entry.Title, entry.Version, source.Digest, source.Target, archive, raw, nextRevision)
 		if err != nil {
 			return err
 		}
@@ -163,6 +167,18 @@ func readTenantMCP(ctx context.Context, q dbTX, tenant, id string) (TenantMCP, e
 		return item, ErrPluginNotInstalled
 	}
 	return item, err
+}
+
+// allocateMCPRevision belongs to the same transaction as the installation/settings
+// write. The durable counter survives removal, and an existing row can seed it.
+func allocateMCPRevision(ctx context.Context, tx pgx.Tx, tenant, id string, current int64) (int64, error) {
+	var revision int64
+	err := tx.QueryRow(ctx, `INSERT INTO v2_tenant_mcp_revisions(tenant_id,plugin_id,revision)
+	 VALUES($1,$2,$3::bigint+1)
+	 ON CONFLICT(tenant_id,plugin_id) DO UPDATE
+	 SET revision=GREATEST(v2_tenant_mcp_revisions.revision,$3)+1
+	 RETURNING revision`, tenant, id, current).Scan(&revision)
+	return revision, err
 }
 
 // SetTenantMCPSettings merges explicitly provided values and clears only named overrides.
@@ -221,7 +237,11 @@ func (s *Store) SetTenantMCPSettings(ctx context.Context, access Access, space, 
 		if err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, `UPDATE v2_tenant_mcps SET settings=$3,revision=revision+1 WHERE tenant_id=$1 AND plugin_id=$2`, access.TenantID, id, sealed); err != nil {
+		nextRevision, err := allocateMCPRevision(ctx, tx, access.TenantID, id, current)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE v2_tenant_mcps SET settings=$3,revision=$4 WHERE tenant_id=$1 AND plugin_id=$2`, access.TenantID, id, sealed, nextRevision); err != nil {
 			return err
 		}
 		out, err = readTenantMCP(ctx, tx, access.TenantID, id)

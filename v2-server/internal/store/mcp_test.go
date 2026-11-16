@@ -8,9 +8,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
@@ -38,6 +41,100 @@ func mcpPackage(t *testing.T, version string) (store.PluginPackageSource, []byte
 	data := body.Bytes()
 	sum := sha256.Sum256(data)
 	return store.PluginPackageSource{Entry: store.PluginCatalogEntry{ID: "official/example.search", Kind: "mcp", Version: version, Title: "Search"}, Digest: hex.EncodeToString(sum[:])}, data
+}
+
+func TestTenantMCPRevisionSurvivesRemovalAndMigration(t *testing.T) {
+	t.Setenv("V2_MARKET_CREDENTIAL_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)))
+	f := newSquadFixture(t)
+	owner := f.login(t, "mcp-owner", "owner")
+	a := storetest.Access(t, f.store, f.tenant, owner)
+	spaces, err := f.store.TenantSpaces(f.ctx, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	space := spaces[0].ID
+	source, archive := mcpPackage(t, "1.0.0")
+	old, err := f.store.InstallTenantMCP(f.ctx, a, space, source, archive, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a row written before the durable allocator existed, including a
+	// revision beyond int32. Applying the startup schema must retain its fence.
+	const legacyRevision int64 = 1 << 32
+	if _, err := f.db.Exec(f.ctx, `UPDATE v2_tenant_mcps SET revision=$1 WHERE tenant_id=$2 AND plugin_id=$3`, legacyRevision, f.tenant, old.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(f.ctx, `DROP TABLE v2_tenant_mcp_revisions`); err != nil {
+		t.Fatal(err)
+	}
+	config, err := pgxpool.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema string
+	if err := f.db.QueryRow(f.ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	migrated, err := store.OpenConfig(f.ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	if err := migrated.RemoveTenantMCP(f.ctx, a, space, old.ID, legacyRevision); err != nil {
+		t.Fatal(err)
+	}
+	source, archive = mcpPackage(t, "2.0.0")
+	current, err := migrated.InstallTenantMCP(f.ctx, a, space, source, archive, 0)
+	if err != nil || current.Revision <= legacyRevision {
+		t.Fatal("reinstallation reused a prior revision", current.Revision, err)
+	}
+	for _, stale := range []int64{old.Revision, legacyRevision} {
+		if _, err := migrated.SetTenantMCPSettings(f.ctx, a, space, old.ID, stale, map[string]any{"apiKey": "stale-key"}, nil); !errors.Is(err, store.ErrConflict) {
+			t.Fatal("old editor changed new installation", stale, err)
+		}
+		if err := migrated.RemoveTenantMCP(f.ctx, a, space, old.ID, stale); !errors.Is(err, store.ErrConflict) {
+			t.Fatal("old editor removed new installation", stale, err)
+		}
+	}
+	// Concurrent editors still share one optimistic lock: exactly one wins and
+	// the other cannot reuse its requested revision after that write commits.
+	var workers sync.WaitGroup
+	results := make(chan error, 2)
+	for range 2 {
+		workers.Go(func() {
+			_, err := migrated.SetTenantMCPSettings(f.ctx, a, space, current.ID, current.Revision, map[string]any{"apiKey": "fresh-key"}, nil)
+			results <- err
+		})
+	}
+	workers.Wait()
+	close(results)
+	wins, conflicts := 0, 0
+	for err := range results {
+		switch {
+		case err == nil:
+			wins++
+		case errors.Is(err, store.ErrConflict):
+			conflicts++
+		default:
+			t.Fatal(err)
+		}
+	}
+	if wins != 1 || conflicts != 1 {
+		t.Fatal("concurrent editors did not serialize", wins, conflicts)
+	}
+	items, err := migrated.TenantMCPs(f.ctx, a)
+	if err != nil || len(items) != 1 || items[0].Revision <= current.Revision {
+		t.Fatal("settings did not advance durable revision", err)
+	}
+	configured := items[0]
+	if err := migrated.RemoveTenantMCP(f.ctx, a, space, current.ID, configured.Revision); err != nil {
+		t.Fatal(err)
+	}
+	reinstalled, err := migrated.InstallTenantMCP(f.ctx, a, space, source, archive, 0)
+	if err != nil || reinstalled.Revision <= configured.Revision {
+		t.Fatal("settings revision collided after reinstallation", err)
+	}
 }
 
 func TestTenantMCPConfigurationIsSharedSealedAndVersioned(t *testing.T) {
