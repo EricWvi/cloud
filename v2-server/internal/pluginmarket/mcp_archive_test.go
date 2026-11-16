@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -91,6 +92,54 @@ func TestMCPArchiveWindowsPathsMatchNode(t *testing.T) {
 			}
 			if _, err := VerifyMCPArchive(archive.Bytes(), "official/test.mcp", "1.0.0"); (err == nil) != tc.valid {
 				t.Fatal("unexpected archive validation", err)
+			}
+		})
+	}
+}
+
+func TestMCPArchiveRejectsCaseAliasedFields(t *testing.T) {
+	const valid = `{"schemaVersion":1,"settings":{"token":{"type":"string","title":"Token","description":"Credential","secret":true}},"transport":{"type":"http","url":"https://example.test/mcp","headers":{"X-API-Key":{"setting":"token"}}}}`
+	for _, tc := range []struct {
+		name, config string
+		valid        bool
+	}{
+		{"canonical", valid, true},
+		{"secret override", strings.Replace(valid, `"secret":true`, `"secret":true,"Secret":false`, 1), false},
+		{"secret alias", strings.Replace(valid, `"secret":true`, `"SECRET":true`, 1), false},
+		{"settings override", strings.Replace(valid, `,"transport":`, `,"Settings":{},"transport":`, 1), false},
+		{"settings alias", strings.Replace(valid, `"settings":`, `"Settings":`, 1), false},
+		{"schema alias", strings.Replace(valid, `"schemaVersion":`, `"SchemaVersion":`, 1), false},
+		{"transport alias", strings.Replace(valid, `"transport":`, `"Transport":`, 1), false},
+		{"headers alias", strings.Replace(valid, `"headers":`, `"Headers":`, 1), false},
+		{"reference alias", strings.Replace(valid, `"setting":"token"`, `"setting":"token","Setting":"token"`, 1), false},
+		{"prefix alias", strings.Replace(valid, `"setting":"token"`, `"setting":"token","Prefix":"Bearer "`, 1), false},
+		{"unknown field", strings.Replace(valid, `"secret":true`, `"secret":true,"hidden":true`, 1), false},
+		{"stdio known fields", `{"schemaVersion":1,"settings":{"token":{"type":"string","title":"Token","description":"Credential","secret":true,"required":false,"order":1,"default":"test-default"}},"transport":{"type":"stdio","command":"assets/server","args":[{"context":"workspace"},{"setting":"token","prefix":"--key=","suffix":"!"},42,true,"literal"],"env":{"API_KEY":{"setting":"token"},"FLAG":true}}}`, true},
+		{"stdio args alias", `{"schemaVersion":1,"transport":{"type":"stdio","command":"assets/server","Args":[]}}`, false},
+		{"stdio context alias", `{"schemaVersion":1,"transport":{"type":"stdio","command":"assets/server","args":[{"Context":"workspace"}]}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var archive bytes.Buffer
+			z := zip.NewWriter(&archive)
+			for name, value := range map[string]string{
+				"orax.toml":          "identifier = \"test.mcp\"\nversion = \"1.0.0\"\nkind = \"mcp\"\n",
+				`assets\config.json`: tc.config,
+			} {
+				f, err := z.Create(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, _ = f.Write([]byte(value))
+			}
+			if err := z.Close(); err != nil {
+				t.Fatal(err)
+			}
+			declaration, err := VerifyMCPArchive(archive.Bytes(), "official/test.mcp", "1.0.0")
+			if (err == nil) != tc.valid {
+				t.Fatal("unexpected field validation", err)
+			}
+			if tc.valid && (len(declaration.Settings) != 1 || !declaration.Settings[0].Secret) {
+				t.Fatal("explicit secret metadata was lost")
 			}
 		})
 	}

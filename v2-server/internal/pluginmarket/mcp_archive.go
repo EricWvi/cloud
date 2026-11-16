@@ -88,7 +88,7 @@ func VerifyMCPArchive(archive []byte, id, version string) (MCPDeclaration, error
 			}
 		}
 	}
-	if manifest.Identifier != identifier || manifest.Kind != "mcp" || manifest.Version != version || len(config) > 256<<10 || !strictjson.Valid(config) || duplicateMCPKeys(config) {
+	if manifest.Identifier != identifier || manifest.Kind != "mcp" || manifest.Version != version || len(config) > 256<<10 || !strictjson.Valid(config) || duplicateMCPKeys(config) || !strictMCPFieldNames(config) {
 		return result, ErrPackage
 	}
 	var raw struct {
@@ -177,6 +177,101 @@ func hasMCPDrivePrefix(name string) bool {
 		}
 	}
 	return false
+}
+
+// Match the exact fields of Node's RawMcpConfiguration, RawSetting and transport
+// references before decoding into Go structs: encoding/json otherwise accepts
+// case aliases, allowing e.g. Secret:false to override an explicit secret:true.
+// Transport compilation and filesystem/capability checks still belong to Node.
+func strictMCPFieldNames(config []byte) bool {
+	var raw map[string]any
+	if json.Unmarshal(config, &raw) != nil || !mcpFields(raw, "schemaVersion", "settings", "transport") {
+		return false
+	}
+	if settings := raw["settings"]; settings != nil {
+		items, ok := settings.(map[string]any)
+		if !ok {
+			return false
+		}
+		for _, value := range items {
+			setting, ok := value.(map[string]any)
+			if !ok || !mcpFields(setting, "type", "title", "description", "required", "secret", "order", "default") {
+				return false
+			}
+		}
+	}
+	transport, ok := raw["transport"].(map[string]any)
+	if !ok {
+		return false
+	}
+	bindings := "headers"
+	switch transport["type"] {
+	case "http":
+		if !mcpFields(transport, "type", "url", "headers") {
+			return false
+		}
+	case "stdio":
+		if !mcpFields(transport, "type", "command", "args", "env") {
+			return false
+		}
+		bindings = "env"
+		if value, present := transport["args"]; present {
+			args, ok := value.([]any)
+			if !ok {
+				return false
+			}
+			for _, arg := range args {
+				if !mcpExpressionFields(arg, true, true) {
+					return false
+				}
+			}
+		}
+	default:
+		return false
+	}
+	if value, present := transport[bindings]; present {
+		entries, ok := value.(map[string]any)
+		if !ok {
+			return false
+		}
+		for _, expression := range entries {
+			if !mcpExpressionFields(expression, bindings == "env", false) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func mcpFields(object map[string]any, allowed ...string) bool {
+	if object == nil {
+		return false
+	}
+	for key := range object {
+		known := false
+		for _, field := range allowed {
+			known = known || key == field
+		}
+		if !known {
+			return false
+		}
+	}
+	return true
+}
+
+func mcpExpressionFields(value any, literal, context bool) bool {
+	switch expression := value.(type) {
+	case string, bool, float64:
+		return literal
+	case map[string]any:
+		if _, exists := expression["context"]; context && exists {
+			return mcpFields(expression, "context")
+		}
+		_, referenced := expression["setting"].(string)
+		return referenced && mcpFields(expression, "setting", "prefix", "suffix")
+	default:
+		return false
+	}
 }
 
 // Reject duplicate members before metadata parsing so the form and Node agree on secrecy
