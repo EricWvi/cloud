@@ -482,15 +482,16 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 }
 
 // finish retries a short database outage and returns the result it tried to store. A result
-// the store rejects as invalid can never be written, so it becomes a failed turn rather than
-// a turn that never ends.
+// the store rejects as invalid can never be written as it is, so it is stored as a failed turn
+// rather than left running; everything else the turn produced is kept, AgentLost and NotStarted
+// included.
 func (s *Service) finish(scope execution.Scope, ref execution.Ref, result execution.Result) (execution.Result, error) {
 	for attempt := 0; ; attempt++ {
 		write, stop := context.WithTimeout(context.Background(), 10*time.Second)
 		_, err := s.finishTurn(write, scope, ref, result)
 		stop()
 		if errors.Is(err, execution.ErrInvalidRequest) && result.Status != execution.StatusFailed {
-			result = execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"}
+			result.Status, result.FailureCode = execution.StatusFailed, "execution_failed"
 			attempt--
 			continue
 		}

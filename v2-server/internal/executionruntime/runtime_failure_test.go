@@ -2,6 +2,7 @@ package executionruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"slices"
@@ -389,13 +390,19 @@ func TestRuntimeUnstoredResultIsWrittenButSessionStaysOpenWhileStopIsUnconfirmed
 
 func TestRuntimeInvalidResultFailsItsTurnInsteadOfNeverEndingIt(t *testing.T) {
 	f, a, completed := silentStopFixture(t)
-	a.result = execution.Result{Status: execution.StatusCompleted, Answer: "truncated"} // AnswerComplete is missing.
+	// AnswerComplete is missing, so the store refuses this as a completed turn.
+	a.result = execution.Result{Status: execution.StatusCompleted, Answer: "truncated", StopReason: "end_turn", Usage: []byte(`{"total_tokens":7}`)}
 	a.release()
 	ref, err := f.service.Start(f.ctx, f.scope, projectChat("chat", "project"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, _ := observeTurn(t, f, ref, 0); result.Status != execution.StatusFailed || result.FailureCode != "execution_failed" {
+	// Only the status and failure code change: what the turn produced is still readable.
+	result, _ := observeTurn(t, f, ref, 0)
+	var usage struct {
+		Total int `json:"total_tokens"`
+	}
+	if result.Status != execution.StatusFailed || result.FailureCode != "execution_failed" || result.Answer != "truncated" || result.StopReason != "end_turn" || json.Unmarshal(result.Usage, &usage) != nil || usage.Total != 7 {
 		t.Fatalf("unstorable result: %+v", result)
 	}
 	waitSessionEnded(t, f, ref.SessionID)
@@ -403,6 +410,21 @@ func TestRuntimeInvalidResultFailsItsTurnInsteadOfNeverEndingIt(t *testing.T) {
 	a.result = completed
 	a.mu.Unlock()
 	startAgentTurn(t, f, projectChat("other-chat", "other"), completed)
+}
+
+// What tells a caller that the Agent was lost, or never started, survives the same conversion.
+func TestRuntimeInvalidResultKeepsWhetherItsAgentWasLost(t *testing.T) {
+	f, a, _ := silentStopFixture(t)
+	a.result = execution.Result{Status: execution.StatusCompleted, Answer: "truncated", StopReason: "end_turn", NotStarted: true}
+	a.runErr = errors.New("fixture transport ended")
+	a.release()
+	ref, err := f.service.Start(f.ctx, f.scope, projectChat("chat", "project"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, _ := observeTurn(t, f, ref, 0); result.Status != execution.StatusFailed || result.FailureCode != "execution_failed" || !result.AgentLost || !result.NotStarted {
+		t.Fatalf("unstorable result of a lost Agent: %+v", result)
+	}
 }
 
 func TestRuntimeCancelAndEndStoreAnUnsavedResultThemselves(t *testing.T) {
