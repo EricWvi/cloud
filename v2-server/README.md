@@ -810,6 +810,8 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 
 设置复用 V2_MARKET_CREDENTIAL_KEY，以 AES-256-GCM 在写入 SQL 前密封，附加数据绑定租户与插件。密钥缺失或不可解密时返回 mcp_credentials_unavailable。读取接口隐藏 secret 设置的值及默认值；HTTP Authorization 或 Proxy-Authorization 引用的设置也视为秘密，兼容未声明 secret 的旧包。升级包会清空旧覆盖值。正在执行的节点拥有独立冻结快照，配置和卸载影响后续会话。
 
+每个租户与插件的 revision 独立递增，卸载后保留版本计数。重新安装不会复用旧 revision，旧页面提交的设置或删除请求返回版本冲突；升级已有数据库时先从当前安装记录回填版本计数。
+
 工作流只解析启用且明确选择的 MCP。无选择时发送空集合语义，每个节点单独冻结包和设置，配置完整性失败会标出 plugin_id、setting_id 或 transport。生命周期门禁在 clone、安装会话插件和 Agent Start 之前拒绝非空选择；设置值不进入运行事件、Node ledger 或页面 DTO。会话恢复、live refresh 和宿主健康探测由后续生命周期实现承接。真实 Node 验收使用 `TEST_DATABASE_URL`、`V2_NODE_ASSETS_DIR` 运行 `go test -race -run TestRealWorkflowMCPLifecycleGate ./internal/workflowhost`，验证当前 pin 拒绝非空选择、禁用绑定后两节点正常执行及公开记录无配置值泄漏。
 
 ### 项目 Skill 安装
