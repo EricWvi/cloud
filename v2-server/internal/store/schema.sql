@@ -125,12 +125,18 @@ CREATE TABLE IF NOT EXISTS v2_plugin_catalog (
 
 -- Skill names a package materializes at runtime (its assets/<name>/SKILL.md directories), recorded
 -- when the package is installed so the settings page can compare user skills against the names the
--- runtime actually projects. plugin_id is the full "namespace/identifier" of the skill package.
-CREATE TABLE IF NOT EXISTS v2_plugin_skills (
-	plugin_id  text NOT NULL,
+-- runtime actually projects. Rows are keyed by the package's verified SHA-256, the same digest a
+-- selection freezes in v2_skill_plans: the names are a fact about those exact bytes, so another
+-- space, source or version can never overwrite what an installed selection resolves to, and a
+-- failed install only adds rows no selection references.
+CREATE TABLE IF NOT EXISTS v2_skill_package_names (
+	digest     text NOT NULL,
 	skill_name text NOT NULL,
-	PRIMARY KEY (plugin_id, skill_name)
+	PRIMARY KEY (digest, skill_name)
 );
+-- An earlier build keyed the names by "namespace/identifier" alone; they are derived data, so the
+-- table is dropped rather than migrated.
+DROP TABLE IF EXISTS v2_plugin_skills;
 
 -- The v2 stand-in for the shared Space Agent directory: one row per plugin installed in a space.
 -- Agent squad members reference the id of an agent row whose observed state is installed. The

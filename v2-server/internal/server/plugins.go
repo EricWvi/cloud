@@ -143,9 +143,10 @@ func (h *handler) installSpacePlugin(w http.ResponseWriter, r *http.Request, a a
 			fault(w, http.StatusBadRequest, "plugin_package_invalid")
 			return
 		}
-		// Names are keyed to the package and only surface through an installed selection, so writing
-		// them before the selection leaves nothing visible if the install itself fails.
-		if e := h.store.UpsertPluginSkills(r.Context(), source.Entry.SourceNamespace+"/"+source.Entry.Identifier, names); e != nil {
+		// Names are keyed to the verified package digest and only surface through a selection that
+		// froze that digest, so writing them before the selection leaves nothing visible (and
+		// replaces nothing) if the install itself fails.
+		if e := h.store.UpsertPluginSkills(r.Context(), source.Digest, names); e != nil {
 			pluginError(w, "install plugin", e)
 			return
 		}

@@ -7,10 +7,11 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 )
 
-// UpsertPluginSkills records the skill names a skill package materializes at runtime, replacing
-// any names recorded for that package before. pluginID is the package's full "namespace/identifier".
-func (s *Store) UpsertPluginSkills(ctx context.Context, pluginID string, names []string) error {
-	if pluginID == "" {
+// UpsertPluginSkills records the skill names a skill package materializes at runtime. digest is the
+// package's verified SHA-256: the names belong to those exact bytes, so recording them never
+// replaces what another space, source or version resolves to, and a repeated record is a no-op.
+func (s *Store) UpsertPluginSkills(ctx context.Context, digest string, names []string) error {
+	if digest == "" {
 		return execution.ErrInvalidRequest
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -18,14 +19,11 @@ func (s *Store) UpsertPluginSkills(ctx context.Context, pluginID string, names [
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `DELETE FROM v2_plugin_skills WHERE plugin_id=$1`, pluginID); err != nil {
-		return err
-	}
 	for _, name := range names {
 		if name == "" {
 			continue
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO v2_plugin_skills(plugin_id, skill_name) VALUES($1,$2) ON CONFLICT DO NOTHING`, pluginID, name); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO v2_skill_package_names(digest, skill_name) VALUES($1,$2) ON CONFLICT DO NOTHING`, digest, name); err != nil {
 			return err
 		}
 	}
@@ -33,12 +31,14 @@ func (s *Store) UpsertPluginSkills(ctx context.Context, pluginID string, names [
 }
 
 // InstalledPluginSkillNames maps each installed skill package in the space ("namespace/identifier")
-// to the skill names it materializes at runtime, taken from what was recorded at install time.
+// to the skill names it materializes at runtime, resolved through the package digest the selection
+// froze at install time. A selection installed before names were recorded has no entry.
 func (s *Store) InstalledPluginSkillNames(ctx context.Context, tenant, space string) (map[string][]string, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT DISTINCT a.source_namespace||'/'||a.identifier, k.skill_name
 		FROM v2_space_agents a
-		JOIN v2_plugin_skills k ON k.plugin_id = a.source_namespace||'/'||a.identifier
+		JOIN v2_skill_plans p ON p.selection_id = a.id
+		JOIN v2_skill_package_names k ON k.digest = p.digest
 		WHERE a.tenant_id=$1::uuid AND a.space_id=$2::uuid AND a.kind='skill' AND a.desired_state='installed'
 		ORDER BY 1, 2`, tenant, space)
 	if err != nil {
