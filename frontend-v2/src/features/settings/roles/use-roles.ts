@@ -75,8 +75,12 @@ export function useWorkspaceRoles() {
     importFile: importFile.mutateAsync,
     savePending: create.isPending || update.isPending,
     deletePending: remove.isPending,
-    loading: tenants.isLoading || query.isPending,
-    error: roleError(tenants.error ?? query.error),
+    // A disabled catalog query stays pending forever, so wait on it only once the workspace is
+    // known; otherwise a failed tenant lookup would hide its own error and retry button.
+    loading: tenants.isLoading || (tenantId !== '' && query.isPending),
+    error: tenants.isSuccess && !tenantId
+      ? new Error('你还没有加入任何工作区，暂时无法读取角色目录。')
+      : roleError(tenants.error ?? query.error),
     // Import reports its own failures inside the dialog, including the name conflict it resolves.
     mutationError: roleError(create.error ?? update.error ?? remove.error),
     resetErrors: () => {
@@ -87,7 +91,7 @@ export function useWorkspaceRoles() {
     },
     refetch: () => {
       void tenants.refetch()
-      void query.refetch()
+      if (tenantId) void query.refetch()
     },
   }
 }

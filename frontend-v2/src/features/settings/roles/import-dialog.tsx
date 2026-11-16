@@ -57,7 +57,9 @@ export function RoleImportDialog({
   }
 
   const submit = async (overwrite: boolean) => {
-    if (!file || !content) return
+    // The server owns the content: an empty file must come back as `role_front_matter_missing`
+    // instead of leaving the enabled button doing nothing.
+    if (!file) return
     setPending(true)
     setError(undefined)
     try {

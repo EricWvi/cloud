@@ -61,6 +61,36 @@ it('creates, renders, edits and deletes a server-backed role', async () => {
   expect(Object.keys(localStorage)).toHaveLength(0)
 })
 
+it('shows the workspace error and retries instead of loading the roles forever', async () => {
+  installMarketplaceBackend({ roles: [serverRole()], tenantFailures: 1 })
+  const user = userEvent.setup()
+  renderSettingsPage(<RolesPage />)
+
+  // The disabled catalog query must not keep the page pending while the workspace lookup failed.
+  expect(await screen.findByText('暂时无法加载')).toBeVisible()
+  expect(screen.queryByText('正在加载…')).not.toBeInTheDocument()
+
+  await user.click(screen.getByRole('button', { name: '重试' }))
+  expect(await screen.findByRole('article', { name: '代码审查' })).toBeVisible()
+})
+
+it('reports the server error when the imported file is empty', async () => {
+  installMarketplaceBackend()
+  const user = userEvent.setup()
+  renderSettingsPage(<RolesPage />)
+
+  await user.click(await screen.findByRole('button', { name: '导入角色' }))
+  await user.upload(
+    screen.getByLabelText('角色 Markdown 文件'),
+    new File([''], 'empty.md', { type: 'text/markdown' }),
+  )
+  await user.click(screen.getByRole('button', { name: '导入' }))
+
+  expect(
+    await screen.findByRole('alert'),
+  ).toHaveTextContent('角色文件缺少 YAML front matter')
+})
+
 it('imports a role Markdown file and resolves a same-name conflict on the server', async () => {
   const backend = installMarketplaceBackend({ roles: [serverRole()] })
   const user = userEvent.setup()

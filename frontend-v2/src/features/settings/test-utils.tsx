@@ -92,6 +92,7 @@ export function installMarketplaceBackend({
   roles = [],
   progress = [],
   mcpInstallFailure,
+  tenantFailures = 0,
 }: {
   role?: 'owner' | 'member'
   catalog?: PluginCatalogEntry[]
@@ -101,7 +102,10 @@ export function installMarketplaceBackend({
   roles?: Role[]
   progress?: { namespace: string; identifier: string; results: SkillProgress[] }[]
   mcpInstallFailure?: string
+  /** Answers the first N tenant lookups with 500, to exercise discovery failures. */
+  tenantFailures?: number
 } = {}) {
+  let remainingTenantFailures = tenantFailures
   const state = {
     catalog: [...catalog],
     selections: [...selections],
@@ -151,7 +155,11 @@ export function installMarketplaceBackend({
       state.mcps.push(resource)
       return { status: 200, data: { resource } }
     }
-    if (url === '/api/v1/me/tenants')
+    if (url === '/api/v1/me/tenants') {
+      if (remainingTenantFailures > 0) {
+        remainingTenantFailures -= 1
+        return { status: 500, data: { code: 'internal', params: {} } }
+      }
       return {
         status: 200,
         data: {
@@ -159,6 +167,7 @@ export function installMarketplaceBackend({
           nextCursor: '',
         },
       }
+    }
     if (url === `/api/v1/tenants/${MARKET_TENANT}/spaces`)
       return {
         status: 200,
