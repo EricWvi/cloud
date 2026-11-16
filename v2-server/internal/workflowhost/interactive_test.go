@@ -793,13 +793,12 @@ func TestTurnRacingACancellationIsRefused(t *testing.T) {
 			t.Fatal(err)
 		}
 		if node(nodes, "a").Status == store.WorkflowStatusRunning {
-			break // moved; SendNodeTurn now waits on the hub before it queues the turn
+			break // moved; SendNodeTurn now waits on the hub before it registers the turn
 		}
 	}
-	if _, err := st.requestCancel(ctx); err != nil { // CancelRun's first step
-		hub.mu.Unlock()
-		t.Fatal(err)
-	}
+	st.mu.Lock()
+	st.cancelling = true // CancelRun's first step
+	st.mu.Unlock()
 	hub.mu.Unlock()
 	if err := <-turned; !errors.Is(err, server.ErrWorkflowNodeNotAwaitingInput) {
 		t.Fatalf("turn racing the cancellation = %v", err)

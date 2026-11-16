@@ -42,28 +42,15 @@ func (h *Host) CleanupLoopExit(runID, parentID, scopeID string) {
 }
 
 func (h *Host) drainLoopScope(ctx context.Context, st *runState, scopeID string) error {
-	inScope := func(a *attemptState) bool { return a.scope == scopeID }
-	st.mu.Lock()
-	refs, err := st.awaitStarts(ctx, inScope)
+	stopped, err := h.stopTurns(ctx, st, func(a *attemptState) bool { return a.scope == scopeID })
 	if err != nil {
-		return err
-	}
-	st.mu.Lock()
-	var done []<-chan struct{}
-	for _, a := range st.attempts {
-		if inScope(a) && a.ref != nil {
-			done = append(done, a.done)
-		}
-	}
-	st.mu.Unlock()
-	if err := h.cancelTurns(ctx, st.scope, refs); err != nil {
 		return err
 	}
 	// Each attempt owns its End and is forgotten only after that call. Merely cancelling the
 	// turns is not enough to advance while their session/workspace cleanup is still under way.
-	for _, d := range done {
+	for _, a := range stopped {
 		select {
-		case <-d:
+		case <-a.done:
 		case <-ctx.Done():
 			return ctx.Err()
 		}

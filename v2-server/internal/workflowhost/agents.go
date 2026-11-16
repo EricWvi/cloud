@@ -182,10 +182,14 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 		return
 	}
 	ref, err := h.exec.Start(h.ctx, st.scope, request)
-	cancelling := st.endStart(a, ref, err)
+	cancelling, last, unstopped := st.endStart(a, ref, err)
 	if err != nil {
 		if cancelling {
-			h.finishCancel(st, d.RunID)
+			// The run closes once its last turn is gone, never while a sibling's stop is
+			// still unconfirmed.
+			if last {
+				h.finishCancel(st, d.RunID)
+			}
 			return
 		}
 		var setup *execution.MCPFailure
@@ -202,14 +206,29 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 	// bound elsewhere) must not leave the new session running unowned.
 	if _, err := h.store.BindWorkflowNodeSession(h.ctx, st.scope.TenantID, d.RunID, d.NodeRunID, ref.SessionID); err != nil {
 		endErr := h.end(st.scope, ref.SessionID)
-		if st.endTurn(a, endErr) {
-			h.finishCancel(st, d.RunID)
+		if cancelling, last := st.endTurn(a, endErr); cancelling {
+			if last {
+				h.finishCancel(st, d.RunID)
+			}
 			return
 		}
 		fail(workflow.Failure{Kind: workflow.FailureSessionBindingRejected, Message: "the attempt refused its session binding"})
 		return
 	}
 	h.hub.Publish(d.RunID)
+	if unstopped {
+		// The run's cancellation gave up waiting for this Start: stop the turn it returned. The
+		// turn then ends as cancelled like any other, and the last one closes the run.
+		h.workers.Add(1)
+		go func() {
+			defer h.workers.Done()
+			stopCtx, cancel := context.WithTimeout(context.WithoutCancel(h.ctx), h.stopTimeout)
+			defer cancel()
+			if _, err := h.exec.Cancel(stopCtx, st.scope, ref); err != nil {
+				h.log.Warn("stop a turn started after its run was cancelled", "run", d.RunID, "node_run", d.NodeRunID, "error", publicReason(err))
+			}
+		}()
+	}
 
 	if interactive {
 		// Desktop parks an interactive node after its first turn instead of ending the session.
@@ -221,8 +240,10 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 	}
 	result, err := h.awaitTurn(st.scope, ref, caller)
 	endErr := h.end(st.scope, ref.SessionID)
-	if st.endTurn(a, endErr) {
-		h.finishCancel(st, d.RunID)
+	if cancelling, last := st.endTurn(a, endErr); cancelling {
+		if last {
+			h.finishCancel(st, d.RunID)
+		}
 		return
 	}
 	if err != nil {
@@ -265,22 +286,26 @@ func (st *runState) releaseStart(a *attemptState) {
 }
 
 // endStart publishes the started turn to a waiting cancellation and reports whether one was
-// requested meanwhile.
-func (st *runState) endStart(a *attemptState, ref execution.Ref, err error) bool {
+// requested meanwhile, whether a refused Start left the cancelled run with no turn (see endTurn),
+// and whether a cancellation gave up waiting for this Start, so that nobody stops the turn it
+// returned unless its attempt does (see stopTurns).
+func (st *runState) endStart(a *attemptState, ref execution.Ref, err error) (cancelling, last, unstopped bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if err != nil {
 		st.forget(a)
-		return st.cancelling
+		return st.cancelling, st.lastCancelled(), false
 	}
 	a.ref = &ref
 	close(a.starting)
 	a.starting = nil
-	return st.cancelling
+	return st.cancelling, false, a.unstopped
 }
 
-// endTurn forgets the turn that ended and reports whether cancellation was requested.
-func (st *runState) endTurn(a *attemptState, endErr error) bool {
+// endTurn forgets the turn that ended and reports whether cancellation was requested, and whether
+// this was the cancelled run's last turn. Only that last one closes the run: a sibling whose stop
+// is not confirmed yet keeps the run open until its own turn ends.
+func (st *runState) endTurn(a *attemptState, endErr error) (cancelling, last bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if endErr != nil && a.scope != "" {
@@ -290,7 +315,19 @@ func (st *runState) endTurn(a *attemptState, endErr error) bool {
 		st.scopeCleanupErrors[a.scope] = endErr
 	}
 	st.forget(a)
+	return st.cancelling, st.lastCancelled()
+}
+
+// isCancelling reports whether the run's cancellation was requested.
+func (st *runState) isCancelling() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	return st.cancelling
+}
+
+// lastCancelled reports whether cancellation was requested and no turn is left. Callers hold mu.
+func (st *runState) lastCancelled() bool {
+	return st.cancelling && len(st.attempts) == 0
 }
 
 // forget removes the turn and wakes whoever waits for its start or its end. Callers hold mu.

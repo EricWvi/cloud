@@ -304,6 +304,9 @@ type attemptState struct {
 	ref      *execution.Ref
 	// done is closed once the turn ended (or never started).
 	done chan struct{}
+	// unstopped marks a turn whose Start a cancellation gave up waiting for: its attempt stops
+	// the turn itself once the Start returns.
+	unstopped bool
 }
 
 // register records who is starting a run and counts the start under way. A run that already
@@ -404,11 +407,10 @@ func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, run
 	if st != nil && (run.Status == store.WorkflowStatusPending || run.Status == store.WorkflowStatusRunning || run.Status == store.WorkflowRunAwaitingInput) {
 		stopCtx, cancel := context.WithTimeout(ctx, h.stopTimeout)
 		defer cancel()
-		refs, err := st.requestCancel(stopCtx)
-		if err != nil {
-			return store.WorkflowRun{}, fmt.Errorf("%w: %w", server.ErrWorkflowRunStopUnconfirmed, err)
-		}
-		if err := h.cancelTurns(stopCtx, st.scope, refs); err != nil {
+		st.mu.Lock()
+		st.cancelling = true // no further turn starts
+		st.mu.Unlock()
+		if _, err := h.stopTurns(stopCtx, st, func(*attemptState) bool { return true }); err != nil {
 			return store.WorkflowRun{}, fmt.Errorf("%w: %w", server.ErrWorkflowRunStopUnconfirmed, err)
 		}
 		// Parked interactive nodes keep their sessions open between turns; a cancelled run
@@ -434,60 +436,81 @@ func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, run
 	return run, nil
 }
 
-// requestCancel marks the run cancelling, so no further turn starts, and returns the turns that
-// are executing. Starts already in flight are awaited, since their turns exist once they return.
-func (st *runState) requestCancel(ctx context.Context) ([]execution.Ref, error) {
-	st.mu.Lock()
-	st.cancelling = true
-	return st.awaitStarts(ctx, func(*attemptState) bool { return true })
-}
-
-// awaitStarts waits until no selected turn is still starting and returns the refs of the selected
-// turns executing. Called with mu held; returns with it released.
-func (st *runState) awaitStarts(ctx context.Context, selected func(*attemptState) bool) ([]execution.Ref, error) {
-	for {
+// stopTurns cancels the selected turns concurrently and reports an error unless execution confirmed
+// every stop: a run's sibling Agents end together, not one after another. Turns already executing
+// are cancelled at once; a turn whose Start is still in flight is cancelled as soon as that Start
+// returns. If ctx ends first, every turn executing by then is still cancelled, the stops issued
+// are awaited and ctx's error is returned; a turn whose Start is still in flight is marked so its
+// attempt stops it once the Start returns (see runAgent). It returns the turns it cancelled.
+func (h *Host) stopTurns(ctx context.Context, st *runState, selected func(*attemptState) bool) ([]*attemptState, error) {
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		errs    []error
+		stopped []*attemptState
+	)
+	issued := map[*attemptState]bool{}
+	defer wg.Wait()
+	for giveUp := false; ; {
+		st.mu.Lock()
 		var starting chan struct{}
 		for _, a := range st.attempts {
-			if selected(a) && a.starting != nil {
+			if !selected(a) {
+				continue
+			}
+			if giveUp && a.starting != nil {
+				a.unstopped = true
+				continue
+			}
+			if a.ref != nil && !issued[a] && giveUp {
+				// Started just as ctx ended: still stop it, past this call's deadline.
+				issued[a] = true
+				stopped = append(stopped, a)
+				ref := *a.ref
+				h.workers.Add(1)
+				go func() {
+					defer h.workers.Done()
+					late, cancel := context.WithTimeout(context.WithoutCancel(ctx), h.stopTimeout)
+					defer cancel()
+					if _, err := h.exec.Cancel(late, st.scope, ref); err != nil {
+						h.log.Warn("stop a turn that started as its cancellation timed out", "session", ref.SessionID, "error", publicReason(err))
+					}
+				}()
+				continue
+			}
+			if a.ref != nil && !issued[a] {
+				issued[a] = true
+				stopped = append(stopped, a)
+				ref := *a.ref
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if _, err := h.exec.Cancel(ctx, st.scope, ref); err != nil {
+						mu.Lock()
+						errs = append(errs, err)
+						mu.Unlock()
+					}
+				}()
+			}
+			if a.starting != nil && starting == nil {
 				starting = a.starting
-				break
 			}
 		}
-		if starting == nil {
-			break
-		}
 		st.mu.Unlock()
+		if giveUp {
+			wg.Wait()
+			return stopped, errors.Join(append(errs, ctx.Err())...)
+		}
+		if starting == nil {
+			wg.Wait()
+			return stopped, errors.Join(errs...)
+		}
 		select {
 		case <-starting:
 		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-		st.mu.Lock()
-	}
-	defer st.mu.Unlock()
-	var refs []execution.Ref
-	for _, a := range st.attempts {
-		if selected(a) && a.ref != nil {
-			refs = append(refs, *a.ref)
+			giveUp = true // one more pass under mu: cancel what started, mark what still starts
 		}
 	}
-	return refs, nil
-}
-
-// cancelTurns cancels the turns concurrently and reports an error unless execution confirmed every
-// stop: a run's sibling Agents end together, not one after another.
-func (h *Host) cancelTurns(ctx context.Context, scope execution.Scope, refs []execution.Ref) error {
-	errs := make([]error, len(refs))
-	var wg sync.WaitGroup
-	for i, ref := range refs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, errs[i] = h.exec.Cancel(ctx, scope, ref)
-		}()
-	}
-	wg.Wait()
-	return errors.Join(errs...)
 }
 
 // lifecycleError translates the engine's refusals into the HTTP layer's lifecycle errors.
