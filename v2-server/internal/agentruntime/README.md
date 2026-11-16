@@ -66,6 +66,7 @@ Agent 把被切断的模型请求当成网络失败原样重发（OpenCode 0.6.1
 包安装与 `spec.mcp` 构造保留为独立接缝及单测，未接入当前被拒绝的启动路径。设置值仅驻留会话内存，停止后释放引用；包安装帧、准备文件和执行持久快照均不含设置值。MCP 失败保留稳定 code 以及可选 `plugin_id`、`setting_id`、`transport`，工作流将其映射为可手动恢复、禁止自动重试的配置失败。这些测试不代表生命周期、刷新或健康探测已经实现。
 
 包级 `go vet` / `go test -race` 验证登记恢复、拒绝未知路径和 symlink、保留工作文件、runtime 锁及无效终态不能确认停止。
+设置 `V2_NODE_ASSETS_DIR` 后，`TestRealRebuildRetiresUnacknowledgedNodeBeforeNextSession` 用真实 Node/OpenCode 验证：Node 不确认 End 时 `Rebuild` 只标记，同一项目的下一个会话先由 supervisor 停掉旧进程树，再在新 Node 上执行。
 
 fake IPC 测试通过同一个 Receive dispatcher 覆盖控制回复、Start/Append、事件持久化与 ACK、End 终态、传输断开及准备失败重试；它不启动真实 Node 进程，不能替代下述组合验收。
 

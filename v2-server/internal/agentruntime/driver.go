@@ -71,6 +71,8 @@ type Driver struct {
 	serial         atomic.Uint64
 	controlTimeout time.Duration
 	startProject   func(*projectRuntime) error
+	// wrapClient lets real-Node tests interpose on IPC before the receiver starts.
+	wrapClient func(nodeClient) nodeClient
 }
 
 // New validates deployment wiring. Processes start lazily for an already-admitted project turn.
