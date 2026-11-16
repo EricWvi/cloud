@@ -151,20 +151,7 @@ func startFields(r reader) map[string]string {
 		v.boolean("required")
 		field := v.str("fieldType")
 		if v.value["fieldType"] == nil {
-			switch typ {
-			case "string", "secret":
-				field = "text-input"
-			case "number", "integer":
-				field = "number"
-			case "boolean":
-				field = "checkbox"
-			case "file":
-				field = "file"
-			case "array[file]":
-				field = "file-list"
-			default:
-				field = "json"
-			}
+			field = defaultFieldType(typ)
 		} else if !fieldProduces(field, typ) {
 			v.fail("fieldType", "field does not produce the declared variable type")
 		}
@@ -203,6 +190,23 @@ func startFields(r reader) map[string]string {
 		result[name] = typ
 	}
 	return result
+}
+
+func defaultFieldType(typ string) string {
+	switch typ {
+	case "string", "secret", "":
+		return "text-input"
+	case "number", "integer":
+		return "number"
+	case "boolean":
+		return "checkbox"
+	case "file":
+		return "file"
+	case "array[file]":
+		return "file-list"
+	default:
+		return "json"
+	}
 }
 
 func fieldProduces(field, typ string) bool {

@@ -162,12 +162,14 @@ func (g *Graph) TopologicalOrder() []Node {
 
 // StartVariable is one typed Start input declaration.
 type StartVariable struct {
-	Name      string
-	ValueType string
-	Required  bool
-	Options   []string
-	MaxLength *int
-	Value     any
+	Name        string
+	DisplayName string
+	FieldType   string
+	ValueType   string
+	Required    bool
+	Options     []string
+	MaxLength   *int
+	Value       any
 }
 
 // StartVariables reads a Start node's validated input declarations.
@@ -177,9 +179,18 @@ func (n Node) StartVariables() []StartVariable {
 	for _, item := range items {
 		v, _ := item.(object)
 		name, _ := v["name"].(string)
+		displayName, _ := v["displayName"].(string)
+		fieldType, _ := v["fieldType"].(string)
 		typ, _ := v["valueType"].(string)
 		required, _ := v["required"].(bool)
-		sv := StartVariable{Name: strings.TrimSpace(name), ValueType: typ, Required: required, Value: v["value"]}
+		sv := StartVariable{
+			Name:        strings.TrimSpace(name),
+			DisplayName: strings.TrimSpace(displayName),
+			FieldType:   strings.TrimSpace(fieldType),
+			ValueType:   typ,
+			Required:    required,
+			Value:       v["value"],
+		}
 		if options, ok := v["options"].([]any); ok {
 			for _, o := range options {
 				if s, ok := o.(string); ok {
