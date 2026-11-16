@@ -43,7 +43,9 @@ export function TaskComposer({ tenantId, task, me, inSquad, sending, error, onSe
   const options = useMemo(() => {
     if (query === null) return []
     const q = query.toLocaleLowerCase()
-    return (targets.data?.items ?? []).filter(t => t.displayName.toLocaleLowerCase().includes(q) || t.description.toLocaleLowerCase().includes(q)).slice(0, 8)
+    return (targets.data?.items ?? [])
+      .filter(t => (t.type === 'user' || t.type === 'agent') && (t.displayName.toLocaleLowerCase().includes(q) || t.description.toLocaleLowerCase().includes(q)))
+      .slice(0, 8)
   }, [query, targets.data])
 
   const typed = (value: string, caret: number) => {

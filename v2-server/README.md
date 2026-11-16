@@ -399,9 +399,12 @@ HTTP 集成测试按此候选 OpenAPI 校验每一次响应，并覆盖创建、
 
 ### 协作 @ 目录
 
-`GET /api/v1/tenants/{tid}/collaboration/targets` 按正式契约实现子集：`user`（工作区有效成员，交互 `mention`）与
-`agent`（预装且已安装的 Space Agent，交互 `task`，`description` 是插件标识）。正式契约里的 `team` 与 `workflow` 不返回：
-v2 不向小队自动派发，工作流在自己的页面运行。
+`GET /api/v1/tenants/{tid}/collaboration/targets` 按正式契约实现子集：`user`（工作区有效成员，交互 `mention`）、
+`agent`（预装且已安装的 Space Agent，交互 `task`，`description` 是插件标识）与 `workflow`（租户内未删除且已发布的工作流，
+交互 `form`，`formRef` 指向工作流 ID）。未发布或已删除的工作流不返回；正式契约里的 `team` 仍不返回（v2 不向小队自动派发）。
+
+`GET /api/v1/tenants/{tid}/collaboration/forms/{formRef}` 按正式契约返回 `FormDescriptor`，从该工作流当前激活的**已发布快照**
+根节点 `Start` 的 `inputVariables` 生成启动表单字段（忽略未发布草稿改动）；未发布、已删除或跨租户工作流返回 `404 form_descriptor_not_found`。
 
 ### 项目仓库
 

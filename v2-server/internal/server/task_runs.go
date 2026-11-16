@@ -10,12 +10,15 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/taskrun"
+	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
 
 // taskRunStore is the part of the database the task timeline and the collaboration targets need.
 type taskRunStore interface {
 	TaskTimeline(ctx context.Context, tenant, taskID string) ([]store.TaskRun, []store.TaskComment, error)
 	CollaborationAgents(ctx context.Context, tenant string) ([]store.TaskAssignee, error)
+	CollaborationWorkflows(ctx context.Context, tenant string) ([]store.CollaborationWorkflow, error)
+	CollaborationWorkflowForm(ctx context.Context, tenant, workflowID string) (store.CollaborationWorkflow, string, error)
 	PendingMentions(ctx context.Context, tenant, caller string) ([]store.PendingMention, error)
 	MySquadTasks(ctx context.Context, tenant, caller string) ([]store.MySquadTask, error)
 }
@@ -32,6 +35,7 @@ func (h *handler) taskRunRoutes(rt *router) {
 	rt.tenant("GET "+base+"/runs/{rid}/events", h.taskRunEvents)
 	rt.tenant("POST "+base+"/comments", h.createTaskComment)
 	rt.tenant("GET /api/v1/tenants/{tid}/collaboration/targets", h.collaborationTargets)
+	rt.tenant("GET /api/v1/tenants/{tid}/collaboration/forms/{formRef}", h.collaborationForm)
 	rt.tenant("GET /api/v2/tenants/{tid}/task-mentions", h.pendingMentions)
 	rt.tenant("GET /api/v2/tenants/{tid}/my-squad-tasks", h.mySquadTasks)
 }
@@ -271,8 +275,9 @@ type interactionDescriptor struct {
 }
 
 // collaborationTargets implements the contract's @ directory for the subset v2 routes: workspace
-// members are mentioned, installed Space Agents take the message as a task. Squads and workflows
-// are not offered: v2 does not dispatch to a squad, and workflows run from their own page.
+// members are mentioned, installed Space Agents take the message as a task, and live published
+// workflows expose Form Mode with formRef pointing to the workflow id. Squads are not offered
+// because v2 does not dispatch to a squad.
 func (h *handler) collaborationTargets(w http.ResponseWriter, r *http.Request, a access) {
 	s, ok := h.store.(taskRunStore)
 	tenant := a.TenantID
@@ -290,7 +295,12 @@ func (h *handler) collaborationTargets(w http.ResponseWriter, r *http.Request, a
 		internal(w, "collaboration agents", e)
 		return
 	}
-	items := make([]collaborationTarget, 0, len(members)+len(agents))
+	workflows, e := s.CollaborationWorkflows(r.Context(), tenant)
+	if e != nil {
+		internal(w, "collaboration workflows", e)
+		return
+	}
+	items := make([]collaborationTarget, 0, len(members)+len(agents)+len(workflows))
 	for _, m := range members {
 		items = append(items, collaborationTarget{Type: "user", ID: m.UserID, DisplayName: m.DisplayName, Description: "工作区成员",
 			InteractionDescriptor: interactionDescriptor{Mode: "mention"}})
@@ -299,5 +309,36 @@ func (h *handler) collaborationTargets(w http.ResponseWriter, r *http.Request, a
 		items = append(items, collaborationTarget{Type: "agent", ID: agent.ID, DisplayName: agent.DisplayName, Description: agent.Identifier,
 			InteractionDescriptor: interactionDescriptor{Mode: "task", RequiresTask: true}})
 	}
+	for _, wf := range workflows {
+		formRef := wf.ID
+		items = append(items, collaborationTarget{Type: "workflow", ID: wf.ID, DisplayName: wf.Name, Description: "已发布工作流 · " + wf.PublishedVersion,
+			InteractionDescriptor: interactionDescriptor{Mode: "form", RequiresTask: false, FormRef: &formRef}})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "nextCursor": ""})
+}
+
+// collaborationForm implements the contract's Form Mode descriptor read for published workflows,
+// deriving fields from the active published snapshot's Start variables rather than the mutable draft.
+func (h *handler) collaborationForm(w http.ResponseWriter, r *http.Request, a access) {
+	s, ok := h.store.(taskRunStore)
+	if !ok {
+		fault(w, http.StatusServiceUnavailable, "task_unavailable")
+		return
+	}
+	formRef := strings.TrimSpace(r.PathValue("formRef"))
+	if !workflowUUID.MatchString(formRef) {
+		fault(w, http.StatusNotFound, "form_descriptor_not_found")
+		return
+	}
+	wf, graph, err := s.CollaborationWorkflowForm(r.Context(), a.TenantID, formRef)
+	if errors.Is(err, store.ErrNotFound) {
+		fault(w, http.StatusNotFound, "form_descriptor_not_found")
+		return
+	}
+	if err != nil {
+		internal(w, "collaboration workflow form", err)
+		return
+	}
+	desc := workflow.BuildStartForm(wf.ID, wf.Name, "已发布版本 "+wf.PublishedVersion, graph)
+	writeJSON(w, http.StatusOK, desc)
 }

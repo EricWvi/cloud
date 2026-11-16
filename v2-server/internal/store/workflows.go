@@ -145,6 +145,59 @@ type WorkflowRef struct {
 	PublishedSnapshotID *string
 }
 
+// CollaborationWorkflow is a live published workflow exposed to the @ collaboration directory.
+type CollaborationWorkflow struct {
+	ID               string
+	Name             string
+	PublishedVersion string
+}
+
+// CollaborationWorkflows lists the tenant's live published workflows ordered by name then id.
+// Unpublished definitions, soft-deleted definitions, and definitions whose active snapshot was
+// deleted are excluded.
+func (s *Store) CollaborationWorkflows(ctx context.Context, tenant string) ([]CollaborationWorkflow, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT w.id::text, w.name, published.version
+		FROM v2_workflows w
+		JOIN v2_workflow_snapshots published
+			ON published.id = w.published_snapshot_id AND published.deleted_at IS NULL
+		WHERE w.tenant_id = $1 AND w.deleted_at IS NULL
+		ORDER BY w.name, w.id`, tenant)
+	if err != nil {
+		return nil, workflowError("list collaboration workflows", err)
+	}
+	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (CollaborationWorkflow, error) {
+		var w CollaborationWorkflow
+		err := row.Scan(&w.ID, &w.Name, &w.PublishedVersion)
+		return w, err
+	})
+	if err != nil {
+		return nil, workflowError("list collaboration workflows", err)
+	}
+	return items, nil
+}
+
+// CollaborationWorkflowForm reads the live published snapshot graph of one workflow for its Form
+// Mode descriptor. Unpublished or deleted workflows return ErrNotFound.
+func (s *Store) CollaborationWorkflowForm(ctx context.Context, tenant, workflowID string) (CollaborationWorkflow, string, error) {
+	var w CollaborationWorkflow
+	var graph string
+	err := s.pool.QueryRow(ctx, `
+		SELECT w.id::text, w.name, published.version, published.graph
+		FROM v2_workflows w
+		JOIN v2_workflow_snapshots published
+			ON published.id = w.published_snapshot_id AND published.deleted_at IS NULL
+		WHERE w.tenant_id = $1 AND w.id = $2 AND w.deleted_at IS NULL`, tenant, workflowID).
+		Scan(&w.ID, &w.Name, &w.PublishedVersion, &graph)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CollaborationWorkflow{}, "", ErrNotFound
+	}
+	if err != nil {
+		return CollaborationWorkflow{}, "", workflowError("read collaboration workflow form", err)
+	}
+	return w, graph, nil
+}
+
 // WorkflowRefs lists the tenant's live definitions in the same order as Workflows, each with the id
 // of its live published snapshot (nil when unpublished). Graphs stay in the database: a published
 // snapshot is immutable, so a caller can cache whatever it derives from one by its id.
