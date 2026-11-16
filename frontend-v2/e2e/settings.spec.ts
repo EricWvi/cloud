@@ -28,10 +28,20 @@ const titles = [
 
 test('roles are workspace-managed on the server and importable', async ({ page }) => {
   await login(page, '/settings/roles')
+  // The catalog belongs to the workspace, so a rerun against the same server starts from whatever
+  // the previous one left behind; empty it through the API so this spec owns no duplicate names.
+  const tenants = await (await page.request.get('/api/v1/me/tenants')).json()
+  const roles = await (
+    await page.request.get(`/api/v2/tenants/${tenants.items[0].id}/roles`)
+  ).json()
+  for (const role of roles.items)
+    await page.request.delete(`/api/v2/tenants/${tenants.items[0].id}/roles/${role.id}`)
+  await page.reload()
   // Roles live in the workspace catalog, not in this browser: a role created here is readable by
   // everyone, and a reload reads it back from the server.
-  await expect(page.getByRole('button', { name: '新建角色' })).toBeVisible()
-  await page.getByRole('button', { name: '新建角色' }).click()
+  const createRole = page.locator('header').getByRole('button', { name: '新建角色' })
+  await expect(createRole).toBeVisible()
+  await createRole.click()
   await page.getByLabel('标题').fill('代码审查')
   await page.getByLabel('描述').fill('检查改动的正确性和测试覆盖')
   await page
@@ -40,7 +50,7 @@ test('roles are workspace-managed on the server and importable', async ({ page }
   await page.getByRole('button', { name: '保存角色' }).click()
   await expect(page.getByRole('article', { name: '代码审查' })).toBeVisible()
 
-  await page.getByRole('button', { name: '新建角色' }).click()
+  await createRole.click()
   await page.getByLabel('标题').fill('发布检查')
   await page.getByLabel('描述').fill('发布前核对版本和说明')
   await page
@@ -512,7 +522,8 @@ test('dark settings screenshots', async ({ page }, info) => {
   await theme(page, '深色')
   for (const path of ['roles', 'plugins', 'skills']) {
     await page.goto('/settings/' + path)
-    await expect(page.getByRole('article').first()).toBeVisible()
+    // The role catalog can be empty; its header is what every settings page always renders.
+    await expect(page.getByRole('heading', { level: 1 }).first()).toBeVisible()
     await resetScroll(page)
     await page.screenshot({
       path: info.outputPath(path + '-dark.png'),

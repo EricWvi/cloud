@@ -77,9 +77,8 @@ export function useWorkspaceRoles() {
     deletePending: remove.isPending,
     loading: tenants.isLoading || query.isPending,
     error: roleError(tenants.error ?? query.error),
-    mutationError: roleError(
-      create.error ?? update.error ?? remove.error ?? importFile.error,
-    ),
+    // Import reports its own failures inside the dialog, including the name conflict it resolves.
+    mutationError: roleError(create.error ?? update.error ?? remove.error),
     resetErrors: () => {
       create.reset()
       update.reset()
