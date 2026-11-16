@@ -102,15 +102,22 @@ type ipcHarness struct {
 	scope   execution.Scope
 }
 
+var ipcModel = nodeservices.Model{ID: "fixture", Name: "Fixture", ContextWindow: 4096, MaxTokens: 256}
+
 func newIPCHarness(t *testing.T, hook func(*fakeNodeIPC, node.Message) bool) *ipcHarness {
+	t.Helper()
+	return newIPCHarnessWith(t, map[string]nodeservices.Binding{
+		"fixture":          {Model: ipcModel, Protocol: nodeservices.OpenAICompletions, Provider: nodeservices.FixtureProvider{}},
+		"messages-fixture": {Model: ipcModel, Protocol: nodeservices.AnthropicMessages, Provider: nodeservices.MessagesFixtureProvider{}},
+	}, hook)
+}
+
+// newIPCHarnessWith runs the driver on the given bindings, keyed "fixture" (OpenAI) and
+// "messages-fixture" (Messages) like the default ones.
+func newIPCHarnessWith(t *testing.T, bindings map[string]nodeservices.Binding, hook func(*fakeNodeIPC, node.Message) bool) *ipcHarness {
 	t.Helper()
 	root := t.TempDir()
 	config := Project{MirrorPath: filepath.Join(root, "mirror.git"), Commit: "0123456789012345678901234567890123456789", SnapshotRef: "refs/snapshots/demo"}
-	model := nodeservices.Model{ID: "fixture", Name: "Fixture", ContextWindow: 4096, MaxTokens: 256}
-	bindings := map[string]nodeservices.Binding{
-		"fixture":          {Model: model, Protocol: nodeservices.OpenAICompletions, Provider: nodeservices.FixtureProvider{}},
-		"messages-fixture": {Model: model, Protocol: nodeservices.AnthropicMessages, Provider: nodeservices.MessagesFixtureProvider{}},
-	}
 	h := &ipcHarness{created: make(chan *fakeNodeIPC, 16), config: config, scope: execution.Scope{TenantID: "tenant", UserID: "user"}}
 	d := &Driver{opts: Options{Root: filepath.Join(root, "projects"), Bindings: bindings, ResolveProject: func(context.Context, execution.Scope, string) (Project, error) { return config, nil }}, boot: "fake", projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, controlTimeout: time.Second}
 	h.driver = d
