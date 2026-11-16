@@ -28,6 +28,7 @@ Agent 自己结束的一轮（`end_turn` 之外的停止原因）不返回错误
 
 项目初始化或 checkout 准备失败不永久缓存；尚未派发 Start 的失败 session 会撤销目录占用并从准备缓存移除，同一逻辑 session 可以重新准备。控制命令（包括插件安装与 clone）各自最多等待两分钟，单帧发送另有十秒上限；一次准备等待最多三分钟，失败后的停止确认另受清理调用的 context 约束。每次尝试使用新的控制 execution ID，迟到回复不会被后一次尝试接收。已收到明确失败的 clone 可重试；超时或传输断开属于执行结果不确定，整个 Node incarnation 会变为不可用，不能把它当作目录忙或只重发 clone。
 
+上层确认不了某个会话已停止时调用 `Rebuild(sid)`，把该会话所在项目标为需要重建（当场不停进程），其他项目不受影响。
 后续请求在重建项目 Node 前，必须先由原 supervisor 确认旧进程树停止，并关闭旧接缝；停止未确认时保留原项目条目，返回 `ErrUnavailable`，不派发新 incarnation。确认停止后才从缓存移除原项目并按需重建，保留已有 checkout 和文件。已派发过的 Agent 不自动重放或恢复上下文；新会话可以使用重建后的 Node。正常结束的 session/Agent 与成功 checkout 条目当前保留到 Driver 关闭或进程重启，仍用于 End 幂等和 checkout 复用。
 
 固定 Node 没有逐轮取消命令：本包的 Run context 取消会发送 EndSession，确认物理会话结束后返回；此后不能继续该物理会话。公共层调用方须据此结束有项目 session；无项目模型调用的逐轮取消属于 `modelturn`。自然完成与取消竞争时保留已经确认的实际轮次结果。
