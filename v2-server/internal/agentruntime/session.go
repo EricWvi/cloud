@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -113,12 +115,24 @@ func (d *Driver) session(ctx context.Context, scope execution.Scope, session exe
 				a.prepareErr = execution.ErrUnavailable
 				return
 			}
-			if p.owners[session.WorkspaceID] != "" && p.owners[session.WorkspaceID] != session.ID {
+			// Only a workflow run's sessions share a checkout; any other workspace has one owner.
+			owners := p.owners[session.WorkspaceID]
+			if _, own := owners[session.ID]; len(owners) != 0 && !own && caller != execution.CallerWorkflow {
 				p.mu.Unlock()
 				a.prepareErr = execution.ErrWorkspaceBusy
 				return
 			}
-			p.owners[session.WorkspaceID] = session.ID
+			if owners == nil {
+				owners = map[string]*execution.Skills{}
+				p.owners[session.WorkspaceID] = owners
+			}
+			owners[session.ID] = session.Skills
+			var siblings []execution.Skills
+			for _, id := range slices.Sorted(maps.Keys(owners)) {
+				if id != session.ID && owners[id] != nil {
+					siblings = append(siblings, *owners[id])
+				}
+			}
 			p.mu.Unlock()
 			// Run has checked the executor names a known plugin; its install overlaps the clone.
 			plugin, _ := findPlugin(session.Executor.AgentID, session.Executor.PluginVersion)
@@ -134,7 +148,7 @@ func (d *Driver) session(ctx context.Context, scope execution.Scope, session exe
 				return
 			}
 			if session.Skills != nil {
-				if err := p.applyWorkflowSkills(a.checkout.path, session.WorkspaceID, *session.Skills); err != nil {
+				if err := p.applyWorkflowSkills(a.checkout.path, session.WorkspaceID, *session.Skills, siblings); err != nil {
 					a.prepareErr = err
 					return
 				}
@@ -252,8 +266,11 @@ func (a *agentSession) markStopped() {
 				a.project.services.End(a.execution)
 			}
 			a.project.mu.Lock()
-			if a.project.owners[a.frozen.WorkspaceID] == a.frozen.ID {
-				delete(a.project.owners, a.frozen.WorkspaceID)
+			if owners := a.project.owners[a.frozen.WorkspaceID]; owners != nil {
+				delete(owners, a.frozen.ID)
+				if len(owners) == 0 {
+					delete(a.project.owners, a.frozen.WorkspaceID)
+				}
 			}
 			a.project.mu.Unlock()
 		}
@@ -323,6 +340,7 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 			Kind   string
 			Result struct {
 				Reason string
+				Detail string
 				Node   node.Identity
 			}
 		}
@@ -341,11 +359,19 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 		var outcome *turnOutcome
 		if call != nil {
 			result := failed("agent_ended_before_turn")
+			if ended.Result.Reason == "agent_failed" && execution.CheckoutRefused(ended.Result.Detail) {
+				// Node refused only this session at admission; the checkout's other sessions and
+				// the control connection are untouched. Its stable code says why.
+				result = failed(ended.Result.Detail)
+			}
 			if ended.Result.Reason == "cancelled" || ended.Result.Reason == "user_ended" {
 				result = execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}
 			}
+			result.AgentLost = true
 			if !publicationFailed && a.publish(execution.Event{Ref: execution.Ref{TurnID: call.id}, Kind: execution.EventTurnEnded, Result: &result}) == nil {
-				outcome = &turnOutcome{call.id, result, nil}
+				// The session is gone, not just the turn: the error tells the execution service
+				// not to keep a held session for another turn.
+				outcome = &turnOutcome{call.id, result, execution.ErrSessionEnded}
 			} else {
 				a.fail("agent_event_write_failed", errEventStore)
 				publicationFailed = true
@@ -374,6 +400,7 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 			return nil, false
 		}
 		result := failed(nodehistory.FailureCode(err))
+		result.AgentLost = true // requestEnd above ends the session
 		if a.publish(execution.Event{Ref: execution.Ref{TurnID: call.id}, Kind: execution.EventTurnEnded, Result: &result}) != nil {
 			a.fail("agent_event_write_failed", errEventStore)
 			return nil, false

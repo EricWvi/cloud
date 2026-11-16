@@ -482,6 +482,9 @@ export const workflowEditorTranslations = {
       "已保存，运行时暂不连接已启用的 MCP，节点照常执行。",
     "settings.workflow.unapplied.interactive":
       "已保存，运行时节点暂不等待人工输入，首轮结束即完成。",
+    "settings.workflow.interactivePartial.badge": "简化版",
+    "settings.workflow.interactivePartial.note":
+      "当前按 end_turn 完成：首轮结束后等待发起这次运行的人继续对话，由发起人点「完成」推进到下一步；Agent 完成信号和确认门禁暂未支持。",
     "settings.workflow.unapplied.retry":
       "已保存，运行失败时暂不自动重试。",
     "settings.workflow.unapplied.other":
@@ -1092,6 +1095,9 @@ export const workflowEditorTranslations = {
       "Saved, but runs do not connect the enabled MCPs yet; the node still runs.",
     "settings.workflow.unapplied.interactive":
       "Saved, but runs do not wait for human input yet; the node finishes after its first turn.",
+    "settings.workflow.interactivePartial.badge": "Simplified",
+    "settings.workflow.interactivePartial.note":
+      "Completes on end_turn for now: after its first turn the node waits for the person who started the run to keep talking, and that person completes it to move on. The agent completion signal and confirmation gates are not supported yet.",
     "settings.workflow.unapplied.retry":
       "Saved, but failed runs are not retried automatically yet.",
     "settings.workflow.unapplied.other":

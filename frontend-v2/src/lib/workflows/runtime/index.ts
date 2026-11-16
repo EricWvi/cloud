@@ -34,6 +34,8 @@ export type {
   WorkflowNodeConversationMessage,
   WorkflowNodeConversationMessageRole,
   WorkflowNodeCompletion,
+  WorkflowNodeInteractiveSession,
+  WorkflowNodeInteractiveBlockerReason,
   WorkflowNodeCompletionBlocker,
   WorkflowNodeCompletionBlockerKind,
   WorkflowNodeTurnKey,

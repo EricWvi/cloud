@@ -13,6 +13,7 @@ import {
   type WorkflowNodeConversationItem,
   type WorkflowNodeErrorDetail,
   type WorkflowNodeExecutorUsed,
+  type WorkflowNodeInteractiveSession,
   type WorkflowNodeModelUsed,
 } from '@/lib/workflows/runtime'
 
@@ -65,6 +66,21 @@ function modelUsed(payload: Record<string, unknown>): WorkflowNodeModelUsed | un
   return { id: text(m.id), name: text(m.name), requested: text(m.requested), fallback: m.fallback === true }
 }
 
+/** Reads `payload.interactive`, what v2 records each time an interactive Agent node parks. */
+function interactiveSession(payload: Record<string, unknown>): WorkflowNodeInteractiveSession | undefined {
+  const i = record(payload.interactive)
+  if (i === undefined) return undefined
+  const session: WorkflowNodeInteractiveSession = {
+    turns: typeof i.turns === 'number' ? i.turns : 0,
+    sessionEnded: i.session_ended === true,
+    completable: i.completable === true,
+  }
+  const blocker = record(i.blocker)
+  if (blocker !== undefined && text(blocker.reason) !== '') session.blocker = { reason: text(blocker.reason), detail: text(blocker.detail) }
+  if (typeof i.answer === 'string') session.answer = i.answer
+  return session
+}
+
 const unappliedNames: ReadonlySet<string> = new Set<WorkflowAgentUnappliedCapability>(['role', 'skill', 'mcp', 'retry', 'interactive'])
 
 /** Reads `payload.unapplied`, the configured settings v2 ran the attempt without; unknown names are dropped. */
@@ -79,14 +95,17 @@ function unapplied(payload: Record<string, unknown>): WorkflowAgentUnappliedCapa
  * neither path invents messages while the node runs.
  */
 function conversation(runId: string, node: WorkflowNodeRun, payload: Record<string, unknown>): WorkflowNodeConversationItem[] | undefined {
-  if (node.nodeType !== 'agent' || node.output === null || node.output === '') return undefined
+  // A parked interactive node has no output until it completes; what completing would accept
+  // stands in, so members who cannot read the starter's session still see the answer so far.
+  const answer = node.output ?? interactiveSession(payload)?.answer ?? null
+  if (node.nodeType !== 'agent' || answer === null || answer === '') return undefined
   const base = { runId, nodeId: node.nodeId, sessionId: node.sessionId ?? '', status: 'complete' as const }
   const asked = typeof payload.task === 'string' && payload.task !== '' ? payload.task : node.input
   const askedAt = iso(node.startedAt ?? node.createdAt) ?? ''
   const answeredAt = iso(node.finishedAt ?? node.updatedAt) ?? ''
   const items: WorkflowNodeConversationItem[] = []
   if (asked) items.push({ ...base, kind: 'message', role: 'user', id: `${node.id}:task`, createdAt: askedAt, updatedAt: askedAt, markdown: asked })
-  items.push({ ...base, kind: 'message', role: 'assistant', id: `${node.id}:answer`, createdAt: answeredAt, updatedAt: answeredAt, markdown: node.output })
+  items.push({ ...base, kind: 'message', role: 'assistant', id: `${node.id}:answer`, createdAt: answeredAt, updatedAt: answeredAt, markdown: answer })
   return items
 }
 
@@ -126,6 +145,8 @@ function nodeState(runId: string, node: WorkflowNodeRun, decisions: Record<strin
   if (model) state.model = model
   const skipped = unapplied(payload)
   if (skipped) state.unapplied = skipped
+  const session = interactiveSession(payload)
+  if (session) state.interactiveSession = session
   if (node.input !== null && node.input !== '') state.input = { summary: node.input.split('\n')[0]!, detail: node.input }
   if (node.output !== null && node.output !== '') state.output = { summary: node.output.split('\n')[0]!, detail: node.output }
   const items = conversation(runId, node, payload)
@@ -339,6 +360,7 @@ export function toGraphWorkflowRun(detail: WorkflowRunDetail, definition: Workfl
   if (run.input !== null) result.kickoffInput = run.input
   if (run.output !== null) result.finalOutput = run.output
   if (run.finishedAt !== null) result.finishedAt = iso(run.finishedAt)
+  if (typeof detail.startedBy === 'string') result.startedBy = detail.startedBy
   return result
 }
 

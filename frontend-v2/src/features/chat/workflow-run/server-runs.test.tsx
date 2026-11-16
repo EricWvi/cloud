@@ -48,7 +48,7 @@ describe('the run analysis', () => {
     runs.runs.set(runId, {
       detail: {
         run: { id: runId, workflowId, snapshotId: published!.id, projectId: 'p', name: '冻结', status: 'failed', state: '{}', input: null, output: null, error: null, startedAt: 1, finishedAt: 2, createdAt: 1, updatedAt: 2 },
-        nodes: [], scopes: [], conditionDecisions: {}, iterationConditionDecisions: {}, variables: [], failedAttempts: [],
+        nodes: [], scopes: [], conditionDecisions: {}, iterationConditionDecisions: {}, variables: [], failedAttempts: [], startedBy: null,
       },
       graph: published!.graph,
       version: published!.version,

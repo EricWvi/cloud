@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
@@ -21,10 +22,18 @@ type workflowSkillState struct {
 	Documents []execution.SkillDocument
 }
 
-// applyWorkflowSkills runs after exclusive checkout admission and before Agent startup.
-// Workflow checkouts are excluded from the background market-wide projection, so one
-// node's imported skills cannot leak into the next node through the shared run directory.
-func (p *projectRuntime) applyWorkflowSkills(checkout, workspace string, selection execution.Skills) error {
+// applyWorkflowSkills runs after checkout admission and before Agent startup, never for a later
+// turn of a session. Workflow checkouts are excluded from the background market-wide projection,
+// so a node sees only what the run's nodes selected: the directory holds the last projection
+// until the next node starts.
+//
+// siblings are the selections of the run's other sessions that are still live in this checkout
+// (an interactive node waiting for its starter). Their skills stay projected, because those
+// Agents read the same directory on their next turn; where a sibling's skill has the name of one
+// in selection, the starting session's version is the one projected. A skill is dropped by the
+// first projection after its session ended, so a live sibling's later turns can still see the
+// skills of a node that started and ended in between.
+func (p *projectRuntime) applyWorkflowSkills(checkout, workspace string, selection execution.Skills, siblings []execution.Skills) error {
 	p.skillsMu.Lock()
 	defer p.skillsMu.Unlock()
 	statePath := filepath.Join(p.root, "workflow-skills-"+digest(workspace)+".json")
@@ -42,7 +51,7 @@ func (p *projectRuntime) applyWorkflowSkills(checkout, workspace string, selecti
 	if err != nil {
 		return err
 	}
-	next := workflowSkillState{Documents: selection.Documents}
+	next := workflowSkillState{Documents: slices.Clone(selection.Documents)}
 	names := map[string]bool{}
 	for _, plugin := range selection.Plugins {
 		found := false
@@ -72,6 +81,24 @@ func (p *projectRuntime) applyWorkflowSkills(checkout, workspace string, selecti
 			return errors.New("workflow_skill_name_conflict")
 		}
 		names[doc.Name] = true
+	}
+	// Siblings were validated when they started; one whose package has since gone or whose name
+	// is taken is left out rather than failing the session that is starting.
+	for _, sibling := range siblings {
+		for _, plugin := range sibling.Plugins {
+			for _, link := range installed {
+				if link.ID == plugin.ID && link.Version == plugin.Version && !names[link.Name] {
+					names[link.Name] = true
+					next.Links = append(next.Links, link)
+				}
+			}
+		}
+		for _, doc := range sibling.Documents {
+			if !names[doc.Name] {
+				names[doc.Name] = true
+				next.Documents = append(next.Documents, doc)
+			}
+		}
 	}
 	root, err := os.OpenRoot(checkout)
 	if err != nil {

@@ -50,12 +50,24 @@ func (h *Host) work(runID string, st *runState) {
 	defer h.workers.Done()
 	for {
 		st.mu.Lock()
-		if len(st.queue) == 0 || h.ctx.Err() != nil {
+		if (len(st.queue) == 0 && len(st.turns) == 0) || h.ctx.Err() != nil {
 			st.queue = nil
+			st.turns = nil
 			st.working = false
 			st.mu.Unlock()
 			h.forgetFinished(runID, st)
 			return
+		}
+		if len(st.turns) != 0 {
+			// A human is waiting on a follow-up turn; it shares the run's single turn slot.
+			f := st.turns[0]
+			st.turns = st.turns[1:]
+			cancelling := st.cancelling || f.generation != st.generation
+			st.mu.Unlock()
+			if !cancelling {
+				h.runFollowUp(st, f)
+			}
+			continue
 		}
 		q := st.queue[0]
 		st.queue = st.queue[1:]
@@ -78,10 +90,11 @@ func (h *Host) forgetFinished(runID string, st *runState) {
 	if err != nil || c.Run.Status == workflow.StatusRunning {
 		return
 	}
+	h.releaseOrphans(st, runID)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	st.mu.Lock()
-	idle := !st.working && st.starters == 0 && st.starting == nil && st.active == nil
+	idle := !st.working && st.starters == 0 && st.starting == nil && st.active == nil && len(st.interactive) == 0
 	st.mu.Unlock()
 	if idle && h.runs[runID] == st {
 		delete(h.runs, runID)
@@ -132,19 +145,29 @@ func (h *Host) finishCancel(st *runState, runID string) {
 // the session and report the outcome to the engine.
 func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint64) {
 	cfg := d.Node.Agent()
+	// Interactive mode applies to root-scope nodes only. Desktop rejects it inside Iterations (graph
+	// validation already does here) but parks Loop members too; v2 does not, so a Loop member runs
+	// as an automatic node, and the workflow package's unapplied rule lists it for that member.
+	interactive := cfg.Interactive && d.ScopeID == "" && d.Iteration == nil
+	fail := func(f workflow.Failure) {
+		if interactive {
+			f = f.Interactive() // a person drives the node: it never fails as auto-retryable
+		}
+		h.fail(d, f)
+	}
 	skills, err := h.store.ResolveWorkflowSkills(h.ctx, st.scope, d.ProjectID, cfg.Skills)
 	if err != nil {
-		h.fail(d, workflow.Failure{Kind: workflow.FailureMissingAgentConfig, Message: err.Error()})
+		fail(workflow.Failure{Kind: workflow.FailureMissingAgentConfig, Message: err.Error()})
 		return
 	}
 	executor, failure := h.resolveExecutor(st.scope, cfg)
 	if failure != nil {
-		h.fail(d, *failure)
+		fail(*failure)
 		return
 	}
 	task, err := workflow.RenderTemplate(cfg.Prompt, &d.Pool)
 	if err != nil {
-		h.fail(d, workflow.Failure{Kind: workflow.FailurePromptTemplate, Message: err.Error()})
+		fail(workflow.Failure{Kind: workflow.FailurePromptTemplate, Message: err.Error()})
 		return
 	}
 	caller := execution.Caller{Kind: execution.CallerWorkflow, ID: d.RunID, NodeID: d.Node.ID, AttemptID: d.NodeRunID}
@@ -152,8 +175,11 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 		Skills: skills, Caller: caller, Target: execution.Target{ProjectID: d.ProjectID},
 		ExecutorID: executor.executor.ID, Prompt: agentPrompt(d, task),
 	}
-
-	if !st.beginStart(d.ScopeID, generation) {
+	if interactive {
+		// The session outlives its turns until completion, a stop or the run's end ends it.
+		request.Lifetime = execution.LifetimeHeld
+	}
+	if !st.beginStart(d.ScopeID, d.NodeRunID, generation) {
 		return
 	}
 	// Resolving the executor and rendering the prompt took a while after the worker's abandon
@@ -171,7 +197,7 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 			h.finishCancel(st, d.RunID)
 			return
 		}
-		h.fail(d, workflow.Failure{Kind: workflow.FailureSession, Message: "execution refused to start the Agent: " + publicReason(err)})
+		fail(workflow.Failure{Kind: workflow.FailureSession, Message: "execution refused to start the Agent: " + publicReason(err)})
 		return
 	}
 
@@ -184,11 +210,19 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 			h.finishCancel(st, d.RunID)
 			return
 		}
-		h.fail(d, workflow.Failure{Kind: workflow.FailureSessionBindingRejected, Message: "the attempt refused its session binding"})
+		fail(workflow.Failure{Kind: workflow.FailureSessionBindingRejected, Message: "the attempt refused its session binding"})
 		return
 	}
 	h.hub.Publish(d.RunID)
 
+	if interactive {
+		// Desktop parks an interactive node after its first turn instead of ending the session.
+		n := st.track(&interactiveNode{d: d, executor: executor, cfg: cfg, task: task, session: ref.SessionID, phase: phaseTurn})
+		h.refreshSummary(st, n, store.WorkflowStatusRunning) // the starter can stop the first turn too
+		result, err := h.awaitTurn(st.scope, ref, caller)
+		h.settleInteractiveTurn(st, n, result, err)
+		return
+	}
 	result, err := h.awaitTurn(st.scope, ref, caller)
 	endErr := h.end(st.scope, ref.SessionID)
 	if st.endTurn(endErr) {
@@ -199,15 +233,15 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 		if h.ctx.Err() != nil {
 			return // shutting down; the next start interrupts the run
 		}
-		h.fail(d, workflow.Failure{Kind: workflow.FailureSession, Message: "lost the Agent turn: " + publicReason(err)})
+		fail(workflow.Failure{Kind: workflow.FailureSession, Message: "lost the Agent turn: " + publicReason(err)})
 		return
 	}
 	h.settle(d, result, executor, cfg, task)
 }
 
-// beginStart reserves the start slot, or reports false once cancellation was requested or the
-// dispatch belongs to a generation a resume has since replaced.
-func (st *runState) beginStart(scopeID string, generation uint64) bool {
+// beginStart reserves the start slot for one attempt's turn, or reports false once cancellation
+// was requested or the dispatch belongs to a generation a resume has since replaced.
+func (st *runState) beginStart(scopeID, nodeRunID string, generation uint64) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if st.cancelling || st.closedScopes[scopeID] || generation != st.generation {
@@ -216,6 +250,7 @@ func (st *runState) beginStart(scopeID string, generation uint64) bool {
 	st.starting = make(chan struct{})
 	st.turnDone = make(chan struct{})
 	st.activeScope = scopeID
+	st.activeNodeRun = nodeRunID
 	return true
 }
 
@@ -226,6 +261,7 @@ func (st *runState) releaseStart() {
 	close(st.turnDone)
 	st.turnDone = nil
 	st.activeScope = ""
+	st.activeNodeRun = ""
 	close(st.starting)
 	st.starting = nil
 }
@@ -241,6 +277,7 @@ func (st *runState) endStart(ref execution.Ref, err error) bool {
 		close(st.turnDone)
 		st.turnDone = nil
 		st.activeScope = ""
+		st.activeNodeRun = ""
 	}
 	close(st.starting)
 	st.starting = nil
@@ -259,6 +296,7 @@ func (st *runState) endTurn(endErr error) bool {
 		st.scopeCleanupErrors[st.activeScope] = endErr
 	}
 	st.activeScope = ""
+	st.activeNodeRun = ""
 	if st.turnDone != nil {
 		close(st.turnDone)
 		st.turnDone = nil

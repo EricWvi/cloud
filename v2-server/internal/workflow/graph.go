@@ -223,13 +223,18 @@ func (n Node) OutputBindings() []OutputBinding {
 	return result
 }
 
-// AgentConfig includes selected Skills and MCP bindings. Skills are applied; Unapplied lists
-// what unappliedAgentSettings decides a run saves but does not apply.
+// AgentConfig includes selected Skills and MCP bindings. Skills are applied; the settings v2 saves
+// but runs without are listed in Unapplied by unappliedAgentSettings, interactive mode included
+// for a Loop member, which v2 runs automatically.
 type AgentConfig struct {
 	Prompt, AgentCLI, ModelID string
 	Skills, MCPs              []string
 	// Unapplied names configured capabilities v2 runs without, so the run can say so.
 	Unapplied []string
+	// Interactive is desktop's agentConfig.interactive as authored: a root-graph node parks for
+	// human turns after its first turn instead of completing. Publication rejects it inside an
+	// Iteration; a Loop member runs automatically and lists it in Unapplied.
+	Interactive bool
 	// Structured is the output schema when the node requires a JSON object answer.
 	Structured object
 }
@@ -243,6 +248,7 @@ func (n Node) Agent() AgentConfig {
 	model, _ := executor["modelId"].(string)
 	cfg := AgentConfig{Prompt: prompt, AgentCLI: cli, ModelID: model, Unapplied: unappliedAgentSettings(c, n.at),
 		Skills: enabledBindings(c, "skills", "skillId"), MCPs: enabledBindings(c, "mcps", "mcpId")}
+	cfg.Interactive, _ = c["interactive"].(bool)
 	if contract, _ := c["outputContract"].(object); contract["type"] == "structured" {
 		cfg.Structured, _ = contract["schema"].(object)
 	}

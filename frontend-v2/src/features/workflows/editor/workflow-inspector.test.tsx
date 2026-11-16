@@ -911,6 +911,47 @@ describe("WorkflowInspector unapplied-setting hints", () => {
     );
     expect(screen.queryByTestId("workflow-unapplied-other")).toBeNull();
   });
+
+  it("marks interactive mode as the end_turn version where a run applies it", async () => {
+    await appI18n.changeLanguage("zh-CN");
+    const user = userEvent.setup();
+    const agent = createAgentNode();
+    const interactive: Node<WorkflowNodeData, "workflow"> = {
+      ...agent,
+      data: {
+        ...agent.data,
+        agentConfig: { ...agent.data.agentConfig!, interactive: true },
+      },
+    };
+    const { unmount } = render(
+      <StatefulInspectorHarness
+        node={interactive}
+        capabilities={createMockWorkflowCapabilities("zh-CN")}
+        unappliedSettings={[]}
+      />,
+    );
+    // A root Agent parks for its starter: no "not applied" mark, and the note names the version.
+    expect(screen.queryByTestId("workflow-unapplied-interactive")).toBeNull();
+    const note = screen.getByTestId("workflow-interactive-partial");
+    expect(note).toHaveTextContent("简化版");
+    expect(note).toHaveTextContent("当前按 end_turn 完成");
+    expect(note).toHaveTextContent("Agent 完成信号和确认门禁暂未支持");
+    // Switching the mode off removes the note with it.
+    await user.click(screen.getByRole("switch", { name: "交互模式" }));
+    expect(screen.queryByTestId("workflow-interactive-partial")).toBeNull();
+    unmount();
+
+    // Where the server lists the mode as unapplied (a Loop member), only that is said.
+    render(
+      <StatefulInspectorHarness
+        node={interactive}
+        capabilities={createMockWorkflowCapabilities("zh-CN")}
+        unappliedSettings={["interactive"]}
+      />,
+    );
+    expect(screen.getByTestId("workflow-unapplied-interactive")).toHaveTextContent("暂不生效");
+    expect(screen.queryByTestId("workflow-interactive-partial")).toBeNull();
+  });
 });
 
 /** Serves one `/auth/providers` answer for the deployment-mode query. */

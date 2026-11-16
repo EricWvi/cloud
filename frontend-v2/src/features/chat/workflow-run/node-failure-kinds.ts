@@ -17,6 +17,8 @@ export const NODE_FAILURE_KINDS = [
   "interrupted_by_restart",
   "multiple_outputs",
   "condition_evaluation",
+  // v2 only: an interactive Agent node whose session could not be set up, never auto-retried.
+  "interactive_session",
 ] as const;
 
 /**

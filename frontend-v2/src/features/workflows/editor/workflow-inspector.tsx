@@ -3,6 +3,7 @@ import { WorkflowAgentRetryFields } from "./workflow-agent-retry-fields";
 import { WorkflowAgentInactivityField } from "./workflow-agent-inactivity-field";
 import { useDeployedVersion } from "@/lib/deploy-mode";
 import {
+  WorkflowInteractivePartialNote,
   WorkflowOtherUnappliedSettings,
   WorkflowUnappliedSettingHint,
 } from "./workflow-unapplied-setting-hint";
@@ -1006,6 +1007,10 @@ function AgentConfigurationFields({
           </div>
           <WorkflowUnappliedSettingHint
             setting="interactive"
+            unapplied={unapplied}
+          />
+          <WorkflowInteractivePartialNote
+            enabled={config.interactive === true && !iterationMember}
             unapplied={unapplied}
           />
           {iterationMember && config.interactive === true && (

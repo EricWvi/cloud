@@ -26,7 +26,7 @@ const definition = normalizeWorkflowDefinition({
 
 const emptyDetail = (id: string): WorkflowRunDetail => ({
   run: { id, workflowId: 'wf', snapshotId: 's', projectId: 'p', name: '运行', status: 'failed', state: '{}', input: null, output: null, error: null, startedAt: 1, finishedAt: 2, createdAt: 1, updatedAt: 2 },
-  nodes: [], scopes: [], conditionDecisions: {}, iterationConditionDecisions: {}, variables: [], failedAttempts: [],
+  nodes: [], scopes: [], conditionDecisions: {}, iterationConditionDecisions: {}, variables: [], failedAttempts: [], startedBy: null,
 })
 
 describe('RunResumeDialog', () => {

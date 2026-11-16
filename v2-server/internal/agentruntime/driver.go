@@ -110,8 +110,31 @@ func New(opts Options) (*Driver, error) {
 	return &Driver{opts: opts, boot: hex.EncodeToString(nonce[:]), projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, controlTimeout: 2 * time.Minute}, nil
 }
 
-// Run executes the admitted turn. Normal Append reuses its original live Agent conversation.
+// Run executes the admitted turn. Normal Append reuses its original live Agent conversation. A
+// turn that fails before the session's Agent was ever sent its start is marked NotStarted.
 func (d *Driver) Run(ctx context.Context, scope execution.Scope, session execution.Session, turn execution.Turn, emit func(context.Context, execution.Event) error) (execution.Result, error) {
+	result, err := d.run(ctx, scope, session, turn, emit)
+	if err != nil && result.Status == execution.StatusFailed && !d.agentStarted(session.ID) {
+		result.NotStarted = true
+	}
+	return result, err
+}
+
+// agentStarted reports whether the session's Agent was sent its start. A session whose
+// preparation failed is not retained, so it reads as not started.
+func (d *Driver) agentStarted(sid string) bool {
+	d.mu.Lock()
+	a := d.sessions[sid]
+	d.mu.Unlock()
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.started
+}
+
+func (d *Driver) run(ctx context.Context, scope execution.Scope, session execution.Session, turn execution.Turn, emit func(context.Context, execution.Event) error) (execution.Result, error) {
 	if session.ID == "" || session.WorkspaceID == "" || session.Target == nil || session.Target.ProjectID == "" || session.Executor == nil || turn.Ref.SessionID != session.ID || turn.Ref.TurnID == "" || emit == nil {
 		return failed("agent_request_invalid"), execution.ErrInvalidRequest
 	}

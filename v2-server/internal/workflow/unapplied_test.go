@@ -122,8 +122,25 @@ func TestAnalysisMatchesRunPathForEveryPlacement(t *testing.T) {
 	if listed == 0 {
 		t.Fatal("no setting is unapplied any more; the comparison checks nothing")
 	}
-	// Default-policy Agents at every placement have no retry hint now. The computed comparison
-	// above still covers all of them without duplicating the retry rule in this test.
+	// v2 parks a root interactive Agent and runs a Loop member automatically, so only the Loop
+	// member lists interactive, on both paths, wired or spare.
+	for _, id := range []string{"root-interactive", "root-interactive-spare", "loop-interactive", "loop-interactive-spare"} {
+		want := strings.HasPrefix(id, "loop-")
+		for side, settings := range map[string][]string{"analysis": got[id], "run path": runPathView(t, run, id).Agent().Unapplied} {
+			if listed := contains(settings, "interactive"); listed != want {
+				t.Errorf("node %s: %s lists interactive = %v (%v), want %v", id, side, listed, settings, want)
+			}
+		}
+	}
+}
+
+func contains(values []string, want string) bool {
+	for _, v := range values {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 // The analysis must hand the rule the same configuration and placement the run path does, so a
@@ -163,15 +180,16 @@ func TestAnalysisFeedsTheRuleTheRunPathInputs(t *testing.T) {
 }
 
 // The rule follows desktop's effective retry policy (retry.rs:66-74, 96-99 at ebd5b725): an absent
-// policy is the default, enabled with two retries, and an interactive node never retries. It lists
-// settings in the payload's fixed order, and counts an MCP binding without an enabled flag as
-// enabled, as AgentConfig.MCPs does. Each case is checked on the analysis and on the run path, for
-// a Loop member and for a root Agent; retry now applies at both placements.
+// policy is the default, enabled with two retries, and an interactive node never retries. A root
+// interactive Agent parks for its starter, so interactive is applied there; a Loop member runs
+// automatically and lists it. It lists settings in the payload's fixed order, and counts an MCP
+// binding without an enabled flag as enabled, as AgentConfig.MCPs does. Each case is checked on the
+// analysis and on the run path, for a Loop member and for a root Agent; retry applies at both.
 func TestUnappliedAgentSettingsRule(t *testing.T) {
 	off := obj{"enabled": false, "maxRetries": 2, "initialDelaySeconds": 5}
 	for name, tc := range map[string]struct {
 		config obj
-		// want is the list at either placement.
+		// want is the list for a root Agent; a Loop member adds interactive when it is configured.
 		want []string
 		// spare marks a draft-only configuration publication rejects; only the analysis sees it.
 		spare bool
@@ -186,8 +204,8 @@ func TestUnappliedAgentSettingsRule(t *testing.T) {
 		// Desktop never retries an interactive node (node_runtime.rs:373-379), so retry is not listed.
 		"every setting, interactive": {obj{"retry": obj{"enabled": true, "maxRetries": 1, "initialDelaySeconds": 1},
 			"interactive": true, "mcps": []any{obj{"mcpId": "official/tools", "enabled": true}}, "roleId": "reviewer"},
-			[]string{"role", "mcp", "interactive"}, false},
-		"interactive without a retry policy": {obj{"interactive": true}, []string{"interactive"}, false},
+			[]string{"role", "mcp"}, false},
+		"interactive without a retry policy": {obj{"interactive": true}, nil, false},
 		"every setting but interactive, in the payload order": {obj{"retry": obj{"enabled": true, "maxRetries": 1, "initialDelaySeconds": 1},
 			"mcps": []any{obj{"mcpId": "official/tools", "enabled": true}}, "roleId": "reviewer"},
 			[]string{"role", "mcp"}, false},
@@ -200,6 +218,9 @@ func TestUnappliedAgentSettingsRule(t *testing.T) {
 					config[k] = v
 				}
 				want := tc.want
+				if inLoop && tc.config["interactive"] == true {
+					want = append(append([]string{}, want...), "interactive")
+				}
 				g := obj{"schemaVersion": 2, "nodes": []any{
 					obj{"id": "start", "data": obj{"kind": "start"}},
 					obj{"id": "loop", "data": obj{"kind": "loop", "loopConfig": obj{"maxIterations": 3, "variables": []any{},

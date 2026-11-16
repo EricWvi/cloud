@@ -417,6 +417,28 @@ export interface WorkflowNodeCompletion {
   ready: boolean;
 }
 
+/** Why v2 refuses to complete a parked interactive node right now. */
+export type WorkflowNodeInteractiveBlockerReason =
+  | "no_completed_turn"
+  | "turn_not_completed"
+  | "structured_output";
+
+/**
+ * v2's summary of an interactive Agent node's session, written as `payload.interactive` each time
+ * the node parks (desktop's legacy end_turn completion only; v2 has no completion snapshot).
+ */
+export interface WorkflowNodeInteractiveSession {
+  /** Turns that settled in the node's session. */
+  turns: number;
+  /** The session was stopped and takes no further turn; completion uses the last normal answer. */
+  sessionEnded: boolean;
+  /** Whether completing now would be accepted. */
+  completable: boolean;
+  blocker?: { reason: WorkflowNodeInteractiveBlockerReason | string; detail: string };
+  /** The answer completing would accept: the last turn that ended normally. */
+  answer?: string;
+}
+
 /** Structured failure persisted on a node run as `payload.error_detail`. */
 export interface WorkflowNodeErrorDetail {
   kind: string;
@@ -569,6 +591,8 @@ export interface GraphWorkflowNodeState {
   unapplied?: WorkflowAgentUnappliedCapability[];
   /** Parked interactive completion gate from `payload.completion`; absent on older node runs. */
   completion?: WorkflowNodeCompletion;
+  /** v2's interactive session summary from `payload.interactive`; absent on automatic nodes. */
+  interactiveSession?: WorkflowNodeInteractiveSession;
   /** What this step received when it started (kickoff, upstream, schema…). */
   input?: GraphWorkflowNodeIo;
   /** What this step produced when it finished (or HITL answer summary). */
@@ -674,6 +698,8 @@ export interface GraphWorkflowRun {
   finishedAt?: string;
   /** Snapshot this run currently points at; may differ from a node's payload.snapshot_id after a version switch. */
   snapshotId?: string;
+  /** v2: the user who started the run, the only one who may talk to or complete an interactive node. */
+  startedBy?: string;
 }
 
 /**

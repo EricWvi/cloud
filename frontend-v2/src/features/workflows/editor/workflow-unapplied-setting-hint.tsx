@@ -54,11 +54,39 @@ export function WorkflowOtherUnappliedSettings({
   );
 }
 
+/**
+ * Says which version of interactive mode a run applies: v2 parks the node for its starter and
+ * completes it on the starter's word (desktop's `end_turn` completion), without the Agent
+ * completion signal or the confirmation gates. Shown while the mode is on and the server applies
+ * it; where the server lists it as unapplied, the unapplied hint says so instead.
+ */
+export function WorkflowInteractivePartialNote({
+  enabled,
+  unapplied,
+}: {
+  enabled: boolean;
+  unapplied: readonly string[];
+}) {
+  const { t } = useTranslation();
+  if (!enabled || unapplied.includes("interactive")) return null;
+  return (
+    <UnappliedNote
+      testId="workflow-interactive-partial"
+      badge={t("settings.workflow.interactivePartial.badge")}
+    >
+      {t("settings.workflow.interactivePartial.note")}
+    </UnappliedNote>
+  );
+}
+
 function UnappliedNote({
   testId,
+  badge,
   children,
 }: {
   testId: string;
+  /** Replaces the "not applied yet" badge for a note about a setting that is applied in part. */
+  badge?: string;
   children: React.ReactNode;
 }) {
   const { t } = useTranslation();
@@ -74,7 +102,7 @@ function UnappliedNote({
       />
       <span>
         <span className="font-medium text-amber-700 dark:text-amber-400">
-          {t("settings.workflow.unapplied.badge")}
+          {badge ?? t("settings.workflow.unapplied.badge")}
         </span>
         <span aria-hidden> · </span>
         {children}

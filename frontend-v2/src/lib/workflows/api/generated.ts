@@ -481,6 +481,14 @@ export interface WorkflowNodeComplete {
   requester?: WorkflowNodeCompleteRequester;
 }
 
+export interface WorkflowNodeTurn {
+  /**
+     * @minLength 1
+     * @maxLength 16000
+     */
+  content: string;
+}
+
 export type WorkflowNodeRunStatus = typeof WorkflowNodeRunStatus[keyof typeof WorkflowNodeRunStatus];
 
 
@@ -609,6 +617,11 @@ export interface WorkflowRunDetail {
   variables: WorkflowRunVariable[];
   /** Earlier failed attempts, oldest first; nodes holds only each node's latest attempt. */
   failedAttempts: WorkflowNodeFailedAttempt[];
+  /**
+     * v2-only: the user who started the run, null before it started. Only they can send turns to, stop or complete an interactive node.
+     * @nullable
+     */
+  startedBy: string | null;
 }
 
 /**
@@ -3302,4 +3315,137 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getCompleteWorkflowNodeMutationOptions(options), queryClient);
+    }
+
+/**
+ * v2-only: queues a human turn on a parked interactive root-scope Agent node, in the node's own session. Only the run's starter may send (409 run_owned); a node whose session was stopped returns 409 workflow_node_session_ended. The answer arrives over the node's session events; the node runs during the turn and parks again after it.
+ */
+export const sendWorkflowNodeTurn = (
+    tid: string,
+    rid: string,
+    nodeId: string,
+    workflowNodeTurn: BodyType<WorkflowNodeTurn>,
+ options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
+) => {
+
+
+      return customInstance<WorkflowRunActionResponse>(
+      {url: `/api/v2/tenants/${tid}/workflow-runs/${rid}/nodes/${nodeId}/turns`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: workflowNodeTurn, signal
+    },
+      options);
+    }
+
+
+
+
+export const getSendWorkflowNodeTurnMutationKey = () => ['sendWorkflowNodeTurn'] as const;
+
+export const getSendWorkflowNodeTurnMutationOptions = <TError = ErrorType<WorkflowErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sendWorkflowNodeTurn>>, TError,SendWorkflowNodeTurnMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof sendWorkflowNodeTurn>>, TError,SendWorkflowNodeTurnMutationVariables, TContext> => {
+
+const mutationKey = getSendWorkflowNodeTurnMutationKey();
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof sendWorkflowNodeTurn>>, SendWorkflowNodeTurnMutationVariables> = (props) => {
+          const {tid,rid,nodeId,data} = props ?? {};
+
+          return  sendWorkflowNodeTurn(tid,rid,nodeId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SendWorkflowNodeTurnMutationResult = NonNullable<Awaited<ReturnType<typeof sendWorkflowNodeTurn>>>
+    export type SendWorkflowNodeTurnMutationBody = BodyType<WorkflowNodeTurn>
+    export type SendWorkflowNodeTurnMutationError = ErrorType<WorkflowErrorResponse>
+    export type SendWorkflowNodeTurnMutationVariables = {tid: string;rid: string;nodeId: string;data: BodyType<WorkflowNodeTurn>}
+
+    export const useSendWorkflowNodeTurn = <TError = ErrorType<WorkflowErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sendWorkflowNodeTurn>>, TError,SendWorkflowNodeTurnMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof sendWorkflowNodeTurn>>,
+        TError,
+        SendWorkflowNodeTurnMutationVariables,
+        TContext
+      > => {
+      return useMutation(getSendWorkflowNodeTurnMutationOptions(options), queryClient);
+    }
+
+/**
+ * v2-only: stops the turn an interactive root-scope Agent node is executing. The pinned Node stops a turn only by ending its session, so afterwards the node waits for completion and accepts no further turns; the run keeps running. Only the run's starter may stop (409 run_owned); without a turn in flight it returns 409 workflow_node_turn_not_running.
+ */
+export const stopWorkflowNodeTurn = (
+    tid: string,
+    rid: string,
+    nodeId: string,
+ options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
+) => {
+
+
+      return customInstance<WorkflowRunActionResponse>(
+      {url: `/api/v2/tenants/${tid}/workflow-runs/${rid}/nodes/${nodeId}/stop`, method: 'POST', signal
+    },
+      options);
+    }
+
+
+
+
+export const getStopWorkflowNodeTurnMutationKey = () => ['stopWorkflowNodeTurn'] as const;
+
+export const getStopWorkflowNodeTurnMutationOptions = <TError = ErrorType<WorkflowErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof stopWorkflowNodeTurn>>, TError,StopWorkflowNodeTurnMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof stopWorkflowNodeTurn>>, TError,StopWorkflowNodeTurnMutationVariables, TContext> => {
+
+const mutationKey = getStopWorkflowNodeTurnMutationKey();
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof stopWorkflowNodeTurn>>, StopWorkflowNodeTurnMutationVariables> = (props) => {
+          const {tid,rid,nodeId} = props ?? {};
+
+          return  stopWorkflowNodeTurn(tid,rid,nodeId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type StopWorkflowNodeTurnMutationResult = NonNullable<Awaited<ReturnType<typeof stopWorkflowNodeTurn>>>
+
+    export type StopWorkflowNodeTurnMutationError = ErrorType<WorkflowErrorResponse>
+    export type StopWorkflowNodeTurnMutationVariables = {tid: string;rid: string;nodeId: string}
+
+    export const useStopWorkflowNodeTurn = <TError = ErrorType<WorkflowErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof stopWorkflowNodeTurn>>, TError,StopWorkflowNodeTurnMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof stopWorkflowNodeTurn>>,
+        TError,
+        StopWorkflowNodeTurnMutationVariables,
+        TContext
+      > => {
+      return useMutation(getStopWorkflowNodeTurnMutationOptions(options), queryClient);
     }

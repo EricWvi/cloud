@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -177,6 +178,102 @@ func TestWorkflowRunLifecycleNeedsBridge(t *testing.T) {
 		status, failure := call(route.method, route.path, map[string]any{"input": nil, "force": false})
 		if status != http.StatusServiceUnavailable || failure["code"] != "workflow_run_host_unavailable" {
 			t.Fatalf("%s %s = %d %v", route.method, route.path, status, failure)
+		}
+	}
+}
+
+// fakeTurnHost adds the interactive node session to the lifecycle fake.
+type fakeTurnHost struct {
+	fakeRunHost
+	turns, stops int
+	lastContent  string
+}
+
+func (f *fakeTurnHost) SendNodeTurn(_ context.Context, scope server.WorkflowRunScope, runID, nodeID, content string) (store.WorkflowRun, error) {
+	f.turns++
+	f.lastScope, f.lastNodeID, f.lastContent = scope, nodeID, content
+	return f.run(runID, store.WorkflowStatusRunning)
+}
+
+func (f *fakeTurnHost) StopNodeTurn(_ context.Context, scope server.WorkflowRunScope, runID, nodeID string) (store.WorkflowRun, error) {
+	f.stops++
+	f.lastScope, f.lastNodeID = scope, nodeID
+	return f.run(runID, store.WorkflowStatusRunning)
+}
+
+func TestWorkflowNodeTurnRoutesDelegateToBridge(t *testing.T) {
+	host := &fakeTurnHost{}
+	call := workflowServer(t, func(o *server.Options) { o.WorkflowRuns = host })
+	tid := workflowTenant(t, call)
+	_, me := call("GET", "/api/v1/me", nil)
+	base := "/api/v2/tenants/" + tid + "/workflow-runs/11111111-1111-4111-8111-111111111111/nodes/agent-1"
+
+	status, sent := call("POST", base+"/turns", map[string]any{"content": "再改一版"})
+	if status != 200 || sent["run"] == nil {
+		t.Fatalf("turn = %d %v", status, sent)
+	}
+	if host.turns != 1 || host.lastNodeID != "agent-1" || host.lastContent != "再改一版" || host.lastScope.UserID != me["id"] || host.lastScope.TenantID != tid {
+		t.Fatalf("turn bridge call = %+v", host)
+	}
+	if status, _ := call("POST", base+"/stop", nil); status != 200 || host.stops != 1 {
+		t.Fatalf("stop = %d, stops = %d", status, host.stops)
+	}
+	for _, body := range []any{map[string]any{"content": "  "}, map[string]any{"content": strings.Repeat("长", 16001)}} {
+		if status, failure := call("POST", base+"/turns", body); status != 400 || failure["code"] != "invalid_content" {
+			t.Fatalf("bad content = %d %v", status, failure)
+		}
+	}
+	if status, failure := call("POST", base+"/turns", map[string]any{"content": "x", "role": "agent"}); status != 400 || failure["code"] != "invalid_json" {
+		t.Fatalf("unknown field = %d %v", status, failure)
+	}
+	if host.turns != 1 {
+		t.Fatalf("a refused request reached the bridge: %d turns", host.turns)
+	}
+}
+
+func TestWorkflowNodeTurnRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		code   string
+		want   int
+		suffix string
+		body   any
+	}{
+		{"turn by another member", server.ErrWorkflowRunOwned, "run_owned", 409, "/turns", map[string]any{"content": "x"}},
+		{"stop by another member", server.ErrWorkflowRunOwned, "run_owned", 409, "/stop", nil},
+		{"complete by another member", server.ErrWorkflowRunOwned, "run_owned", 409, "/complete", map[string]any{"force": false}},
+		{"session ended", server.ErrWorkflowNodeSessionEnded, "workflow_node_session_ended", 409, "/turns", map[string]any{"content": "x"}},
+		{"turn while busy", server.ErrWorkflowNodeNotAwaitingInput, "workflow_node_not_awaiting_input", 400, "/turns", map[string]any{"content": "x"}},
+		{"nothing to stop", server.ErrWorkflowNodeTurnNotRunning, "workflow_node_turn_not_running", 409, "/stop", nil},
+		{"stop unconfirmed", server.ErrWorkflowRunStopUnconfirmed, "workflow_run_stop_unconfirmed", 503, "/stop", nil},
+		{"incomplete", &server.WorkflowNodeIncomplete{Reason: "structured_output", Detail: "missing approved"}, "workflow_node_incomplete", 409, "/complete", map[string]any{"force": false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host := &fakeTurnHost{fakeRunHost: fakeRunHost{err: tc.err}}
+			call := workflowServer(t, func(o *server.Options) { o.WorkflowRuns = host })
+			tid := workflowTenant(t, call)
+			path := "/api/v2/tenants/" + tid + "/workflow-runs/11111111-1111-4111-8111-111111111111/nodes/agent-1" + tc.suffix
+			status, failure := call("POST", path, tc.body)
+			if status != tc.want || failure["code"] != tc.code {
+				t.Fatalf("refusal = %d %v", status, failure)
+			}
+			if tc.code == "workflow_node_incomplete" {
+				if params := failure["params"].(map[string]any); params["reason"] != "structured_output" || params["detail"] != "missing approved" {
+					t.Fatalf("params = %v", params)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkflowNodeTurnRoutesNeedATurnHost(t *testing.T) {
+	call := workflowServer(t, func(o *server.Options) { o.WorkflowRuns = &fakeRunHost{} })
+	tid := workflowTenant(t, call)
+	base := "/api/v2/tenants/" + tid + "/workflow-runs/11111111-1111-4111-8111-111111111111/nodes/agent-1"
+	for _, suffix := range []string{"/turns", "/stop"} {
+		if status, failure := call("POST", base+suffix, map[string]any{"content": "x"}); status != 503 || failure["code"] != "workflow_run_host_unavailable" {
+			t.Fatalf("%s = %d %v", suffix, status, failure)
 		}
 	}
 }

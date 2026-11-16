@@ -85,8 +85,13 @@ type projectRuntime struct {
 	agents         map[string]*agentSession
 	checkouts      map[string]*checkout
 	installs       map[string]*installation
-	owners         map[string]string
-	acknowledged   map[string]uint64
+	// owners lists, by workspace, the sessions admitted to its checkout that have not stopped,
+	// each with the workflow Skill selection it was admitted with (nil outside workflows). A
+	// conversation's or a task's workspace has one session. A workflow run's sessions share the
+	// run's checkout and stay live side by side, which the Node allows through its
+	// shared_checkout_sessions capability (required at the handshake).
+	owners       map[string]map[string]*execution.Skills
+	acknowledged map[string]uint64
 }
 
 func digest(value string) string {
@@ -118,7 +123,7 @@ func (d *Driver) project(ctx context.Context, id string, config Project) (*proje
 			lifetime, cancel := context.WithCancel(context.Background())
 			p = &projectRuntime{driver: d, id: id, root: filepath.Join(d.opts.Root, digest(id)[:16]), configuration: config,
 				ready: make(chan struct{}), ctx: lifetime, cancel: cancel, loopDone: make(chan struct{}), dead: make(chan struct{}),
-				controls: map[string]*controlWait{}, agents: map[string]*agentSession{}, checkouts: map[string]*checkout{}, installs: map[string]*installation{}, owners: map[string]string{}, acknowledged: map[string]uint64{}}
+				controls: map[string]*controlWait{}, agents: map[string]*agentSession{}, checkouts: map[string]*checkout{}, installs: map[string]*installation{}, owners: map[string]map[string]*execution.Skills{}, acknowledged: map[string]uint64{}}
 			d.projects[id] = p
 			go p.initialize()
 		}
@@ -210,7 +215,7 @@ func (p *projectRuntime) start() error {
 		}
 		assets[name] = node.Asset{Path: path, SHA256: hex.EncodeToString(hash.Sum(nil))}
 	}
-	ipc := node.Options{ControllerID: "v2-execution", ExpectedNodeID: "v2-" + digest(p.id), HeartbeatInterval: time.Second, FrameTimeout: 15 * time.Second, RequiredCapabilities: []string{"plugin_install", "agent_session"}, ThreadPreviews: true}
+	ipc := node.Options{ControllerID: "v2-execution", ExpectedNodeID: "v2-" + digest(p.id), HeartbeatInterval: time.Second, FrameTimeout: 15 * time.Second, RequiredCapabilities: []string{"plugin_install", "agent_session", "shared_checkout_sessions"}, ThreadPreviews: true}
 	p.runtime, err = node.StartRuntime(p.ctx, node.RuntimeOptions{Root: filepath.Join(p.root, "w"), Node: assets["ora-node"], Reaper: assets["ora-reaper"], IPC: ipc,
 		StartupTimeout: 20 * time.Second, StopGrace: 3 * time.Second, Configure: func(paths node.Paths) ([]byte, error) {
 			return p.services.NodeConfiguration(paths, ipc, filepath.Join(opts.AssetsDirectory, "bin", "deno"))

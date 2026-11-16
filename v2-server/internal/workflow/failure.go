@@ -27,12 +27,17 @@ const (
 	FailureMultipleOutputs           FailureKind = "multiple_outputs"
 	FailureConditionEvaluation       FailureKind = "condition_evaluation"
 	FailureAggregatorNoMatch         FailureKind = "aggregator_no_match"
+	// FailureInteractiveSession is v2's own kind for an interactive Agent node whose session
+	// could not be set up. Desktop never retries an interactive node (retry_tests.rs:636-644),
+	// so its failures must not read as auto-retryable; desktop has no such kind because its
+	// retry policy excludes interactive attempts instead.
+	FailureInteractiveSession FailureKind = "interactive_session"
 )
 
 func (k FailureKind) resumable() bool {
 	switch k {
 	case FailureWorkflowModelNotFound, FailureMissingAgentConfig, FailureSession, FailureSessionEndedWithoutReason,
-		FailureSessionBindingRejected, FailureInterruptedByRestart, FailureRepository:
+		FailureSessionBindingRejected, FailureInterruptedByRestart, FailureRepository, FailureInteractiveSession:
 		return true
 	}
 	return false
@@ -53,6 +58,16 @@ func (k FailureKind) autoRetryable() bool {
 		return true
 	}
 	return false
+}
+
+// Interactive returns f as the failure of an interactive Agent node: a kind that would retry
+// automatically becomes FailureInteractiveSession, since a person drives the node and desktop
+// never retries it. Other kinds already fail without a retry and keep their own name.
+func (f Failure) Interactive() Failure {
+	if f.Kind.autoRetryable() {
+		f.Kind = FailureInteractiveSession
+	}
+	return f
 }
 
 // Failure is one node failure as reported by a runtime or the execution bridge. Output keeps
