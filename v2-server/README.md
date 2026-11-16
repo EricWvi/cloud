@@ -745,11 +745,11 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 
 与 desktop 的差异：
 
-- **同一运行的 Agent 并发执行**（与 desktop 相同，列在这里说明做法）：同一波就绪的 Agent 各自立即启动，每个尝试是一个独立的执行会话，共用运行的目录，轮次同时执行；交互节点的后续消息同样不等其他节点。每个尝试启动前、以及解析完执行器即将 `Start` 前各确认一次运行仍在执行：运行已经结束时它还没有启动任何东西，直接收为 `cancelled`。已经在执行的兄弟不受另一个节点让运行失败的影响，迟到结果照常记录（desktop 同样如此）；Loop 轮次因子节点失败关闭时，已在执行的同轮兄弟收为 `cancelled`，它的会话执行完本轮后结束，迟到结果不再写入。
+- **同一运行的 Agent 并发执行**（与 desktop 相同，列在这里说明做法）：同一波就绪的 Agent 各自立即启动，每个尝试是一个独立的执行会话，共用运行的目录，轮次同时执行；交互节点的后续消息同样不等其他节点。同一目录最多 8 个未结束的会话（Node 的 `shared_checkout_sessions` 上限，等待输入的交互节点会话也算在内），执行桥不另行限流：超出时 Node 只拒绝多出的那个会话，普通 Agent 节点以 `session` 失败并照常自动重试，交互节点首轮被拒以 `interactive_session` 失败（可从失败处继续）。每个尝试启动前、以及解析完执行器即将 `Start` 前各确认一次运行仍在执行：运行已经结束时它还没有启动任何东西，直接收为 `cancelled`。已经在执行的兄弟不受另一个节点让运行失败的影响，迟到结果照常记录（desktop 同样如此）；Loop 轮次因子节点失败关闭时，已在执行的同轮兄弟收为 `cancelled`，它的会话执行完本轮后结束，迟到结果不再写入。
 - **prompt**：按 desktop 的 `assemble_workflow_prompt` 组装 `workspace_root`、`current_workflow_step`、`workflow_context`，按运行冻结的 locale 选文案；选择 Skill 时附加 `required_skills`，不带角色和上次失败注入。节点 prompt 的 `{{#…#}}` 先按变量池渲染，渲染失败的节点以 `prompt_template` 失败，不启动 Agent。公共执行服务在接受 prompt 之后才在 Node 里克隆运行目录，也不暴露它的路径，所以 `workspace_root` 写 `.`（Agent 进程的工作目录就是运行目录），不写 desktop 的绝对路径。
 - **会话绑定时机**：`Start` 返回 turn 引用即视为 prompt 已被接受，随后把 session 绑定到节点尝试（desktop 同样在 prompt 被接受后才发布绑定）；绑定被拒（尝试已不在运行）时结束该会话。turn 结束后执行桥结束会话，对话历史保留。
 - **结果映射**：只有 `completed` 且答案完整（`AnswerComplete`）才可能成功，再按 desktop 的停止原因映射：`end_turn`、`max_tokens`、`max_turn_requests` 成功；`refusal` 为 `agent_refusal`；缺少停止原因为 `session_ended_without_stop_reason`；其他为 `unknown_stop_reason`。turn 失败、取消、中断或答案不完整一律以 `session` 失败，失败节点保留已有的回答。
-- **取消**：先用发起运行的用户身份同时取消所有活动 turn，全部确认后再关闭运行；正在进行的 Start 先等它们返回。任一停止未确认时返回 `503 workflow_run_stop_unconfirmed`，运行保持打开但不再推进，对应 turn 结束后由执行桥自行关闭为已取消。
+- **取消**：先用发起运行的用户身份同时取消所有活动 turn，全部确认后再关闭运行；还在 Start 的尝试不拖住别的停止，它的 Start 一返回就取消它。任一停止未确认（包括等 Start 超时）时返回 `503 workflow_run_stop_unconfirmed`，运行保持打开但不再推进；已确认停止的兄弟不会提前关闭运行，最后一个 turn 结束后才由执行桥关闭为已取消；超时后才返回的 Start 由它的尝试自己取消。
 - **运行发起者持久化**：启动门禁内保存 started_by，表单默认确认人为实际发起者。执行中的尝试仍只在进程内记录；普通 Agent 执行重启后中断，冻结表单及提交后的确定性任务步骤可以恢复。拆分运行同样恢复已提交的审核，但停在未提交表单的拆分运行会在重启时取消（见上文拆分的“重启”）；任务的处理运行在重启时一律取消。
 - **失效事件**：`workflowhost.Hub` 在每次提交的状态转移、会话绑定和取消后按运行发布一个不带数据的失效通知，供运行事件流使用；读者收到后重新读取运行，未消费的通知会合并。
 - **失败后的操作**：失败或已取消的运行，顶栏有两个入口：「从失败处继续」在同一次运行里重跑失败节点及其下游（见下文），“再跑一次”创建新的运行再从 Start 启动。失败提示同时指向两者。
