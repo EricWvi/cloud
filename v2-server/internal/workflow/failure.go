@@ -12,6 +12,7 @@ type FailureKind string
 // materialization, baselines) are not listed because v2 never raises them.
 const (
 	FailureWorkflowModelNotFound     FailureKind = "workflow_model_not_found"
+	FailureWorkflowRoleNotFound      FailureKind = "workflow_role_not_found"
 	FailureMissingAgentRef           FailureKind = "missing_agent_ref"
 	FailureMissingAgentConfig        FailureKind = "missing_agent_config"
 	FailureInvalidRunPayload         FailureKind = "invalid_run_payload"
@@ -36,7 +37,7 @@ const (
 
 func (k FailureKind) resumable() bool {
 	switch k {
-	case FailureWorkflowModelNotFound, FailureMissingAgentConfig, FailureSession, FailureSessionEndedWithoutReason,
+	case FailureWorkflowModelNotFound, FailureWorkflowRoleNotFound, FailureMissingAgentConfig, FailureSession, FailureSessionEndedWithoutReason,
 		FailureSessionBindingRejected, FailureInterruptedByRestart, FailureRepository, FailureInteractiveSession:
 		return true
 	}

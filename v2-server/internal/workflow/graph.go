@@ -160,6 +160,39 @@ func (g *Graph) TopologicalOrder() []Node {
 	return result
 }
 
+// RoleReferences lists the distinct role references every executable Agent node declares, in a
+// stable order: the root graph, then each Loop body by id. A role is a start hard-dependency on
+// desktop (collect_roles), so a role a graph node references is checked even when this run's
+// branches never reach that node; Iteration region members are part of the root scope here, and
+// spare members are excluded with the rest of the unpublished nodes.
+func (g *Graph) RoleReferences() []string {
+	seen := map[string]bool{}
+	result := []string{}
+	collect := func(nodes []*node) {
+		for _, n := range nodes {
+			if n.kind != "agent" {
+				continue
+			}
+			if ref := g.view(n).Agent().RoleID; ref != "" && !seen[ref] {
+				seen[ref] = true
+				result = append(result, ref)
+			}
+		}
+	}
+	collect(g.root.order)
+	ids := make([]string, 0, len(g.scopes))
+	for id := range g.scopes {
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		collect(g.scopes[id].order)
+	}
+	return result
+}
+
 // StartVariable is one typed Start input declaration.
 type StartVariable struct {
 	Name        string
@@ -234,12 +267,14 @@ func (n Node) OutputBindings() []OutputBinding {
 	return result
 }
 
-// AgentConfig includes selected Skills and MCP bindings. Skills are applied; the settings v2 saves
-// but runs without are listed in Unapplied by unappliedAgentSettings, interactive mode included
-// for a Loop member, which v2 runs automatically.
+// AgentConfig includes the selected role and selected Skills and MCP bindings. Roles and Skills are
+// applied; Unapplied lists what unappliedAgentSettings decides a run saves but does not apply,
+// interactive mode included for a Loop member, which v2 runs automatically.
 type AgentConfig struct {
 	Prompt, AgentCLI, ModelID string
-	Skills, MCPs              []string
+	// RoleID is the role reference the graph stores: a role name, or a legacy role id.
+	RoleID       string
+	Skills, MCPs []string
 	// Unapplied names configured capabilities v2 runs without, so the run can say so.
 	Unapplied []string
 	// Interactive is desktop's agentConfig.interactive as authored: a root-graph node parks for
@@ -257,8 +292,10 @@ func (n Node) Agent() AgentConfig {
 	executor, _ := c["executor"].(object)
 	cli, _ := executor["agentCli"].(string)
 	model, _ := executor["modelId"].(string)
-	cfg := AgentConfig{Prompt: prompt, AgentCLI: cli, ModelID: model, Unapplied: unappliedAgentSettings(c, n.at),
-		Skills: enabledBindings(c, "skills", "skillId"), MCPs: enabledBindings(c, "mcps", "mcpId")}
+	role, _ := c["roleId"].(string)
+	cfg := AgentConfig{Prompt: prompt, AgentCLI: cli, ModelID: model, RoleID: strings.TrimSpace(role),
+		Unapplied: unappliedAgentSettings(c, n.at),
+		Skills:    enabledBindings(c, "skills", "skillId"), MCPs: enabledBindings(c, "mcps", "mcpId")}
 	cfg.Interactive, _ = c["interactive"].(bool)
 	if contract, _ := c["outputContract"].(object); contract["type"] == "structured" {
 		cfg.Structured, _ = contract["schema"].(object)

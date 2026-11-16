@@ -289,6 +289,9 @@ type fixture struct {
 	project string
 }
 
+// reviewerContent is the role definition every fixture run of twoAgents receives.
+const reviewerContent = "# 代码审查\n\n先复述改动目标和影响范围。"
+
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	s := storetest.Open(t)
@@ -299,6 +302,12 @@ func newFixture(t *testing.T) *fixture {
 		Commit: "0123456789abcdef0123456789abcdef01234567", MirrorPath: "/tmp/project-host", SnapshotRef: "refs/ora/snapshots/project-host",
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	// twoAgents references the role by name, and a run refuses to start without it.
+	if _, err := s.CreateRole(context.Background(), tenant, user, store.RoleInput{
+		Name: "reviewer", Description: "审查改动", Content: reviewerContent,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	f := &fixture{s: s, exec: newFakeExecution(), scope: scope, project: project.ID}
