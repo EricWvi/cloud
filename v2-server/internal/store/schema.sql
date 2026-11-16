@@ -205,6 +205,27 @@ CREATE TABLE IF NOT EXISTS v2_skill_seeds (
 	seeded_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Roles are the tenant's Agent catalog: the settings page and the workflow node pickers read the
+-- same rows, and a workflow run resolves the content it injects from here. Desktop keeps roles in a
+-- local agents catalog and editors store the role name in the graph, so the live-name index makes a
+-- name identify at most one role per tenant.
+CREATE TABLE IF NOT EXISTS v2_roles (
+	id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+	tenant_id   uuid NOT NULL REFERENCES tenants (id),
+	name        text NOT NULL,
+	description text NOT NULL DEFAULT '',
+	content     text NOT NULL DEFAULT '',
+	version     bigint NOT NULL DEFAULT 1,
+	created_by  uuid NOT NULL REFERENCES users (id),
+	created_at  timestamptz NOT NULL DEFAULT now(),
+	updated_at  timestamptz NOT NULL DEFAULT now(),
+	deleted_at  timestamptz
+);
+CREATE UNIQUE INDEX IF NOT EXISTS v2_roles_live_name
+	ON v2_roles (tenant_id, lower(name)) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS v2_roles_tenant
+	ON v2_roles (tenant_id, updated_at DESC, id) WHERE deleted_at IS NULL;
+
 -- Members are typed references: a human row points at a user, an agent row at a Space Agent.
 -- Ending a membership keeps the row as history; rejoining inserts a new grant.
 CREATE TABLE IF NOT EXISTS v2_squad_members (

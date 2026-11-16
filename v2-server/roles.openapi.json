@@ -1,0 +1,285 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Temporary v2 roles",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v2/tenants/{tid}/roles": {
+      "get": {
+        "operationId": "listRoles",
+        "tags": ["roles"],
+        "parameters": [
+          {
+            "name": "tid",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RoleList" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/RoleError" },
+          "404": { "$ref": "#/components/responses/RoleError" },
+          "500": { "$ref": "#/components/responses/RoleError" }
+        }
+      },
+      "post": {
+        "operationId": "createRole",
+        "tags": ["roles"],
+        "parameters": [
+          {
+            "name": "tid",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RoleInput" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Role" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/RoleError" },
+          "401": { "$ref": "#/components/responses/RoleError" },
+          "404": { "$ref": "#/components/responses/RoleError" },
+          "409": { "$ref": "#/components/responses/RoleError" },
+          "500": { "$ref": "#/components/responses/RoleError" }
+        }
+      }
+    },
+    "/api/v2/tenants/{tid}/roles/import": {
+      "post": {
+        "operationId": "importRole",
+        "tags": ["roles"],
+        "parameters": [
+          {
+            "name": "tid",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ImportRoleInput" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Role" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/RoleError" },
+          "401": { "$ref": "#/components/responses/RoleError" },
+          "404": { "$ref": "#/components/responses/RoleError" },
+          "409": { "$ref": "#/components/responses/RoleError" },
+          "500": { "$ref": "#/components/responses/RoleError" }
+        }
+      }
+    },
+    "/api/v2/tenants/{tid}/roles/{rid}": {
+      "get": {
+        "operationId": "getRole",
+        "tags": ["roles"],
+        "parameters": [
+          {
+            "name": "tid",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "rid",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Role" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/RoleError" },
+          "404": { "$ref": "#/components/responses/RoleError" },
+          "500": { "$ref": "#/components/responses/RoleError" }
+        }
+      },
+      "put": {
+        "operationId": "updateRole",
+        "tags": ["roles"],
+        "parameters": [
+          {
+            "name": "tid",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "rid",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RoleInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Role" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/RoleError" },
+          "401": { "$ref": "#/components/responses/RoleError" },
+          "404": { "$ref": "#/components/responses/RoleError" },
+          "409": { "$ref": "#/components/responses/RoleError" },
+          "500": { "$ref": "#/components/responses/RoleError" }
+        }
+      },
+      "delete": {
+        "operationId": "deleteRole",
+        "tags": ["roles"],
+        "parameters": [
+          {
+            "name": "tid",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "rid",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "204": { "description": "No Content" },
+          "401": { "$ref": "#/components/responses/RoleError" },
+          "404": { "$ref": "#/components/responses/RoleError" },
+          "500": { "$ref": "#/components/responses/RoleError" }
+        }
+      }
+    }
+  },
+  "components": {
+    "responses": {
+      "RoleError": {
+        "description": "Response",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/RoleError" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Role": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "content",
+          "version",
+          "createdAt",
+          "updatedAt"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "content": { "type": "string" },
+          "version": { "type": "integer", "format": "int64" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "RoleList": {
+        "type": "object",
+        "required": ["items"],
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Role" }
+          }
+        }
+      },
+      "RoleInput": {
+        "type": "object",
+        "required": ["name", "content"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "content": { "type": "string" }
+        }
+      },
+      "ImportRoleInput": {
+        "type": "object",
+        "required": ["fileName", "content"],
+        "additionalProperties": false,
+        "properties": {
+          "fileName": { "type": "string" },
+          "content": { "type": "string" },
+          "overwrite": { "type": "boolean" }
+        }
+      },
+      "RoleError": {
+        "type": "object",
+        "required": ["code", "params", "requestId"],
+        "properties": {
+          "code": { "type": "string" },
+          "params": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "requestId": { "type": "string" }
+        }
+      }
+    }
+  }
+}
