@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { isAxiosError } from 'axios'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -49,6 +50,18 @@ export function McpSettings({ installation, tenantId, spaceId, canManage }: {
       setSaved(true)
     },
   })
+  const conflict = isAxiosError(save.error) && save.error.response?.status === 409
+  const reload = useMutation({
+    mutationFn: () => client.refetchQueries({ queryKey: getListMcpQueryKey(tenantId) }, { throwOnError: true }),
+    onSuccess: () => {
+      setDraft({})
+      setCleared([])
+      setEditRevision(null)
+      setSaved(false)
+      save.reset()
+    },
+  })
+  const pending = save.isPending || reload.isPending
   const change = (id: string, value: string) => {
     setEditRevision((current) => current ?? installation.revision)
     setDraft((current) => ({ ...current, [id]: value }))
@@ -70,19 +83,20 @@ export function McpSettings({ installation, tenantId, spaceId, canManage }: {
           <div key={field.id} className="space-y-1">
             <label htmlFor={id} className="text-sm">{field.label || field.id}{field.required ? '（必填）' : ''}</label>
             {field.type === 'boolean' ? (
-              <select id={id} value={value} disabled={!canManage || save.isPending} onChange={(event) => change(field.id, event.target.value)} className="block rounded border p-2 text-sm">
+              <select id={id} value={value} disabled={!canManage || pending} onChange={(event) => change(field.id, event.target.value)} className="block rounded border p-2 text-sm">
                 <option value="">未设置</option><option value="true">是</option><option value="false">否</option>
               </select>
             ) : (
               <Input id={id} type={field.secret ? 'password' : field.type === 'number' ? 'number' : 'text'}
-                autoComplete="off" value={value} disabled={!canManage || save.isPending}
+                step={field.type === 'number' ? 'any' : undefined}
+                autoComplete="off" value={value} disabled={!canManage || pending}
                 placeholder={configured ? '已配置，留空保留' : undefined}
                 onChange={(event) => change(field.id, event.target.value)} />
             )}
             {field.description && <p className="text-xs text-muted-foreground">{field.description}</p>}
             {configured && <p className="text-xs text-muted-foreground">{cleared.includes(field.id) ? '保存后清除' : '秘密值已配置'}</p>}
             {canManage && (configured || Object.hasOwn(installation.values, field.id)) && (
-              <Button type="button" variant="ghost" size="sm" disabled={save.isPending}
+              <Button type="button" variant="ghost" size="sm" disabled={pending}
                 onClick={() => {
                   setEditRevision((current) => current ?? installation.revision)
                   setCleared((current) => [...new Set([...current, field.id])])
@@ -94,9 +108,17 @@ export function McpSettings({ installation, tenantId, spaceId, canManage }: {
           </div>
         )
       })}
-      <ActionError error={save.error} />
+      {conflict ? (
+        <div role="alert" className="space-y-2 rounded-lg border border-destructive/30 p-3 text-sm">
+          <p>配置已被其他操作修改。重新加载会放弃当前未保存的修改，请核对最新配置后再编辑。</p>
+          <Button type="button" variant="outline" disabled={pending} onClick={() => reload.mutate()}>
+            {reload.isPending ? '正在重新加载…' : '放弃修改并重新加载'}
+          </Button>
+        </div>
+      ) : <ActionError error={save.error} />}
+      <ActionError error={reload.error} />
       {saved && <p role="status" className="text-sm">MCP 配置已保存</p>}
-      {canManage && <Button type="submit" disabled={save.isPending || (Object.keys(draft).length === 0 && cleared.length === 0)}>
+      {canManage && <Button type="submit" disabled={pending || conflict || (Object.keys(draft).length === 0 && cleared.length === 0)}>
         {save.isPending ? '保存中…' : '保存 MCP 配置'}
       </Button>}
     </form>

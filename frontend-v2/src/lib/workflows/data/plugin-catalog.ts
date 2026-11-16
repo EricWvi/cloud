@@ -28,8 +28,7 @@ export async function workflowPluginCatalog(tenantId: string) {
   const skills: CatalogSkill[] = []
   const plugins: InstalledPlugin[] = []
   for (const [id, item] of unique) {
-    // A Skill selection is the install, so the picker offers it without a project receipt; an MCP
-    // server only exists once its Node reports it installed.
+    // A Skill selection is offered before project deployment completes; MCP has its own tenant catalog.
     if (item.kind === 'skill') {
       skills.push({
         id,

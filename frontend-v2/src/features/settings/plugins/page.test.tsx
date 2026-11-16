@@ -2,7 +2,9 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { PluginCatalogEntry } from '@/api/generated.schemas'
+import { getListMcpQueryKey, type McpInstallation } from '@/lib/mcp-api/generated'
 import {
+  MARKET_TENANT,
   installMarketplaceBackend,
   marketplaceEntry,
   marketplaceSelection,
@@ -66,6 +68,17 @@ const hook = marketplaceEntry('sample-hooks', {
   title: '示例 Hooks',
   description: '生命周期 Hook 的安装和卸载只记录空间选择。',
 })
+
+function installedGithub(): McpInstallation {
+  return {
+    id: github.id, name: github.title, pluginVersion: github.version, revision: 1, state: 'installed',
+    settings: [
+      { id: 'timeout', label: '超时秒数', type: 'number', secret: false, required: false, description: '' },
+      { id: 'token', label: 'API Token', type: 'string', secret: true, required: false, description: '' },
+    ],
+    values: { timeout: 1 }, configuredSecrets: ['token'], complete: true, settingsMissing: [],
+  }
+}
 
 beforeEach(() => {
   mock.enabled = false
@@ -156,6 +169,52 @@ it('keeps Hooks read-only with no install entry', async () => {
   expect(within(row).getByText('暂不支持安装')).toBeInTheDocument()
   expect(within(row).queryByRole('button', { name: '安装' })).not.toBeInTheDocument()
   expect(backend.bodies).toHaveLength(0)
+})
+
+it('saves decimal MCP settings without browser integer-step validation', async () => {
+  const backend = installMarketplaceBackend({ catalog: [github] })
+  backend.state.mcps.push(installedGithub())
+  const user = userEvent.setup()
+  renderSettingsPage(<PluginsPage />)
+  await user.click(await screen.findByRole('button', { name: '查看插件 GitHub 工具' }))
+  const timeout = screen.getByLabelText('超时秒数') as HTMLInputElement
+  await user.clear(timeout)
+  await user.type(timeout, '1.5')
+  expect(timeout.checkValidity()).toBe(true)
+  await user.click(screen.getByRole('button', { name: '保存 MCP 配置' }))
+  await screen.findByText('MCP 配置已保存')
+  expect(backend.bodies.at(-1)).toEqual({ identifier: github.id, revision: 1, values: { timeout: 1.5 }, clear: [] })
+  expect(backend.state.mcps[0].configuredSecrets).toEqual(['token'])
+})
+
+it('preserves a conflicting draft until the user reloads, then saves against the latest revision', async () => {
+  const backend = installMarketplaceBackend({ catalog: [github] })
+  backend.state.mcps.push(installedGithub())
+  const user = userEvent.setup()
+  const { client } = renderSettingsPage(<PluginsPage />)
+  await user.click(await screen.findByRole('button', { name: '查看插件 GitHub 工具' }))
+  const timeout = screen.getByLabelText('超时秒数')
+  const token = screen.getByLabelText('API Token')
+  await user.clear(timeout)
+  await user.type(timeout, '1.5')
+  await user.type(token, 'unsaved-secret')
+  backend.state.mcps[0] = { ...backend.state.mcps[0], revision: 2, values: { timeout: 2.5 } }
+  await client.invalidateQueries({ queryKey: getListMcpQueryKey(MARKET_TENANT) })
+  await user.click(screen.getByRole('button', { name: '保存 MCP 配置' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('配置已被其他操作修改')
+  expect(backend.bodies.at(-1)).toMatchObject({ revision: 1 })
+  expect(timeout).toHaveValue(1.5)
+  expect(token).toHaveValue('unsaved-secret')
+  expect(screen.getByRole('button', { name: '保存 MCP 配置' })).toBeDisabled()
+  await user.click(screen.getByRole('button', { name: '放弃修改并重新加载' }))
+  await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
+  expect(timeout).toHaveValue(2.5)
+  expect(token).toHaveValue('')
+  await user.clear(timeout)
+  await user.type(timeout, '3.5')
+  await user.click(screen.getByRole('button', { name: '保存 MCP 配置' }))
+  await screen.findByText('MCP 配置已保存')
+  expect(backend.bodies.at(-1)).toEqual({ identifier: github.id, revision: 2, values: { timeout: 3.5 }, clear: [] })
 })
 
 it('keeps unsupported packs disabled and clears no-result filters', async () => {
