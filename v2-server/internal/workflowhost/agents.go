@@ -178,7 +178,9 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 	// with the attempt registered, so nothing can end the run between this check and the start
 	// without waiting for the start to return.
 	if h.abandoned(d) {
-		st.releaseStart(a)
+		if st.releaseStart(a) {
+			h.finishCancel(st, d.RunID)
+		}
 		return
 	}
 	ref, err := h.exec.Start(h.ctx, st.scope, request)
@@ -278,11 +280,13 @@ func (st *runState) register(key, nodeRun, scopeID string, generation uint64) *a
 	return a
 }
 
-// releaseStart forgets a turn beginStart registered that will not start.
-func (st *runState) releaseStart(a *attemptState) {
+// releaseStart forgets a turn beginStart registered that will not start, and reports whether it
+// was the cancelled run's last turn (see endTurn).
+func (st *runState) releaseStart(a *attemptState) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.forget(a)
+	return st.lastCancelled()
 }
 
 // endStart publishes the started turn to a waiting cancellation and reports whether one was
@@ -299,6 +303,7 @@ func (st *runState) endStart(a *attemptState, ref execution.Ref, err error) (can
 	a.ref = &ref
 	close(a.starting)
 	a.starting = nil
+	st.startResolved()
 	return st.cancelling, false, a.unstopped
 }
 
@@ -318,11 +323,13 @@ func (st *runState) endTurn(a *attemptState, endErr error) (cancelling, last boo
 	return st.cancelling, st.lastCancelled()
 }
 
-// isCancelling reports whether the run's cancellation was requested.
-func (st *runState) isCancelling() bool {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.cancelling
+// startResolved wakes whoever waits for any of the run's Starts to return (see stopTurns).
+// Callers hold mu.
+func (st *runState) startResolved() {
+	if st.startsChanged != nil {
+		close(st.startsChanged)
+		st.startsChanged = nil
+	}
 }
 
 // lastCancelled reports whether cancellation was requested and no turn is left. Callers hold mu.
@@ -340,6 +347,7 @@ func (st *runState) forget(a *attemptState) {
 	if a.starting != nil {
 		close(a.starting)
 		a.starting = nil
+		st.startResolved()
 	}
 	select {
 	case <-a.done:

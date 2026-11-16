@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
@@ -272,6 +273,12 @@ func TestCancelWaitsForAnInFlightStart(t *testing.T) {
 	}
 }
 
+func (st *runState) isCancelling() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.cancelling
+}
+
 func TestRefusedBindingEndsTheSession(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -464,6 +471,80 @@ const parallelAgents = `{"nodes":[
  {"id":"a","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"A"}}},
  {"id":"b","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"B"}}}
 ],"edges":[{"source":"start","target":"a"},{"source":"start","target":"b"}]}`
+
+// fourAgents fans Start out to four Agents.
+const fourAgents = `{"nodes":[
+ {"id":"start","data":{"kind":"start"}},
+ {"id":"a","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"A"}}},
+ {"id":"b","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"B"}}},
+ {"id":"c","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"C"}}},
+ {"id":"d","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"D"}}}
+],"edges":[{"source":"start","target":"a"},{"source":"start","target":"b"},{"source":"start","target":"c"},{"source":"start","target":"d"}]}`
+
+// While C's Start is stuck, D's Start returning is enough for the cancellation to stop D's turn:
+// it never waits for one Start to see another. The cancellation tracks several Starts in flight
+// with no order between them, so the scenario runs a few times.
+func TestCancelStopsEachStartAsItReturns(t *testing.T) {
+	for round := range 6 {
+		t.Run(fmt.Sprint(round), func(t *testing.T) {
+			f := newFixture(t)
+			ctx := context.Background()
+			gates := map[string]chan struct{}{"c": make(chan struct{}), "d": make(chan struct{})}
+			entered := make(chan string, 2)
+			var once sync.Once
+			releaseC := func() { once.Do(func() { close(gates["c"]) }) }
+			t.Cleanup(releaseC)
+			f.exec.beforeStart = func(req execution.StartRequest) error {
+				if gate := gates[req.Caller.NodeID]; gate != nil {
+					entered <- req.Caller.NodeID
+					<-gate
+				}
+				return nil
+			}
+			runID := f.run(t, fourAgents, nil)
+			if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+				t.Fatal(err)
+			}
+			started := f.exec.awaitStarts(t, 2)
+			<-entered
+			<-entered
+			f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+				return node(n, "a").SessionID != nil && node(n, "b").SessionID != nil
+			})
+			cancelled := make(chan error, 1)
+			go func() { _, err := f.host.CancelRun(ctx, f.scope, runID); cancelled <- err }()
+			stopped := func(session string) bool {
+				f.exec.mu.Lock()
+				defer f.exec.mu.Unlock()
+				return slices.ContainsFunc(f.exec.cancels, func(r execution.Ref) bool { return r.SessionID == session })
+			}
+			waitUntil(t, func() bool { return stopped(started["a"]) && stopped(started["b"]) })
+			close(gates["d"])
+			d := f.exec.awaitStart(t)
+			// Well inside StopTimeout (a second here), so only waking on D's Start can explain it.
+			deadline := time.Now().Add(300 * time.Millisecond)
+			for !stopped(d) {
+				if time.Now().After(deadline) {
+					t.Fatal("D's turn was not stopped while C's Start was still in flight")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			select {
+			case err := <-cancelled:
+				t.Fatalf("cancel returned before C's Start did: %v", err)
+			default:
+			}
+			releaseC()
+			f.exec.awaitStart(t)
+			if err := <-cancelled; err != nil {
+				t.Fatalf("cancel = %v", err)
+			}
+			if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusCancelled {
+				t.Fatalf("run %s", run.Status)
+			}
+		})
+	}
+}
 
 // threeAgents fans Start out to three Agents.
 const threeAgents = `{"nodes":[

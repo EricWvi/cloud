@@ -286,7 +286,9 @@ type runState struct {
 	dispatched int
 	// attempts are the turns starting or executing, by caller attempt: Agent attempts and the
 	// follow-up turns of interactive nodes. They execute concurrently.
-	attempts           map[string]*attemptState
+	attempts map[string]*attemptState
+	// startsChanged, when set, is closed as soon as any turn's Start returns.
+	startsChanged      chan struct{}
 	closedScopes       map[string]bool
 	scopeCleanupErrors map[string]error
 
@@ -453,7 +455,7 @@ func (h *Host) stopTurns(ctx context.Context, st *runState, selected func(*attem
 	defer wg.Wait()
 	for giveUp := false; ; {
 		st.mu.Lock()
-		var starting chan struct{}
+		starting := false
 		for _, a := range st.attempts {
 			if !selected(a) {
 				continue
@@ -492,21 +494,28 @@ func (h *Host) stopTurns(ctx context.Context, st *runState, selected func(*attem
 					}
 				}()
 			}
-			if a.starting != nil && starting == nil {
-				starting = a.starting
+			if a.starting != nil {
+				starting = true
 			}
+		}
+		var changed chan struct{}
+		if starting {
+			if st.startsChanged == nil {
+				st.startsChanged = make(chan struct{})
+			}
+			changed = st.startsChanged
 		}
 		st.mu.Unlock()
 		if giveUp {
 			wg.Wait()
 			return stopped, errors.Join(append(errs, ctx.Err())...)
 		}
-		if starting == nil {
+		if !starting {
 			wg.Wait()
 			return stopped, errors.Join(errs...)
 		}
 		select {
-		case <-starting:
+		case <-changed: // any Start returned: stop its turn without waiting for the others
 		case <-ctx.Done():
 			giveUp = true // one more pass under mu: cancel what started, mark what still starts
 		}

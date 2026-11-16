@@ -155,14 +155,13 @@ func (n *interactiveNode) summary() map[string]any {
 // neither a conversation nor an answer. A session that was lost after its Agent started still
 // parks, as desktop keeps a crashed turn awaiting input.
 func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interactiveNode, result execution.Result, err error) {
-	if st.isCancelling() {
+	if cancelling, last := st.endTurn(a, nil); cancelling {
 		h.end(st.scope, n.session)
-		if _, last := st.endTurn(a, nil); last {
+		if last {
 			h.finishCancel(st, n.d.RunID)
 		}
 		return
 	}
-	st.endTurn(a, nil)
 	if err != nil && h.ctx.Err() != nil {
 		return // shutting down; the next start interrupts the run
 	}
@@ -348,7 +347,11 @@ func (h *Host) runFollowUp(st *runState, a *attemptState, f followUp) {
 	// runAgent), check with the turn registered, and run no turn for a run that stopped; the park
 	// is then refused, which ends the session and closes the row.
 	if h.runStopped(h.ctx, n.d.RunID) {
-		st.releaseStart(a)
+		if st.releaseStart(a) {
+			h.end(st.scope, n.session) // a cancellation stopped the run; close it once
+			h.finishCancel(st, n.d.RunID)
+			return
+		}
 		h.park(st, n)
 		return
 	}
