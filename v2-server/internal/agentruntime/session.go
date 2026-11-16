@@ -7,8 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"maps"
-	"slices"
 	"sync"
 	"time"
 
@@ -130,12 +128,6 @@ func (d *Driver) session(ctx context.Context, scope execution.Scope, session exe
 				p.owners[session.WorkspaceID] = owners
 			}
 			owners[session.ID] = session.Skills
-			var siblings []execution.Skills
-			for _, id := range slices.Sorted(maps.Keys(owners)) {
-				if id != session.ID && owners[id] != nil {
-					siblings = append(siblings, *owners[id])
-				}
-			}
 			p.mu.Unlock()
 			// Run has checked the executor names a known plugin; its install overlaps the clone.
 			plugin, _ := findPlugin(session.Executor.AgentID, session.Executor.PluginVersion)
@@ -150,15 +142,18 @@ func (d *Driver) session(ctx context.Context, scope execution.Scope, session exe
 			if a.prepareErr = installed.wait(prepare, p); a.prepareErr != nil {
 				return
 			}
+			// Siblings start concurrently, so the live selections are read inside the same skillsMu
+			// section that projects them: a snapshot taken at admission could be projected after a
+			// later sibling's, removing that sibling's skills while its Agent is starting.
+			p.skillsMu.Lock()
+			defer p.skillsMu.Unlock()
 			if session.Skills != nil {
-				if err := p.applyWorkflowSkills(a.checkout.path, session.WorkspaceID, *session.Skills, siblings); err != nil {
+				if err := p.applyWorkflowSkills(a.checkout.path, session.WorkspaceID, *session.Skills, p.liveSiblingSkills(session.WorkspaceID, session.ID)); err != nil {
 					a.prepareErr = err
 					return
 				}
 			}
 			a.projection = nodehistory.NewProjection(p.reader, a.execution)
-			p.skillsMu.Lock()
-			defer p.skillsMu.Unlock()
 			p.mu.Lock()
 			if p.fatal {
 				p.mu.Unlock()
