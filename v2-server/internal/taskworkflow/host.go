@@ -26,13 +26,15 @@ type Runs interface {
 
 // Host owns watchers until Close and uses the database to serialize cross-kind admission.
 type Host struct {
-	db      *store.Store
-	runs    Runs
-	ctx     context.Context
-	stop    context.CancelFunc
-	workers sync.WaitGroup
-	mu      sync.Mutex
-	locks   map[string]*taskLock
+	db            *store.Store
+	runs          Runs
+	ctx           context.Context
+	stop          context.CancelFunc
+	workers       sync.WaitGroup
+	mu            sync.Mutex
+	locks         map[string]*taskLock
+	beforeRefuse  func()
+	retryInterval time.Duration
 }
 
 // taskLock counts both its holder and queued callers so idle entries can be reclaimed safely.
@@ -89,10 +91,12 @@ func (h *Host) Start(ctx context.Context, in store.NewTaskWorkflow, values map[s
 	}
 	owned := context.WithoutCancel(ctx)
 	if err := h.runs.Prepare(owned, in.TenantID, in.UserID, id, in.Input, values); err != nil {
-		return id, h.refuse(owned, in.TenantID, id, err)
+		_, err = h.refuse(owned, in.TenantID, in.UserID, id, err, true)
+		return id, err
 	}
 	if err := h.db.CheckTaskWorkflowStart(owned, in.TenantID, id); err != nil {
-		return id, h.refuse(owned, in.TenantID, id, err)
+		_, err = h.refuse(owned, in.TenantID, in.UserID, id, err, true)
+		return id, err
 	}
 	events, cancel := h.runs.Subscribe(id)
 	if err = h.runs.Start(owned, in.TenantID, in.UserID, id); err != nil {
@@ -283,11 +287,11 @@ func (h *Host) startFailure(ctx context.Context, tenant, user, id string, cause 
 			h.cancelExecutedStart(ctx, tenant, user, id)
 			return true
 		}
-		h.refuse(ctx, tenant, id, stoppedBeforeStart)
-		return false
+		executed, _ := h.refuse(ctx, tenant, user, id, stoppedBeforeStart, false)
+		return executed
 	}
-	h.refuse(ctx, tenant, id, cause)
-	return false
+	executed, _ := h.refuse(ctx, tenant, user, id, cause, false)
+	return executed
 }
 
 // cancelExecutedStart stops a run that already began executing through the workflow host and
@@ -392,36 +396,50 @@ func (h *Host) lock(id string) func() {
 }
 
 // refuse keeps admission reserved until cancellation and link restoration commit together, and
-// retries transient failures, so a transient error cannot abandon an admission. It only ever
-// covers starts that never executed; callers route executed runs to the workflow host instead.
-func (h *Host) refuse(ctx context.Context, tenant, id string, cause error) error {
-	clean := func(ctx context.Context) error {
+// retries transient failures, so a transient error cannot abandon an admission. If the run turns
+// out to have already begun executing (ErrWorkflowRunState), it hands off to cancelExecutedStart
+// and keeps (or opens) a watcher so the real outcome settles.
+func (h *Host) refuse(ctx context.Context, tenant, user, id string, cause error, watchOnExecute bool) (bool, error) {
+	clean := func(ctx context.Context, subscribeOnExecute bool) (bool, error) {
+		if h.beforeRefuse != nil {
+			h.beforeRefuse()
+		}
 		err := h.db.RefuseTaskWorkflow(ctx, tenant, id, cause.Error())
 		if errors.Is(err, store.ErrWorkflowRunState) {
-			// The run turned out to have executed: a refusal can never succeed, and normal
-			// settlement owns the run from here. Stop retrying without hiding the original cause.
-			return nil
+			if subscribeOnExecute {
+				events, cancel := h.runs.Subscribe(id)
+				h.cancelExecutedStart(ctx, tenant, user, id)
+				h.watch(tenant, id, events, cancel)
+			} else {
+				h.cancelExecutedStart(ctx, tenant, user, id)
+			}
+			return true, nil
 		}
-		return err
+		return false, err
 	}
-	if err := clean(ctx); err != nil {
+	executed, err := clean(ctx, watchOnExecute)
+	if err != nil {
+		interval := h.retryInterval
+		if interval <= 0 {
+			interval = time.Second
+		}
 		h.workers.Add(1)
 		go func() {
 			defer h.workers.Done()
-			tick := time.NewTicker(time.Second)
+			tick := time.NewTicker(interval)
 			defer tick.Stop()
 			for {
 				select {
 				case <-h.ctx.Done():
 					return
 				case <-tick.C:
-					if clean(h.ctx) == nil {
+					if _, err := clean(h.ctx, true); err == nil {
 						return
 					}
 				}
 			}
 		}()
-		return errors.Join(cause, err)
+		return false, errors.Join(cause, err)
 	}
-	return cause
+	return executed, cause
 }
