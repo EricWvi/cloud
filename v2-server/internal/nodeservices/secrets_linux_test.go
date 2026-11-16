@@ -15,8 +15,9 @@ import (
 
 // TestNodeIsHandedNoUpstreamSecret collects everything the services hand to Node for real
 // upstream providers of both protocols: the Node configuration, every file it names, and the
-// grant issue and renew responses. No upstream key or address may appear in any of it; Node
-// reaches the model only through the local proxy with its session token.
+// grant issue, renew and revoke responses. No upstream key or address may appear in any of it,
+// as written or encoded; Node reaches the model only through the local proxy with its session
+// token.
 func TestNodeIsHandedNoUpstreamSecret(t *testing.T) {
 	const (
 		openAIURL   = "https://openai-upstream.invalid/v1"
@@ -26,7 +27,7 @@ func TestNodeIsHandedNoUpstreamSecret(t *testing.T) {
 		bearerURL   = "https://bearer-upstream.invalid/api"
 		bearerToken = "bearer-upstream-token-a5"
 	)
-	secrets := []string{openAIURL, openAIKey, messagesURL, messagesKey, bearerURL, bearerToken, "openai-upstream.invalid", "messages-upstream.invalid", "bearer-upstream.invalid"}
+	secrets := secretForms(openAIURL, openAIKey, messagesURL, messagesKey, bearerURL, bearerToken, "openai-upstream.invalid", "messages-upstream.invalid", "bearer-upstream.invalid")
 	openAI, err := NewRemoteProvider(openAIURL, openAIKey, nil)
 	if err != nil {
 		t.Fatal(err)

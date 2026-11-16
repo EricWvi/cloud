@@ -14,8 +14,9 @@ import (
 
 // TestDriverIPCSendsNodeNoUpstreamSecret runs an OpenCode and a Claude Code session on bindings
 // backed by real upstream providers, through install, clone, start, a follow-up turn and end.
-// No command the driver sends Node may carry an upstream key or address: the session names its
-// binding and frozen model, and Node reaches the upstream only through the local proxy.
+// No command the driver sends Node may carry an upstream key or address, as written or
+// encoded: the session names its binding and frozen model, and Node reaches the upstream only
+// through the local proxy.
 func TestDriverIPCSendsNodeNoUpstreamSecret(t *testing.T) {
 	const (
 		openAIURL   = "https://openai-upstream.invalid/v1"
@@ -31,6 +32,7 @@ func TestDriverIPCSendsNodeNoUpstreamSecret(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	secrets := secretForms(openAIURL, openAIKey, messagesURL, messagesKey, "openai-upstream.invalid", "messages-upstream.invalid")
 	var mu sync.Mutex
 	var sent []node.Message
 	h := newIPCHarnessWith(t, map[string]nodeservices.Binding{
@@ -89,7 +91,7 @@ func TestDriverIPCSendsNodeNoUpstreamSecret(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, secret := range []string{openAIURL, openAIKey, messagesURL, messagesKey, "openai-upstream.invalid", "messages-upstream.invalid"} {
+		for _, secret := range secrets {
 			if strings.Contains(string(data), secret) {
 				t.Errorf("%s sent to Node contains upstream secret %q", m.Type, secret)
 			}
