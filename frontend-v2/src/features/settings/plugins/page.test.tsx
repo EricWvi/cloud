@@ -191,6 +191,9 @@ it('saves decimal MCP settings without browser integer-step validation', async (
   renderSettingsPage(<PluginsPage />)
   await user.click(await screen.findByRole('button', { name: '查看插件 GitHub 工具' }))
   const timeout = screen.getByLabelText('超时秒数') as HTMLInputElement
+  const token = screen.getByLabelText('API Token')
+  await user.type(token, 'discard-this-draft')
+  await user.clear(token)
   await user.clear(timeout)
   await user.type(timeout, '1.5')
   expect(timeout.checkValidity()).toBe(true)

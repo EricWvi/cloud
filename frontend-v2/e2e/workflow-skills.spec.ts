@@ -39,8 +39,9 @@ test('workflow dependencies: select an imported Skill, persist its binding and o
   await expect.poll(async () => (await node()).data.agentConfig.skills).toEqual([{ skillId: name, enabled: false }])
   await toggle.click()
   await expect.poll(async () => (await node()).data.agentConfig.skills).toEqual([{ skillId: name, enabled: true }])
-  await expect(page.getByRole('button', { name: '添加 MCP', exact: true })).toBeDisabled()
-  await expect(page.getByText('请先在设置中安装 MCP。已有绑定可保留并启用。')).toBeVisible()
+  // Other specs may install tenant-wide MCPs concurrently. This Skill flow must neither
+  // assume an empty installation list nor acquire an MCP binding implicitly.
+  expect((await node()).data.agentConfig.mcps ?? []).toEqual([])
   await expect(page.getByText(/^已实时保存/)).toBeVisible()
   await page.screenshot({ path: info.outputPath('workflow-imported-skill.png'), animations: 'disabled' })
 })
