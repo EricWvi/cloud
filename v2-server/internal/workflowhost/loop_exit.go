@@ -21,6 +21,7 @@ func (h *Host) CleanupLoopExit(runID, parentID, scopeID string) {
 		return
 	}
 	st.closedScopes[scopeID] = true
+	st.slotsMayHaveChanged()
 	st.mu.Unlock()
 	h.workers.Add(1)
 	go func() {

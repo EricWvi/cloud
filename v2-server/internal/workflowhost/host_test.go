@@ -781,3 +781,56 @@ func TestNonconformingStructuredAnswerFailsTheNode(t *testing.T) {
 		t.Fatal("the run advanced past a failed structured node")
 	}
 }
+
+// noStart fails the test if another Agent session starts within a short wait.
+func (f *fakeExecution) noStart(t *testing.T, why string) {
+	t.Helper()
+	select {
+	case id := <-f.startedCh:
+		t.Fatalf("%s: session %s started", why, id)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// A fan-out wider than the run's free session slots waits for one instead of asking Node for a
+// session over its checkout's limit: the waiting sibling starts once a session ends.
+func TestSiblingsBeyondTheSessionLimitWaitForASlot(t *testing.T) {
+	f := newFixture(t)
+	f.host.sessionLimit = 1
+	runID := f.run(t, parallelAgents, nil)
+	if _, err := f.host.StartRun(context.Background(), f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	first := f.exec.awaitStart(t)
+	f.exec.noStart(t, "a sibling started over the session limit")
+	f.exec.finish(first, completed("one"))
+	second := f.exec.awaitStart(t)
+	if f.exec.request(second).Caller.NodeID == f.exec.request(first).Caller.NodeID {
+		t.Fatal("the same node started twice")
+	}
+	f.exec.finish(second, completed("two"))
+	if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusSucceeded {
+		t.Fatalf("run %s", run.Status)
+	}
+}
+
+// Cancelling a run drops a sibling still waiting for a session slot: it never starts, and the run
+// closes as cancelled once the executing turn is stopped.
+func TestCancelDropsASiblingWaitingForASlot(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.host.sessionLimit = 1
+	runID := f.run(t, parallelAgents, nil)
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.awaitStart(t)
+	if _, err := f.host.CancelRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusCancelled {
+		t.Fatalf("run %s", run.Status)
+	}
+	f.exec.noStart(t, "a waiting sibling started after the cancellation")
+	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
+}

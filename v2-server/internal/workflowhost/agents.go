@@ -169,7 +169,7 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 		// The session outlives its turns until completion, a stop or the run's end ends it.
 		request.Lifetime = execution.LifetimeHeld
 	}
-	a := st.beginStart(d.NodeRunID, d.NodeRunID, d.ScopeID, generation)
+	a := h.beginSession(st, d.NodeRunID, d.ScopeID, generation)
 	if a == nil {
 		return
 	}
@@ -280,6 +280,71 @@ func (st *runState) register(key, nodeRun, scopeID string, generation uint64) *a
 	return a
 }
 
+// maxRunSessions is the pinned Node's limit of unfinished sessions on one checkout
+// (shared_checkout_sessions). A run's sessions share its checkout, so the bridge never asks for more.
+const maxRunSessions = 8
+
+// beginSession is beginStart for a turn that starts a new session (an Agent attempt, or an
+// interactive node's first turn). It first waits until the run holds fewer unfinished sessions
+// than the Node admits on its checkout, so a fan-out wider than the free slots queues here instead
+// of being refused by Node; parked interactive sessions keep their slots until they end. It
+// returns nil like beginStart, also when the host shuts down while it waits.
+func (h *Host) beginSession(st *runState, nodeRun, scopeID string, generation uint64) *attemptState {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for {
+		if st.cancelling || st.closedScopes[scopeID] || generation != st.generation || h.ctx.Err() != nil {
+			return nil
+		}
+		if st.sessionsInUse() < h.sessionLimit {
+			a := st.register(nodeRun, nodeRun, scopeID, generation)
+			if a != nil {
+				a.session = true
+			}
+			return a
+		}
+		if st.slotsChanged == nil {
+			st.slotsChanged = make(chan struct{})
+		}
+		changed := st.slotsChanged
+		st.mu.Unlock()
+		select {
+		case <-changed:
+		case <-h.ctx.Done():
+		}
+		st.mu.Lock()
+	}
+}
+
+// sessionsInUse counts the run's unfinished sessions: every turn starting a new session, from just
+// before its Start until its attempt is forgotten (an automatic attempt after its session's End
+// returned), and every tracked interactive node whose session's End has not returned, counted once while
+// its first turn is also such a turn. Callers hold mu.
+func (st *runState) sessionsInUse() int {
+	used := 0
+	starting := map[string]bool{}
+	for _, a := range st.attempts {
+		if a.session {
+			used++
+			starting[a.nodeRun] = true
+		}
+	}
+	for _, n := range st.interactive {
+		if !n.sessionGone && !starting[n.d.NodeRunID] {
+			used++
+		}
+	}
+	return used
+}
+
+// slotsMayHaveChanged wakes the attempts waiting in beginSession. Callers hold mu.
+func (st *runState) slotsMayHaveChanged() {
+	if st.slotsChanged != nil {
+		close(st.slotsChanged)
+		st.slotsChanged = nil
+	}
+}
+
 // releaseStart forgets a turn beginStart registered that will not start, and reports whether it
 // was the cancelled run's last turn (see endTurn).
 func (st *runState) releaseStart(a *attemptState) bool {
@@ -353,6 +418,9 @@ func (st *runState) forget(a *attemptState) {
 	case <-a.done:
 	default:
 		close(a.done)
+	}
+	if a.session {
+		st.slotsMayHaveChanged()
 	}
 }
 

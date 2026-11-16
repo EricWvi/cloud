@@ -44,7 +44,9 @@ type Host struct {
 	now         func() time.Time
 	stopTimeout time.Duration
 	busyRetry   time.Duration
-	engine      *workflow.Engine
+	// sessionLimit caps a run's unfinished sessions (see sessionsInUse); tests lower it.
+	sessionLimit int
+	engine       *workflow.Engine
 
 	ctx     context.Context
 	stop    context.CancelFunc
@@ -143,6 +145,7 @@ func NewHost(c Config) (*Host, error) {
 	if h.busyRetry == 0 {
 		h.busyRetry = 10 * time.Second
 	}
+	h.sessionLimit = maxRunSessions
 	h.ctx, h.stop = context.WithCancel(context.Background())
 	h.engine = workflow.NewEngine(repository{c.Store}, h, h.hub.Publish, h.now)
 	return h, nil
@@ -290,7 +293,10 @@ type runState struct {
 	// follow-up turns of interactive nodes. They execute concurrently.
 	attempts map[string]*attemptState
 	// startsChanged, when set, is closed as soon as any turn's Start returns.
-	startsChanged      chan struct{}
+	startsChanged chan struct{}
+	// slotsChanged, when set, is closed whenever an attempt waiting for a session slot should look
+	// again: a session slot was freed, or the run was cancelled or a Loop scope closed.
+	slotsChanged       chan struct{}
 	closedScopes       map[string]bool
 	scopeCleanupErrors map[string]error
 
@@ -311,6 +317,9 @@ type attemptState struct {
 	// unstopped marks a turn whose Start a cancellation gave up waiting for: its attempt stops
 	// the turn itself once the Start returns.
 	unstopped bool
+	// session marks a turn that starts a new session and holds one of the run's session slots
+	// until it is forgotten (see sessionsInUse).
+	session bool
 }
 
 // register records who is starting a run and counts the start under way. A run that already
@@ -413,6 +422,7 @@ func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, run
 		defer cancel()
 		st.mu.Lock()
 		st.cancelling = true // no further turn starts
+		st.slotsMayHaveChanged()
 		st.mu.Unlock()
 		if _, err := h.stopTurns(stopCtx, st, func(*attemptState) bool { return true }); err != nil {
 			return store.WorkflowRun{}, fmt.Errorf("%w: %w", server.ErrWorkflowRunStopUnconfirmed, err)
@@ -434,6 +444,7 @@ func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, run
 	if st != nil {
 		st.mu.Lock()
 		st.interactive = nil // their sessions ended above and CancelWorkflowRun closed their rows
+		st.slotsMayHaveChanged()
 		st.mu.Unlock()
 		h.forgetFinished(runID, st)
 	}

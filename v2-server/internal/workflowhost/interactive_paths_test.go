@@ -699,3 +699,72 @@ func TestStopDuringPreparationParksInsteadOfFailing(t *testing.T) {
 		t.Fatalf("run %s, A %+v, summary %v; want parked by the stop, never failed", run.Status, row, p)
 	}
 }
+
+// A parked interactive node keeps its session, so it keeps its slot: a sibling over the limit waits
+// until the node completes and its session ends.
+func TestParkedInteractiveSessionHoldsItsSlot(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.host.sessionLimit = 1
+	waiting, release := f.holdDispatchOf(t, "c")
+	runID := f.run(t, parallelInteractive, nil)
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	a := f.exec.awaitStart(t)
+	<-waiting
+	release()
+	f.exec.noStart(t, "C started beside A's first turn")
+	f.exec.finish(a, completed("在"))
+	f.await(t, runID, parked("a"))
+	f.exec.noStart(t, "C started beside A's parked session")
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+		t.Fatal(err)
+	}
+	c := f.exec.awaitStart(t)
+	if f.exec.request(c).Caller.NodeID != "c" {
+		t.Fatalf("started %s, want C", f.exec.request(c).Caller.NodeID)
+	}
+	f.exec.finish(c, completed("好"))
+	if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusSucceeded {
+		t.Fatalf("run %s", run.Status)
+	}
+}
+
+// A completion whose End is not confirmed keeps the node's slot, since Node may still hold the
+// session: the waiting sibling starts only once a retried completion ends the session.
+func TestUnconfirmedEndKeepsTheInteractiveSlot(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.host.sessionLimit = 1
+	waiting, release := f.holdDispatchOf(t, "c")
+	runID := f.run(t, parallelInteractive, nil)
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	a := f.exec.awaitStart(t)
+	<-waiting
+	release()
+	f.exec.finish(a, completed("在"))
+	f.await(t, runID, parked("a"))
+	confirm := f.exec.EndFunc
+	f.exec.EndFunc = func(ctx context.Context, scope execution.Scope, id string) error {
+		if id == a {
+			return execution.ErrStopUnconfirmed
+		}
+		return confirm(ctx, scope, id)
+	}
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err == nil {
+		t.Fatal("completion with an unconfirmed End succeeded")
+	}
+	f.exec.noStart(t, "C started while A's session may still be live")
+	f.exec.EndFunc = confirm
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+		t.Fatalf("retried completion: %v", err)
+	}
+	c := f.exec.awaitStart(t)
+	f.exec.finish(c, completed("好"))
+	if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusSucceeded {
+		t.Fatalf("run %s", run.Status)
+	}
+}
