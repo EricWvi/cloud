@@ -1,6 +1,6 @@
 # Settings
 
-设置模块包含小队、角色、模型连接、主题、Plugins 和 Skills 六个独立子路由，默认进入小队页。成员属于小队，没有单独的成员页：在小队详情里看成员，在「添加成员」里邀请或加入，`/settings/members` 重定向到小队页。页面沿用 V2 的组件和语义颜色，不引入其他 UI 库。**部署版（`GET /auth/providers` 返回 `idaas`）隐藏只写浏览器的「角色」「模型连接」两页**：导航不出现，直接访问地址由路由 loader 重定向到小队页，工作流 Agent 节点的角色选择也不显示；providers 读取失败或为空时按开发版处理，照常显示。判断逻辑在 `lib/deploy-mode.ts`，登录方式和开发/部署的区分见登录根决策 A6。
+设置模块包含小队、角色、模型连接、主题、Plugins 和 Skills 六个独立子路由，默认进入小队页。成员属于小队，没有单独的成员页：在小队详情里看成员，在「添加成员」里邀请或加入，`/settings/members` 重定向到小队页。页面沿用 V2 的组件和语义颜色，不引入其他 UI 库。**部署版（`GET /auth/providers` 返回 `idaas`）只隐藏只写浏览器的「模型连接」页**：导航不出现，直接访问地址由路由 loader 重定向到小队页；角色目录在服务端，部署版照常提供角色页和工作流节点的角色选择。providers 读取失败或为空时按开发版处理，照常显示。判断逻辑在 `lib/deploy-mode.ts`，登录方式和开发/部署的区分见登录根决策 A6。
 
 ## 数据边界
 
@@ -9,14 +9,13 @@
 小队页（`squads/`，`/settings/squads`）管理工作区内人和 Agent 的协作编组，数据来自候选契约 `v2-server/squads.openapi.json`，客户端在 `src/lib/squads-api`（协作页指派任务和按小队切换也用它），`npm run api:generate:squads` 生成。列表显示有效的人类成员、Agent 成员与维护者计数，详情按类型列成员、职责、维护者与 leader，并保留已退出历史；工作区 owner 和本队维护者可编辑、归档、加入成员与可执行的 Space Agent、移除成员，任何成员可以自己退出，维护者可以交接维护者标记、设置 Agent leader。已删除的账号由 v2-server 结束其成员关系，并且不再出现在小队里，「已退出」历史也不列出。小队关系不授予私人模型、Git 凭据或运行时权限。`?squad=<id>` 直接打开那个小队；协作页的旧地址 `/collaboration/squads` 会重定向过来。弹窗和基础样式来自 `src/components/panel/`，与协作页共用。
 
 成员、Plugins、技能、登录状态与浏览器主题偏好来自真实接口。Plugins 使用 Cloud
-契约的目录、空间选择和卸载路由；市场技能与来源插件共享同一份空间选择。Skill 的下载、校验和安装由节点回执确认，尚未确认时显示等待状态。技能、工作流与 MCP 插件通过服务端安装。MCP 使用租户共享的安装记录和设置，空间 owner 可安装、修改和移除；秘密只写不读，表单显示是否已配置。当前安装、配置和节点选择可保存；非空 MCP 执行在运行时拒绝：Node 缺少 session_mcp_lifecycle 时返回 mcp_node_capability_missing，有能力但服务端尚未实现生命周期时返回 mcp_lifecycle_not_ready。空 MCP 选择不受此门禁影响。运行时预装 Agent、市场 Agent、Hook 与合集仍使用各自的展示规则。模型连接和角色只保存在当前浏览器，部署版隐藏这两页（见上文）。不存在请求失败后自动切换假数据的逻辑。
+契约的目录、空间选择和卸载路由；市场技能与来源插件共享同一份空间选择。Skill 的下载、校验和安装由节点回执确认，尚未确认时显示等待状态。技能、工作流与 MCP 插件通过服务端安装。MCP 使用租户共享的安装记录和设置，空间 owner 可安装、修改和移除；秘密只写不读，表单显示是否已配置。当前安装、配置和节点选择可保存；非空 MCP 执行在运行时拒绝：Node 缺少 session_mcp_lifecycle 时返回 mcp_node_capability_missing，有能力但服务端尚未实现生命周期时返回 mcp_lifecycle_not_ready。空 MCP 选择不受此门禁影响。运行时预装 Agent、市场 Agent、Hook 与合集仍使用各自的展示规则。模型连接只保存在当前浏览器，部署版因此隐藏这一页（见上文）；角色属于工作区的服务端目录，与工作流节点共用同一份目录（见下文「角色」）。不存在请求失败后自动切换假数据的逻辑。
 
-`lib/settings-demo/` 是本机模型连接和角色的共享存储边界，键包含版本、当前用户 ID 和空间
-ID；Settings 与工作流的角色选择读同一份快照。`members/`、`skills/` 与
-`data/marketplace.ts` 不使用它。初次读取创建示例；修改先校验 revision 并成功写入
-localStorage，再更新 TanStack Query 缓存。schema 2、3、4 的旧快照会升级为 schema 5，
-丢弃已经由服务端目录取代的技能和本地插件镜像，同时保留已有角色或为旧快照补上角色。保存
-失败和损坏数据会报错，不会自动清空。
+`lib/settings-demo/` 只是模型连接的本机存储边界，键包含版本、当前用户 ID 和空间
+ID。`members/`、`skills/`、`roles/` 与 `data/marketplace.ts` 不使用它。初次读取创建示例；
+修改先校验 revision 并成功写入 localStorage，再更新 TanStack Query 缓存。schema 2–5 的旧
+快照会升级为 schema 6，丢弃已经由服务端目录取代的技能、角色和本地插件镜像。保存失败和
+损坏数据会报错，不会自动清空。
 
 - 插件复用生成的 `PluginCatalogEntry` 与 `SpacePlugin`；目录读取与服务端安装、卸载走
   `frontend-v2/src/api` 的生成客户端。以 `sourceNamespace/identifier` 对应，写入带
@@ -40,10 +39,14 @@ localStorage，再更新 TanStack Query 缓存。schema 2、3、4 的旧快照�
   同名时会话以 `skill_name_conflict` 失败，提示用户改名，不覆盖也不静默丢弃任何一方；
   编辑或删除只影响之后
   启动的会话。
-- 角色复用 desktop 的 Agent definition 形状：名称、描述和 Markdown 内容，使用 `local`
-  命名空间。可在页面新建、编辑、删除，也可以导入带 YAML front matter（`name` 和
-  `description`）的单个 `.md` 文件；同名时选择跳过或覆盖。工作流 Agent 节点按角色名称读取
-  这份目录，v2 执行仍不注入角色内容。
+- 角色是工作区的服务端目录，通过候选契约 `v2-server/roles.openapi.json` 持久化在
+  PostgreSQL；`npm run api:generate:roles` 生成共享客户端到 `src/lib/roles-api`。目录按
+  `tenant_id` 共享，租户内所有成员都能新建、编辑、删除，也可以导入带 YAML front matter
+  （`name` 和 `description`）的单个 `.md` 文件；同名时服务端返回冲突，用户确认后覆盖并保留
+  角色 ID。不内置默认角色。工作流 Agent 节点按角色名称选择它，运行启动时预检整张图（条件
+  分支里本次不走的节点也算），节点启动前再实时读取一次内容，包成 `<system_instructions>`
+  注入提示词；角色缺失时启动返回 `workflow_role_not_found`，执行中被删除的节点以同一错误码
+  失败并可从失败处继续。
 - 成员列表复用契约生成的 `MemberListItem`，invite 客户端由 `orval.members.config.ts` 从 `v2-server/members.openapi.json` 生成。邀请填邮箱（必填）和显示名（选填），小队就是当前小队；小队候选来自「协作」的 `GET /api/v2/tenants/{tid}/squads`，只列未归档小队，没有可加入的小队时不显示这一项。本地数据里不再保存成员、申请或邀请链接。
 - 模型连接复用生成类型，维护元数据、多模型和默认选择；只记录 credentialConfigured，不提供真实 API Key 输入。默认连接失效时提示重新选择，不悄悄替换模型。
 
@@ -61,11 +64,11 @@ localStorage，再更新 TanStack Query 缓存。schema 2、3、4 的旧快照�
 
 `npm run check` 检查类型、Oxlint、单元测试、客户端一致性与构建。`e2e/login.ts` 提供邮箱
 登录辅助，以及 bootstrap owner 的固定邮箱 `ownerEmail`、显示名 `ownerName` 和「邀请一个真实
-成员后再以该成员登录」的 `signInAsInvitedMember`；`e2e/settings.spec.ts` 覆盖七页路由、成员页的 owner/member 两种视角、角色增改删
-与 Markdown 导入、插件和技能安装/卸载、技能新建与 `SKILL.md` 导入及覆盖、Agent 选择生命周期、
+成员后再以该成员登录」的 `signInAsInvitedMember`；`e2e/settings.spec.ts` 覆盖七页路由、成员页的 owner/member 两种视角、服务端角色的新建/
+刷新读取/覆盖导入、插件和技能安装/卸载、技能新建与 `SKILL.md` 导入及覆盖、Agent 选择生命周期、
 刷新与新浏览器上下文读取服务端状态、错误恢复、主题、375/768/1440 布局与截图；
 `e2e/multiuser.spec.ts` 覆盖 owner 邀请（含邀请入队）、被邀请者登录、未邀请邮箱被拒与
-member 被服务端拒绝。模型连接和角色的资源操作仍只保存在当前浏览器。
+member 被服务端拒绝。只有模型连接的资源操作保存在当前浏览器。
 
 插件市场区分空间选择与项目实际结果。来源管理使用临时市场契约生成的客户端；空间选择供插件和技能页面共享。Skill 会进入项目运行时；MCP 的非空执行须待 Node 与服务端完整生命周期接入，当前不会静默忽略选择后继续执行；可执行 Agent 仍只有系统预装的 OpenCode 和 Claude Code；市场 Agent、Hook 与合集只浏览，服务端拒绝新建或更新这些选择。默认构建里没有任何预装或演示安装：`VITE_DEMO_MOCK=1` 时 `lib/demo/plugin-installs.ts` 才为市场 Agent、Hook 和预装 Agent 提供浏览器本地演示安装（3–5 秒等待，只写 localStorage，不发请求）。插件详情列出各项目等待、成功或失败的状态。移除市场仅隐藏可安装目录，不移除空间中已有选择。
 

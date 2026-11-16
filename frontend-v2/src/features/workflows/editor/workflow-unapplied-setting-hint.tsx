@@ -6,7 +6,6 @@ import { IconInfoCircle } from "@tabler/icons-react";
  * one shows is the server's call: the inspector only knows where each would go and why.
  */
 const PLACED_SETTINGS = {
-  role: "settings.workflow.unapplied.role",
   mcp: "settings.workflow.unapplied.mcp",
   interactive: "settings.workflow.unapplied.interactive",
   retry: "settings.workflow.unapplied.retry",

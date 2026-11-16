@@ -301,7 +301,7 @@ describe("workflow page", () => {
 
   it("marks the Agent settings the server says a run does not apply, and drops a hint it stops listing", async () => {
     const user = userEvent.setup();
-    let listed = ["role", "mcp", "interactive", "retry", "sandbox"];
+    let listed = ["mcp", "interactive", "retry", "sandbox"];
     // Stands in for v2-server's policy: the page must show exactly what the analysis lists.
     server.runPolicy = (graph) => ({
       unappliedSettings: (JSON.parse(graph) as { nodes: { id: string; data: { kind: string } }[] }).nodes
@@ -360,18 +360,18 @@ describe("workflow page", () => {
       expect(aside).not.toBeNull();
       return aside!;
     });
-    for (const setting of ["role", "mcp", "interactive", "retry"]) {
+    for (const setting of ["mcp", "interactive", "retry"]) {
       expect(await within(inspector).findByTestId(`workflow-unapplied-${setting}`)).toHaveTextContent("暂不生效");
     }
     // A setting the inspector has no field for is still named.
     expect(within(inspector).getByTestId("workflow-unapplied-other")).toHaveTextContent("sandbox");
 
     // The server stops listing retry (and the unknown one); the next analysis takes their hints away.
-    listed = ["role", "mcp", "interactive"];
+    listed = ["mcp", "interactive"];
     await user.click(within(inspector).getByRole("switch", { name: "失败自动重试" }));
     await waitFor(() => expect(within(inspector).queryByTestId("workflow-unapplied-retry")).toBeNull());
     expect(within(inspector).queryByTestId("workflow-unapplied-other")).toBeNull();
-    expect(within(inspector).getByTestId("workflow-unapplied-role")).toBeInTheDocument();
+    expect(within(inspector).queryByTestId("workflow-unapplied-role")).toBeNull();
 
     listed = [];
     await user.click(within(inspector).getByRole("switch", { name: "交互模式" }));

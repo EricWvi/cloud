@@ -14,6 +14,7 @@ import type {
   SkillProgress,
 } from './market-api/generated'
 import type { Skill, SkillInput } from '@/lib/skills-api/generated'
+import type { ImportRoleInput, Role, RoleInput } from '@/lib/roles-api/generated'
 import { demoUser, fakeBackend } from '@/test/backend'
 import type { McpInstallation, McpSettingsInput } from '@/lib/mcp-api/generated'
 
@@ -88,6 +89,7 @@ export function installMarketplaceBackend({
   selections = [],
   marketSources = [],
   skills = [],
+  roles = [],
   progress = [],
   mcpInstallFailure,
 }: {
@@ -96,6 +98,7 @@ export function installMarketplaceBackend({
   selections?: SpacePlugin[]
   marketSources?: MarketSource[]
   skills?: Skill[]
+  roles?: Role[]
   progress?: { namespace: string; identifier: string; results: SkillProgress[] }[]
   mcpInstallFailure?: string
 } = {}) {
@@ -104,6 +107,7 @@ export function installMarketplaceBackend({
     selections: [...selections],
     marketSources: [...marketSources],
     skills: [...skills],
+    roles: [...roles],
     progress: [...progress],
     mcps: [] as McpInstallation[],
   }
@@ -293,6 +297,113 @@ export function installMarketplaceBackend({
           updatedAt: new Date().toISOString(),
         }
         state.skills[index] = item
+        return { status: 200, data: item }
+      }
+    }
+    const roleBase = `/api/v2/tenants/${MARKET_TENANT}/roles`
+    if (url === roleBase && method === 'GET')
+      return { status: 200, data: { items: state.roles } }
+    if (url === roleBase + '/import' && method === 'POST') {
+      const body = (
+        typeof config.data === 'string'
+          ? JSON.parse(config.data)
+          : config.data
+      ) as ImportRoleInput
+      const match = body.content.match(
+        /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/,
+      )
+      if (!match)
+        return {
+          status: 400,
+          data: { code: 'role_front_matter_missing', params: {} },
+        }
+      const name = match[1].match(/^name:\s*["']?([^"'\r\n]+)["']?$/m)?.[1]
+      const description = match[1].match(
+        /^description:\s*["']?([^"'\r\n]+)["']?$/m,
+      )?.[1]
+      if (!name)
+        return { status: 400, data: { code: 'role_name_missing', params: {} } }
+      if (!description)
+        return {
+          status: 400,
+          data: { code: 'role_description_missing', params: {} },
+        }
+      const index = state.roles.findIndex(
+        (item) => item.name.toLowerCase() === name.toLowerCase(),
+      )
+      if (index >= 0 && !body.overwrite)
+        return { status: 409, data: { code: 'role_name_conflict', params: {} } }
+      const now = new Date().toISOString()
+      const item: Role = {
+        id: index < 0 ? crypto.randomUUID() : state.roles[index].id,
+        name,
+        description,
+        content: match[2].trim(),
+        version: index < 0 ? 1 : state.roles[index].version + 1,
+        createdAt: index < 0 ? now : state.roles[index].createdAt,
+        updatedAt: now,
+      }
+      if (index < 0) state.roles.unshift(item)
+      else state.roles[index] = item
+      return { status: 201, data: item }
+    }
+    if (url === roleBase && method === 'POST') {
+      const body = (
+        typeof config.data === 'string'
+          ? JSON.parse(config.data)
+          : config.data
+      ) as RoleInput
+      if (
+        state.roles.some(
+          (item) => item.name.toLowerCase() === body.name.trim().toLowerCase(),
+        )
+      )
+        return { status: 409, data: { code: 'role_name_conflict', params: {} } }
+      const now = new Date().toISOString()
+      const item: Role = {
+        id: crypto.randomUUID(),
+        name: body.name.trim(),
+        description: (body.description ?? '').trim(),
+        content: body.content,
+        version: 1,
+        createdAt: now,
+        updatedAt: now,
+      }
+      state.roles.unshift(item)
+      return { status: 201, data: item }
+    }
+    if (url.startsWith(roleBase + '/')) {
+      const id = decodeURIComponent(url.slice(roleBase.length + 1))
+      const index = state.roles.findIndex((item) => item.id === id)
+      if (index < 0)
+        return { status: 404, data: { code: 'role_not_found', params: {} } }
+      if (method === 'DELETE') {
+        state.roles.splice(index, 1)
+        return { status: 204 }
+      }
+      if (method === 'PUT') {
+        const body = (
+          typeof config.data === 'string'
+            ? JSON.parse(config.data)
+            : config.data
+        ) as RoleInput
+        if (
+          state.roles.some(
+            (item) =>
+              item.id !== id &&
+              item.name.toLowerCase() === body.name.trim().toLowerCase(),
+          )
+        )
+          return { status: 409, data: { code: 'role_name_conflict', params: {} } }
+        const item: Role = {
+          ...state.roles[index],
+          name: body.name.trim(),
+          description: (body.description ?? '').trim(),
+          content: body.content,
+          version: state.roles[index].version + 1,
+          updatedAt: new Date().toISOString(),
+        }
+        state.roles[index] = item
         return { status: 200, data: item }
       }
     }
