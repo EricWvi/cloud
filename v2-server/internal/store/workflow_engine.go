@@ -454,21 +454,22 @@ func (s *Store) InterruptWorkflowRuns(ctx context.Context, message string, detai
 	return s.interruptWorkflowRuns(ctx, message, detail, nil)
 }
 
-// InterruptWorkflowRunsWithIterationRecovery applies the boot sweep with desktop's composite
-// exception. absorb returns the IDs to interrupt when every active non-Iteration row belongs to a
-// still-running Iteration, or nil to fail the whole run. It is consulted only for a run that is
-// still running: an active row of a run that already ended (an Iteration owner left beside the
-// root failure that ended it) has no runtime to settle its round, so it fails as before. An absorb
+// InterruptWorkflowRunsWithRecovery applies the boot sweep with desktop's composite exceptions.
+// absorb inspects active attempts and Loop rounds and returns the IDs to interrupt while keeping
+// the run for Iteration settlement or pending LoopExit cleanup, or nil to fail the whole run.
+// It is consulted only for a run that is still running: an active row of a run that already ended
+// (an Iteration owner left beside the root failure that ended it) has no runtime to settle its
+// round, so it fails as before. An absorb
 // decision is honoured only when the run has a durable starter (whoever resumes it needs that
 // identity); otherwise the run fails like the rest. Absorbed runs survive the set-based run and
 // scope failure below. The result lists every run the sweep failed or absorbed — runs whose active
 // rows it settled and runs it failed without any — so the caller can resume the absorbed ones
 // (still running) and count the rest.
-func (s *Store) InterruptWorkflowRunsWithIterationRecovery(
+func (s *Store) InterruptWorkflowRunsWithRecovery(
 	ctx context.Context,
 	message string,
 	detail func(attempt int, node []byte) ([]byte, error),
-	absorb func(graph string, nodes []WorkflowNodeRun) map[string]bool,
+	absorb func(graph string, nodes []WorkflowNodeRun, rounds []WorkflowScope) map[string]bool,
 ) ([]string, error) {
 	return s.interruptWorkflowRuns(ctx, message, detail, absorb)
 }
@@ -495,7 +496,7 @@ func (s *Store) interruptWorkflowRuns(
 	ctx context.Context,
 	message string,
 	detail func(attempt int, node []byte) ([]byte, error),
-	absorb func(graph string, nodes []WorkflowNodeRun) map[string]bool,
+	absorb func(graph string, nodes []WorkflowNodeRun, rounds []WorkflowScope) map[string]bool,
 ) (interrupted []string, err error) {
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
@@ -524,7 +525,7 @@ func (s *Store) interruptWorkflowRuns(
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		// Absorb-eligible runs keep their Iteration owner running; every other run with active
+		// Absorb-eligible runs keep their container owner running; every other run with active
 		// rows fails, and the set-based statements below also fail runs without active rows.
 		// An absorbed run without a durable starter cannot be resumed by anyone, so it fails too
 		// instead of surviving forever (or aborting the caller's boot).
@@ -539,7 +540,18 @@ func (s *Store) interruptWorkflowRuns(
 				if status != WorkflowStatusRunning {
 					continue
 				}
-				ids := absorb(graph, byRun[runID])
+				// Read the break state in the same transaction as the attempts it atomically
+				// cancelled. Only an active round can exempt its parent from interruption.
+				scopeRows, err := tx.Query(ctx, `SELECT `+workflowScopeColumns+` FROM v2_workflow_scopes
+					WHERE run_id=$1 AND parent_loop_node_run_id IS NOT NULL AND status='running'`, runID)
+				if err != nil {
+					return fmt.Errorf("read interrupted Loop rounds: %w", err)
+				}
+				rounds, err := pgx.CollectRows(scopeRows, func(row pgx.CollectableRow) (WorkflowScope, error) { return scanWorkflowScope(row) })
+				if err != nil {
+					return fmt.Errorf("read interrupted Loop rounds: %w", err)
+				}
+				ids := absorb(graph, byRun[runID], rounds)
 				if ids == nil || starter == "" {
 					continue
 				}

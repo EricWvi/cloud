@@ -159,12 +159,18 @@ func (h *Host) Close() {
 
 const interruptedMessage = "the server restarted while this run was executing"
 
-// iterationInterrupts selects desktop's absorbable boot-sweep rows: every executing non-owner
-// row belongs to an Iteration whose owner is still running. Any outer or Loop work fails the run.
-func iterationInterrupts(graph string, nodes []store.WorkflowNodeRun) map[string]bool {
+// workflowInterrupts keeps pending LoopExit cleanup and running Iterations alive. Every other
+// active row must be a running Iteration member; outer work and retry waits still fail the run.
+func workflowInterrupts(graph string, nodes []store.WorkflowNodeRun, rounds []store.WorkflowScope) map[string]bool {
 	g, err := workflow.ParseGraph(graph)
 	if err != nil {
 		return nil
+	}
+	exiting := map[string]bool{}
+	for _, round := range rounds {
+		if round.ParentLoopNodeRunID != nil && round.Status != nil && *round.Status == store.WorkflowStatusRunning && workflow.HasPendingLoopExit(round.State) {
+			exiting[*round.ParentLoopNodeRunID] = true
+		}
 	}
 	running := map[string]bool{}
 	for _, row := range nodes {
@@ -175,15 +181,17 @@ func iterationInterrupts(graph string, nodes []store.WorkflowNodeRun) map[string
 			running[row.NodeID] = true
 		}
 	}
-	if len(running) == 0 {
-		return nil
-	}
 	interrupted := map[string]bool{}
 	for _, row := range nodes {
 		if row.Status != store.WorkflowStatusRunning {
 			return nil
 		}
 		if row.Iteration == nil {
+			if row.NodeType == "loop" && exiting[row.ID] {
+				if n, ok := g.Node(row.NodeID); ok && n.Kind == "loop" {
+					continue
+				}
+			}
 			if row.NodeType == "iteration" && running[row.NodeID] {
 				continue
 			}
@@ -199,17 +207,18 @@ func iterationInterrupts(graph string, nodes []store.WorkflowNodeRun) map[string
 }
 
 // Interrupt fails attempts a previous process left executing with desktop's interrupted_by_restart
-// detail. Root and Loop work fails its run; an interrupted Iteration round fails alone, then its
-// owner applies the round's error strategy. Frozen forms and deterministic post-review work
-// survive; no interrupted Agent turn is replayed. It must run before the host serves requests and
+// detail. Pending LoopExit cleanup survives; other root and Loop work fails its run. An interrupted
+// Iteration round fails alone, then its owner applies the round's error strategy. Frozen forms
+// and deterministic post-review work survive; no interrupted Agent turn is replayed. It must run
+// after execution recovery has ended the old process's sessions, before the host serves requests and
 // after the owners of task runs have cancelled theirs, so an absorbed run is never task-owned
 // (package boot orders both).
 func (h *Host) Interrupt(ctx context.Context) error {
 	f := workflow.Failure{Kind: workflow.FailureInterruptedByRestart, Message: interruptedMessage}
 	now := h.now()
-	ids, err := h.store.InterruptWorkflowRunsWithIterationRecovery(ctx, interruptedMessage, func(attempt int, node []byte) ([]byte, error) {
+	ids, err := h.store.InterruptWorkflowRunsWithRecovery(ctx, interruptedMessage, func(attempt int, node []byte) ([]byte, error) {
 		return workflow.MergePayload(node, map[string]any{"error_detail": f.Detail(attempt, true, now)})
-	}, iterationInterrupts)
+	}, workflowInterrupts)
 	if err != nil {
 		return fmt.Errorf("interrupt workflow runs: %w", err)
 	}
@@ -219,22 +228,22 @@ func (h *Host) Interrupt(ctx context.Context) error {
 			return fmt.Errorf("read interrupted run %s: %w", id, err)
 		}
 		// The sweep fails every run it cannot resume (no durable starter), so only absorbed
-		// Iteration runs are still running here.
+		// Iteration or pending LoopExit runs are still running here.
 		if current.Run.Status != store.WorkflowStatusRunning {
 			continue
 		}
 		actor, err := h.store.WorkflowStarter(ctx, id)
 		if err != nil {
-			return fmt.Errorf("read starter of interrupted Iteration %s: %w", id, err)
+			return fmt.Errorf("read starter of recoverable workflow %s: %w", id, err)
 		}
 		if actor == "" {
 			// Defensive: the sweep already excludes unstartered runs; reaching here means the
 			// starter vanished between the sweep and this read, so fail rather than resume as
 			// someone else.
-			h.log.Error("interrupted Iteration lost its starter; failing the run", "run", id)
+			h.log.Error("recoverable workflow lost its starter; failing the run", "run", id)
 			message := interruptedMessage
 			if _, err := h.store.FinishWorkflowRun(ctx, current.Run.TenantID, id, store.WorkflowStatusFailed, nil, &message); err != nil {
-				h.log.Error("fail interrupted Iteration without a starter", "run", id, "error", err)
+				h.log.Error("fail recoverable workflow without a starter", "run", id, "error", err)
 			}
 			continue
 		}
@@ -243,7 +252,7 @@ func (h *Host) Interrupt(ctx context.Context) error {
 		st.started()
 		h.forgetFinished(id, st)
 		if err != nil {
-			h.log.Error("recover interrupted Iteration", "run", id, "error", err)
+			h.log.Error("recover interrupted workflow", "run", id, "error", err)
 		}
 	}
 	reviews, err := h.store.RecoverableFormRuns(ctx)

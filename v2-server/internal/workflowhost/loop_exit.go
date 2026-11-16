@@ -32,7 +32,7 @@ func (h *Host) CleanupLoopExit(runID, parentID, scopeID string) {
 		err := h.drainLoopScope(ctx, st, scopeID)
 		if h.ctx.Err() != nil {
 			return
-		} // startup interrupts; it never replays an exit
+		} // The next host replays the persisted exit after the old process has stopped.
 		if err != nil {
 			err = fmt.Errorf("LoopExit could not confirm session cleanup: %s", publicReason(err))
 		}

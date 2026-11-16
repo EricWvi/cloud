@@ -42,6 +42,13 @@ type loopExit struct {
 	Result map[string]any `json:"result"`
 }
 
+// HasPendingLoopExit recognizes a persisted break whose cleanup must be replayed at boot.
+// Use the runtime's decoder so malformed round state cannot exempt a Loop from interruption.
+func HasPendingLoopExit(raw []byte) bool {
+	state, err := decodeLoopState(raw)
+	return err == nil && state.Exit != nil
+}
+
 func decodeLoopState(raw []byte) (loopState, error) {
 	var state loopState
 	d := json.NewDecoder(bytes.NewReader(raw))

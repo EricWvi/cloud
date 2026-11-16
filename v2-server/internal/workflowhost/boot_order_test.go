@@ -216,8 +216,8 @@ func TestBootFailsALeftoverIterationOwnerOfAFailedRun(t *testing.T) {
 		}
 	}
 	// The second sweep had nothing left: the run was not reported or absorbed again.
-	again, err := f.s.InterruptWorkflowRunsWithIterationRecovery(ctx, interruptedMessage,
-		func(int, []byte) ([]byte, error) { return []byte(`{}`), nil }, iterationInterrupts)
+	again, err := f.s.InterruptWorkflowRunsWithRecovery(ctx, interruptedMessage,
+		func(int, []byte) ([]byte, error) { return []byte(`{}`), nil }, workflowInterrupts)
 	if err != nil || len(again) != 0 {
 		t.Fatalf("a later sweep found %v %v", again, err)
 	}
