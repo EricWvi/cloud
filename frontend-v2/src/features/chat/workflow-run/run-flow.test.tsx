@@ -16,6 +16,10 @@ import { parseWorkflowGraph } from '@/lib/workflows/runtime'
 import { runRefreshMs } from './server-runs'
 import { serveRuns, type RunServer } from './test-run-server'
 
+// This file exercises run inspection against a fixed development build; the deployment-mode query
+// would otherwise depend on which test set the shared backend last.
+vi.mock('@/lib/deploy-mode', () => ({ useDeployedVersion: () => false }))
+
 /** Renders the page and waits until it has loaded the backend's projects. */
 const renderPage = async () => {
   render(

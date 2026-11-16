@@ -1,6 +1,7 @@
 import { WorkflowMcpFields } from "./workflow-mcp-fields";
 import { WorkflowAgentRetryFields } from "./workflow-agent-retry-fields";
 import { WorkflowAgentInactivityField } from "./workflow-agent-inactivity-field";
+import { useDeployedVersion } from "@/lib/deploy-mode";
 import {
   WorkflowOtherUnappliedSettings,
   WorkflowUnappliedSettingHint,
@@ -470,6 +471,9 @@ function AgentConfigurationFields({
   onChange: (config: WorkflowAgentConfig) => void;
 }) {
   const { t } = useTranslation();
+  // Roles only exist in the development build (they live in the browser); a deployed install keeps
+  // a stored roleId untouched but never shows the picker.
+  const deployed = useDeployedVersion();
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [rolePickerOpen, setRolePickerOpen] = useState(false);
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
@@ -755,10 +759,11 @@ function AgentConfigurationFields({
           onChange={(prompt) => onChange({ ...config, prompt })}
         />
       </InspectorField>
-      <InspectorField
-        label={t("settings.workflow.field.role")}
-        htmlFor="workflow-agent-role"
-      >
+      {!deployed && (
+        <InspectorField
+          label={t("settings.workflow.field.role")}
+          htmlFor="workflow-agent-role"
+        >
         <Popover open={rolePickerOpen} onOpenChange={setRolePickerOpen}>
           <PopoverTrigger
             render={
@@ -828,7 +833,8 @@ function AgentConfigurationFields({
           </PopoverContent>
         </Popover>
         <WorkflowUnappliedSettingHint setting="role" unapplied={unapplied} />
-      </InspectorField>
+        </InspectorField>
+      )}
       <fieldset className="min-w-0 space-y-2">
         <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
           <legend className="min-w-0 text-[11px] font-medium">

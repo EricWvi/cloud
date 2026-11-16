@@ -18,6 +18,7 @@ import {
 import { RunActV2Execution } from "./run-act-v2-execution";
 import { RunBriefPopover } from "./run-brief-popover";
 import { shouldPreviewBrief } from "./should-preview-brief";
+import { useDeployedVersion } from "@/lib/deploy-mode";
 
 interface RunActAgentConfigProps {
   /** The Agent node, for the run analysis's unapplied settings when the attempt recorded none. */
@@ -42,6 +43,8 @@ export function RunActAgentConfig({
 }: RunActAgentConfigProps) {
   const config = normalizeWorkflowAgentConfig(rawConfig);
   const { t } = useTranslation();
+  // Roles exist only in the development build; a deployed install keeps a stored roleId untouched.
+  const deployed = useDeployedVersion();
   const agentCatalog = useAgentCatalog();
   const agentsQuery = useAgents();
   const skillsQuery = useSkills();
@@ -134,22 +137,24 @@ export function RunActAgentConfig({
         )}
       </div>
 
-      <div className="space-y-1">
-        <p className="text-[11px] text-muted-foreground">
-          {t("settings.workflow.field.role")}
-        </p>
-        <RunBriefPopover
-          title={roleLabel}
-          body={
-            roleDescription === ""
-              ? t("workflowRun.inspector.catalogNoDescription")
-              : roleDescription
-          }
-          openLabel={t("workflowRun.inspector.roleOpen", { name: roleLabel })}
-        >
-          <span className="line-clamp-2 text-xs leading-4">{roleLabel}</span>
-        </RunBriefPopover>
-      </div>
+      {!deployed && (
+        <div className="space-y-1">
+          <p className="text-[11px] text-muted-foreground">
+            {t("settings.workflow.field.role")}
+          </p>
+          <RunBriefPopover
+            title={roleLabel}
+            body={
+              roleDescription === ""
+                ? t("workflowRun.inspector.catalogNoDescription")
+                : roleDescription
+            }
+            openLabel={t("workflowRun.inspector.roleOpen", { name: roleLabel })}
+          >
+            <span className="line-clamp-2 text-xs leading-4">{roleLabel}</span>
+          </RunBriefPopover>
+        </div>
+      )}
 
       {enabledSkills.length > 0 && (
         <div className="space-y-1">

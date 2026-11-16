@@ -10,6 +10,7 @@ import {
 import { useAgents } from "@/lib/workflows/data/catalog-hooks";
 import { useSkills } from "@/lib/workflows/data/catalog-hooks";
 import { useInstalledPlugins } from "@/lib/workflows/data/catalog-hooks";
+import { useDeployedVersion } from "@/lib/deploy-mode";
 import { normalizeWorkflowAgentConfig } from "@/lib/workflows/mock";
 
 interface NodeParameter {
@@ -42,6 +43,7 @@ export function WorkflowNodeParameterSummary({
   const locale =
     i18n.resolvedLanguage === "en-US" ? ("en-US" as const) : ("zh-CN" as const);
   const labels = createWorkflowSummaryLabels(locale);
+  const deployed = useDeployedVersion();
   const parameters = configuredParameters(
     data,
     t,
@@ -50,6 +52,7 @@ export function WorkflowNodeParameterSummary({
     mcpNameById,
     labels,
     locale,
+    deployed,
   );
 
   if (parameters.length === 0) {
@@ -91,6 +94,7 @@ function configuredParameters(
   mcpNameById: ReadonlyMap<string, string>,
   labels: WorkflowSummaryLabels,
   locale: "zh-CN" | "en-US",
+  deployed: boolean,
 ): NodeParameter[] {
   const parameters: NodeParameter[] = [];
   if (data.kind === "agent" && data.agentConfig !== undefined) {
@@ -101,11 +105,14 @@ function configuredParameters(
     const enabledMcps = config.mcps
       .filter((mcp) => mcp.enabled)
       .map((mcp) => mcpNameById.get(mcp.mcpId) ?? mcp.mcpId);
-    parameters.push(
-      {
+    // A deployed install has no roles (they live only in the browser); the stored roleId stays.
+    if (!deployed) {
+      parameters.push({
         label: t("settings.workflow.field.role"),
         values: [agentNameById.get(config.roleId) ?? config.roleId],
-      },
+      });
+    }
+    parameters.push(
       {
         label: t("settings.workflow.field.agentModel"),
         values: [
