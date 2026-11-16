@@ -10,6 +10,7 @@ import {
 } from "@/lib/workflows/mock";
 import { appI18n, translationResources } from "@/lib/workflows/test/i18n-instance";
 import { AppI18nProvider } from "@/lib/workflows/test/i18n";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WorkflowInspector } from "./workflow-inspector";
 
 /** Keeps inspector edits and external undo/redo changes in the same persisted node contract. */
@@ -49,21 +50,25 @@ function Harness({
   }
 
   return (
-    <AppI18nProvider>
-      <WorkflowInspector
-        node={node}
-        capabilities={createMockWorkflowCapabilities("en-US")}
-        variableCatalog={[]}
-        onUpdate={setNode}
-        onDelete={() => undefined}
-        onCloseNode={() => undefined}
-      />
-      <pre data-testid="agent-config">
-        {JSON.stringify(node.data.agentConfig)}
-      </pre>
-      <button onClick={() => restore(undefined)}>Undo</button>
-      <button onClick={() => restore("wait")}>Redo</button>
-    </AppI18nProvider>
+    <QueryClientProvider
+      client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+    >
+      <AppI18nProvider>
+        <WorkflowInspector
+          node={node}
+          capabilities={createMockWorkflowCapabilities("en-US")}
+          variableCatalog={[]}
+          onUpdate={setNode}
+          onDelete={() => undefined}
+          onCloseNode={() => undefined}
+        />
+        <pre data-testid="agent-config">
+          {JSON.stringify(node.data.agentConfig)}
+        </pre>
+        <button onClick={() => restore(undefined)}>Undo</button>
+        <button onClick={() => restore("wait")}>Redo</button>
+      </AppI18nProvider>
+    </QueryClientProvider>
   );
 }
 

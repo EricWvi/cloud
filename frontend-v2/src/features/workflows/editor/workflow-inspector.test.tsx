@@ -8,6 +8,8 @@ import {
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fakeBackend } from "@/test/backend";
 import type { Node } from "@xyflow/react";
 import {
   createMockWorkflowCapabilities,
@@ -109,16 +111,20 @@ function renderNarrowInspector(): HTMLElement {
   document.body.append(container);
 
   render(
-    <AppI18nProvider>
-      <WorkflowInspector
-        variableCatalog={[]}
-        node={createAgentNode()}
-        capabilities={capabilities}
-        onUpdate={() => undefined}
-        onDelete={() => undefined}
-        onCloseNode={() => undefined}
-      />
-    </AppI18nProvider>,
+    <QueryClientProvider
+      client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+    >
+      <AppI18nProvider>
+        <WorkflowInspector
+          variableCatalog={[]}
+          node={createAgentNode()}
+          capabilities={capabilities}
+          onUpdate={() => undefined}
+          onDelete={() => undefined}
+          onCloseNode={() => undefined}
+        />
+      </AppI18nProvider>
+    </QueryClientProvider>,
     { container },
   );
   return container;
@@ -227,17 +233,21 @@ function StatefulInspectorHarness({
 }) {
   const [current, setCurrent] = useState(node);
   return (
-    <AppI18nProvider>
-      <WorkflowInspector
-        variableCatalog={variableCatalog}
-        node={current}
-        capabilities={capabilities}
-        onUpdate={setCurrent}
-        onDelete={() => undefined}
-        onCloseNode={() => undefined}
-        unappliedSettings={unappliedSettings}
-      />
-    </AppI18nProvider>
+    <QueryClientProvider
+      client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+    >
+      <AppI18nProvider>
+        <WorkflowInspector
+          variableCatalog={variableCatalog}
+          node={current}
+          capabilities={capabilities}
+          onUpdate={setCurrent}
+          onDelete={() => undefined}
+          onCloseNode={() => undefined}
+          unappliedSettings={unappliedSettings}
+        />
+      </AppI18nProvider>
+    </QueryClientProvider>
   );
 }
 
@@ -900,5 +910,79 @@ describe("WorkflowInspector unapplied-setting hints", () => {
       "运行失败时暂不自动重试",
     );
     expect(screen.queryByTestId("workflow-unapplied-other")).toBeNull();
+  });
+});
+
+/** Serves one `/auth/providers` answer for the deployment-mode query. */
+function serveProviders(providers: string[]) {
+  fakeBackend((c) =>
+    c.url === "/auth/providers"
+      ? { status: 200, data: { providers, default: providers[0] } }
+      : undefined,
+  );
+}
+
+describe("WorkflowInspector deployed install", () => {
+  it("hides the role field for idaas and keeps a stored roleId when editing", async () => {
+    await appI18n.changeLanguage("zh-CN");
+    serveProviders(["idaas"]);
+    const user = userEvent.setup();
+    const updates: string[] = [];
+    const capabilities = createMockWorkflowCapabilities("zh-CN");
+    render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <AppI18nProvider>
+          <WorkflowInspector
+            variableCatalog={[]}
+            node={createAgentNode()}
+            capabilities={capabilities}
+            onUpdate={(next) => {
+              updates.push(next.data.agentConfig?.roleId ?? "");
+              void next;
+            }}
+            onDelete={() => undefined}
+            onCloseNode={() => undefined}
+          />
+        </AppI18nProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(
+      await screen.findByLabelText("Agent 模型"),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByLabelText("角色")).not.toBeInTheDocument(),
+    );
+    const prompt = screen.getByLabelText("自定义 Prompt");
+    await user.click(prompt);
+    await user.type(prompt, "继续");
+    // Editing another field must not clear the stored roleId, only the UI hides it.
+    expect(updates.at(-1)).toBe("Researcher");
+  });
+
+  it("shows the role field when the gateway is email (development)", async () => {
+    await appI18n.changeLanguage("zh-CN");
+    serveProviders(["email"]);
+    render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <AppI18nProvider>
+          <WorkflowInspector
+            variableCatalog={[]}
+            node={createAgentNode()}
+            capabilities={createMockWorkflowCapabilities("zh-CN")}
+            onUpdate={() => undefined}
+            onDelete={() => undefined}
+            onCloseNode={() => undefined}
+          />
+        </AppI18nProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByLabelText("角色")).toBeInTheDocument();
+    expect(screen.getByText("研究员")).toBeInTheDocument();
   });
 });

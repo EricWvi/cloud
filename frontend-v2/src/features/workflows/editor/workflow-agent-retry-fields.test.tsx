@@ -11,6 +11,7 @@ import {
 } from "@/lib/workflows/mock";
 import { appI18n, translationResources } from "@/lib/workflows/test/i18n-instance";
 import { AppI18nProvider } from "@/lib/workflows/test/i18n";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WorkflowInspector } from "./workflow-inspector";
 
 /** An Agent node built from the catalog default, which carries no `retry` field. */
@@ -52,38 +53,42 @@ function Harness({
 }) {
   const [current, setCurrent] = useState(node);
   return (
-    <AppI18nProvider>
-      <WorkflowInspector
-        variableCatalog={[]}
-        node={current}
-        capabilities={createMockWorkflowCapabilities("en-US")}
-        onUpdate={setCurrent}
-        onDelete={() => undefined}
-        onCloseNode={() => undefined}
-      />
-      <pre data-testid="agent-config">
-        {JSON.stringify(current.data.agentConfig)}
-      </pre>
-      {externalChanges.map(([label, retry]) => (
-        <button
-          key={label}
-          type="button"
-          onClick={() =>
-            setCurrent((previous) => {
-              const agentConfig = { ...previous.data.agentConfig! };
-              if (retry === undefined) {
-                delete agentConfig.retry;
-              } else {
-                agentConfig.retry = retry;
-              }
-              return { ...previous, data: { ...previous.data, agentConfig } };
-            })
-          }
-        >
-          {label}
-        </button>
-      ))}
-    </AppI18nProvider>
+    <QueryClientProvider
+      client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+    >
+      <AppI18nProvider>
+        <WorkflowInspector
+          variableCatalog={[]}
+          node={current}
+          capabilities={createMockWorkflowCapabilities("en-US")}
+          onUpdate={setCurrent}
+          onDelete={() => undefined}
+          onCloseNode={() => undefined}
+        />
+        <pre data-testid="agent-config">
+          {JSON.stringify(current.data.agentConfig)}
+        </pre>
+        {externalChanges.map(([label, retry]) => (
+          <button
+            key={label}
+            type="button"
+            onClick={() =>
+              setCurrent((previous) => {
+                const agentConfig = { ...previous.data.agentConfig! };
+                if (retry === undefined) {
+                  delete agentConfig.retry;
+                } else {
+                  agentConfig.retry = retry;
+                }
+                return { ...previous, data: { ...previous.data, agentConfig } };
+              })
+            }
+          >
+            {label}
+          </button>
+        ))}
+      </AppI18nProvider>
+    </QueryClientProvider>
   );
 }
 
