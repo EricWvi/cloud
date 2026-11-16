@@ -17,22 +17,31 @@ func TestRestartedServiceRejectsTokensIssuedBeforeTheRestart(t *testing.T) {
 	before := testService(t, FixtureProvider{})
 	beforeClient := serviceClient(t, before, true)
 	token, grant := issueToken(t, before, beforeClient, "execution")
-	err := filepath.WalkDir(before.opts.StateDirectory, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || !d.Type().IsRegular() {
-			return err
-		}
-		data, err := os.ReadFile(path)
+	// A grant could be persisted lazily, for example on renewal, so the state directory is
+	// checked again after both instances have issued, renewed and refused grants.
+	unpersisted := func() {
+		t.Helper()
+		err := filepath.WalkDir(before.opts.StateDirectory, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || !d.Type().IsRegular() {
+				return err
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if strings.Contains(string(data), token) || strings.Contains(string(data), grant) {
+				t.Errorf("%s persists the grant", path)
+			}
+			return nil
+		})
 		if err != nil {
-			return err
+			t.Fatal(err)
 		}
-		if strings.Contains(string(data), token) || strings.Contains(string(data), grant) {
-			t.Errorf("%s persists the grant", path)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
+	if status, data := request(t, beforeClient, "POST", before.URL+"/internal/v1/model-grants/"+grant+"/renew", "", `{"executionId":"execution"}`); status != 200 {
+		t.Fatalf("renewal on the instance that issued the grant=%d %s", status, data)
+	}
+	unpersisted()
 
 	after, err := Start(before.opts)
 	if err != nil {
@@ -64,4 +73,5 @@ func TestRestartedServiceRejectsTokensIssuedBeforeTheRestart(t *testing.T) {
 	if status, data := request(t, afterClient, "POST", after.URL+"/runtime/openai/v1/chat/completions", fresh, completion); status != 200 {
 		t.Fatalf("token issued after the restart=%d %s", status, data)
 	}
+	unpersisted()
 }

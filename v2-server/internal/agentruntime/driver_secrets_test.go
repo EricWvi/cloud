@@ -34,8 +34,8 @@ func TestDriverIPCSendsNodeNoUpstreamSecret(t *testing.T) {
 	var mu sync.Mutex
 	var sent []node.Message
 	h := newIPCHarnessWith(t, map[string]nodeservices.Binding{
-		"fixture":          {Model: ipcModel, Protocol: nodeservices.OpenAICompletions, Provider: openAI},
-		"messages-fixture": {Model: ipcModel, Protocol: nodeservices.AnthropicMessages, Provider: messages},
+		"fixture":          {Model: ipcModel(), Protocol: nodeservices.OpenAICompletions, Provider: openAI},
+		"messages-fixture": {Model: ipcModel(), Protocol: nodeservices.AnthropicMessages, Provider: messages},
 	}, func(_ *fakeNodeIPC, m node.Message) bool {
 		mu.Lock()
 		defer mu.Unlock()

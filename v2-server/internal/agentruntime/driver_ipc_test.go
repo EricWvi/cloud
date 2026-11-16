@@ -102,13 +102,16 @@ type ipcHarness struct {
 	scope   execution.Scope
 }
 
-var ipcModel = nodeservices.Model{ID: "fixture", Name: "Fixture", ContextWindow: 4096, MaxTokens: 256}
+// ipcModel is the frozen model of the harness bindings.
+func ipcModel() nodeservices.Model {
+	return nodeservices.Model{ID: "fixture", Name: "Fixture", ContextWindow: 4096, MaxTokens: 256}
+}
 
 func newIPCHarness(t *testing.T, hook func(*fakeNodeIPC, node.Message) bool) *ipcHarness {
 	t.Helper()
 	return newIPCHarnessWith(t, map[string]nodeservices.Binding{
-		"fixture":          {Model: ipcModel, Protocol: nodeservices.OpenAICompletions, Provider: nodeservices.FixtureProvider{}},
-		"messages-fixture": {Model: ipcModel, Protocol: nodeservices.AnthropicMessages, Provider: nodeservices.MessagesFixtureProvider{}},
+		"fixture":          {Model: ipcModel(), Protocol: nodeservices.OpenAICompletions, Provider: nodeservices.FixtureProvider{}},
+		"messages-fixture": {Model: ipcModel(), Protocol: nodeservices.AnthropicMessages, Provider: nodeservices.MessagesFixtureProvider{}},
 	}, hook)
 }
 

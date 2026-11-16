@@ -105,6 +105,11 @@ func TestNodeIsHandedNoUpstreamSecret(t *testing.T) {
 			t.Fatalf("%s renew=%d %s", binding, status, data)
 		}
 		handed[binding+" renewal"] = data
+		status, data = request(t, client, "DELETE", grants+"/"+issued.GrantID, "", `{"executionId":"`+execution+`"}`)
+		if status != 200 {
+			t.Fatalf("%s revoke=%d %s", binding, status, data)
+		}
+		handed[binding+" revocation"] = data
 	}
 
 	for name, data := range handed {
