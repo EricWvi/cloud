@@ -23,7 +23,7 @@ func TestRuntimeMCPGatePreservesIdlePredecessorAndCreatesNoRecords(t *testing.T)
 	if _, err = f.db.CreateProject(f.ctx, f.scope, store.Project{ID: "project", Name: "Demo", RepositoryURL: "https://example.com/demo.git", Commit: "fixed", MirrorPath: "/fake/unused"}); err != nil {
 		t.Fatal(err)
 	}
-	req := execution.StartRequest{Caller: execution.Caller{Kind: execution.CallerWorkflow, ID: "run", NodeID: "a", AttemptID: "attempt"}, Target: execution.Target{ProjectID: "project"}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("run")}
+	req := execution.StartRequest{Lifetime: execution.LifetimeHeld, Caller: execution.Caller{Kind: execution.CallerWorkflow, ID: "run", NodeID: "a", AttemptID: "attempt"}, Target: execution.Target{ProjectID: "project"}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("run")}
 	ref, err := f.service.Start(f.ctx, f.scope, req)
 	if err != nil {
 		t.Fatal(err)
