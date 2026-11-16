@@ -32,6 +32,8 @@ export default defineConfig({
           env: {
             V2_ADDR: `127.0.0.1:${serverPort}`,
             V2_DATABASE_URL: database,
+            // Public fixture key for this isolated test server; external servers keep their own setup.
+            V2_MARKET_CREDENTIAL_KEY: process.env.V2_MARKET_CREDENTIAL_KEY ?? Buffer.alloc(32, 7).toString('base64'),
             // Opt-in real Agent acceptance: forward the prepared Node assets and an isolated data directory
             // so the Agent specs can run here; without them those specs skip themselves.
             ...(process.env.V2_NODE_ASSETS_DIR ? { V2_NODE_ASSETS_DIR: process.env.V2_NODE_ASSETS_DIR } : {}),

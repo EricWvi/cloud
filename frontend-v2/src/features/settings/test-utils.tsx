@@ -89,6 +89,7 @@ export function installMarketplaceBackend({
   marketSources = [],
   skills = [],
   progress = [],
+  mcpInstallFailure,
 }: {
   role?: 'owner' | 'member'
   catalog?: PluginCatalogEntry[]
@@ -96,6 +97,7 @@ export function installMarketplaceBackend({
   marketSources?: MarketSource[]
   skills?: Skill[]
   progress?: { namespace: string; identifier: string; results: SkillProgress[] }[]
+  mcpInstallFailure?: string
 } = {}) {
   const state = {
     catalog: [...catalog],
@@ -136,6 +138,7 @@ export function installMarketplaceBackend({
       }
       const entry = state.catalog.find((item) => item.id === body.identifier)
       if (!entry) return { status: 404, data: { code: 'plugin_not_found', params: {} } }
+      if (mcpInstallFailure) return { status: 503, data: { code: mcpInstallFailure, params: {} } }
       const resource: McpInstallation = {
         id: entry.id, name: entry.title, pluginVersion: entry.version, revision: 1, state: 'installed',
         settings: [{ id: 'token', label: 'API Token', type: 'string', secret: true, required: true, description: '' }],

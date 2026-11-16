@@ -14,19 +14,21 @@ test('installs a real MCP and preserves its workflow binding after removal', asy
   const prior = existing.find((item: { id: string }) => item.id === 'official/ora-space.tavily-search')
   if (prior) expect((await page.request.delete(mcpPath, { data: { identifier: prior.id, revision: prior.revision } })).ok()).toBe(true)
   await page.reload()
+  const installing = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === mcpPath)
   await plugin.getByRole('button', { name: '安装', exact: true }).click()
+  const installedResponse = await installing
+  expect(installedResponse.status(), await installedResponse.text()).toBe(200)
   await expect(plugin.getByText('已安装', { exact: true })).toBeVisible({ timeout: 90_000 })
   await plugin.getByRole('button', { name: '查看插件 Tavily' }).click()
   await expect(page.getByText('MCP 配置', { exact: true })).toBeVisible()
   const secrets = page.locator('input[type=password]')
+  await expect(secrets).toHaveCount(1)
   for (let i = 0; i < await secrets.count(); i++) await secrets.nth(i).fill('mcp-e2e-fixture-token')
-  if (await secrets.count()) {
-    await page.getByRole('button', { name: '保存 MCP 配置', exact: true }).click()
-    await expect(page.getByText('MCP 配置已保存')).toBeVisible()
-    await expect(secrets.first()).toHaveValue('')
-  }
+  await page.getByRole('button', { name: '保存 MCP 配置', exact: true }).click()
+  await expect(page.getByText('MCP 配置已保存')).toBeVisible()
+  await expect(secrets.first()).toHaveValue('')
   await page.reload()
-  await plugin.getByRole('button', { name: '查看插件 Tavily' }).click()
+  // The detail selection is in the URL and survives refresh.
   await expect(page.getByText('秘密值已配置')).toBeVisible()
   await expect(secrets.first()).toHaveValue('')
   await page.screenshot({ path: info.outputPath('1201-mcp-settings.png'), animations: 'disabled' })

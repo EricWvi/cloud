@@ -1,4 +1,5 @@
 import { useRef } from 'react'
+import { isAxiosError } from 'axios'
 import { create } from 'zustand'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { PluginCatalogEntry, SpacePlugin } from '@/api/generated.schemas'
@@ -92,10 +93,17 @@ export function usePluginMarketplace() {
     mutationFn: async (entry: PluginCatalogEntry) => {
       if (!tenantId || !spaceId) throw new Error('cloud space not resolved')
       if (entry.kind === 'mcp') {
-        return installMcp(tenantId, spaceId, {
-          identifier: pluginKey(entry), pluginVersion: entry.version,
-          revision: mcps.find((item) => item.id === pluginKey(entry))?.revision ?? 0,
-        })
+        try {
+          return await installMcp(tenantId, spaceId, {
+            identifier: pluginKey(entry), pluginVersion: entry.version,
+            revision: mcps.find((item) => item.id === pluginKey(entry))?.revision ?? 0,
+          })
+        } catch (error) {
+          if (isAxiosError(error) && error.response?.data?.code === 'plugin_package_unavailable') {
+            throw new Error('插件包暂时无法下载，请稍后重试。', { cause: error })
+          }
+          throw error
+        }
       }
       if (
         entry.kind !== 'skill' &&

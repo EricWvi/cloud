@@ -270,10 +270,10 @@ describe('workflow runs in chat', () => {
   }, 30_000)
 
   it('analyzes a finished run once and explains each Agent from that analysis with its own list', async () => {
-    // Two Agents with different lists: each node's details must show only its own.
+    // Two Agents with different lists: applied MCP must not inherit another node's warning.
     workflows.runPolicy = (graph) => {
       const [first, second] = (JSON.parse(graph) as { nodes: { id: string; data: { kind: string } }[] }).nodes.filter((n) => n.data.kind === 'agent')
-      return { unappliedSettings: [{ nodeId: first!.id, settings: ['role', 'retry'] }, { nodeId: second!.id, settings: ['mcp'] }], unsupportedNodes: [] }
+      return { unappliedSettings: [{ nodeId: first!.id, settings: ['role', 'retry'] }, { nodeId: second!.id, settings: [] }], unsupportedNodes: [] }
     }
     const user = userEvent.setup()
     await renderPage()
@@ -303,10 +303,10 @@ describe('workflow runs in chat', () => {
     await user.click(await screen.findByRole('button', { name: '打开节点详情' }))
     const details = await screen.findByLabelText('阶段详情')
     expect(await within(details).findByRole('note', { name: 'v2 未应用的设置' })).toHaveTextContent(/^v2 未应用：角色、自动重试/)
-    // The second Agent has not run; its details show its own analysis list, not the first Agent's.
+    // The second Agent has no unapplied settings; it must not inherit the first Agent's warning.
     const second = (JSON.parse(entry.graph) as { nodes: { id: string; data: { kind: string; title?: string } }[] }).nodes.filter((n) => n.data.kind === 'agent')[1]!
     await user.click(screen.getByRole('button', { name: `${second.data.title}: 未执行` }))
-    await waitFor(() => expect(within(screen.getByLabelText('阶段详情')).getByRole('note', { name: 'v2 未应用的设置' })).toHaveTextContent(/^v2 未应用：MCP/))
+    await waitFor(() => expect(within(screen.getByLabelText('阶段详情')).queryByRole('note', { name: 'v2 未应用的设置' })).not.toBeInTheDocument())
     // The frozen graph never changes: switching views and reading details asks for no second analysis.
     await user.click(screen.getByRole('button', { name: '全图' }))
     await expect(waitFor(() => expect(analyses()).toBeGreaterThan(before + 1), { timeout: 300 })).rejects.toThrow()

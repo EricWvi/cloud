@@ -171,6 +171,18 @@ it('keeps Hooks read-only with no install entry', async () => {
   expect(backend.bodies).toHaveLength(0)
 })
 
+it('explains an unavailable MCP download and keeps installation available for retry', async () => {
+  const backend = installMarketplaceBackend({ catalog: [github], mcpInstallFailure: 'plugin_package_unavailable' })
+  const user = userEvent.setup()
+  renderSettingsPage(<PluginsPage />)
+  const row = await screen.findByRole('article', { name: 'GitHub 工具' })
+  await user.click(within(row).getByRole('button', { name: '安装' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('插件包暂时无法下载，请稍后重试。')
+  await waitFor(() => expect(within(row).getByRole('button', { name: '安装' })).toBeEnabled())
+  expect(within(row).getByText('未安装')).toBeInTheDocument()
+  expect(backend.state.mcps).toEqual([])
+})
+
 it('saves decimal MCP settings without browser integer-step validation', async () => {
   const backend = installMarketplaceBackend({ catalog: [github] })
   backend.state.mcps.push(installedGithub())
