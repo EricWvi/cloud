@@ -33,7 +33,10 @@ func (a *failureAgent) Run(ctx context.Context, _ execution.Scope, _ execution.S
 			return execution.Result{}, err
 		}
 	}
-	return a.result, a.runErr
+	a.mu.Lock()
+	result := a.result
+	a.mu.Unlock()
+	return result, a.runErr
 }
 func (a *failureAgent) End(ctx context.Context, sid string) error {
 	select {
@@ -209,31 +212,39 @@ func TestRuntimeAgentFailureRequiresStopBeforeSessionEnd(t *testing.T) {
 	}
 }
 
-// flakyFinish fails the turn-result write while down is set and counts every attempt.
+// flakyFinish fails the turn-result write of the first session it sees, as a database fault
+// that outlasts that turn would, and counts every attempt. Other sessions write normally.
 type flakyFinish struct {
 	write    func(context.Context, execution.Scope, execution.Ref, execution.Result) (execution.Result, error)
-	failures atomic.Int32 // remaining failures; negative fails forever
+	failures atomic.Int32 // remaining failures; negative fails until reset
 	calls    atomic.Int32
+	victim   atomic.Pointer[string]
 }
 
 func (f *flakyFinish) finish(ctx context.Context, scope execution.Scope, ref execution.Ref, result execution.Result) (execution.Result, error) {
-	f.calls.Add(1)
-	if n := f.failures.Load(); n != 0 {
-		if n > 0 {
-			f.failures.Add(-1)
+	f.victim.CompareAndSwap(nil, &ref.SessionID)
+	if *f.victim.Load() == ref.SessionID {
+		f.calls.Add(1)
+		if n := f.failures.Load(); n != 0 {
+			if n > 0 {
+				f.failures.Add(-1)
+			}
+			return execution.Result{}, errors.New("database unavailable")
 		}
-		return execution.Result{}, errors.New("database unavailable")
 	}
 	return f.write(ctx, scope, ref, result)
 }
 
-func shortFinishRetries(t *testing.T) {
+func brokenResultWrites(t *testing.T, f *runtimeFixture, failures int32) *flakyFinish {
 	t.Helper()
-	old := finishRetryDelays
-	finishRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
-	t.Cleanup(func() { finishRetryDelays = old })
+	f.service.finishRetryDelays, f.service.concludeInterval = []time.Duration{time.Millisecond, time.Millisecond}, 20*time.Millisecond
+	flaky := &flakyFinish{write: f.service.finishTurn}
+	flaky.failures.Store(failures)
+	f.service.finishTurn = flaky.finish
+	return flaky
 }
 
+// waitUnsaved returns once the session's worker has given up on its result write and gone.
 func waitUnsaved(t *testing.T, f *runtimeFixture, sid string) {
 	t.Helper()
 	for {
@@ -252,17 +263,32 @@ func waitUnsaved(t *testing.T, f *runtimeFixture, sid string) {
 	}
 }
 
+func waitSessionEnded(t *testing.T, f *runtimeFixture, sid string) {
+	t.Helper()
+	for {
+		session, err := f.service.ReadSession(f.ctx, f.scope, sid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if session.EndedAt != nil {
+			return
+		}
+		select {
+		case <-f.ctx.Done():
+			t.Fatal("session with a recovered result write never ended")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
 func TestRuntimeRetriesAResultWriteBeforeFailingTheSession(t *testing.T) {
-	shortFinishRetries(t)
 	f := runtimeDatabase(t, nil)
-	flaky := &flakyFinish{write: f.service.finishTurn}
-	flaky.failures.Store(int32(len(finishRetryDelays)))
-	f.service.finishTurn = flaky.finish
+	flaky := brokenResultWrites(t, f, 2)
 	ref := startModel(t, f, modelRequest("chat", "first", "hello"))
 	if result, _ := observeTurn(t, f, ref, 0); result.Status != execution.StatusCompleted {
 		t.Fatalf("retried write: %+v", result)
 	}
-	if got := flaky.calls.Load(); got != int32(len(finishRetryDelays))+1 {
+	if got := flaky.calls.Load(); got != 3 {
 		t.Fatalf("write attempts=%d", got)
 	}
 	if _, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: ref.SessionID, Caller: execution.Caller{Kind: execution.CallerChat, ID: "chat", AttemptID: "second"}, Prompt: execution.TextPrompt("again")}); err != nil {
@@ -270,70 +296,49 @@ func TestRuntimeRetriesAResultWriteBeforeFailingTheSession(t *testing.T) {
 	}
 }
 
-func TestRuntimeResultWriteFailureOnlyFailsItsSession(t *testing.T) {
-	shortFinishRetries(t)
+// Callers never End a turn they are still waiting for: workflows and task runs wait on the
+// subscription, schedules poll the attempt. A result the worker could not write must reach
+// them by itself once the database returns.
+func TestRuntimeUnstoredResultReachesWaitingCallersWithoutEnd(t *testing.T) {
 	f := runtimeDatabase(t, nil)
-	flaky := &flakyFinish{write: f.service.finishTurn}
-	flaky.failures.Store(-1)
-	f.service.finishTurn = flaky.finish
+	flaky := brokenResultWrites(t, f, -1)
 	ref := startModel(t, f, modelRequest("chat", "first", "hello"))
+	first := execution.Caller{Kind: execution.CallerChat, ID: "chat", AttemptID: "first"}
 	waitUnsaved(t, f, ref.SessionID)
-	if got := flaky.calls.Load(); got != int32(len(finishRetryDelays))+1 {
-		t.Fatalf("write attempts=%d", got)
+	if got := flaky.calls.Load(); got < 3 {
+		t.Fatalf("worker gave up after %d write attempts", got)
 	}
 	if _, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: ref.SessionID, Caller: execution.Caller{Kind: execution.CallerChat, ID: "chat", AttemptID: "second"}, Prompt: execution.TextPrompt("again")}); !errors.Is(err, execution.ErrSessionEnded) {
 		t.Fatalf("session with an unstored result accepted Append: %v", err)
 	}
+	if turn, err := f.service.ReadAttempt(f.ctx, f.scope, first); err != nil || turn.Result != nil {
+		t.Fatalf("unstored result was readable: %+v err=%v", turn, err)
+	}
 
-	// The database recovers: other conversations and the catalog were never fenced.
-	flaky.failures.Store(0)
+	// Only this session failed: the catalog and other conversations were never fenced.
 	if _, err := f.service.ListModels(f.ctx, f.scope); err != nil {
 		t.Fatalf("one write failure withdrew model readiness: %v", err)
 	}
 	if result, _ := observeTurn(t, f, startModel(t, f, modelRequest("other", "first", "hello")), 0); result.Status != execution.StatusCompleted {
-		t.Fatalf("another conversation after a write failure: %+v", result)
+		t.Fatalf("another conversation during a write failure: %+v", result)
 	}
 
-	// Ending the failed session first stores the result its worker could not write.
-	if err := f.service.End(f.ctx, f.scope, ref.SessionID); err != nil {
-		t.Fatal(err)
+	// The database returns. Nobody calls End or Cancel.
+	flaky.failures.Store(0)
+	if result, _ := observeTurn(t, f, ref, 0); result.Status != execution.StatusCompleted {
+		t.Fatalf("subscriber did not receive the recovered result: %+v", result)
 	}
-	turn, err := f.service.ReadAttempt(f.ctx, f.scope, execution.Caller{Kind: execution.CallerChat, ID: "chat", AttemptID: "first"})
-	if err != nil || turn.Result == nil || turn.Result.Status != execution.StatusCompleted {
-		t.Fatalf("End did not store the unsaved result: %+v err=%v", turn, err)
+	if turn, err := f.service.ReadAttempt(f.ctx, f.scope, first); err != nil || turn.Result == nil || turn.Result.Status != execution.StatusCompleted {
+		t.Fatalf("attempt reader did not receive the recovered result: %+v err=%v", turn, err)
 	}
-	session, err := f.service.ReadSession(f.ctx, f.scope, ref.SessionID)
-	if err != nil || session.EndedAt == nil {
-		t.Fatalf("failed session did not end: %+v err=%v", session, err)
-	}
+	waitSessionEnded(t, f, ref.SessionID)
 }
 
 func TestRuntimeAgentResultWriteFailureStopsOnlyThatAgent(t *testing.T) {
-	shortFinishRetries(t)
-	f := runtimeDatabase(t, nil)
-	if err := f.service.Close(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	completed := execution.Result{Status: execution.StatusCompleted, Answer: "complete", AnswerComplete: true, StopReason: "end_turn"}
-	a := &failureAgent{result: completed, endEntered: make(chan string, 8), allowEnd: make(chan struct{})}
+	f, a, completed := silentStopFixture(t)
 	a.release()
-	var err error
-	f.service, err = New(f.ctx, Config{Store: f.db, Models: f.models, Agent: a})
-	if err != nil {
-		t.Fatal(err)
-	}
-	flaky := &flakyFinish{write: f.service.finishTurn}
-	flaky.failures.Store(-1)
-	f.service.finishTurn = flaky.finish
-	for _, id := range []string{"project", "other"} {
-		if _, err := f.db.CreateProject(f.ctx, f.scope, store.Project{ID: id, Name: id, RepositoryURL: "https://example.com/" + id + ".git", Commit: "fixed", MirrorPath: "/fake/" + id}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	chat := func(id, project string) execution.StartRequest {
-		return execution.StartRequest{Caller: execution.Caller{Kind: execution.CallerChat, ID: id, AttemptID: "first"}, Target: execution.Target{ProjectID: project}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("run")}
-	}
-	ref, err := f.service.Start(f.ctx, f.scope, chat("chat", "project"))
+	flaky := brokenResultWrites(t, f, -1)
+	ref, err := f.service.Start(f.ctx, f.scope, projectChat("chat", "project"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,28 +354,91 @@ func TestRuntimeAgentResultWriteFailureStopsOnlyThatAgent(t *testing.T) {
 	if got := a.rebuilds(); len(got) != 0 {
 		t.Fatalf("confirmed stop still marked the Node for rebuild: %v", got)
 	}
+	startAgentTurn(t, f, projectChat("other-chat", "other"), completed)
+
 	flaky.failures.Store(0)
-	otherRef, err := f.service.Start(f.ctx, f.scope, chat("other-chat", "other"))
+	if result, _ := observeTurn(t, f, ref, 0); !reflect.DeepEqual(result, completed) {
+		t.Fatalf("subscriber did not receive the original result: %+v", result)
+	}
+	waitSessionEnded(t, f, ref.SessionID)
+}
+
+func TestRuntimeUnstoredResultIsWrittenButSessionStaysOpenWhileStopIsUnconfirmed(t *testing.T) {
+	f, a, completed := silentStopFixture(t)
+	a.endErr = execution.ErrStopUnconfirmed
+	a.release()
+	flaky := brokenResultWrites(t, f, -1)
+	ref, err := f.service.Start(f.ctx, f.scope, projectChat("chat", "project"))
 	if err != nil {
-		t.Fatalf("other project's new conversation was refused: %v", err)
+		t.Fatal(err)
 	}
-	if result, _ := observeTurn(t, f, otherRef, 0); !reflect.DeepEqual(result, completed) {
-		t.Fatalf("other project's conversation: %+v", result)
+	waitUnsaved(t, f, ref.SessionID)
+	if got := a.rebuilds(); !slices.Equal(got, []string{ref.SessionID}) {
+		t.Fatalf("unconfirmed stop did not mark its Node: %v", got)
 	}
-	if _, err := f.service.Cancel(f.ctx, f.scope, ref); err != nil {
-		t.Fatalf("Cancel after the database recovered: %v", err)
+	flaky.failures.Store(0)
+	if result, _ := observeTurn(t, f, ref, 0); !reflect.DeepEqual(result, completed) {
+		t.Fatalf("subscriber did not receive the original result: %+v", result)
 	}
-	turn, err := f.service.ReadAttempt(f.ctx, f.scope, chat("chat", "project").Caller)
-	if err != nil || turn.Result == nil || !reflect.DeepEqual(*turn.Result, completed) {
-		t.Fatalf("Cancel did not store the original result: %+v err=%v", turn, err)
+	// Several retry intervals later the session is still open: only stop proof may end it.
+	time.Sleep(5 * f.service.concludeInterval)
+	if session, err := f.service.ReadSession(f.ctx, f.scope, ref.SessionID); err != nil || session.EndedAt != nil {
+		t.Fatalf("session ended without stop confirmation: %+v err=%v", session, err)
 	}
 }
 
-func shortStopTimeout(t *testing.T, d time.Duration) {
-	t.Helper()
-	old := stopTimeout
-	stopTimeout = d
-	t.Cleanup(func() { stopTimeout = old })
+func TestRuntimeInvalidResultFailsItsTurnInsteadOfNeverEndingIt(t *testing.T) {
+	f, a, completed := silentStopFixture(t)
+	a.result = execution.Result{Status: execution.StatusCompleted, Answer: "truncated"} // AnswerComplete is missing.
+	a.release()
+	ref, err := f.service.Start(f.ctx, f.scope, projectChat("chat", "project"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, _ := observeTurn(t, f, ref, 0); result.Status != execution.StatusFailed || result.FailureCode != "execution_failed" {
+		t.Fatalf("unstorable result: %+v", result)
+	}
+	waitSessionEnded(t, f, ref.SessionID)
+	a.mu.Lock()
+	a.result = completed
+	a.mu.Unlock()
+	startAgentTurn(t, f, projectChat("other-chat", "other"), completed)
+}
+
+func TestRuntimeCancelAndEndStoreAnUnsavedResultThemselves(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	flaky := brokenResultWrites(t, f, -1)
+	f.service.concludeInterval = time.Hour // Only the explicit calls below may store the results.
+	cancelled := startModel(t, f, modelRequest("cancelled", "first", "hello"))
+	waitUnsaved(t, f, cancelled.SessionID)
+	flaky.failures.Store(0)
+	result, err := f.service.Cancel(f.ctx, f.scope, cancelled)
+	if err != nil || result.Status != execution.StatusCompleted {
+		t.Fatalf("Cancel of a turn with an unstored result: %+v err=%v", result, err)
+	}
+	if session, err := f.service.ReadSession(f.ctx, f.scope, cancelled.SessionID); err != nil || session.EndedAt == nil {
+		t.Fatalf("session with an unstored result stayed open: %+v err=%v", session, err)
+	}
+
+	// A healthy conversation is untouched by the same late Cancel: its session stays open.
+	healthy := startModel(t, f, modelRequest("healthy", "first", "hello"))
+	observeTurn(t, f, healthy, 0)
+	if result, err := f.service.Cancel(f.ctx, f.scope, healthy); err != nil || result.Status != execution.StatusCompleted {
+		t.Fatalf("late Cancel of a finished turn: %+v err=%v", result, err)
+	}
+	if _, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: healthy.SessionID, Caller: execution.Caller{Kind: execution.CallerChat, ID: "healthy", AttemptID: "second"}, Prompt: execution.TextPrompt("again")}); err != nil {
+		t.Fatalf("late Cancel ended a healthy conversation: %v", err)
+	}
+}
+
+func TestRuntimeCloseJoinsPendingResultWrites(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	brokenResultWrites(t, f, -1)
+	ref := startModel(t, f, modelRequest("chat", "first", "hello"))
+	waitUnsaved(t, f, ref.SessionID)
+	if err := f.service.Close(f.ctx); err != nil {
+		t.Fatalf("Close with a result write still pending: %v", err)
+	}
 }
 
 // silentStopFixture runs turns that complete normally on an Agent whose End stays unconfirmed
@@ -417,8 +485,8 @@ func startAgentTurn(t *testing.T, f *runtimeFixture, req execution.StartRequest,
 }
 
 func TestRuntimeStopBudgetAfterACompletedTurnMarksOnlyThatNode(t *testing.T) {
-	shortStopTimeout(t, 150*time.Millisecond)
 	f, a, completed := silentStopFixture(t)
+	f.service.stopTimeout = 150 * time.Millisecond
 
 	// An explicit End after a normally completed turn: the service's budget, not the caller's
 	// far deadline, bounds the wait, and running out of it marks the Node.

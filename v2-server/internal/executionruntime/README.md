@@ -16,7 +16,7 @@ Start/StartModel/Append 以当前租户授权（`TenantAccess`，store 在记录
 重新检查授权、会话和 attempt，再接收下一轮；等待遵从请求 context，不提前释放目录或重叠派发。
 原轮尚无持久终态时仍立即返回 Busy，已存在的同 attempt 重试仍直接返回原 Ref。
 不同对话、定时触发各有自己的 checkout；同一 workflow run 复用一个 checkout，run 的各个会话在里面并存：换节点时不结束之前的会话（`LifetimeHeld` 的交互节点会话因此能一直等到发起人回来），每个会话由调用方自己 End；它们的轮次可以同时执行。调用方 End 失败的会话不会再被下一个节点的 Start 顺带结束，它留在 checkout 上并占 Node 的一个会话名额，直到该项目的 Node 被重建（见下文）或进程重启。Node 以 `shared_checkout_sessions` 能力允许同一 checkout 上有多个 Agent 会话。
-没有完成的 Agent 轮次结束 `LifetimeTurn` 会话；`LifetimeHeld` 会话只在 driver 报错（Agent 丢失）时结束，runtime 自己写的结果此时带 `AgentLost`。
+没有完成的 Agent 轮次结束 `LifetimeTurn` 会话；`LifetimeHeld` 会话只在 driver 报错（Agent 丢失）或这一轮的结果写不进数据库时结束，runtime 自己写的结果此时带 `AgentLost`。
 只支持文本 prompt；附件、权限询问、运行中切换模型尚不支持。
 
 公共读取、Cancel 和 End 只按原归属（租户与用户）定位，不再检查租户授权：页面请求已由 HTTP 租户路由授权。执行中撤权后不能再接收新轮次。
@@ -30,7 +30,10 @@ Agent Cancel 使用固定 Node 的 EndSession，因此会结束整个物理会�
 
 一轮的失败只影响它自己的会话，不让整个服务停止接收：
 - 终态写入失败先重试两次（间隔 1s、2s，每次 10s 上限）；仍失败时该会话不再接收新轮次，有项目的会话停止物理 Agent。
-  没写进去的结果留在内存，之后对该会话的 End 或 Cancel 先补写它，再结束会话；进程重启前没补上的按重启中断处理。
+  没写进去的结果留在内存，服务每 5s 在后台继续写，直到写入成功或服务关闭：等订阅或轮询结果的调用方（工作流、任务运行、定时任务、对话）
+  不需要调用 End，数据库恢复后就能收到 turn_ended。写入成功后，无项目或物理停止已确认的会话随即结束；停止未确认的只补写结果，
+  会话要等之后的 End 拿到停止确认才结束。End、Cancel 也会先补写。进程重启前没补上的按重启中断处理。
+- 存储拒绝的无效结果（例如 completed 但答案不完整）永远写不进去，改记为 `execution_failed`，不让这一轮一直停在运行中。
 - 物理停止由服务自己限时 30s，worker 收尾、End 和 Cancel 对同一会话共用一次尝试：调用方可以提前放弃等待，尝试本身继续，
   所以调用方的短 deadline 不会把只是回复慢的 Node 标坏，没有 deadline 的调用方也不会一直等。到时仍未确认就调用 driver 的 `Rebuild`，
   只把该项目的 Node 标为需要重建；同一项目的下一个会话或之后的 End 先由 supervisor 确认旧进程树停止，再起新 Node。
@@ -56,7 +59,7 @@ OpenAI 协议的 `fixture` 与 Messages 协议的 `messages-fixture` 分别生�
 ## 验证
 
 普通包测试使用独立的真实 PostgreSQL schema，覆盖 attempt 幂等、并发接收、事件续读、多轮、
-取消、停止失败只围住该会话、终态写入的重试与补写、撤权后的公开控制拒绝与内部终态结算、关闭重开后的完整历史。
+取消、停止失败只围住该会话、停止限时且不占接收锁、终态写入的重试与后台补写、撤权后的公开控制拒绝与内部终态结算、关闭重开后的完整历史。
 `TestRealServiceAgentPostgresRestartAndConcurrentConversations` 在显式配置 `V2_NODE_ASSETS_DIR` 后
 通过真实固定 Node/OpenCode 与 fixture 模型验证 shell 文件、双 checkout、End 和重启读回。
 `TestRealClaudeCodeRunsTheMessagesFixture` 用同样的资产让固定 Claude Code 走 Messages fixture：
