@@ -69,6 +69,15 @@ function Harness({
 }
 
 describe("workflow MCP catalog", () => {
+  it("caps enabled bindings at sixteen and allows disabling one to release capacity", async () => {
+    await appI18n.changeLanguage("en-US");
+    const user = userEvent.setup();
+    const initial = Array.from({ length: 16 }, (_, index) => ({ mcpId: `official/tool-${index}`, enabled: true }));
+    render(<Harness initial={initial} choices={[...initial.map((item) => ({ value: item.mcpId, label: item.mcpId })), { value: "official/extra", label: "Extra" }]} />);
+    expect(screen.getByRole("button", { name: "Add MCP" })).toBeDisabled();
+    await user.click(screen.getAllByRole("switch")[0]);
+    expect(screen.getByRole("button", { name: "Add MCP" })).toBeEnabled();
+  });
   it("uses installed MCP identities and readiness, regardless of process runtime", () => {
     expect(
       workflowMcpChoices([

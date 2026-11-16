@@ -55,7 +55,7 @@ import type {
   WorkflowVersion,
 } from "../contracts";
 import { ContractError } from "../contracts";
-import { workflowPluginCatalog } from "./plugin-catalog";
+import { workflowPluginCatalog, workflowMcpCatalog } from "./plugin-catalog";
 import { listSkills } from "@/lib/skills-api/generated";
 
 type Options = { signal?: AbortSignal };
@@ -189,7 +189,7 @@ export function createContractsClient(workflow: WorkflowContracts, tenantId: str
       }),
     },    plugin: {
       listInstalled: async (_request: Record<string, never>) => ({
-        plugins: (await workflowPluginCatalog(tenantId)).plugins,
+        plugins: await workflowMcpCatalog(tenantId),
       }),
     },
     executors: {

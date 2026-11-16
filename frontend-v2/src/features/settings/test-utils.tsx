@@ -15,6 +15,7 @@ import type {
 } from './market-api/generated'
 import type { Skill, SkillInput } from '@/lib/skills-api/generated'
 import { demoUser, fakeBackend } from '@/test/backend'
+import type { McpInstallation, McpSettingsInput } from '@/lib/mcp-api/generated'
 
 export const MARKET_TENANT = '00000000-0000-4000-8000-0000000000aa'
 export const MARKET_SPACE = '00000000-0000-4000-8000-0000000000bb'
@@ -102,6 +103,7 @@ export function installMarketplaceBackend({
     marketSources: [...marketSources],
     skills: [...skills],
     progress: [...progress],
+    mcps: [] as McpInstallation[],
   }
   const seen: string[] = []
   const bodies: unknown[] = []
@@ -109,6 +111,39 @@ export function installMarketplaceBackend({
     const method = config.method?.toUpperCase() ?? 'GET'
     const url = config.url ?? ''
     seen.push(`${method} ${url}`)
+    const mcpBase = `/api/v1/tenants/${MARKET_TENANT}/spaces/${MARKET_SPACE}/mcp`
+    if (url === `/api/v1/tenants/${MARKET_TENANT}/mcp`)
+      return { status: 200, data: { items: structuredClone(state.mcps) } }
+    if (url === mcpBase || url === mcpBase + '/settings') {
+      if (role !== 'owner') return { status: 403, data: { code: 'forbidden', params: {} } }
+      const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
+      bodies.push(body)
+      const index = state.mcps.findIndex((item) => item.id === body.identifier)
+      if (method === 'DELETE') { state.mcps.splice(index, 1); return { status: 204 } }
+      if (method === 'PUT') {
+        const input = body as McpSettingsInput
+        const current = state.mcps[index]
+        if (!current || current.revision !== input.revision) return { status: 409, data: { code: 'version_conflict', params: {} } }
+        const next = structuredClone(current)
+        for (const [id, value] of Object.entries(input.values)) {
+          if (next.settings.find((field) => field.id === id)?.secret) next.configuredSecrets = [...new Set([...next.configuredSecrets, id])]
+          else next.values[id] = value
+        }
+        for (const id of input.clear ?? []) { delete next.values[id]; next.configuredSecrets = next.configuredSecrets.filter((key) => key !== id) }
+        next.revision++
+        state.mcps[index] = next
+        return { status: 200, data: { resource: next } }
+      }
+      const entry = state.catalog.find((item) => item.id === body.identifier)
+      if (!entry) return { status: 404, data: { code: 'plugin_not_found', params: {} } }
+      const resource: McpInstallation = {
+        id: entry.id, name: entry.title, pluginVersion: entry.version, revision: 1, state: 'installed',
+        settings: [{ id: 'token', label: 'API Token', type: 'string', secret: true, required: true, description: '' }],
+        values: {}, configuredSecrets: [], complete: false, settingsMissing: ['token'],
+      }
+      state.mcps.push(resource)
+      return { status: 200, data: { resource } }
+    }
     if (url === '/api/v1/me/tenants')
       return {
         status: 200,

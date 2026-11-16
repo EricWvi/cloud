@@ -12,6 +12,7 @@ import {
   postApiV1TenantsTidSpacesSpaceIdPlugins,
 } from '@/api/spaces/spaces'
 import { useRole } from '@/app/auth/user'
+import { getListMcpQueryKey, useListMcp, installMcp, removeMcp } from '@/lib/mcp-api/generated'
 
 const useMarketScope = create<{
   byTenant: Record<string, string>
@@ -72,6 +73,8 @@ export function usePluginMarketplace() {
       },
     },
   )
+  const mcpQuery = useListMcp(tenantId, { query: { enabled: tenantId !== '', refetchInterval: 3000 } })
+  const mcps = mcpQuery.data?.items ?? []
   const client = useQueryClient()
   const canManage = useRole() === 'owner'
   const invalidate = async () => {
@@ -82,10 +85,18 @@ export function usePluginMarketplace() {
         spaceId,
       ),
     })
+    await client.invalidateQueries({ queryKey: getListMcpQueryKey(tenantId) })
+    await client.invalidateQueries({ queryKey: ['workflow-catalog', 'plugins'] })
   }
   const install = useMutation({
     mutationFn: async (entry: PluginCatalogEntry) => {
       if (!tenantId || !spaceId) throw new Error('cloud space not resolved')
+      if (entry.kind === 'mcp') {
+        return installMcp(tenantId, spaceId, {
+          identifier: pluginKey(entry), pluginVersion: entry.version,
+          revision: mcps.find((item) => item.id === pluginKey(entry))?.revision ?? 0,
+        })
+      }
       if (
         entry.kind !== 'skill' &&
         entry.kind !== 'agent' &&
@@ -123,6 +134,9 @@ export function usePluginMarketplace() {
   const remove = useMutation({
     mutationFn: async (selection: SpacePlugin) => {
       if (!tenantId || !spaceId) throw new Error('cloud space not resolved')
+      if (selection.kind === 'mcp') {
+        return removeMcp(tenantId, spaceId, { identifier: pluginKey(selection), revision: selection.version })
+      }
       const intent = JSON.stringify([
         'remove',
         tenantId,
@@ -143,7 +157,16 @@ export function usePluginMarketplace() {
     onError: () => void invalidate(),
   })
   const catalogItems = catalog.data?.items ?? []
-  const installations = selections.data?.items ?? []
+  const installations: SpacePlugin[] = [
+    ...(selections.data?.items ?? []).filter((item) => item.kind !== 'mcp'),
+    ...mcps.map((item): SpacePlugin => ({
+      id: item.id, tenantId, spaceId, sourceNamespace: item.id.split('/')[0],
+      identifier: item.id.slice(item.id.indexOf('/') + 1), kind: 'mcp',
+      desiredState: 'installed', observedState: 'installed',
+      desiredVersion: item.pluginVersion, observedVersion: item.pluginVersion,
+      version: item.revision, installError: null, createdAt: '', updatedAt: '',
+    })),
+  ]
   const byKey = new Map(
     installations.map((selection) => [pluginKey(selection), selection]),
   )
@@ -155,6 +178,7 @@ export function usePluginMarketplace() {
     catalog: catalogItems,
     syncedAt: catalog.data?.syncedAt ?? undefined,
     installations,
+    mcps,
     selection: (entry: { sourceNamespace: string; identifier: string }) =>
       byKey.get(pluginKey(entry)),
     canManage,
@@ -162,8 +186,8 @@ export function usePluginMarketplace() {
       tenants.isLoading ||
       spaces.isLoading ||
       catalog.isLoading ||
-      selections.isLoading,
-    error: tenants.error ?? spaces.error ?? catalog.error ?? selections.error,
+      selections.isLoading || mcpQuery.isLoading,
+    error: tenants.error ?? spaces.error ?? catalog.error ?? selections.error ?? mcpQuery.error,
     mutationError: install.error ?? remove.error,
     mutating: install.isPending || remove.isPending,
     resetErrors: () => {
@@ -173,7 +197,7 @@ export function usePluginMarketplace() {
     install: install.mutateAsync,
     remove: remove.mutateAsync,
     refetch: async () => {
-      await Promise.all([catalog.refetch(), selections.refetch()])
+      await Promise.all([catalog.refetch(), selections.refetch(), mcpQuery.refetch()])
     },
   }
 }

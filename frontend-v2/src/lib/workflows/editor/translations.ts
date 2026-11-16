@@ -461,7 +461,8 @@ export const workflowEditorTranslations = {
     "settings.workflow.toggleMcp": "启用或禁用 {{name}}",
     "settings.workflow.removeMcp": "移除 {{name}}",
     "settings.workflow.mcpAuthorizationHint":
-      "可选择设置中已安装的 MCP，并为本节点启用。",
+      "选择团队已安装的 MCP，为本节点授权。运行使用团队配置的共享凭据。",
+    "settings.workflow.mcp.limit": "每个节点最多启用 16 个 MCP。",
     "settings.workflow.field.prompt": "自定义 Prompt",
     "settings.workflow.field.insertVariable": "插入变量",
     "settings.workflow.field.promptCharacterCount": "{{count}} 个字符",
@@ -1073,7 +1074,8 @@ export const workflowEditorTranslations = {
     "settings.workflow.toggleMcp": "Enable or disable {{name}}",
     "settings.workflow.removeMcp": "Remove {{name}}",
     "settings.workflow.mcpAuthorizationHint":
-      "Choose MCPs installed in Settings and enable them for this node.",
+      "Authorize installed team MCPs for this node. Runs use the team's shared credentials.",
+    "settings.workflow.mcp.limit": "Each node supports up to 16 enabled MCPs.",
     "settings.workflow.field.prompt": "Custom prompt",
     "settings.workflow.field.insertVariable": "Insert variable",
     "settings.workflow.field.promptCharacterCount": "{{count}} characters",

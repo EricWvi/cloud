@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { Button, Input, Spinner, Textarea, cn } from "@/lib/workflows/host/ui";
+import { McpFailureDetail } from "./mcp-failure-detail";
 import {
   IconLayoutSidebarRightCollapse,
   IconSparkles,
@@ -664,6 +665,7 @@ function RunActInspectorPanel({
               >
                 {state.errorDetail != null && (
                   <div className="mb-2 space-y-1">
+                    <McpFailureDetail detail={state.errorDetail} />
                     <p className="font-medium">
                       {KNOWN_NODE_FAILURE_KINDS.has(state.errorDetail.kind)
                         ? t(`workflowRun.errorKind.${state.errorDetail.kind}`)

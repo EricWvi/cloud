@@ -6,7 +6,7 @@ beforeEach(() => {
   localStorage.clear()
 })
 
-it('keeps browser-local MCP and Agent installs scoped and persisted', () => {
+it('preserves historical browser selections scoped by user and space', () => {
   const { setSelected } = useDemoPluginSelections.getState()
 
   setSelected('owner:tenant:space-a', 'demo/sample-mcp', true)

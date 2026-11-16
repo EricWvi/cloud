@@ -50,7 +50,7 @@ const DEMO_SOURCE_URL = '本地'
 
 function demoEntry(
   identifier: string,
-  kind: 'mcp' | 'hook',
+  kind: 'hook',
   title: string,
   description: string,
 ): PluginCatalogEntry {
@@ -76,13 +76,6 @@ function demoEntry(
   }
 }
 
-export const demoMcpEntry = demoEntry(
-  'sample-mcp',
-  'mcp',
-  '示例 MCP 工具',
-  '演示用的 MCP 示例，安装只记录浏览器本地状态，不会连接外部服务。',
-)
-
 export const demoHookEntry = demoEntry(
   'sample-hooks',
   'hook',
@@ -91,7 +84,7 @@ export const demoHookEntry = demoEntry(
 )
 
 /**
- * In the demo recording the catalog keeps a sample MCP and Hook so the page can show their
+ * In the demo recording the catalog keeps a sample Hook so the page can show its
  * lifecycle. A real listing from a synced marketplace takes precedence, so this never hides an
  * actual package. Outside the demo (`VITE_DEMO_MOCK` unset) the catalog is returned unchanged.
  */
@@ -99,21 +92,20 @@ export function withDemoCatalog(catalog: PluginCatalogEntry[]): PluginCatalogEnt
   if (!demoMockEnabled()) return catalog
   return [
     ...catalog,
-    ...(catalog.some((entry) => entry.kind === 'mcp') ? [] : [demoMcpEntry]),
     ...(catalog.some((entry) => entry.kind === 'hook') ? [] : [demoHookEntry]),
   ]
 }
 
 /**
  * Whether an install for this kind is a browser-only demo action. Agents (market and
- * runtime-preinstalled), Hooks and MCP have no server-backed package in v2; recording their
- * lifecycle is a demo concern, so only the demo mock installs them. Skills and workflows always
+ * runtime-preinstalled) and Hooks have no server-backed package in v2; recording their
+ * lifecycle is a demo concern, so only the demo mock installs them. Skills, workflows and MCP always
  * install through the server and are never demo installs.
  */
 export function demoInstallable(entry: Pick<PluginCatalogEntry, 'kind'>): boolean {
   return (
     demoMockEnabled() &&
-    (entry.kind === 'agent' || entry.kind === 'hook' || entry.kind === 'mcp')
+    (entry.kind === 'agent' || entry.kind === 'hook')
   )
 }
 

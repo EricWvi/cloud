@@ -4,6 +4,7 @@ import {
 } from '@/api/spaces/spaces'
 import type { InstalledPlugin, Skill } from '../contracts'
 import { getSkillProgress } from '@/features/settings/market-api/generated'
+import { listMcp } from '@/lib/mcp-api/generated'
 
 /** Aggregates one selected Skill's project receipts into the workflow picker's visible state. */
 export type SkillDeployment =
@@ -40,15 +41,21 @@ export async function workflowPluginCatalog(tenantId: string) {
         deployment: await skillDeployment(tenantId, item.spaceId, item.sourceNamespace, item.identifier),
       })
     }
-    if (item.kind === 'mcp' && item.observedState === 'installed') {
-      plugins.push({ id, namespace: item.sourceNamespace, name: item.identifier,
-        displayName: item.identifier, version: item.observedVersion ?? item.desiredVersion,
-        description: '', homepage: null, license: null, logo: null, kind: 'mcp',
-        installationValidity: { validity: 'valid' },
-        configuration: { state: 'unavailable', errorCode: 'mcp_node_unsupported' }, runtime: 'stopped' })
-    }
   }
   return { skills, plugins }
+}
+
+/** Tenant MCP choices come from verified installations and secret-free configuration readiness. */
+export async function workflowMcpCatalog(tenantId: string): Promise<InstalledPlugin[]> {
+  const mcp = await listMcp(tenantId)
+  return mcp.items.map((item) => ({
+    id: item.id, namespace: item.id.split('/')[0], name: item.id.slice(item.id.indexOf('/') + 1),
+    displayName: item.name, version: item.pluginVersion,
+    description: '', homepage: null, license: null, logo: null, kind: 'mcp',
+    installationValidity: { validity: 'valid' },
+    configuration: { state: 'available', completeness: item.complete ? 'complete' : 'incomplete' },
+    runtime: 'stopped',
+  }))
 }
 
 async function skillDeployment(

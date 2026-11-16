@@ -442,6 +442,10 @@ export interface WorkflowNodeInteractiveSession {
 /** Structured failure persisted on a node run as `payload.error_detail`. */
 export interface WorkflowNodeErrorDetail {
   kind: string;
+  code?: string;
+  pluginId?: string;
+  settingId?: string;
+  transport?: "stdio" | "http";
   message: string;
   sourceChain: string[];
   attempt: number;

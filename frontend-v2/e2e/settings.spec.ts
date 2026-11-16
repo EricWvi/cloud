@@ -218,8 +218,7 @@ test('server-backed plugin and skill install lifecycle survives reload and a new
 
   await page.goto('/settings/plugins')
   const tavily = page.getByRole('article', { name: 'Tavily' })
-  await expect(tavily.getByText('暂不支持安装')).toBeVisible()
-  expect(await tavily.getByRole('button', { name: '安装' }).count()).toBe(0)
+  await expect(tavily.getByRole('button', { name: /^(安装|移除)$/ })).toBeVisible()
 })
 
 test('server-backed user skills create, import, overwrite, reload and isolate by browser context', async ({
@@ -466,8 +465,7 @@ test('seven settings pages and keyboard-accessible details', async ({
       await expect(page.getByText('正在加载…', { exact: true })).toHaveCount(0)
     if (path === 'plugins') {
       const tavily = page.getByRole('article', { name: 'Tavily' })
-      await expect(tavily.getByText('暂不支持安装')).toBeVisible()
-      expect(await tavily.getByRole('button', { name: '安装' }).count()).toBe(0)
+      await expect(tavily.getByRole('button', { name: /^(安装|移除)$/ })).toBeVisible()
     }
     await resetScroll(page)
     await page.screenshot({
