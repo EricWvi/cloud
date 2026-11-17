@@ -37,6 +37,9 @@ var (
 	ErrWorkflowNodeNotAwaitingInput = errors.New("workflow node is not awaiting input")
 	// ErrWorkflowNodeNotFound reports a node absent from the run.
 	ErrWorkflowNodeNotFound = errors.New("workflow node not found")
+	// ErrWorkflowRoleNotFound reports a run whose frozen graph references a role the workspace's
+	// role catalog does not have, so the start is refused before anything executes.
+	ErrWorkflowRoleNotFound = errors.New("workflow role not found")
 	// ErrWorkflowRunStopUnconfirmed reports a cancellation whose stop was not confirmed.
 	ErrWorkflowRunStopUnconfirmed = errors.New("workflow run stop is unconfirmed")
 )
@@ -179,6 +182,8 @@ func workflowRunLifecycleFault(w http.ResponseWriter, err error, op string) {
 		fault(w, http.StatusNotFound, "workflow_node_not_found")
 	case errors.Is(err, ErrWorkflowRunNotStartable):
 		fault(w, http.StatusBadRequest, "workflow_run_start_failed")
+	case errors.Is(err, ErrWorkflowRoleNotFound):
+		fault(w, http.StatusBadRequest, "workflow_role_not_found")
 	case errors.Is(err, ErrWorkflowRunNotEditable):
 		fault(w, http.StatusConflict, "workflow_run_not_editable")
 	case errors.Is(err, ErrWorkflowNodeNotAwaitingInput):

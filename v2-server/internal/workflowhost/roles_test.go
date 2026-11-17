@@ -1,0 +1,164 @@
+package workflowhost
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/wanglongan587/cloud/v2-server/internal/server"
+	"github.com/wanglongan587/cloud/v2-server/internal/store"
+)
+
+// reviewBranchesWithRoleOnBothBranches puts a role on the branch that this run will not take:
+// the structured review approves, so "ship" runs and "fix" never does. Desktop checks roles over
+// the whole graph at start, and so does v2.
+func reviewBranchesWithRoles(roles func(ship, fix string) string) string {
+	graph := strings.Replace(reviewBranches, `"prompt":"发布"`, `"prompt":"发布","roleId":"`+roles("ship", "fix")+`"`, 1)
+	return strings.Replace(graph, `"prompt":"返工"`, `"prompt":"返工","roleId":"`+"missing-archivist"+`"`, 1)
+}
+
+func TestStartRefusesARoleMissingFromAnyNodeOfTheGraph(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	runID := f.run(t, reviewBranchesWithRoles(func(string, string) string { return "reviewer" }), str("支付重构"))
+
+	_, err := f.host.StartRun(ctx, f.scope, runID)
+	if !errors.Is(err, server.ErrWorkflowRoleNotFound) {
+		t.Fatalf("start error = %v, want a missing role", err)
+	}
+	if !strings.Contains(err.Error(), "missing-archivist") {
+		t.Fatalf("start error does not name the missing role: %v", err)
+	}
+	f.exec.mu.Lock()
+	started := len(f.exec.started)
+	f.exec.mu.Unlock()
+	if started != 0 {
+		t.Fatalf("started %d Agents despite the missing role", started)
+	}
+	run, err := f.s.WorkflowRun(ctx, f.scope.TenantID, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != store.WorkflowStatusPending {
+		t.Fatalf("run status = %s, want it left pending", run.Status)
+	}
+
+	// Creating the role makes the same pending run startable, as desktop's dependency behaves.
+	if _, err := f.s.CreateRole(ctx, f.scope.TenantID, f.scope.UserID, store.RoleInput{Name: "missing-archivist"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatalf("start after creating the role = %v", err)
+	}
+	f.exec.finish(f.exec.awaitStart(t), completed(`{"approved":true}`))
+	f.exec.finish(f.exec.awaitStart(t), completed("已发布"))
+	f.await(t, runID, terminal)
+}
+
+func TestRoleDeletedAfterStartFailsTheNodeResumably(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	writer, err := f.s.CreateRole(ctx, f.scope.TenantID, f.scope.UserID, store.RoleInput{
+		Name: "writer", Description: "写作", Content: "# 技术写作",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph := strings.Replace(twoAgents, `"prompt":"审阅这段初稿：{{#a.output#}}"`,
+		`"prompt":"审阅这段初稿：{{#a.output#}}","roleId":"writer"`, 1)
+	runID := f.run(t, graph, str("支付重构"))
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	a := f.exec.awaitStart(t)
+	// The catalog is read again when the node starts, not reused from the start check.
+	if err := f.s.DeleteRole(ctx, f.scope.TenantID, writer.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.finish(a, completed("初稿：先拆网关"))
+
+	run, nodes := f.await(t, runID, terminal)
+	if run.Status != store.WorkflowStatusFailed {
+		t.Fatalf("run = %+v, want failed", run)
+	}
+	b := node(nodes, "b")
+	if kind := errorKind(t, b); kind != "workflow_role_not_found" {
+		t.Fatalf("node b failure = %s", kind)
+	}
+	var detail struct {
+		ErrorDetail struct {
+			Message       string `json:"message"`
+			Resumable     bool   `json:"resumable"`
+			AutoRetryable bool   `json:"auto_retryable"`
+		} `json:"error_detail"`
+	}
+	if err := json.Unmarshal(b.Payload, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if !detail.ErrorDetail.Resumable || detail.ErrorDetail.AutoRetryable {
+		t.Fatalf("detail = %+v", detail.ErrorDetail)
+	}
+	if !strings.Contains(detail.ErrorDetail.Message, "writer") {
+		t.Fatalf("detail message = %q", detail.ErrorDetail.Message)
+	}
+	f.exec.mu.Lock()
+	started := len(f.exec.started)
+	f.exec.mu.Unlock()
+	if started != 1 {
+		t.Fatalf("sessions started = %d, want only the first node", started)
+	}
+}
+
+func TestRoleContentIsOptionalAndCursorFreeWhenBlank(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	if _, err := f.s.CreateRole(ctx, f.scope.TenantID, f.scope.UserID, store.RoleInput{
+		Name: "blank", Description: "空角色", Content: " \n\t\n",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	graph := strings.Replace(twoAgents, `"roleId":"reviewer"`, `"roleId":"blank"`, 1)
+	runID := f.run(t, graph, str("输入"))
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	a := f.exec.awaitStart(t)
+	if text := promptText(t, f.exec.request(a).Prompt); strings.Contains(text, "<system_instructions>") {
+		t.Fatalf("blank role content still sent a block:\n%s", text)
+	}
+	f.exec.finish(a, completed("初稿"))
+	f.exec.finish(f.exec.awaitStart(t), completed("可以合并"))
+	f.await(t, runID, terminal)
+}
+
+func TestRoleReferenceResolvesCaseInsensitivelyAndByID(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	role, err := f.s.CreateRole(ctx, f.scope.TenantID, f.scope.UserID, store.RoleInput{
+		Name: "Researcher", Description: "调研", Content: "# 调研",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, reference := range map[string]string{"lowercase name": "researcher", "id fallback": role.ID} {
+		t.Run(name, func(t *testing.T) {
+			graph := strings.Replace(twoAgents, `"roleId":"reviewer"`, `"roleId":"`+reference+`"`, 1)
+			runID := f.run(t, graph, str("输入"))
+			if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+				t.Fatalf("start = %v", err)
+			}
+			a := f.exec.awaitStart(t)
+			text := promptText(t, f.exec.request(a).Prompt)
+			want := fmt.Sprintf("<system_instructions>\n在整个步骤中，请遵守以下角色定义，并将其视为对推理、行动和交付表达方式的约束。\n角色: %s\n\n# 调研\n</system_instructions>", reference)
+			if !strings.Contains(text, want) {
+				t.Fatalf("prompt lacks %q:\n%s", want, text)
+			}
+			f.exec.finish(a, completed("初稿"))
+			f.exec.finish(f.exec.awaitStart(t), completed("可以合并"))
+			f.await(t, runID, terminal)
+		})
+	}
+}

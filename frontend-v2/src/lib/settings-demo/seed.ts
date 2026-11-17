@@ -1,33 +1,9 @@
-import type { Role, Snapshot } from './types'
-
-/** Seeds the roles that used to be hard-coded in the workflow demo catalog. */
-export function seedRoles(now = new Date().toISOString()): Role[] {
-  return [
-    {
-      id: 'role-reviewer',
-      namespace: 'local',
-      name: '代码审查',
-      description: '检查改动的正确性、风险和测试覆盖',
-      content:
-        '# 代码审查\n\n你负责审查改动的正确性、风险和测试覆盖。\n\n- 先复述改动目标和影响范围。\n- 检查边界条件、错误路径和回归风险。\n- 给出可执行的修改建议，并标明未验证的部分。',
-      updatedAt: now,
-    },
-    {
-      id: 'role-writer',
-      namespace: 'local',
-      name: '技术写作',
-      description: '把结论整理成清楚的说明文档',
-      content:
-        '# 技术写作\n\n你负责把技术结论整理成清晰、可执行的说明。\n\n- 先说明读者和目标。\n- 用结论先行组织内容。\n- 区分事实、推断和未知项。',
-      updatedAt: now,
-    },
-  ]
-}
+import type { Snapshot } from './types'
 
 export function seed(): Snapshot {
   const now = new Date().toISOString()
   return {
-    schema: 5,
+    schema: 6,
     revision: 1,
     connections: [
       {
@@ -56,6 +32,5 @@ export function seed(): Snapshot {
       modelId: 'demo/general',
       version: 1,
     },
-    roles: seedRoles(now),
   }
 }

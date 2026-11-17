@@ -73,15 +73,24 @@ func TestWorkflowDomainServesAnalyzeAndPublish(t *testing.T) {
 	if status != http.StatusOK || !reflect.DeepEqual(analysis, want) {
 		t.Fatalf("analyze spare chain = %d %v, want %v", status, analysis, want)
 	}
-	// Role is the setting v2 is not working on applying; prompt and tool stay unsupported, as on desktop.
-	unapplied := `{"nodes":[{"id":"start","data":{"kind":"start"}},
+	// Roles, Skills, MCP and retry all apply now, so the one setting the analysis still lists is a
+	// Loop member's interactive mode: v2 runs that member automatically where desktop parks it.
+	// Prompt and tool stay unsupported, as on desktop.
+	unapplied := `{"schemaVersion":2,"nodes":[{"id":"start","data":{"kind":"start"}},
 		{"id":"writer","data":{"kind":"agent","agentConfig":{"prompt":"x","roleId":"reviewer",
+			"mcps":[{"mcpId":"official/tavily","enabled":true}],
 			"retry":{"enabled":false,"maxRetries":2,"initialDelaySeconds":10}}}},
+		{"id":"loop","data":{"kind":"loop","loopConfig":{"maxIterations":3,"variables":[],
+			"until":{"logic":"and","conditions":[]},"outputs":[]}}},
+		{"id":"entry","parentId":"loop","data":{"kind":"start","containerId":"loop"}},
+		{"id":"parked","parentId":"loop","data":{"kind":"agent","containerId":"loop",
+			"agentConfig":{"prompt":"y","interactive":true}}},
 		{"id":"tool","data":{"kind":"tool"}},{"id":"spare","data":{"kind":"prompt"}}],
-		"edges":[{"source":"start","target":"writer"},{"source":"writer","target":"tool"}]}`
+		"edges":[{"source":"start","target":"writer"},{"source":"start","target":"loop"},
+			{"source":"entry","target":"parked"},{"source":"writer","target":"tool"}]}`
 	status, analysis = call("POST", base+"/analyze", map[string]any{"graph": unapplied})
 	want = map[string]any{"unusedNodeIds": []any{"spare"}, "unrecognizedNodes": []any{},
-		"unappliedSettings": []any{map[string]any{"nodeId": "writer", "settings": []any{"role"}}},
+		"unappliedSettings": []any{map[string]any{"nodeId": "parked", "settings": []any{"interactive"}}},
 		"unsupportedNodes":  []any{map[string]any{"nodeId": "tool", "kind": "tool"}}}
 	if status != http.StatusOK || !reflect.DeepEqual(analysis, want) {
 		t.Fatalf("analyze unapplied and unsupported = %d %v, want %v", status, analysis, want)

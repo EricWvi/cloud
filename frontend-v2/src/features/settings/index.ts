@@ -6,8 +6,9 @@ import { isDeployedProviders } from '@/lib/deploy-mode'
 
 /**
  * Settings pages that only persist browser-local data never render in a deployed install; reading
- * their URL redirects to the squad page. A providers failure keeps the development behavior instead
- * of redirecting on a guess.
+ * their URL redirects to the squad page. Roles live in the workspace's server catalog, so they are
+ * offered in every install. A providers failure keeps the development behavior instead of
+ * redirecting on a guess.
  */
 async function hideInDeployed() {
   const providers = await getProviders().catch(() => undefined)
@@ -39,7 +40,6 @@ export const settings: Feature = {
     },
     {
       path: 'roles',
-      loader: hideInDeployed,
       lazy: async () => ({
         Component: (await import('./roles/page')).default,
       }),

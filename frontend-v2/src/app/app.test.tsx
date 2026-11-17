@@ -129,10 +129,11 @@ describe('deployed install hides browser-only settings routes', () => {
     })
   })
 
-  it('redirects a direct visit to roles back to the squad page', async () => {
+  // Roles come from the workspace's server catalog, so the route stays reachable.
+  it('keeps the roles page reachable', async () => {
     const router = renderAt('/settings/roles')
     await waitFor(() =>
-      expect(router.state.location.pathname).toBe('/settings/squads'),
+      expect(router.state.location.pathname).toBe('/settings/roles'),
     )
   })
 

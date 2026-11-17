@@ -3,8 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { Skill } from "../contracts";
 import type { CatalogSkill } from "./plugin-catalog";
 import type { WorkflowAgentModel } from "../mock";
-import { useRoleCatalog } from "@/lib/settings-demo/role-hooks";
-import { useDeployedVersion } from "@/lib/deploy-mode";
+import { useRoleCatalog } from "@/features/settings/roles/use-role-catalog";
 import { useContractsClient } from "./contracts-client";
 import { useAgentCatalog, type AgentEntry } from "./use-agent-catalog";
 
@@ -18,15 +17,17 @@ const catalogKeys = {
   executors: ["workflow-catalog", "executors"] as const,
 };
 
-/** Loads configurable roles from the same browser-local snapshot Settings edits. */
+/**
+ * Loads the workspace's server-side role catalog that Settings edits and runs resolve. Roles are
+ * server data, so a deployed install offers them like a development one does.
+ */
 export function useAgents() {
   const query = useRoleCatalog();
-  const deployed = useDeployedVersion();
   return {
     ...query,
-    data: deployed ? [] : query.data?.map((role) => ({
+    data: query.data?.map((role) => ({
       id: role.id,
-      namespace: role.namespace,
+      namespace: "local" as const,
       name: role.name,
       description: role.description,
     })),

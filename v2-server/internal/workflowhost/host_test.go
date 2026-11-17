@@ -66,8 +66,16 @@ func TestTwoAgentChainHandsTheAnswerDownstream(t *testing.T) {
 			t.Fatalf("A prompt lacks %q:\n%s", want, textA)
 		}
 	}
-	if strings.Contains(textA, "reviewer") || strings.Contains(textA, "system_instructions") {
-		t.Fatalf("A prompt applied the role:\n%s", textA)
+	if want := "<system_instructions>\n在整个步骤中，请遵守以下角色定义，并将其视为对推理、行动和交付表达方式的约束。\n角色: reviewer\n\n" + reviewerContent + "\n</system_instructions>"; !strings.Contains(textA, want) {
+		t.Fatalf("A prompt lacks the role block:\n%s", textA)
+	}
+	// Desktop places the role after the workspace root and before the current step.
+	if !(strings.Index(textA, "<workspace_root>") < strings.Index(textA, "<system_instructions>") &&
+		strings.Index(textA, "<system_instructions>") < strings.Index(textA, "<current_workflow_step>")) {
+		t.Fatalf("the role block is out of order:\n%s", textA)
+	}
+	if strings.Contains(textA, "<system_instructions>") && !strings.Contains(textA, reviewerContent) {
+		t.Fatalf("the role block lacks the stored content:\n%s", textA)
 	}
 	_, nodes := f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
 		return node(n, "a").SessionID != nil
@@ -95,7 +103,7 @@ func TestTwoAgentChainHandsTheAnswerDownstream(t *testing.T) {
 	_ = json.Unmarshal(node(nodes, "a").Payload, &payloadA)
 	_ = json.Unmarshal(node(nodes, "b").Payload, &payloadB)
 	if payloadA["stop_reason"] != "end_turn" || payloadA["executor"].(map[string]any)["id"] != "opencode:other" ||
-		payloadA["model"].(map[string]any)["fallback"] != false || !reflect.DeepEqual(payloadA["unapplied"], []any{"role"}) {
+		payloadA["model"].(map[string]any)["fallback"] != false || !reflect.DeepEqual(payloadA["unapplied"], []any{}) {
 		t.Fatalf("A payload = %v", payloadA)
 	}
 	if payloadB["task"] != "审阅这段初稿：初稿：先拆网关" {

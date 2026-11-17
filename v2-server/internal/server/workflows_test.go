@@ -58,7 +58,7 @@ func workflowServerWithClient(t *testing.T, mutate func(*server.Options)) (workf
 		AnalyzeWorkflow: func(string) (server.WorkflowAnalysis, error) {
 			return server.WorkflowAnalysis{
 				UnusedNodeIDs:     []string{"spare"},
-				UnappliedSettings: []server.UnappliedWorkflowSettings{{NodeID: "writer", Settings: []string{"role", "mcp"}}},
+				UnappliedSettings: []server.UnappliedWorkflowSettings{{NodeID: "writer", Settings: []string{"mcp", "interactive"}}},
 				UnsupportedNodes:  []server.UnsupportedWorkflowNode{{NodeID: "tool", Kind: "tool"}},
 			}, nil
 		},
@@ -317,7 +317,7 @@ func TestWorkflowAnalysisAndPublishValidation(t *testing.T) {
 	want := map[string]any{
 		"unusedNodeIds":     []any{"spare"},
 		"unrecognizedNodes": []any{},
-		"unappliedSettings": []any{map[string]any{"nodeId": "writer", "settings": []any{"role", "mcp"}}},
+		"unappliedSettings": []any{map[string]any{"nodeId": "writer", "settings": []any{"mcp", "interactive"}}},
 		"unsupportedNodes":  []any{map[string]any{"nodeId": "tool", "kind": "tool"}},
 	}
 	if status != 200 || !reflect.DeepEqual(analysis, want) {

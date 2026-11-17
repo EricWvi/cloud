@@ -16,7 +16,6 @@ import (
 func placedAgents(wire bool) (obj, []string) {
 	variants := map[string]obj{
 		"retry":             {"retry": obj{"enabled": true, "maxRetries": 2, "initialDelaySeconds": 5}},
-		"role":              {"roleId": "reviewer"},
 		"interactive":       {"interactive": true},
 		"mcp":               {"mcps": []any{obj{"mcpId": "official/tools", "enabled": true}}},
 		"interactive-retry": {"interactive": true, "retry": obj{"enabled": true, "maxRetries": 1, "initialDelaySeconds": 1}},
@@ -204,11 +203,11 @@ func TestUnappliedAgentSettingsRule(t *testing.T) {
 		// Desktop never retries an interactive node (node_runtime.rs:373-379), so retry is not listed.
 		"every setting, interactive": {obj{"retry": obj{"enabled": true, "maxRetries": 1, "initialDelaySeconds": 1},
 			"interactive": true, "mcps": []any{obj{"mcpId": "official/tools", "enabled": true}}, "roleId": "reviewer"},
-			[]string{"role"}, false},
+			nil, false},
 		"interactive without a retry policy": {obj{"interactive": true}, nil, false},
 		"every setting but interactive, in the payload order": {obj{"retry": obj{"enabled": true, "maxRetries": 1, "initialDelaySeconds": 1},
 			"mcps": []any{obj{"mcpId": "official/tools", "enabled": true}}, "roleId": "reviewer"},
-			[]string{"role"}, false},
+			nil, false},
 	} {
 		for _, inLoop := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/loop=%v", name, inLoop), func(t *testing.T) {

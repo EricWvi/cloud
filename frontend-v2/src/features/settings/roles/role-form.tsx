@@ -3,8 +3,8 @@ import { Button } from '@/components/ui/button'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
+import type { Role, RoleInput } from '@/lib/roles-api/generated'
 import { ActionError } from '../components/page-parts'
-import type { Role, RoleDraft } from '../data/types'
 
 export function RoleForm({
   role,
@@ -16,11 +16,11 @@ export function RoleForm({
   role?: Role
   pending: boolean
   error: unknown
-  onSave: (draft: RoleDraft) => void
+  onSave: (draft: RoleInput) => void
   onCancel: () => void
 }) {
   const id = useId()
-  const [draft, setDraft] = useState<RoleDraft>({
+  const [draft, setDraft] = useState<RoleInput>({
     name: role?.name ?? '',
     description: role?.description ?? '',
     content: role?.content ?? '',
@@ -78,8 +78,8 @@ export function RoleForm({
       </FieldGroup>
       <ActionError error={error} />
       <p className="text-xs leading-relaxed text-muted-foreground">
-        角色只保存在当前浏览器。工作流节点可以选择它，但 v2 执行仍不会
-        注入角色内容。
+        角色保存在工作区服务端，工作流 Agent 节点按标题引用它；运行时会把内容包成
+        system_instructions 注入该节点的提示词。
       </p>
       <div className="settings-form-actions">
         <Button

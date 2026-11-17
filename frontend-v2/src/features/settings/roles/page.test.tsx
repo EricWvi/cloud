@@ -1,27 +1,43 @@
 import { beforeEach, expect, it } from 'vitest'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { renderSettingsPage } from '../test-utils'
+import type { Role } from '@/lib/roles-api/generated'
+import { installMarketplaceBackend, renderSettingsPage } from '../test-utils'
 import RolesPage from './page'
+
+const serverRole = (overrides: Partial<Role> = {}): Role => ({
+  id: '00000000-0000-4000-8000-000000000901',
+  name: '代码审查',
+  description: '检查改动的正确性和测试覆盖。',
+  content: '# 代码审查\n\n先看行为，再看实现。',
+  version: 1,
+  createdAt: '2026-11-02T08:00:00Z',
+  updatedAt: '2026-11-02T08:00:00Z',
+  ...overrides,
+})
+
+const roleFile = (name: string, description = '导入的角色', body = '# 导入角色') =>
+  new File([`---\nname: ${name}\ndescription: ${description}\n---\n\n${body}`], 'role.md', {
+    type: 'text/markdown',
+  })
 
 beforeEach(() => localStorage.clear())
 
-it('creates, renders, edits and deletes a local role', async () => {
+it('creates, renders, edits and deletes a server-backed role', async () => {
+  const backend = installMarketplaceBackend({ roles: [serverRole()] })
   const user = userEvent.setup()
   renderSettingsPage(<RolesPage />)
-  await screen.findByRole('article', { name: '代码审查' })
+  expect(await screen.findByRole('article', { name: '代码审查' })).toBeVisible()
+  // The role says where it lives: no browser-local catalog any more.
+  expect(backend.seen).toContain(`GET /api/v2/tenants/00000000-0000-4000-8000-0000000000aa/roles`)
+
   await user.click(screen.getByRole('button', { name: '新建角色' }))
   await user.type(screen.getByLabelText('标题'), '发布检查')
   await user.type(screen.getByLabelText('描述'), '发布前核对版本和说明')
-  await user.type(
-    screen.getByLabelText('内容（Markdown）'),
-    '# 发布检查\n\n核对版本。',
-  )
+  await user.type(screen.getByLabelText('内容（Markdown）'), '# 发布检查\n\n核对版本。')
   await user.click(screen.getByRole('button', { name: '保存角色' }))
   const row = await screen.findByRole('article', { name: '发布检查' })
-  await user.click(
-    within(row).getByRole('button', { name: '查看角色 发布检查' }),
-  )
+  await user.click(within(row).getByRole('button', { name: '查看角色 发布检查' }))
   expect(await screen.findByText('核对版本。')).toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: '编辑角色' }))
   await user.clear(screen.getByLabelText('描述'))
@@ -37,56 +53,73 @@ it('creates, renders, edits and deletes a local role', async () => {
     }),
   )
   await waitFor(() =>
-    expect(
-      screen.queryByRole('article', { name: '发布检查' }),
-    ).not.toBeInTheDocument(),
+    expect(screen.queryByRole('article', { name: '发布检查' })).not.toBeInTheDocument(),
   )
+  // Persistence belongs to the server, not to this browser's storage.
+  await user.click(screen.getByRole('button', { name: '导入角色' }))
+  expect(await screen.findByRole('dialog')).toBeInTheDocument()
+  expect(Object.keys(localStorage)).toHaveLength(0)
 })
 
-it('imports a Markdown role and resolves a same-name conflict', async () => {
+it('shows the workspace error and retries instead of loading the roles forever', async () => {
+  installMarketplaceBackend({ roles: [serverRole()], tenantFailures: 1 })
+  const user = userEvent.setup()
+  renderSettingsPage(<RolesPage />)
+
+  // The disabled catalog query must not keep the page pending while the workspace lookup failed.
+  expect(await screen.findByText('暂时无法加载')).toBeVisible()
+  expect(screen.queryByText('正在加载…')).not.toBeInTheDocument()
+
+  await user.click(screen.getByRole('button', { name: '重试' }))
+  expect(await screen.findByRole('article', { name: '代码审查' })).toBeVisible()
+})
+
+it('reports the server error when the imported file is empty', async () => {
+  installMarketplaceBackend()
+  const user = userEvent.setup()
+  renderSettingsPage(<RolesPage />)
+
+  await user.click(await screen.findByRole('button', { name: '导入角色' }))
+  await user.upload(
+    screen.getByLabelText('角色 Markdown 文件'),
+    new File([''], 'empty.md', { type: 'text/markdown' }),
+  )
+  await user.click(screen.getByRole('button', { name: '导入' }))
+
+  expect(
+    await screen.findByRole('alert'),
+  ).toHaveTextContent('角色文件缺少 YAML front matter')
+})
+
+it('imports a role Markdown file and resolves a same-name conflict on the server', async () => {
+  const backend = installMarketplaceBackend({ roles: [serverRole()] })
   const user = userEvent.setup()
   renderSettingsPage(<RolesPage />)
   await screen.findByRole('article', { name: '代码审查' })
-  const fileInput = () => screen.getByLabelText('角色 Markdown 文件')
-  const imported = new File(
-    [
-      `---
-name: 发布检查
-description: 发布前核对版本和说明
----
 
-核对版本。`,
-    ],
-    'release.md',
-    { type: 'text/markdown' },
-  )
   await user.click(screen.getByRole('button', { name: '导入角色' }))
-  await user.upload(fileInput(), imported)
-  expect(await screen.findByText('发布检查')).toBeInTheDocument()
-  await user.click(screen.getByRole('button', { name: '确认导入' }))
-  expect(
-    await screen.findByRole('article', { name: '发布检查' }),
-  ).toBeInTheDocument()
-
-  const conflict = new File(
-    [
-      `---
-name: 代码审查
-description: 覆盖后的说明
----
-覆盖后的内容`,
-    ],
-    'reviewer.md',
-    { type: 'text/markdown' },
-  )
-  await user.click(screen.getByRole('button', { name: '导入角色' }))
-  await user.upload(fileInput(), conflict)
-  expect(await screen.findByText(/现有描述：/)).toBeInTheDocument()
-  await user.click(screen.getByRole('button', { name: '覆盖' }))
-  await user.click(screen.getByRole('button', { name: '确认导入' }))
+  await user.upload(screen.getByLabelText('角色 Markdown 文件'), roleFile('发布检查'))
+  await user.click(screen.getByRole('button', { name: '导入' }))
   await waitFor(() =>
-    expect(
-      screen.getByRole('article', { name: '代码审查' }),
-    ).toHaveTextContent('覆盖后的说明'),
+    expect(backend.seen).toContain(
+      `POST /api/v2/tenants/00000000-0000-4000-8000-0000000000aa/roles/import`,
+    ),
+  )
+  await waitFor(() =>
+    expect(screen.getByRole('article', { name: '发布检查' })).toBeVisible(),
+  )
+
+  await user.click(screen.getByRole('button', { name: '导入角色' }))
+  await user.upload(
+    screen.getByLabelText('角色 Markdown 文件'),
+    roleFile('代码审查', '覆盖后的描述', '覆盖后的内容'),
+  )
+  await user.click(screen.getByRole('button', { name: '导入' }))
+  expect(await screen.findByText('已有同名角色')).toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: '覆盖并导入' }))
+  await waitFor(() =>
+    expect(screen.getByRole('article', { name: '代码审查' })).toHaveTextContent(
+      '覆盖后的描述',
+    ),
   )
 })

@@ -964,12 +964,13 @@ function serveProviders(providers: string[]) {
 }
 
 describe("WorkflowInspector deployed install", () => {
-  it("hides the role field for idaas and keeps a stored roleId when editing", async () => {
+  // Roles live in the workspace's server catalog, so the picker stays available in a deployed
+  // install; only browser-local settings are hidden there.
+  it("keeps the role field for idaas and preserves the stored roleId when editing", async () => {
     await appI18n.changeLanguage("zh-CN");
     serveProviders(["idaas"]);
     const user = userEvent.setup();
     const updates: string[] = [];
-    const capabilities = createMockWorkflowCapabilities("zh-CN");
     render(
       <QueryClientProvider
         client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
@@ -978,7 +979,7 @@ describe("WorkflowInspector deployed install", () => {
           <WorkflowInspector
             variableCatalog={[]}
             node={createAgentNode()}
-            capabilities={capabilities}
+            capabilities={createMockWorkflowCapabilities("zh-CN")}
             onUpdate={(next) => {
               updates.push(next.data.agentConfig?.roleId ?? "");
               void next;
@@ -990,40 +991,13 @@ describe("WorkflowInspector deployed install", () => {
       </QueryClientProvider>,
     );
 
-    expect(
-      await screen.findByLabelText("Agent 模型"),
-    ).toBeInTheDocument();
-    await waitFor(() =>
-      expect(screen.queryByLabelText("角色")).not.toBeInTheDocument(),
-    );
+    expect(await screen.findByLabelText("Agent 模型")).toBeInTheDocument();
+    expect(await screen.findByLabelText("角色")).toBeInTheDocument();
+    expect(screen.getByText("研究员")).toBeInTheDocument();
     const prompt = screen.getByLabelText("自定义 Prompt");
     await user.click(prompt);
     await user.type(prompt, "继续");
-    // Editing another field must not clear the stored roleId, only the UI hides it.
+    // Editing another field still keeps the stored roleId.
     expect(updates.at(-1)).toBe("Researcher");
-  });
-
-  it("shows the role field when the gateway is email (development)", async () => {
-    await appI18n.changeLanguage("zh-CN");
-    serveProviders(["email"]);
-    render(
-      <QueryClientProvider
-        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
-      >
-        <AppI18nProvider>
-          <WorkflowInspector
-            variableCatalog={[]}
-            node={createAgentNode()}
-            capabilities={createMockWorkflowCapabilities("zh-CN")}
-            onUpdate={() => undefined}
-            onDelete={() => undefined}
-            onCloseNode={() => undefined}
-          />
-        </AppI18nProvider>
-      </QueryClientProvider>,
-    );
-
-    expect(await screen.findByLabelText("角色")).toBeInTheDocument();
-    expect(screen.getByText("研究员")).toBeInTheDocument();
   });
 });

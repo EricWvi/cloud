@@ -4,13 +4,12 @@ import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
-import { useSettingsData } from '../data/hooks'
-import { deleteRole, saveRole } from '../data/resource-actions'
-import type { Role, RoleDraft } from '../data/types'
+import type { Role, RoleInput } from '@/lib/roles-api/generated'
 import { ConfirmDialog } from '../components/confirm-dialog'
 import { DetailPanel } from '../components/detail-panel'
 import { MarkdownPreview } from '../components/markdown-preview'
 import {
+  ActionError,
   DataState,
   NoResults,
   PageHeader,
@@ -18,59 +17,63 @@ import {
 } from '../components/page-parts'
 import { RoleForm } from './role-form'
 import { RoleImportDialog } from './import-dialog'
-import { applyRoleImport } from './import'
+import { useWorkspaceRoles } from './use-roles'
 
 type Panel = { kind: 'create' } | { kind: 'detail' | 'edit'; id: string } | null
 
 export default function RolesPage() {
-  const local = useSettingsData()
+  const local = useWorkspaceRoles()
   const [search, setSearch] = useState('')
   const [panel, setPanel] = useState<Panel>(null)
   const [importing, setImporting] = useState(false)
   const [removing, setRemoving] = useState<Role>()
-  const roles = local.query.data?.roles ?? []
+  const roles = local.roles
   const filtered = roles.filter((role) =>
-    `${role.name} ${role.description} ${
-      role.content
-    }`.toLowerCase().includes(search.trim().toLowerCase()),
+    `${role.name} ${role.description} ${role.content}`
+      .toLowerCase()
+      .includes(search.trim().toLowerCase()),
   )
   const selected =
-    panel && 'id' in panel
-      ? roles.find((role) => role.id === panel.id)
-      : undefined
+    panel && 'id' in panel ? roles.find((role) => role.id === panel.id) : undefined
   const open = (next: Panel) => {
-    local.mutation.reset()
+    local.resetErrors()
     setPanel(next)
   }
   const create = () => open({ kind: 'create' })
-  const startImport = () => {
-    local.mutation.reset()
-    setImporting(true)
+  const save = async (input: RoleInput, id?: string) => {
+    if (!local.tenantId) return
+    local.resetErrors()
+    try {
+      if (id) await local.update({ tid: local.tenantId, rid: id, data: input })
+      else await local.create({ tid: local.tenantId, data: input })
+      toast.success(id ? `已更新角色 ${input.name}` : `已创建角色 ${input.name}`)
+      if (id) setPanel({ kind: 'detail', id })
+      else setPanel(null)
+    } catch {
+      // The form renders the localized mutation error.
+    }
   }
-  const save = (draft: RoleDraft, id?: string) =>
-    local.save(
-      (data) => saveRole(data, draft, id),
-      '角色已保存',
-      () => setPanel(id ? { kind: 'detail', id } : null),
-    )
   return (
     <section>
       <PageHeader
         title="角色"
-        description="管理可在工作流 Agent 节点中调用的角色；角色只保存在当前浏览器。"
+        description="管理工作区的角色目录。工作流 Agent 节点按名称引用角色，运行时会读取这里的内容并注入提示词。"
         count={roles.length}
         actions={
           <>
             <Button
               variant="outline"
-              disabled={!local.query.data || local.query.isError}
-              onClick={startImport}
+              disabled={!local.tenantId || local.loading}
+              onClick={() => {
+                local.resetErrors()
+                setImporting(true)
+              }}
             >
               <Upload data-icon="inline-start" />
               导入角色
             </Button>
             <Button
-              disabled={!local.query.data || local.query.isError}
+              disabled={!local.tenantId || local.loading}
               onClick={create}
             >
               <Plus data-icon="inline-start" />
@@ -80,13 +83,14 @@ export default function RolesPage() {
         }
       />
       <DataState
-        pending={local.query.isPending}
-        error={local.query.error}
-        retry={() => void local.query.refetch()}
+        pending={local.loading}
+        error={local.error}
+        retry={() => local.refetch()}
       >
         <div className="settings-toolbar">
           <SearchInput label="搜索角色" value={search} onChange={setSearch} />
         </div>
+        <ActionError error={local.mutationError} />
         <div className="settings-resource-list">
           {filtered.map((role) => (
             <article
@@ -109,9 +113,9 @@ export default function RolesPage() {
                     {role.description || '暂无描述'}
                   </span>
                   <span className="settings-resource-meta">
-                    <span>本地角色</span>
+                    <span>工作区角色 · 服务端</span>
                     <span aria-hidden="true">·</span>
-                    <span>{role.namespace}</span>
+                    <span>local</span>
                   </span>
                 </span>
               </button>
@@ -130,10 +134,7 @@ export default function RolesPage() {
           ))}
         </div>
         {!filtered.length && (
-          <NoResults
-            filtered={roles.length > 0}
-            onClear={() => setSearch('')}
-          >
+          <NoResults filtered={roles.length > 0} onClear={() => setSearch('')}>
             <Button onClick={create}>新建角色</Button>
           </NoResults>
         )}
@@ -151,26 +152,26 @@ export default function RolesPage() {
           onClose={() => setPanel(null)}
         >
           <RoleForm
-            pending={local.mutation.isPending}
-            error={local.mutation.error}
+            pending={local.savePending}
+            error={local.mutationError}
             onCancel={() => setPanel(null)}
-            onSave={(draft) => save(draft)}
+            onSave={(draft) => void save(draft)}
           />
         </DetailPanel>
       )}
       {selected && panel?.kind === 'edit' && (
         <DetailPanel
           title={`编辑 ${selected.name}`}
-          description="修改只保存在当前浏览器。"
+          description="修改后会同步给工作区和之后启动的工作流运行。"
           onClose={() => setPanel(null)}
         >
           <RoleForm
             key={selected.id}
             role={selected}
-            pending={local.mutation.isPending}
-            error={local.mutation.error}
-            onCancel={() => open({ kind: 'detail', id: selected.id })}
-            onSave={(draft) => save(draft, selected.id)}
+            pending={local.savePending}
+            error={local.mutationError}
+            onCancel={() => setPanel({ kind: 'detail', id: selected.id })}
+            onSave={(draft) => void save(draft, selected.id)}
           />
         </DetailPanel>
       )}
@@ -181,7 +182,7 @@ export default function RolesPage() {
           onClose={() => setPanel(null)}
         >
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <Badge variant="secondary">本地角色</Badge>
+            <Badge variant="secondary">工作区角色</Badge>
             <div className="flex gap-2">
               <Button
                 variant="outline"
@@ -192,7 +193,7 @@ export default function RolesPage() {
               <Button
                 variant="destructive"
                 onClick={() => {
-                  local.mutation.reset()
+                  local.resetErrors()
                   setRemoving(selected)
                 }}
               >
@@ -201,10 +202,10 @@ export default function RolesPage() {
             </div>
           </div>
           <dl className="settings-facts">
-            <dt>命名空间</dt>
-            <dd>{selected.namespace}</dd>
+            <dt>作用域</dt>
+            <dd>工作区内所有成员共用</dd>
             <dt>引用方式</dt>
-            <dd>工作流 Agent 节点按标题选择角色</dd>
+            <dd>工作流 Agent 节点按标题选择角色，运行时读取本页内容</dd>
           </dl>
           <Separator />
           <MarkdownPreview content={selected.content} />
@@ -212,42 +213,34 @@ export default function RolesPage() {
       )}
       {importing && (
         <RoleImportDialog
-          roles={roles}
-          pending={local.mutation.isPending}
-          error={local.mutation.error}
           onClose={() => setImporting(false)}
-          onCommit={(preview, decision, done) => {
-            if (decision === 'skip') {
-              toast.success(`已跳过同名角色 ${preview.draft.name}`)
-              done()
-              return
-            }
-            local.save(
-              (data) => applyRoleImport(data, preview, decision),
-              '角色已导入',
-              done,
-            )
+          onImport={(input) =>
+            local.importFile({ tid: local.tenantId, data: input })
+          }
+          onImported={(name, overwritten) => {
+            toast.success(overwritten ? `已覆盖角色 ${name}` : `已导入角色 ${name}`)
+            setImporting(false)
           }}
         />
       )}
       {removing && (
         <ConfirmDialog
           title={`删除“${removing.name}”？`}
-          description="该角色将从工作流选择中移除；已有图里的标题引用不会被自动改写。此操作无法撤销。"
+          description="该角色将从工作区目录和工作流选择中移除；已有图里的名称引用不会被自动改写，引用它的运行会因找不到角色而无法启动。此操作无法撤销。"
           confirmLabel="删除角色"
-          pending={local.mutation.isPending}
-          error={local.mutation.error}
+          pending={local.deletePending}
+          error={local.mutationError}
           onClose={() => setRemoving(undefined)}
-          onConfirm={() =>
-            local.save(
-              (data) => deleteRole(data, removing.id),
-              '角色已删除',
-              () => {
+          onConfirm={() => {
+            local
+              .remove({ tid: local.tenantId, rid: removing.id })
+              .then(() => {
+                toast.success(`已删除角色 ${removing.name}`)
                 setRemoving(undefined)
                 setPanel(null)
-              },
-            )
-          }
+              })
+              .catch(() => undefined)
+          }}
         />
       )}
     </section>

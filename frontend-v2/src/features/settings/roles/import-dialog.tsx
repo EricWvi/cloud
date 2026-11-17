@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react'
-import { Upload } from 'lucide-react'
+import { useId, useState } from 'react'
+import { FileText, Upload, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -9,165 +9,170 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import type { Role } from '../data/types'
+import type { ImportRoleInput, Role } from '@/lib/roles-api/generated'
 import { ActionError } from '../components/page-parts'
-import {
-  MAX_ROLE_MARKDOWN_BYTES,
-  previewRoleImport,
-  type RoleImportDecision,
-  type RoleImportPreview,
-} from './import'
+import { isRoleNameConflict, roleError } from './use-roles'
 
+const MAX_FILE_BYTES = 1 << 20
+
+/**
+ * Imports one role Markdown file. The server owns front-matter validation and name conflicts; the
+ * dialog only asks for an explicit overwrite after the first attempt returns a conflict.
+ */
 export function RoleImportDialog({
-  roles,
-  pending,
-  error,
   onClose,
-  onCommit,
+  onImport,
+  onImported,
 }: {
-  roles: readonly Role[]
-  pending: boolean
-  error: unknown
   onClose: () => void
-  onCommit: (
-    preview: RoleImportPreview,
-    decision: RoleImportDecision | null,
-    done: () => void,
-  ) => void
+  onImport: (input: ImportRoleInput) => Promise<Role>
+  onImported: (name: string, overwritten: boolean) => void
 }) {
-  const input = useRef<HTMLInputElement>(null)
-  const [preview, setPreview] = useState<RoleImportPreview | null>(null)
-  const [decision, setDecision] = useState<RoleImportDecision | null>(null)
-  const [reading, setReading] = useState(false)
-  const [fileError, setFileError] = useState<unknown>(null)
-  const conflict = preview !== null && preview.existing !== null
-  const close = () => {
-    if (!pending) onClose()
-  }
-  const choose = async (file: File | undefined) => {
-    if (!file) return
-    setFileError(null)
-    setPreview(null)
-    setDecision(null)
-    if (!file.name.toLowerCase().endsWith('.md')) {
-      setFileError(new Error('请选择一个 .md Markdown 文件。'))
+  const inputId = useId()
+  const [file, setFile] = useState<File>()
+  const [content, setContent] = useState('')
+  const [conflict, setConflict] = useState(false)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<unknown>()
+
+  const choose = async (next?: File) => {
+    setError(undefined)
+    setConflict(false)
+    if (!next) return
+    if (!/\.(md|markdown)$/i.test(next.name)) {
+      setError(new Error('请选择 .md 格式的角色文件。'))
       return
     }
-    if (file.size > MAX_ROLE_MARKDOWN_BYTES) {
-      setFileError(new Error('Markdown 文件不能超过 1 MiB。'))
+    if (next.size > MAX_FILE_BYTES) {
+      setError(new Error('角色文件不能超过 1 MiB。'))
       return
     }
-    setReading(true)
     try {
-      setPreview(previewRoleImport(await file.text(), file.name, roles))
-    } catch (cause) {
-      setFileError(cause)
-    } finally {
-      setReading(false)
+      const text = await next.text()
+      setFile(next)
+      setContent(text)
+    } catch {
+      setError(new Error('无法读取该文件，请重新选择。'))
     }
   }
-  const canCommit =
-    preview !== null && (!conflict || decision !== null) && !pending
+
+  const submit = async (overwrite: boolean) => {
+    // The server owns the content: an empty file must come back as `role_front_matter_missing`
+    // instead of leaving the enabled button doing nothing.
+    if (!file) return
+    setPending(true)
+    setError(undefined)
+    try {
+      const imported = await onImport({
+        fileName: file.name,
+        content,
+        overwrite,
+      })
+      onImported(imported.name, overwrite)
+    } catch (cause) {
+      if (!overwrite && isRoleNameConflict(cause)) setConflict(true)
+      else setError(roleError(cause))
+    } finally {
+      setPending(false)
+    }
+  }
+
   return (
-    <Dialog open onOpenChange={(open) => !open && close()}>
-      <DialogContent className="max-w-lg">
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open && !pending) onClose()
+      }}
+    >
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>导入角色</DialogTitle>
           <DialogDescription>
-            选择一个本地 Markdown 文件。front matter 需要包含 name 和
-            description，导入前会检查同名角色。
+            选择一个带 YAML front matter 的角色 Markdown 文件。导入后，工作区成员都能在工作流里选择它。
           </DialogDescription>
         </DialogHeader>
-        <input
-          ref={input}
-          className="hidden"
-          type="file"
-          accept=".md,text/markdown"
-          aria-label="角色 Markdown 文件"
-          onChange={(event) => {
-            void choose(event.target.files?.[0])
-            event.target.value = ''
-          }}
-        />
-        {preview === null ? (
-          <Button
-            variant="outline"
-            disabled={reading}
-            onClick={() => input.current?.click()}
-          >
-            <Upload data-icon="inline-start" />
-            {reading ? '正在读取…' : '选择 Markdown 文件'}
-          </Button>
-        ) : (
-          <div className="space-y-3 rounded-lg border p-4">
-            <div>
-              <p className="text-sm font-medium">{preview.draft.name}</p>
-              <p className="text-xs text-muted-foreground">
-                {preview.fileName}
+        <div className="flex flex-col gap-4">
+          {file ? (
+            <div className="flex items-start gap-3 rounded-lg border p-4">
+              <FileText className="mt-0.5 size-5 shrink-0 text-muted-foreground" />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium">{file.name}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {Math.max(1, Math.ceil(file.size / 1024))} KiB · Markdown
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label="重新选择文件"
+                disabled={pending}
+                onClick={() => {
+                  setFile(undefined)
+                  setContent('')
+                  setConflict(false)
+                  setError(undefined)
+                }}
+              >
+                <X />
+              </Button>
+            </div>
+          ) : (
+            <label
+              htmlFor={inputId}
+              className="flex min-h-40 cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border border-dashed p-6 text-center transition-colors hover:bg-muted/40 focus-within:ring-2 focus-within:ring-ring"
+            >
+              <span className="flex size-10 items-center justify-center rounded-full bg-muted">
+                <Upload className="size-5" />
+              </span>
+              <span>
+                <span className="block text-sm font-medium">选择角色 Markdown 文件</span>
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  文件最大 1 MiB，名称与描述写在 YAML front matter 中
+                </span>
+              </span>
+            </label>
+          )}
+          <input
+            id={inputId}
+            aria-label="角色 Markdown 文件"
+            className="sr-only"
+            type="file"
+            accept=".md,.markdown,text/markdown"
+            disabled={pending}
+            onChange={(event) => {
+              void choose(event.currentTarget.files?.item(0) ?? undefined)
+              event.currentTarget.value = ''
+            }}
+          />
+          {conflict && (
+            <div
+              role="alert"
+              className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm"
+            >
+              <p className="font-medium">已有同名角色</p>
+              <p className="mt-1 text-muted-foreground">
+                覆盖会用这份文件更新现有角色，并保留它的角色 ID。
               </p>
             </div>
-            <p className="text-sm text-muted-foreground">
-              {preview.draft.description}
-            </p>
-            {preview.existing ? (
-              <div className="space-y-2">
-                <p className="text-xs text-muted-foreground">
-                  现有描述：{preview.existing.description || '暂无描述'}
-                </p>
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    variant={decision === 'skip' ? 'secondary' : 'outline'}
-                    onClick={() => setDecision('skip')}
-                  >
-                    跳过
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant={decision === 'overwrite' ? 'secondary' : 'outline'}
-                    onClick={() => setDecision('overwrite')}
-                  >
-                    覆盖
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <p className="text-xs text-muted-foreground">
-                未发现同名角色，确认后会新建。
-              </p>
-            )}
-          </div>
-        )}
-        <ActionError error={fileError ?? error} />
-        <DialogFooter>
-          {preview !== null && (
-            <Button
-              variant="outline"
-              disabled={pending}
-              onClick={() => {
-                setPreview(null)
-                setDecision(null)
-                setFileError(null)
-              }}
-            >
-              重新选择
-            </Button>
           )}
-          <Button variant="ghost" disabled={pending} onClick={close}>
+          <ActionError error={error} />
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="ghost" disabled={pending} onClick={onClose}>
             取消
           </Button>
-          {preview !== null && (
+          {conflict ? (
+            <Button type="button" disabled={pending} onClick={() => void submit(true)}>
+              {pending ? '导入中…' : '覆盖并导入'}
+            </Button>
+          ) : (
             <Button
-              disabled={!canCommit}
-              onClick={() =>
-                onCommit(preview, decision, () => {
-                  setPreview(null)
-                  setDecision(null)
-                  onClose()
-                })
-              }
+              type="button"
+              disabled={!file || pending}
+              onClick={() => void submit(false)}
             >
-              {pending ? '正在导入…' : '确认导入'}
+              {pending ? '导入中…' : '导入'}
             </Button>
           )}
         </DialogFooter>

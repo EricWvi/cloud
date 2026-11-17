@@ -16,18 +16,25 @@ import (
 const promptWorkspaceRoot = "."
 
 // agentPrompt is desktop's assemble_workflow_prompt (crates/backend/src/workflow/run/prompt.rs)
-// without the parts v2 does not apply: the role block and previous-failure
-// injection (v2 never retries). The node's prompt is already rendered against the pool. Each
-// section is one ACP text block, separated by a blank line because providers may concatenate
-// block text verbatim. A structured-output node ends with its output contract, last so the
-// final-response constraint has the strongest recency.
-func agentPrompt(d workflow.AgentDispatch, renderedTask string) execution.Prompt {
+// without the parts v2 does not apply: previous-failure injection (v2 never retries).
+// The node's prompt is already rendered against the pool, and roleContent is the role definition
+// read from the tenant's role catalog just before this attempt started; an empty content sends no
+// {@code system_instructions} block, as desktop does for an empty role. Each section is one ACP
+// text block, separated by a blank line because providers may concatenate block text verbatim. A
+// structured-output node ends with its output contract, last so the final-response constraint has
+// the strongest recency.
+func agentPrompt(d workflow.AgentDispatch, renderedTask, roleContent string) execution.Prompt {
 	c := promptCopyFor(d.Locale)
 	sections := []string{
 		workspaceRootBlock(d.Locale),
+	}
+	if role := roleBlock(d.Node, roleContent, c); role != "" {
+		sections = append(sections, role)
+	}
+	sections = append(sections,
 		currentStepBlock(d.Node, renderedTask, c),
 		workflowContextBlock(d, c),
-	}
+	)
 	if names := d.Node.Agent().Skills; len(names) > 0 {
 		sections = append(sections, "<required_skills>\nRead and follow the selected imported skills before doing this step. They are available under .opencode/skills or .claude/skills in this workspace. A plugin selection supplies its packaged skills.\n"+strings.Join(names, "\n")+"\n</required_skills>")
 	}
@@ -62,6 +69,23 @@ func structuredContractBlock(schema map[string]any, locale string) string {
 	}
 	return "<structured_output_contract>\nThis workflow step requires structured output. You may reason, call tools, read or write files, and perform the task normally; the rules below constrain only your final assistant response.\n\nRules:\n1. The final assistant response must contain exactly one JSON object and nothing else.\n2. Do not use a Markdown code fence or add explanations, headings, or other text before or after the JSON.\n3. Each Schema field's type is the type required by the variable pool; follow both the types and the data shapes in the example below.\n4. Include every field declared in the schema's required list.\n5. When additionalProperties is false, do not add undeclared fields.\n6. A file value must be {\"kind\":\"workspace_file\",\"path\":\"path relative to this run's Workspace\"}; array[file] is an array of those objects. Never use an absolute path or a path containing `..`.\n\nValid output example:\n" +
 		string(example) + "\n\nJSON Schema:\n" + string(pretty) + "\n</structured_output_contract>"
+}
+
+// roleBlock renders the role definition as explicit behavioural instructions rather than
+// appending the Markdown raw, exactly as desktop's render_role_definition does. The label is the
+// reference the graph stores (the role name); a graph that stored only an id still gets the name
+// the run resolved, because the host passes the resolved catalog row's name through the node
+// configuration. Blank content sends no block at all.
+func roleBlock(n workflow.Node, content string, c promptCopy) string {
+	role := strings.TrimSpace(content)
+	if role == "" {
+		return ""
+	}
+	name := n.Agent().RoleID
+	if name == "" {
+		name = c.defaultRole
+	}
+	return "<system_instructions>\n" + c.roleIntro + "\n" + c.role + ": " + name + "\n\n" + role + "\n</system_instructions>"
 }
 
 func currentStepBlock(n workflow.Node, task string, c promptCopy) string {
@@ -129,6 +153,7 @@ func nodeList(nodes []workflow.Node, c promptCopy) string {
 
 // promptCopy is desktop's PromptCopy, limited to the sections v2 renders.
 type promptCopy struct {
+	roleIntro, role, defaultRole                                         string
 	currentStepIntro, step, description, taskInstructions                string
 	workflowOverview, workflowOverviewIntro, directPredecessors          string
 	directSuccessors, topologyAndStatus, notStarted, currentMarker, none string
@@ -139,6 +164,9 @@ type promptCopy struct {
 func promptCopyFor(locale string) promptCopy {
 	if locale == workflow.LocaleZhCN {
 		return promptCopy{
+			roleIntro:             "在整个步骤中，请遵守以下角色定义，并将其视为对推理、行动和交付表达方式的约束。",
+			role:                  "角色",
+			defaultRole:           "工作流角色",
 			currentStepIntro:      "你负责执行下述工作流步骤。请专注于当前步骤，并让最终回复成为可供后续步骤直接使用的清晰交付内容。",
 			step:                  "当前步骤",
 			description:           "步骤说明",
@@ -160,6 +188,9 @@ func promptCopyFor(locale string) promptCopy {
 		}
 	}
 	return promptCopy{
+		roleIntro:             "Follow the role definition below throughout this workflow step. Treat it as constraints on how you reason, act, and present the handoff.",
+		role:                  "Role",
+		defaultRole:           "workflow role",
 		currentStepIntro:      "You are responsible for the workflow step identified below. Focus on this step and make your final response a clear handoff for downstream steps.",
 		step:                  "Step",
 		description:           "Description",

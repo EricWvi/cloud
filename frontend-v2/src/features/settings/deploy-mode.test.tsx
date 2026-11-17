@@ -27,14 +27,15 @@ it('recognizes a deployed install only when idaas is offered', () => {
   expect(isDeployedProviders([])).toBe(false)
 })
 
-it('hides the browser-only pages from the navigation in a deployed install', async () => {
+it('hides only the browser-local model connections in a deployed install', async () => {
   serveProviders(['idaas'])
   renderSettingsPage(<SettingsPage />, '/settings/squads')
   await waitFor(() => expect(screen.getByRole('navigation', { name: '设置导航' })).toBeInTheDocument())
   await waitFor(() =>
-    expect(screen.queryByRole('link', { name: '角色' })).not.toBeInTheDocument(),
+    expect(screen.queryByRole('link', { name: '模型连接' })).not.toBeInTheDocument(),
   )
-  expect(screen.queryByRole('link', { name: '模型连接' })).not.toBeInTheDocument()
+  // Roles live in the workspace's server catalog, so a deployed install offers them too.
+  expect(screen.getByRole('link', { name: '角色' })).toBeInTheDocument()
   expect(screen.getByRole('link', { name: '小队' })).toBeInTheDocument()
   expect(screen.getByRole('link', { name: 'Plugins' })).toBeInTheDocument()
 })

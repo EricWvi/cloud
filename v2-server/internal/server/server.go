@@ -56,6 +56,12 @@ type Store interface {
 	UpdateSkill(ctx context.Context, tenant, caller, id string, in store.SkillInput) (store.Skill, error)
 	DeleteSkill(ctx context.Context, tenant, caller, id string) error
 	ImportSkill(ctx context.Context, tenant, caller string, raw []byte, overwrite bool) (store.Skill, error)
+	ListRoles(ctx context.Context, tenant string) ([]store.Role, error)
+	GetRole(ctx context.Context, tenant, id string) (store.Role, error)
+	CreateRole(ctx context.Context, tenant, caller string, in store.RoleInput) (store.Role, error)
+	UpdateRole(ctx context.Context, tenant, id string, in store.RoleInput) (store.Role, error)
+	DeleteRole(ctx context.Context, tenant, id string) error
+	ImportRole(ctx context.Context, tenant, caller string, raw []byte, overwrite bool) (store.Role, error)
 }
 
 // PluginPackageDownloader stages one verified marketplace archive and returns its local path.
@@ -128,6 +134,12 @@ func newRouter(h *handler) *router {
 	rt.tenant("GET /api/v2/tenants/{tid}/skills/{sid}", h.getSkill)
 	rt.tenant("PUT /api/v2/tenants/{tid}/skills/{sid}", h.updateSkill)
 	rt.tenant("DELETE /api/v2/tenants/{tid}/skills/{sid}", h.deleteSkill)
+	rt.tenant("GET /api/v2/tenants/{tid}/roles", h.listRoles)
+	rt.tenant("POST /api/v2/tenants/{tid}/roles", h.createRole)
+	rt.tenant("POST /api/v2/tenants/{tid}/roles/import", h.importRole)
+	rt.tenant("GET /api/v2/tenants/{tid}/roles/{rid}", h.getRole)
+	rt.tenant("PUT /api/v2/tenants/{tid}/roles/{rid}", h.updateRole)
+	rt.tenant("DELETE /api/v2/tenants/{tid}/roles/{rid}", h.deleteRole)
 	rt.tenant("GET /api/v1/tenants/{tid}/spaces", h.spaces)
 	rt.tenant("GET /api/v1/tenants/{tid}/mcp", h.listMCP)
 	rt.owner("POST /api/v1/tenants/{tid}/spaces/{sid}/mcp", h.installMCP)
