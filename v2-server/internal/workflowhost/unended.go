@@ -70,13 +70,13 @@ func (h *Host) endInteractive(st *runState, n *interactiveNode) {
 
 // dropInteractive stops tracking n, if it is still tracked. A session whose End was not confirmed
 // keeps its slot as a lingering session; it reports whether the caller must start its retry.
-// Callers hold mu.
+// Dropping n never frees a slot by itself: a gone session gave its slot back (and woke the
+// waiters) when its End was confirmed. Callers hold mu.
 func (st *runState) dropInteractive(n *interactiveNode) bool {
 	if st.interactive[n.d.Node.ID] != n {
 		return false
 	}
 	delete(st.interactive, n.d.Node.ID)
-	st.slotsMayHaveChanged()
 	return !n.sessionGone && st.linger(n.session)
 }
 
