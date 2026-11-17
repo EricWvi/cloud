@@ -21,10 +21,11 @@ import { TaskDiscussion } from './task-discussion'
 import { TaskForm, type TaskDraft } from './task-form'
 import { TaskWorkflowDialog } from './task-workflow-dialog'
 import { TaskWorkflows } from './task-workflows'
+import { statusOf } from '@/lib/api-client'
 import { projectLabel, taskMessageFor, taskMoveMessageFor, taskRunMessageFor, taskStatusLabel } from './task-model'
 import {
   createTaskComment, getTask, getTaskTimeline, listTaskExecutors, setTaskAssignee, setTaskStatus, startTaskRun, stopTaskRun, updateTask,
-  type Task, type TaskAssigneeRef, type TaskStatusProperty,
+  type Task, type TaskAssigneeRef, type TaskComment, type TaskStatusProperty,
 } from './tasks-api/generated'
 import { canCloseTask, canDecompose, runsAgent } from './task-views'
 import { useDecompositions, useMySquadTasks, useWorkspace } from './workspace'
@@ -59,9 +60,11 @@ export default function TaskPage() {
     refetchInterval: q => (q.state.data?.activeRun?.state === 'running' ? 2000 : 10000),
   })
   const task = taskQuery.data
+  const hasLiveCommentWorkflow = (items?: TaskComment[]) =>
+    (items ?? []).some(c => !!c.workflowRun && !c.workflowRun.deleted && ['pending', 'running', 'awaitingInput'].includes(c.workflowRun.status))
   const timeline = useQuery({
     queryKey: ['task-timeline', tenantId, taskId], queryFn: () => getTaskTimeline(tenantId, taskId), enabled: !!tenantId && !!taskId,
-    refetchInterval: live(task) ? 3000 : 10000,
+    refetchInterval: q => (live(task) || hasLiveCommentWorkflow(q.state.data?.comments) ? 2000 : 10000),
   })
   const projects = useQuery({ queryKey: ['projects', tenantId], queryFn: () => getApiV2TenantsTidProjects(tenantId, { limit: 100 }), enabled: !!tenantId })
   const squads = useQuery({ queryKey: ['squads', tenantId], queryFn: () => listSquads(tenantId), enabled: !!tenantId })
@@ -113,6 +116,26 @@ export default function TaskPage() {
   const handlingLive = workflowRuns.some(run => run.kind === 'handle' && ['pending', 'running', 'awaitingInput'].includes(run.status))
   const runs = timeline.data?.runs ?? []
   const comments = timeline.data?.comments ?? []
+  const liveCommentRunIds = useMemo(
+    () => (timeline.data?.comments ?? [])
+      .filter(c => !!c.workflowRun && !c.workflowRun.deleted && ['pending', 'running', 'awaitingInput'].includes(c.workflowRun.status))
+      .map(c => c.workflowRun!.id)
+      .sort()
+      .join(','),
+    [timeline.data],
+  )
+  useEffect(() => {
+    if (!tenantId || !liveCommentRunIds || typeof EventSource === 'undefined') return
+    const sources = liveCommentRunIds.split(',').filter(Boolean).map(runId => {
+      const source = new EventSource(`/api/v2/tenants/${tenantId}/workflow-runs/${runId}/events`)
+      source.addEventListener('workflow_run_invalidated', () => {
+        void client.invalidateQueries({ queryKey: ['task-timeline', tenantId, taskId] })
+        void client.invalidateQueries({ queryKey: ['task-workflow-runs', tenantId, taskId] })
+      })
+      return source
+    })
+    return () => { sources.forEach(s => s.close()) }
+  }, [tenantId, taskId, liveCommentRunIds, client])
   const selected = pickedRun ? runs.find(r=>r.id===pickedRun) : runs.at(-1)
   // A link to a run the task no longer lists falls back to the list.
   const openedWorkflow = tab === 'workflows' ? workflowRuns.find(d => !d.deleted && d.workflowRunId && d.workflowRunId === params.get('workflow')) : undefined
@@ -190,9 +213,17 @@ export default function TaskPage() {
     onSuccess: async () => { setError(''); await refresh() },
     onError: e => setError(taskRunMessageFor(e)),
   })
+  const commentKeyRef = useRef<{ signature: string; key: string } | null>(null)
   const comment = useMutation({
-    mutationFn: (draft: CommentDraft) => createTaskComment(tenantId, taskId, { ...draft, executorId: draft.toAgent ? executorId : undefined }, keyed()),
+    mutationFn: ({ idempotencyKey, ...draft }: CommentDraft & { idempotencyKey: string }) =>
+      createTaskComment(
+        tenantId,
+        taskId,
+        { ...draft, executorId: draft.toAgent ? executorId : undefined },
+        { headers: { 'Idempotency-Key': idempotencyKey } },
+      ),
     onSuccess: async (created, draft) => {
+      commentKeyRef.current = null
       setComposeError('')
       // Replying answers any @ waiting on the caller here.
       void client.invalidateQueries({ queryKey: ['task-mentions', tenantId] })
@@ -242,10 +273,22 @@ export default function TaskPage() {
             ? <p role="alert">运行与讨论加载失败，请刷新重试。</p>
             : tab === 'runs'
               ? pickedRun&&!selected&&!timeline.isPending ? <p role="status">这次运行已不存在或不可见。</p> : <RunPane tenantId={tenantId} taskId={task.id} runs={runs} selected={selected} onSelect={showRun} />
-              : <TaskDiscussion comments={comments} runs={runs} onRun={showRun} />}
+              : <TaskDiscussion taskId={task.id} comments={comments} runs={runs} onRun={showRun} />}
         </div>
-        {!openedWorkflow && <TaskComposer tenantId={tenantId} task={task} me={me.id} inSquad={inSquad} sending={comment.isPending} error={composeError}
-          onSend={async draft => { try { await comment.mutateAsync(draft); return true } catch { return false } }} />}
+        {!openedWorkflow && <TaskComposer tenantId={tenantId} task={task} me={me.id} inSquad={inSquad} sending={comment.isPending} error={composeError} submitError={comment.isError ? comment.error : undefined}
+          onSend={async draft => {
+            const signature = JSON.stringify(draft)
+            const key = commentKeyRef.current?.signature === signature ? commentKeyRef.current.key : crypto.randomUUID()
+            commentKeyRef.current = { signature, key }
+            try {
+              await comment.mutateAsync({ ...draft, idempotencyKey: key })
+              return true
+            } catch (err) {
+              const code = statusOf(err)
+              if (code && code >= 400 && code < 500) commentKeyRef.current = null
+              return false
+            }
+          }} />}
       </section>
       {!workspaceShown && <aside className="mc-task-side-col" aria-label="任务属性">
         <TaskDetailView task={task} me={me.id} inSquad={inSquad} canClose={canCloseTask(task, me.id, role)} projectName={projectLabel(projectList, task.projectId)} squads={squads.data?.items ?? []}
