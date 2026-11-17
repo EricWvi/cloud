@@ -279,3 +279,41 @@ func TestCloseDoesNotWaitForTheRetryOfALingeringEnd(t *testing.T) {
 		t.Fatal("Close waited for the retry of a lingering End")
 	}
 }
+
+// An End reporting the session of a parked node unknown or already ended proves it gone: the node
+// can still be completed, and its run cancelled.
+func TestAParkedNodeWhoseSessionIsGoneCompletesAndCancels(t *testing.T) {
+	gone := func(f *fixture, session string) {
+		end := f.exec.EndFunc
+		f.exec.EndFunc = func(ctx context.Context, scope execution.Scope, id string) error {
+			err := end(ctx, scope, id)
+			if id == session {
+				return execution.ErrNotFound
+			}
+			return err
+		}
+	}
+	t.Run("complete", func(t *testing.T) {
+		f := newFixture(t)
+		runID, a := f.startParked(t, interactiveChain, "初稿")
+		gone(f, a)
+		if _, err := f.host.CompleteNode(context.Background(), f.scope, runID, "a", false, "human"); err != nil {
+			t.Fatal(err)
+		}
+		f.exec.finish(f.exec.awaitStart(t), completed("可以"))
+		if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusSucceeded {
+			t.Fatalf("run %s", run.Status)
+		}
+	})
+	t.Run("cancel", func(t *testing.T) {
+		f := newFixture(t)
+		runID, a := f.startParked(t, interactiveChain, "初稿")
+		gone(f, a)
+		if _, err := f.host.CancelRun(context.Background(), f.scope, runID); err != nil {
+			t.Fatal(err)
+		}
+		if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusCancelled {
+			t.Fatalf("run %s", run.Status)
+		}
+	})
+}

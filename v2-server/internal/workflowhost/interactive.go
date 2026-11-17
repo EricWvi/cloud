@@ -518,6 +518,9 @@ func (h *Host) CompleteNode(ctx context.Context, scope server.WorkflowRunScope, 
 		stopCtx, cancel := context.WithTimeout(ctx, h.stopTimeout)
 		err := h.exec.End(stopCtx, st.scope, n.session)
 		cancel()
+		if endConfirmed(err) {
+			err = nil
+		}
 		// Confirmed or not, the execution service takes no further turn for a session it was
 		// asked to end, so the node stops offering the conversation either way: a message sent
 		// now would be accepted and then lost.
@@ -640,7 +643,7 @@ func (h *Host) endParked(ctx context.Context, st *runState) error {
 	}
 	st.mu.Unlock()
 	for _, id := range sessions {
-		if err := h.exec.End(ctx, st.scope, id); err != nil {
+		if err := h.exec.End(ctx, st.scope, id); !endConfirmed(err) {
 			return err
 		}
 	}
