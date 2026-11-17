@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,9 +34,9 @@ type workflowSkillState struct {
 // in selection, the starting session's version is the one projected. A skill is dropped by the
 // first projection after its session ended, so a live sibling's later turns can still see the
 // skills of a node that started and ended in between.
+//
+// The caller holds skillsMu, and reads siblings with liveSiblingSkills inside that section.
 func (p *projectRuntime) applyWorkflowSkills(checkout, workspace string, selection execution.Skills, siblings []execution.Skills) error {
-	p.skillsMu.Lock()
-	defer p.skillsMu.Unlock()
 	statePath := filepath.Join(p.root, "workflow-skills-"+digest(workspace)+".json")
 	var before workflowSkillState
 	raw, err := os.ReadFile(statePath)
@@ -190,4 +191,19 @@ func renderWorkflowSkill(doc execution.SkillDocument) string {
 
 func workflowSkillError(err error) bool {
 	return err != nil && strings.HasPrefix(err.Error(), "workflow_skill_")
+}
+
+// liveSiblingSkills returns, in session order, the selections of the other sessions admitted to
+// the workspace's checkout that have not stopped.
+func (p *projectRuntime) liveSiblingSkills(workspace, session string) []execution.Skills {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	owners := p.owners[workspace]
+	var siblings []execution.Skills
+	for _, id := range slices.Sorted(maps.Keys(owners)) {
+		if id != session && owners[id] != nil {
+			siblings = append(siblings, *owners[id])
+		}
+	}
+	return siblings
 }

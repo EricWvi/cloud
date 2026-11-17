@@ -430,18 +430,21 @@ func TestRuntimeBusyAndIndependentConversations(t *testing.T) {
 	workflow.Caller.NodeID = "one"
 	workflowRef := startModel(t, f, workflow)
 	third := nextProviderCall(t, f, p)
+	// Attempts of one workflow run are independent sessions and run concurrently.
 	workflow.Caller.AttemptID = "node-two"
 	workflow.Caller.NodeID = "two"
-	if _, err := f.service.StartModel(f.ctx, f.scope, workflow); !errors.Is(err, execution.ErrWorkspaceBusy) {
-		t.Fatalf("same workflow run=%v", err)
+	siblingRef := startModel(t, f, workflow)
+	fourth := nextProviderCall(t, f, p)
+	if siblingRef.SessionID == workflowRef.SessionID {
+		t.Fatal("sibling workflow attempt reused a session")
 	}
-	for _, call := range []*providerCall{first, second, third} {
+	for _, call := range []*providerCall{first, second, third, fourth} {
 		if call.ctx.Err() != nil {
 			t.Fatalf("independent execution cancelled: %v", call.ctx.Err())
 		}
 		call.unblock()
 	}
-	for _, ref := range []execution.Ref{ref, secondRef, workflowRef} {
+	for _, ref := range []execution.Ref{ref, secondRef, workflowRef, siblingRef} {
 		result, _ := observeTurn(t, f, ref, 0)
 		if result.Status != execution.StatusCompleted {
 			t.Fatalf("result=%+v", result)
@@ -691,7 +694,7 @@ func TestRuntimeExecutorDirectoryPairsAgentsWithTheirProtocol(t *testing.T) {
 	}
 }
 
-func TestRuntimeAgentOrchestrationSeparatesConversationsAndReusesWorkflowDirectory(t *testing.T) {
+func TestRuntimeAgentOrchestrationSeparatesConversationsAndSharesWorkflowDirectory(t *testing.T) {
 	f := runtimeDatabase(t, nil)
 	if err := f.service.Close(f.ctx); err != nil {
 		t.Fatal(err)
@@ -739,21 +742,23 @@ func TestRuntimeAgentOrchestrationSeparatesConversationsAndReusesWorkflowDirecto
 	workflow := execution.Caller{Kind: execution.CallerWorkflow, ID: "workflow", NodeID: "one", AttemptID: "node-one"}
 	old := start(workflow)
 	oldCall := nextAgentCall(t, f, a)
+	// A sibling attempt of the same run starts while the first still executes: its own session,
+	// in the run's directory, concurrently.
 	workflow.NodeID, workflow.AttemptID = "two", "node-two"
-	if _, err := f.service.Start(f.ctx, f.scope, execution.StartRequest{Caller: workflow, Target: execution.Target{ProjectID: "project"}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("run")}); !errors.Is(err, execution.ErrWorkspaceBusy) {
-		t.Fatalf("same active workflow=%v", err)
-	}
-	oldCall.unblock()
-	observeTurn(t, f, old, 0)
 	next := start(workflow)
 	nextCall := nextAgentCall(t, f, a)
-	if nextCall.session.WorkspaceID != oldCall.session.WorkspaceID {
-		t.Fatal("workflow did not reuse its directory")
+	if nextCall.session.WorkspaceID != oldCall.session.WorkspaceID || next.SessionID == old.SessionID {
+		t.Fatal("workflow sibling did not share its run's directory as its own session")
+	}
+	if oldCall.ctx.Err() != nil {
+		t.Fatal("starting a sibling cancelled the executing attempt")
 	}
 	// The run's sessions share the directory side by side: starting the next node does not end
 	// its predecessor, whose owner (the workflow host) ends it.
 	nextCall.unblock()
 	observeTurn(t, f, next, 0)
+	oldCall.unblock()
+	observeTurn(t, f, old, 0)
 	select {
 	case sid := <-a.ended:
 		t.Fatalf("starting the run's next session ended %s", sid)
@@ -1011,23 +1016,31 @@ func TestRuntimeHeldSessionSurvivesAnAgentEndedTurn(t *testing.T) {
 	if sideCall.session.WorkspaceID != heldCall.session.WorkspaceID {
 		t.Fatal("the run's second session did not share its directory")
 	}
+	// The held session takes its next turn while the sibling's executes: each session of a run
+	// runs one turn at a time, and the run's sessions run theirs concurrently.
 	followUp := request("shared", execution.LifetimeHeld).Caller
 	followUp.AttemptID = "a2"
-	if _, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: held.SessionID, Caller: followUp, Prompt: execution.TextPrompt("again")}); !errors.Is(err, execution.ErrWorkspaceBusy) {
-		t.Fatalf("a turn beside the run's executing turn = %v, want ErrWorkspaceBusy", err)
+	turn, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: held.SessionID, Caller: followUp, Prompt: execution.TextPrompt("again")})
+	if err != nil {
+		t.Fatalf("the held session refused a turn beside its sibling's: %v", err)
+	}
+	again := followUp
+	again.AttemptID = "a3"
+	if _, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: held.SessionID, Caller: again, Prompt: execution.TextPrompt("third")}); !errors.Is(err, execution.ErrWorkspaceBusy) {
+		t.Fatalf("a second turn in the executing held session = %v, want ErrWorkspaceBusy", err)
+	}
+	turnCall := nextAgentCall(t, f, a)
+	if sideCall.ctx.Err() != nil {
+		t.Fatal("the held session's turn cancelled its sibling's")
+	}
+	turnCall.unblock()
+	if result, _ := observeTurn(t, f, turn, 0); result.Status != execution.StatusCompleted {
+		t.Fatalf("turn beside the sibling = %+v", result)
 	}
 	sideCall.unblock()
 	observeTurn(t, f, side, 0)
 	if !live(held.SessionID) || !live(side.SessionID) {
-		t.Fatalf("live after the sibling's turn: held = %v, side = %v; want both", live(held.SessionID), live(side.SessionID))
-	}
-	turn, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: held.SessionID, Caller: followUp, Prompt: execution.TextPrompt("again")})
-	if err != nil {
-		t.Fatalf("the held session refused a turn after its sibling ran: %v", err)
-	}
-	nextAgentCall(t, f, a).unblock()
-	if result, _ := observeTurn(t, f, turn, 0); result.Status != execution.StatusCompleted {
-		t.Fatalf("turn after the sibling = %+v", result)
+		t.Fatalf("live after both turns: held = %v, side = %v; want both", live(held.SessionID), live(side.SessionID))
 	}
 	for _, id := range []string{held.SessionID, side.SessionID} {
 		if err := f.service.End(f.ctx, f.scope, id); err != nil {

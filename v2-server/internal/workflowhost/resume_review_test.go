@@ -56,6 +56,21 @@ func blockFirstExecutorList(f *fixture) (entered <-chan struct{}, release func()
 	return in, func() { once.Do(func() { close(gate) }) }
 }
 
+// blockExecutorLists makes every ListExecutors call wait until the returned release is called,
+// reporting each call on entered.
+func blockExecutorLists(f *fixture) (entered <-chan struct{}, release func()) {
+	var once sync.Once
+	gate := make(chan struct{})
+	in := make(chan struct{}, 8)
+	list := f.exec.ListExecutorsFunc
+	f.exec.ListExecutorsFunc = func(c context.Context, s execution.Scope) ([]execution.Executor, error) {
+		in <- struct{}{}
+		<-gate
+		return list(c, s)
+	}
+	return in, func() { once.Do(func() { close(gate) }) }
+}
+
 // M1: a dispatch already past its abandon check and resolving its executor when the run is
 // cancelled and resumed must never start a turn for the attempt the resume soft-deleted, and the
 // resumed attempt must still run (the cancellation request is cleared by the resume, N5).
@@ -94,17 +109,18 @@ func TestResumeNeverStartsADispatchQueuedBeforeTheCancel(t *testing.T) {
 }
 
 // M1: a dispatch whose run a sibling failed while it resolved its executor must not start: the
-// abandon check is repeated once the start slot is reserved.
+// abandon check is repeated once the attempt is registered.
 func TestADispatchWhoseRunEndedWhileItResolvedDoesNotStart(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	entered, release := blockFirstExecutorList(f)
+	entered, release := blockExecutorLists(f)
 	defer release()
 	id := f.run(t, siblings, nil)
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	<-entered // D is resolving its executor; A is queued behind it
+	<-entered // D and A are both resolving their executors
+	<-entered
 	_, rows := f.await(t, id, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool { return node(n, "a").ID != "" })
 	if err := f.host.engine.FailNode(ctx, id, node(rows, "a").ID, workflow.Failure{Kind: workflow.FailureSession, Message: "boom"}); err != nil {
 		t.Fatal(err)
@@ -327,12 +343,16 @@ func TestResumeClosesTheOpenRoundOfAClearedLoop(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	f.exec.finish(expectAgent(t, f, "x"), sessionFailed)
-	// The queued writer is abandoned (cancelled) under the failed run; its round stays open.
+	// X and the Loop's writer execute concurrently. X fails the run; the writer's late failure is
+	// still recorded, and since a failed run schedules nothing, its round stays open.
+	started := f.exec.awaitStarts(t, 2)
+	f.exec.finish(started["x"], sessionFailed)
+	f.await(t, id, terminal)
+	f.exec.finish(started["writer"], sessionFailed)
 	var open store.WorkflowScope
 	for deadline := time.Now().Add(5 * time.Second); open.ID == ""; time.Sleep(5 * time.Millisecond) {
 		if time.Now().After(deadline) {
-			t.Fatal("the Loop's round never settled its abandoned writer")
+			t.Fatal("the Loop's round never settled its late writer")
 		}
 		rounds, err := f.s.WorkflowEngineLoopRounds(ctx, id)
 		if err != nil {
@@ -340,11 +360,12 @@ func TestResumeClosesTheOpenRoundOfAClearedLoop(t *testing.T) {
 		}
 		for _, r := range rounds {
 			rows, _ := f.s.WorkflowEngineScopeNodes(ctx, id, r.ID)
-			if *r.Status == "running" && node(rows, "writer").Status == "cancelled" {
+			if *r.Status == "running" && node(rows, "writer").Status == "failed" {
 				open = r
 			}
 		}
 	}
+	f.await(t, id, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return !f.host.settling(id) })
 	if _, err := f.host.ResumeRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +389,7 @@ func TestALateSiblingFailureKeepsTheRunsFailureAnchor(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	d := expectAgent(t, f, "d")
+	d := f.exec.awaitStarts(t, 2)["d"]
 	_, rows := f.await(t, id, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool { return node(n, "a").ID != "" })
 	if err := f.host.engine.FailNode(ctx, id, node(rows, "a").ID, workflow.Failure{Kind: workflow.FailureSession, Message: "boom"}); err != nil {
 		t.Fatal(err)
@@ -413,8 +434,9 @@ func TestCancelDuringAResumeStopsTheResumedAgent(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	f.exec.finish(expectAgent(t, f, "d"), completed("D"))
-	f.exec.finish(expectAgent(t, f, "a"), sessionFailed)
+	pair := f.exec.awaitStarts(t, 2)
+	f.exec.finish(pair["d"], completed("D"))
+	f.exec.finish(pair["a"], sessionFailed)
 	_, before := f.await(t, id, terminal)
 	awaitIdle(t, f, id)
 	failedA := node(before, "a").ID
@@ -481,8 +503,9 @@ func TestResumeDuringACancellationIsRefusedAtOnce(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	f.exec.finish(expectAgent(t, f, "d"), completed("D"))
-	f.exec.finish(expectAgent(t, f, "a"), sessionFailed)
+	pair := f.exec.awaitStarts(t, 2)
+	f.exec.finish(pair["d"], completed("D"))
+	f.exec.finish(pair["a"], sessionFailed)
 	f.await(t, id, terminal)
 	awaitIdle(t, f, id)
 	unlock := f.host.lockLifecycle(id) // a cancellation under way
@@ -525,7 +548,7 @@ func TestLifecycleLocksAreReleasedAndNeverCreatedForUnknownRuns(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	expectAgent(t, f, "d")
+	f.exec.awaitStarts(t, 2)
 	if _, err := f.host.CancelRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
@@ -542,14 +565,15 @@ func TestLifecycleLocksAreReleasedAndNeverCreatedForUnknownRuns(t *testing.T) {
 // any store read, and a released slot leaves nothing in flight.
 func TestBeginStartRefusesADispatchFromAReplacedGeneration(t *testing.T) {
 	st := &runState{generation: 2}
-	if st.beginStart("", "attempt", 1) {
-		t.Fatal("a dispatch queued before the resume reserved the start slot")
+	if st.beginStart("attempt", "attempt", "", 1) != nil {
+		t.Fatal("a dispatch made before the resume registered a turn")
 	}
-	if !st.beginStart("", "attempt", 2) {
-		t.Fatal("a current dispatch was refused the start slot")
+	a := st.beginStart("attempt", "attempt", "", 2)
+	if a == nil {
+		t.Fatal("a current dispatch was refused")
 	}
-	st.releaseStart()
-	if st.starting != nil || st.turnDone != nil || st.active != nil {
-		t.Fatalf("released slot left state behind: %+v", st)
+	st.releaseStart(a)
+	if len(st.attempts) != 0 {
+		t.Fatalf("released turn left state behind: %+v", st)
 	}
 }

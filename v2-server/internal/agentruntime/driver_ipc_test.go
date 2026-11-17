@@ -982,6 +982,85 @@ func TestDriverIPCWorkflowSessionsShareACheckout(t *testing.T) {
 	}
 }
 
+// Two sessions of one run start at the same time with different Skills. Both wait on the same
+// clone and then project into the shared checkout; whichever projects second must keep the other's
+// Skill, so both are on disk once both Agents have been started. The race is timing-dependent, so
+// the case repeats; before the fix a round lost a Skill roughly one time in seven.
+func TestDriverIPCConcurrentWorkflowStartsKeepEachOthersSkills(t *testing.T) {
+	h := newIPCHarness(t, func(f *fakeNodeIPC, m node.Message) bool {
+		if m.Type == "clone_repository" {
+			_ = os.MkdirAll(filepath.Join(f.project.root, "w", "r", m.ExecutionID), 0700)
+		}
+		return false
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	run := func(session execution.Session, turn string) <-chan ipcRunOutcome {
+		done := make(chan ipcRunOutcome, 1)
+		go func() {
+			result, err := h.driver.Run(ctx, h.scope, session, execution.Turn{
+				Ref: execution.Ref{SessionID: session.ID, TurnID: turn}, Prompt: execution.TextPrompt("prompt"),
+				Caller: execution.Caller{Kind: execution.CallerWorkflow, ID: "run", AttemptID: turn},
+			}, discardIPCEvent)
+			done <- ipcRunOutcome{result, err}
+		}()
+		return done
+	}
+	turnOf := func(command node.Message) string {
+		var payload struct {
+			Spec struct {
+				Turn struct {
+					ID string `json:"turn_id"`
+				} `json:"initial_turn"`
+			} `json:"spec"`
+		}
+		if err := json.Unmarshal(command.Payload, &payload); err != nil || payload.Spec.Turn.ID == "" {
+			t.Fatalf("start payload %s: %v", command.Payload, err)
+		}
+		return payload.Spec.Turn.ID
+	}
+	skill := func(name string) *execution.Skills {
+		return &execution.Skills{Documents: []execution.SkillDocument{{Name: name, Description: name, Content: "CONTENT-" + name}}}
+	}
+	const rounds = 30
+	lost := 0
+	var f *fakeNodeIPC
+	for i := range rounds {
+		ws := fmt.Sprintf("run-workspace-%d", i)
+		a, b := h.session(fmt.Sprintf("a-%d", i), ws), h.session(fmt.Sprintf("b-%d", i), ws)
+		a.Skills, b.Skills = skill("alpha"), skill("beta")
+		doneA, doneB := run(a, fmt.Sprintf("ta-%d", i)), run(b, fmt.Sprintf("tb-%d", i))
+		if f == nil {
+			f = receiveIPC(t, h.created)
+		}
+		first := nextIPCCommand(t, f, "start_agent_session")
+		second := nextIPCCommand(t, f, "start_agent_session")
+		h.driver.mu.Lock()
+		project := h.driver.projects["project"]
+		h.driver.mu.Unlock()
+		project.mu.Lock()
+		path := project.checkouts[ws].path
+		project.mu.Unlock()
+		for _, name := range []string{"alpha", "beta"} {
+			if _, err := os.Stat(filepath.Join(path, ".opencode/skills", name, "SKILL.md")); err != nil {
+				lost++
+				t.Logf("round %d: skill %s missing while both sessions are live: %v", i, name, err)
+			}
+		}
+		f.finishTurn(t, first, turnOf(first), "one")
+		f.finishTurn(t, second, turnOf(second), "two")
+		if got := receiveIPC(t, doneA); got.err != nil {
+			t.Fatalf("round %d A: %+v", i, got)
+		}
+		if got := receiveIPC(t, doneB); got.err != nil {
+			t.Fatalf("round %d B: %+v", i, got)
+		}
+	}
+	if lost != 0 {
+		t.Fatalf("%d of %d rounds lost a live session's Skill", lost, rounds)
+	}
+}
+
 // Node refuses the session over a checkout's limit by ending only that execution, with a stable
 // detail and the control connection open. The turn fails with that code as a lost Agent, and the
 // run's other session on the checkout keeps working.

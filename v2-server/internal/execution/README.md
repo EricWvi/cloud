@@ -29,12 +29,12 @@ chat 的 ID 是 conversation，workflow 是 run，schedule 是 occurrence；容�
 `Target` 只有 ProjectID，调用方不选择 Workspace。后端按以下粒度创建目录，并将生成的 WorkspaceID 记入 Session：
 
 - 每个 chat 会话一个目录；定时任务每次触发创建独立会话和目录。
-- 同一 Scope 下 `CallerWorkflow.ID` 相同的一次工作流运行共用目录，同时最多执行一轮（其余返回 `ErrWorkspaceBusy`）；目录里可以同时有多个活会话：下一个节点 Start 不结束之前的会话，各会话由调用方各自 End。这依赖 Node 的 `shared_checkout_sessions` 能力（同一 checkout 最多 8 个未结束的会话，超出的那个会话被 Node 拒绝，只有它自己失败）。
+- 同一 Scope 下 `CallerWorkflow.ID` 相同的一次工作流运行共用目录，每个会话同时最多执行一轮（同一会话的其余轮次返回 `ErrWorkspaceBusy`），不同会话的轮次可以同时执行；目录里可以同时有多个活会话：下一个节点 Start 不结束之前的会话，各会话由调用方各自 End。这依赖 Node 的 `shared_checkout_sessions` 能力（同一 checkout 最多 8 个未结束的会话，超出的那个会话被 Node 拒绝，只有它自己失败）。
 - 不同对话和不同 workflow run 不争抢目录，即使它们属于同一个项目。
 - 模型直连的 Session.WorkspaceID 为空。
 
 接收执行只用单进程内的锁和一次数据库写入，持久记录建立后返回 Ref。
-`ErrWorkspaceBusy` 仅表示同一 session 或同一次 workflow run 的上一轮尚未结束；页面自己排队，公共层不另设队列。
+`ErrWorkspaceBusy` 仅表示同一 session 的上一轮尚未结束（对话等非 workflow 调用方按调用方计）；同一次 workflow run 的不同会话各自执行，互不排队。页面自己排队，公共层不另设队列。
 
 `Result.NotStarted` 标出首轮在 Agent 启动之前就失败（项目、checkout、插件或 Skill 没准备好），和 `AgentLost` 一起出现；`FailureCode` 为 `checkout_busy`、`checkout_session_limit`、`checkout_too_deep` 时是 Node 按 checkout 拒绝了这个会话（`CheckoutRefused`）。调用方据此区分“从来没有会话”和“会话中途丢了”。
 

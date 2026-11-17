@@ -24,8 +24,9 @@ func TestRefusedResumeDuringACancellationLeavesNoLifecycleEntry(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	f.exec.finish(expectAgent(t, f, "d"), completed("D"))
-	f.exec.finish(expectAgent(t, f, "a"), sessionFailed)
+	pair := f.exec.awaitStarts(t, 2)
+	f.exec.finish(pair["d"], completed("D"))
+	f.exec.finish(pair["a"], sessionFailed)
 	f.await(t, id, terminal)
 	awaitIdle(t, f, id)
 	unlock := f.host.lockLifecycle(id) // a cancellation under way

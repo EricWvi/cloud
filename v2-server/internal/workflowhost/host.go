@@ -27,15 +27,14 @@ type Config struct {
 	Now func() time.Time
 	// StopTimeout bounds waiting for execution to confirm a cancellation; zero means 30s.
 	StopTimeout time.Duration
-	// BusyRetry bounds how long an Agent start waits for the run's previous turn to release the
-	// shared directory; zero means 10s.
+	// BusyRetry bounds how long an interactive node's follow-up turn waits for its session's
+	// previous turn to finish cleaning up; zero means 10s.
 	BusyRetry time.Duration
 }
 
 // Host executes workflow runs in this process and implements server.WorkflowRunHost. Every run
 // is driven by the stateless engine; the host only keeps what cannot outlive the process: who
-// started each run (execution sessions are scoped to that user), its queued Agent attempts and
-// the turn currently executing.
+// started each run (execution sessions are scoped to that user) and its turns in flight.
 type Host struct {
 	store       *store.Store
 	exec        execution.Service
@@ -45,7 +44,9 @@ type Host struct {
 	now         func() time.Time
 	stopTimeout time.Duration
 	busyRetry   time.Duration
-	engine      *workflow.Engine
+	// sessionLimit caps a run's unfinished sessions (see sessionsInUse); tests lower it.
+	sessionLimit int
+	engine       *workflow.Engine
 
 	ctx     context.Context
 	stop    context.CancelFunc
@@ -62,6 +63,10 @@ type Host struct {
 	// resuming, when set (tests only), runs inside ResumeRun once it holds the run's lifecycle
 	// lock and has admitted the resume, before the resume transaction.
 	resuming func(runID string)
+	// dispatching, when set (tests only), runs first in every Agent attempt's goroutine.
+	dispatching func(workflow.AgentDispatch)
+	// followingUp, when set (tests only), runs first in every accepted follow-up's goroutine.
+	followingUp func(nodeID string)
 }
 
 // lifecycleLock is one run's cancel/resume lock and the number of callers holding or waiting.
@@ -140,6 +145,7 @@ func NewHost(c Config) (*Host, error) {
 	if h.busyRetry == 0 {
 		h.busyRetry = 10 * time.Second
 	}
+	h.sessionLimit = maxRunSessions
 	h.ctx, h.stop = context.WithCancel(context.Background())
 	h.engine = workflow.NewEngine(repository{c.Store}, h, h.hub.Publish, h.now)
 	return h, nil
@@ -278,33 +284,42 @@ type runState struct {
 	starters   int
 	cancelling bool
 	// generation counts the resumes of this run in this process. A dispatch carries the generation
-	// it was queued in, so one queued before a cancellation and a resume can never start a turn
-	// for the attempt the resume soft-deleted (see beginStart).
+	// it was dispatched in, so one dispatched before a cancellation and a resume can never start a
+	// turn for the attempt the resume soft-deleted (see beginStart).
 	generation uint64
-	queue      []queuedDispatch
-	working    bool
-	// starting is closed when an in-flight Start returns, so a cancellation can learn its ref.
-	starting           chan struct{}
-	active             *execution.Ref
-	activeScope        string
-	turnDone           chan struct{}
+	// dispatched counts the goroutines of attempts and follow-up turns that have not returned.
+	dispatched int
+	// attempts are the turns starting or executing, by caller attempt: Agent attempts and the
+	// follow-up turns of interactive nodes. They execute concurrently.
+	attempts map[string]*attemptState
+	// startsChanged, when set, is closed as soon as any turn's Start returns.
+	startsChanged chan struct{}
+	// slotsChanged, when set, is closed whenever an attempt waiting for a session slot should look
+	// again: a session slot was freed, or the run was cancelled or a Loop scope closed.
+	slotsChanged       chan struct{}
 	closedScopes       map[string]bool
 	scopeCleanupErrors map[string]error
 
-	// activeNodeRun is the attempt whose turn holds the slot, so a node's stop finds its turn.
-	activeNodeRun string
-	// turns are human follow-up turns waiting for the run's turn slot, before queued attempts.
-	turns []followUp
 	// interactive holds the root-scope interactive Agent nodes whose session is open between
 	// turns, by node ID. Process-local on purpose: a restart fails parked nodes.
 	interactive map[string]*interactiveNode
 }
 
-// queuedDispatch is one Agent attempt waiting for the run's worker, with the generation of the
-// run state it was dispatched in.
-type queuedDispatch struct {
-	d          workflow.AgentDispatch
-	generation uint64
+// attemptState is one turn from just before its Start (or Append) until it ended.
+type attemptState struct {
+	nodeRun string // the node run the turn belongs to, so a node's stop finds its turn
+	scope   string
+	// starting is closed when the in-flight Start returns, so a cancellation can learn its ref.
+	starting chan struct{}
+	ref      *execution.Ref
+	// done is closed once the turn ended (or never started).
+	done chan struct{}
+	// unstopped marks a turn whose Start a cancellation gave up waiting for: its attempt stops
+	// the turn itself once the Start returns.
+	unstopped bool
+	// session marks a turn that starts a new session and holds one of the run's session slots
+	// until it is forgotten (see sessionsInUse).
+	session bool
 }
 
 // register records who is starting a run and counts the start under way. A run that already
@@ -379,10 +394,10 @@ func (h *Host) UpdateRunInput(ctx context.Context, scope server.WorkflowRunScope
 	return h.store.WorkflowRun(ctx, scope.TenantID, runID)
 }
 
-// CancelRun stops the run's executing Agent turn and waits for execution to confirm it before
-// closing the run as cancelled. Without confirmation the run stays open and the caller learns
-// the stop is unconfirmed; the run still never advances, and its worker closes it as cancelled
-// once the turn ends. When no turn was executing and only a parked interactive session could not
+// CancelRun stops every executing Agent turn of the run at once and waits for execution to confirm
+// all of them before closing the run as cancelled. Without confirmation the run stays open and the
+// caller learns the stop is unconfirmed; the run still never advances, and an attempt closes it as
+// cancelled once its turn ends. When no turn was executing and only a parked interactive session could not
 // be ended, no worker follows up: the run stays open, refusing every node action, until the
 // caller cancels again.
 func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, runID string) (store.WorkflowRun, error) {
@@ -405,14 +420,12 @@ func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, run
 	if st != nil && (run.Status == store.WorkflowStatusPending || run.Status == store.WorkflowStatusRunning || run.Status == store.WorkflowRunAwaitingInput) {
 		stopCtx, cancel := context.WithTimeout(ctx, h.stopTimeout)
 		defer cancel()
-		ref, err := st.requestCancel(stopCtx)
-		if err != nil {
+		st.mu.Lock()
+		st.cancelling = true // no further turn starts
+		st.slotsMayHaveChanged()
+		st.mu.Unlock()
+		if _, err := h.stopTurns(stopCtx, st, func(*attemptState) bool { return true }); err != nil {
 			return store.WorkflowRun{}, fmt.Errorf("%w: %w", server.ErrWorkflowRunStopUnconfirmed, err)
-		}
-		if ref != nil {
-			if _, err := h.exec.Cancel(stopCtx, st.scope, *ref); err != nil {
-				return store.WorkflowRun{}, fmt.Errorf("%w: %w", server.ErrWorkflowRunStopUnconfirmed, err)
-			}
 		}
 		// Parked interactive nodes keep their sessions open between turns; a cancelled run
 		// must not leave them open.
@@ -431,33 +444,95 @@ func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, run
 	if st != nil {
 		st.mu.Lock()
 		st.interactive = nil // their sessions ended above and CancelWorkflowRun closed their rows
+		st.slotsMayHaveChanged()
 		st.mu.Unlock()
 		h.forgetFinished(runID, st)
 	}
 	return run, nil
 }
 
-// requestCancel marks the run cancelling, so no further Agent starts, and returns the turn that
-// is executing. A Start already in flight is awaited, since its turn exists once it returns.
-func (st *runState) requestCancel(ctx context.Context) (*execution.Ref, error) {
-	st.mu.Lock()
-	st.cancelling = true
-	for st.starting != nil {
-		starting := st.starting
-		st.mu.Unlock()
-		select {
-		case <-starting:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+// stopTurns cancels the selected turns concurrently and reports an error unless execution confirmed
+// every stop: a run's sibling Agents end together, not one after another. Turns already executing
+// are cancelled at once; a turn whose Start is still in flight is cancelled as soon as that Start
+// returns. If ctx ends first, every turn executing by then is still cancelled, the stops issued
+// are awaited and ctx's error is returned; a turn whose Start is still in flight is marked so its
+// attempt stops it once the Start returns (see runAgent). It returns the turns it cancelled.
+func (h *Host) stopTurns(ctx context.Context, st *runState, selected func(*attemptState) bool) ([]*attemptState, error) {
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		errs    []error
+		stopped []*attemptState
+	)
+	issued := map[*attemptState]bool{}
+	defer wg.Wait()
+	for giveUp := false; ; {
 		st.mu.Lock()
+		starting := false
+		for _, a := range st.attempts {
+			if !selected(a) {
+				continue
+			}
+			if giveUp && a.starting != nil {
+				a.unstopped = true
+				continue
+			}
+			if a.ref != nil && !issued[a] && giveUp {
+				// Started just as ctx ended: still stop it, past this call's deadline.
+				issued[a] = true
+				stopped = append(stopped, a)
+				ref := *a.ref
+				h.workers.Add(1)
+				go func() {
+					defer h.workers.Done()
+					late, cancel := context.WithTimeout(context.WithoutCancel(ctx), h.stopTimeout)
+					defer cancel()
+					if _, err := h.exec.Cancel(late, st.scope, ref); err != nil {
+						h.log.Warn("stop a turn that started as its cancellation timed out", "session", ref.SessionID, "error", publicReason(err))
+					}
+				}()
+				continue
+			}
+			if a.ref != nil && !issued[a] {
+				issued[a] = true
+				stopped = append(stopped, a)
+				ref := *a.ref
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if _, err := h.exec.Cancel(ctx, st.scope, ref); err != nil {
+						mu.Lock()
+						errs = append(errs, err)
+						mu.Unlock()
+					}
+				}()
+			}
+			if a.starting != nil {
+				starting = true
+			}
+		}
+		var changed chan struct{}
+		if starting {
+			if st.startsChanged == nil {
+				st.startsChanged = make(chan struct{})
+			}
+			changed = st.startsChanged
+		}
+		st.mu.Unlock()
+		if giveUp {
+			wg.Wait()
+			return stopped, errors.Join(append(errs, ctx.Err())...)
+		}
+		if !starting {
+			wg.Wait()
+			return stopped, errors.Join(errs...)
+		}
+		select {
+		case <-changed: // any Start returned: stop its turn without waiting for the others
+		case <-ctx.Done():
+			giveUp = true // one more pass under mu: cancel what started, mark what still starts
+		}
 	}
-	defer st.mu.Unlock()
-	if st.active == nil {
-		return nil, nil
-	}
-	ref := *st.active
-	return &ref, nil
 }
 
 // lifecycleError translates the engine's refusals into the HTTP layer's lifecycle errors.

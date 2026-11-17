@@ -129,7 +129,7 @@ func (h *Host) settling(runID string) bool {
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.active != nil || st.starting != nil || st.starters != 0 {
+	if len(st.attempts) != 0 || st.starters != 0 {
 		return true
 	}
 	// A completion still settling an interactive node makes admitResume refuse as well. Nodes
@@ -147,9 +147,8 @@ func (h *Host) settling(runID string) bool {
 // one that still tracks an interactive node: a completion is settling it (ResumeRun released the
 // parked ones just before). A leftover
 // state is reused with its cancellation request cleared, because the run it belonged to has
-// closed, and its generation advanced: a worker still draining its queue keeps going, but a
-// dispatch queued before the resume carries the old generation, so neither the worker loop nor
-// beginStart lets it start a turn, even when it was already past its abandon check and resolving
+// closed, and its generation advanced: a dispatch made before the resume carries the old
+// generation, so neither its attempt goroutine nor beginStart lets it start a turn, even when it was already past its abandon check and resolving
 // its executor while the run was cancelled and resumed.
 func (h *Host) admitResume(runID string, scope execution.Scope) (*runState, bool) {
 	h.mu.Lock()
@@ -161,7 +160,7 @@ func (h *Host) admitResume(runID string, scope execution.Scope) (*runState, bool
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.active != nil || st.starting != nil || st.starters != 0 || len(st.interactive) != 0 {
+	if len(st.attempts) != 0 || st.starters != 0 || len(st.interactive) != 0 {
 		return nil, false
 	}
 	st.cancelling = false

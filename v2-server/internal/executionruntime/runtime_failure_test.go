@@ -44,7 +44,7 @@ func (a *failureAgent) End(ctx context.Context, sid string) error {
 }
 func (a *failureAgent) Close(context.Context) error { return nil }
 
-func TestRuntimeAgentFailureRequiresStopBeforeSessionEndAndDirectoryReuse(t *testing.T) {
+func TestRuntimeAgentFailureRequiresStopBeforeSessionEnd(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		result         execution.Result
@@ -100,11 +100,21 @@ func TestRuntimeAgentFailureRequiresStopBeforeSessionEndAndDirectoryReuse(t *tes
 			next := req
 			next.Caller.NodeID = "next"
 			next.Caller.AttemptID = "next"
-			if _, err := f.service.Start(f.ctx, f.scope, next); !errors.Is(err, execution.ErrWorkspaceBusy) {
-				t.Fatalf("directory reused before stop confirmation: %v", err)
+			// A workflow run's other sessions may start beside it (they share the directory), but
+			// the failed session itself takes no new turn until its stop is confirmed: its turn
+			// keeps the session's admission occupied, and Append refuses it.
+			f.service.mu.Lock()
+			occupied := f.service.groups[turnGroup(f.scope, req.Caller, ref.SessionID)] == ref.TurnID
+			f.service.mu.Unlock()
+			if !occupied {
+				t.Fatal("the failed session released its admission before stop confirmation")
 			}
-			if _, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: ref.SessionID, Caller: next.Caller, Prompt: next.Prompt}); !errors.Is(err, execution.ErrSessionEnded) {
-				t.Fatalf("broken physical session accepted Append: %v", err)
+			for _, attempt := range []string{"next", "again"} {
+				retry := next.Caller
+				retry.AttemptID = attempt
+				if _, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: ref.SessionID, Caller: retry, Prompt: next.Prompt}); !errors.Is(err, execution.ErrSessionEnded) && !errors.Is(err, execution.ErrWorkspaceBusy) {
+					t.Fatalf("broken physical session accepted Append %s before its stop was confirmed: %v", attempt, err)
+				}
 			}
 			a.release()
 			select {
@@ -142,6 +152,9 @@ func TestRuntimeAgentFailureRequiresStopBeforeSessionEndAndDirectoryReuse(t *tes
 			} else {
 				if session.EndedAt == nil || len(events) != 2 || events[1].Kind != execution.EventSessionEnded {
 					t.Fatalf("confirmed stop did not end session: session=%+v events=%+v", session, events)
+				}
+				if _, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: ref.SessionID, Caller: next.Caller, Prompt: next.Prompt}); !errors.Is(err, execution.ErrSessionEnded) {
+					t.Fatalf("the stopped session accepted a turn: %v", err)
 				}
 				nextRef, err := f.service.Start(f.ctx, f.scope, next)
 				if err != nil {

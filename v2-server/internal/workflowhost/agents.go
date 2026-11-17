@@ -5,16 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
 
-// Dispatch queues one Agent attempt on its run's worker and returns at once. A run's Agent
-// attempts execute one at a time: v2's execution service lends every workflow run one shared
-// directory and refuses a second concurrent turn with ErrWorkspaceBusy.
+// Dispatch starts one Agent attempt in its own goroutine and returns at once. A run's attempts
+// execute concurrently, as desktop's: each is its own execution session in the run's shared
+// directory, and Node admits several live sessions on one checkout.
 func (h *Host) Dispatch(d workflow.AgentDispatch) {
 	if d.Node.Kind == "form" || d.Node.Kind == "createTasks" {
 		h.workers.Add(1)
@@ -34,50 +33,35 @@ func (h *Host) Dispatch(d workflow.AgentDispatch) {
 		return
 	}
 	st.mu.Lock()
-	defer st.mu.Unlock()
-	st.queue = append(st.queue, queuedDispatch{d: d, generation: st.generation})
-	if !st.working {
-		st.working = true
-		h.workers.Add(1)
-		go h.work(d.RunID, st)
-	}
-}
-
-// work drains the run's queue. Attempts dispatched after a cancellation request are dropped:
-// the run is about to close as cancelled together with their rows. Attempts whose run ended
-// while they waited (a sibling failed it) are closed without starting a turn.
-func (h *Host) work(runID string, st *runState) {
-	defer h.workers.Done()
-	for {
+	generation := st.generation
+	st.dispatched++
+	st.mu.Unlock()
+	h.workers.Add(1)
+	go func() {
+		defer h.settled(d.RunID, st)
+		if h.dispatching != nil {
+			h.dispatching(d)
+		}
 		st.mu.Lock()
-		if (len(st.queue) == 0 && len(st.turns) == 0) || h.ctx.Err() != nil {
-			st.queue = nil
-			st.turns = nil
-			st.working = false
-			st.mu.Unlock()
-			h.forgetFinished(runID, st)
+		dropped := st.cancelling || generation != st.generation || h.ctx.Err() != nil
+		st.mu.Unlock()
+		// An attempt dispatched before a cancellation request, or one a resume replaced, is
+		// dropped: the run closes as cancelled together with its row, or the resume soft-deleted
+		// it. One whose run ended meanwhile (a sibling failed it) is closed without a turn.
+		if dropped || h.abandoned(d) {
 			return
 		}
-		if len(st.turns) != 0 {
-			// A human is waiting on a follow-up turn; it shares the run's single turn slot.
-			f := st.turns[0]
-			st.turns = st.turns[1:]
-			cancelling := st.cancelling || f.generation != st.generation
-			st.mu.Unlock()
-			if !cancelling {
-				h.runFollowUp(st, f)
-			}
-			continue
-		}
-		q := st.queue[0]
-		st.queue = st.queue[1:]
-		cancelling := st.cancelling || q.generation != st.generation
-		st.mu.Unlock()
-		if cancelling || h.abandoned(q.d) {
-			continue
-		}
-		h.runAgent(st, q.d, q.generation)
-	}
+		h.runAgent(st, d, generation)
+	}()
+}
+
+// settled ends one goroutine counted in runState.dispatched.
+func (h *Host) settled(runID string, st *runState) {
+	st.mu.Lock()
+	st.dispatched--
+	st.mu.Unlock()
+	h.forgetFinished(runID, st)
+	h.workers.Done()
 }
 
 // forgetFinished drops the state of a run that is not running while nothing of it is in flight,
@@ -94,7 +78,7 @@ func (h *Host) forgetFinished(runID string, st *runState) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	st.mu.Lock()
-	idle := !st.working && st.starters == 0 && st.starting == nil && st.active == nil && len(st.interactive) == 0
+	idle := st.dispatched == 0 && st.starters == 0 && len(st.attempts) == 0 && len(st.interactive) == 0
 	st.mu.Unlock()
 	if idle && h.runs[runID] == st {
 		delete(h.runs, runID)
@@ -185,22 +169,29 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 		// The session outlives its turns until completion, a stop or the run's end ends it.
 		request.Lifetime = execution.LifetimeHeld
 	}
-	if !st.beginStart(d.ScopeID, d.NodeRunID, generation) {
+	a := h.beginSession(st, d.NodeRunID, d.ScopeID, generation)
+	if a == nil {
 		return
 	}
-	// Resolving the executor and rendering the prompt took a while after the worker's abandon
+	// Resolving the executor and rendering the prompt took a while after the attempt's abandon
 	// check: the run may have ended (a sibling failed it) or been cancelled meanwhile. Check again
-	// with the slot reserved, so nothing can end the run between this check and the start
+	// with the attempt registered, so nothing can end the run between this check and the start
 	// without waiting for the start to return.
 	if h.abandoned(d) {
-		st.releaseStart()
+		if st.releaseStart(a) {
+			h.finishCancel(st, d.RunID)
+		}
 		return
 	}
-	ref, err := h.start(st.scope, request)
-	cancelling := st.endStart(ref, err)
+	ref, err := h.exec.Start(h.ctx, st.scope, request)
+	cancelling, last, unstopped := st.endStart(a, ref, err)
 	if err != nil {
 		if cancelling {
-			h.finishCancel(st, d.RunID)
+			// The run closes once its last turn is gone, never while a sibling's stop is
+			// still unconfirmed.
+			if last {
+				h.finishCancel(st, d.RunID)
+			}
 			return
 		}
 		var setup *execution.MCPFailure
@@ -217,27 +208,44 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 	// bound elsewhere) must not leave the new session running unowned.
 	if _, err := h.store.BindWorkflowNodeSession(h.ctx, st.scope.TenantID, d.RunID, d.NodeRunID, ref.SessionID); err != nil {
 		endErr := h.end(st.scope, ref.SessionID)
-		if st.endTurn(endErr) {
-			h.finishCancel(st, d.RunID)
+		if cancelling, last := st.endTurn(a, endErr); cancelling {
+			if last {
+				h.finishCancel(st, d.RunID)
+			}
 			return
 		}
 		fail(workflow.Failure{Kind: workflow.FailureSessionBindingRejected, Message: "the attempt refused its session binding"})
 		return
 	}
 	h.hub.Publish(d.RunID)
+	if unstopped {
+		// The run's cancellation gave up waiting for this Start: stop the turn it returned. The
+		// turn then ends as cancelled like any other, and the last one closes the run.
+		h.workers.Add(1)
+		go func() {
+			defer h.workers.Done()
+			stopCtx, cancel := context.WithTimeout(context.WithoutCancel(h.ctx), h.stopTimeout)
+			defer cancel()
+			if _, err := h.exec.Cancel(stopCtx, st.scope, ref); err != nil {
+				h.log.Warn("stop a turn started after its run was cancelled", "run", d.RunID, "node_run", d.NodeRunID, "error", publicReason(err))
+			}
+		}()
+	}
 
 	if interactive {
 		// Desktop parks an interactive node after its first turn instead of ending the session.
 		n := st.track(&interactiveNode{d: d, executor: executor, cfg: cfg, task: task, session: ref.SessionID, phase: phaseTurn})
 		h.refreshSummary(st, n, store.WorkflowStatusRunning) // the starter can stop the first turn too
 		result, err := h.awaitTurn(st.scope, ref, caller)
-		h.settleInteractiveTurn(st, n, result, err)
+		h.settleInteractiveTurn(st, a, n, result, err)
 		return
 	}
 	result, err := h.awaitTurn(st.scope, ref, caller)
 	endErr := h.end(st.scope, ref.SessionID)
-	if st.endTurn(endErr) {
-		h.finishCancel(st, d.RunID)
+	if cancelling, last := st.endTurn(a, endErr); cancelling {
+		if last {
+			h.finishCancel(st, d.RunID)
+		}
 		return
 	}
 	if err != nil {
@@ -250,86 +258,169 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 	h.settle(d, result, executor, cfg, task)
 }
 
-// beginStart reserves the start slot for one attempt's turn, or reports false once cancellation
-// was requested or the dispatch belongs to a generation a resume has since replaced.
-func (st *runState) beginStart(scopeID, nodeRunID string, generation uint64) bool {
+// beginStart registers a turn about to start under key (the turn's caller attempt) for the node
+// run nodeRun, or returns nil once cancellation was requested, the turn's Loop scope was closed,
+// or the dispatch belongs to a generation a resume has since replaced.
+func (st *runState) beginStart(key, nodeRun, scopeID string, generation uint64) *attemptState {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.cancelling || st.closedScopes[scopeID] || generation != st.generation {
-		return false
-	}
-	st.starting = make(chan struct{})
-	st.turnDone = make(chan struct{})
-	st.activeScope = scopeID
-	st.activeNodeRun = nodeRunID
-	return true
+	return st.register(key, nodeRun, scopeID, generation)
 }
 
-// releaseStart gives back a slot beginStart reserved for an attempt that will not start.
-func (st *runState) releaseStart() {
+// register is beginStart for a caller holding mu.
+func (st *runState) register(key, nodeRun, scopeID string, generation uint64) *attemptState {
+	if st.cancelling || st.closedScopes[scopeID] || generation != st.generation {
+		return nil
+	}
+	if st.attempts == nil {
+		st.attempts = map[string]*attemptState{}
+	}
+	a := &attemptState{nodeRun: nodeRun, scope: scopeID, starting: make(chan struct{}), done: make(chan struct{})}
+	st.attempts[key] = a
+	return a
+}
+
+// maxRunSessions is the pinned Node's limit of unfinished sessions on one checkout
+// (shared_checkout_sessions). A run's sessions share its checkout, so the bridge never asks for more.
+const maxRunSessions = 8
+
+// beginSession is beginStart for a turn that starts a new session (an Agent attempt, or an
+// interactive node's first turn). It first waits until the run holds fewer unfinished sessions
+// than the Node admits on its checkout, so a fan-out wider than the free slots queues here instead
+// of being refused by Node; parked interactive sessions keep their slots until they end. It
+// returns nil like beginStart, also when the host shuts down while it waits.
+func (h *Host) beginSession(st *runState, nodeRun, scopeID string, generation uint64) *attemptState {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	close(st.turnDone)
-	st.turnDone = nil
-	st.activeScope = ""
-	st.activeNodeRun = ""
-	close(st.starting)
-	st.starting = nil
+	for {
+		if st.cancelling || st.closedScopes[scopeID] || generation != st.generation || h.ctx.Err() != nil {
+			return nil
+		}
+		if st.sessionsInUse() < h.sessionLimit {
+			a := st.register(nodeRun, nodeRun, scopeID, generation)
+			if a != nil {
+				a.session = true
+			}
+			return a
+		}
+		if st.slotsChanged == nil {
+			st.slotsChanged = make(chan struct{})
+		}
+		changed := st.slotsChanged
+		st.mu.Unlock()
+		select {
+		case <-changed:
+		case <-h.ctx.Done():
+		}
+		st.mu.Lock()
+	}
+}
+
+// sessionsInUse counts the run's unfinished sessions: every turn starting a new session, from just
+// before its Start until its attempt is forgotten (an automatic attempt after its session's End
+// returned), and every tracked interactive node whose session's End has not returned, counted once while
+// its first turn is also such a turn. Callers hold mu.
+func (st *runState) sessionsInUse() int {
+	used := 0
+	starting := map[string]bool{}
+	for _, a := range st.attempts {
+		if a.session {
+			used++
+			starting[a.nodeRun] = true
+		}
+	}
+	for _, n := range st.interactive {
+		if !n.sessionGone && !starting[n.d.NodeRunID] {
+			used++
+		}
+	}
+	return used
+}
+
+// slotsMayHaveChanged wakes the attempts waiting in beginSession. Callers hold mu.
+func (st *runState) slotsMayHaveChanged() {
+	if st.slotsChanged != nil {
+		close(st.slotsChanged)
+		st.slotsChanged = nil
+	}
+}
+
+// releaseStart forgets a turn beginStart registered that will not start, and reports whether it
+// was the cancelled run's last turn (see endTurn).
+func (st *runState) releaseStart(a *attemptState) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.forget(a)
+	return st.lastCancelled()
 }
 
 // endStart publishes the started turn to a waiting cancellation and reports whether one was
-// requested meanwhile.
-func (st *runState) endStart(ref execution.Ref, err error) bool {
+// requested meanwhile, whether a refused Start left the cancelled run with no turn (see endTurn),
+// and whether a cancellation gave up waiting for this Start, so that nobody stops the turn it
+// returned unless its attempt does (see stopTurns).
+func (st *runState) endStart(a *attemptState, ref execution.Ref, err error) (cancelling, last, unstopped bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if err == nil {
-		st.active = &ref
-	} else {
-		close(st.turnDone)
-		st.turnDone = nil
-		st.activeScope = ""
-		st.activeNodeRun = ""
+	if err != nil {
+		st.forget(a)
+		return st.cancelling, st.lastCancelled(), false
 	}
-	close(st.starting)
-	st.starting = nil
-	return st.cancelling
+	a.ref = &ref
+	close(a.starting)
+	a.starting = nil
+	st.startResolved()
+	return st.cancelling, false, a.unstopped
 }
 
-// endTurn forgets the finished turn and reports whether cancellation was requested.
-func (st *runState) endTurn(endErr error) bool {
+// endTurn forgets the turn that ended and reports whether cancellation was requested, and whether
+// this was the cancelled run's last turn. Only that last one closes the run: a sibling whose stop
+// is not confirmed yet keeps the run open until its own turn ends.
+func (st *runState) endTurn(a *attemptState, endErr error) (cancelling, last bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.active = nil
-	if endErr != nil && st.activeScope != "" {
+	if endErr != nil && a.scope != "" {
 		if st.scopeCleanupErrors == nil {
 			st.scopeCleanupErrors = map[string]error{}
 		}
-		st.scopeCleanupErrors[st.activeScope] = endErr
+		st.scopeCleanupErrors[a.scope] = endErr
 	}
-	st.activeScope = ""
-	st.activeNodeRun = ""
-	if st.turnDone != nil {
-		close(st.turnDone)
-		st.turnDone = nil
-	}
-	return st.cancelling
+	st.forget(a)
+	return st.cancelling, st.lastCancelled()
 }
 
-// start submits the turn, waiting out ErrWorkspaceBusy while the run's previous turn releases the
-// shared directory: its terminal event is published before the execution worker cleans up.
-// Repeating the same caller attempt is idempotent, so a retry never starts a second turn.
-func (h *Host) start(scope execution.Scope, req execution.StartRequest) (execution.Ref, error) {
-	deadline := time.Now().Add(h.busyRetry)
-	for {
-		ref, err := h.exec.Start(h.ctx, scope, req)
-		if !errors.Is(err, execution.ErrWorkspaceBusy) || time.Now().After(deadline) {
-			return ref, err
+// startResolved wakes whoever waits for any of the run's Starts to return (see stopTurns).
+// Callers hold mu.
+func (st *runState) startResolved() {
+	if st.startsChanged != nil {
+		close(st.startsChanged)
+		st.startsChanged = nil
+	}
+}
+
+// lastCancelled reports whether cancellation was requested and no turn is left. Callers hold mu.
+func (st *runState) lastCancelled() bool {
+	return st.cancelling && len(st.attempts) == 0
+}
+
+// forget removes the turn and wakes whoever waits for its start or its end. Callers hold mu.
+func (st *runState) forget(a *attemptState) {
+	for key, current := range st.attempts {
+		if current == a {
+			delete(st.attempts, key)
 		}
-		select {
-		case <-time.After(50 * time.Millisecond):
-		case <-h.ctx.Done():
-			return execution.Ref{}, h.ctx.Err()
-		}
+	}
+	if a.starting != nil {
+		close(a.starting)
+		a.starting = nil
+		st.startResolved()
+	}
+	select {
+	case <-a.done:
+	default:
+		close(a.done)
+	}
+	if a.session {
+		st.slotsMayHaveChanged()
 	}
 }
 

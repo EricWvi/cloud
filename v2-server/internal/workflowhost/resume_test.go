@@ -90,8 +90,10 @@ func TestResumeFromFailureReusesSucceededWorkAndContinuesAttempts(t *testing.T) 
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	f.exec.finish(expectAgent(t, f, "a"), completed("初稿A"))
-	f.exec.finish(expectAgent(t, f, "d"), completed("旁支D"))
+	// A and the unrelated D execute concurrently.
+	first := f.exec.awaitStarts(t, 2)
+	f.exec.finish(first["a"], completed("初稿A"))
+	f.exec.finish(first["d"], completed("旁支D"))
 	// B fails its first attempt and both automatic retries.
 	f.exec.finish(expectAgent(t, f, "b"), sessionFailed)
 	for retry := 1; retry <= 2; retry++ {
@@ -203,15 +205,13 @@ func TestResumeRefusedWhileASiblingRunsAndOnALiveRun(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	d := expectAgent(t, f, "d")
+	started := f.exec.awaitStarts(t, 2)
+	d := started["d"]
 	if _, err := f.host.ResumeRun(ctx, f.scope, id); refusal(t, err) != workflow.ResumeRefusedStatus {
 		t.Fatalf("running run resumed: %v", err)
 	}
-	// A, queued behind D, fails the run while D's turn is still executing.
-	_, rows := f.await(t, id, func(_ store.WorkflowRun, rows []store.WorkflowNodeRun) bool { return node(rows, "a").ID != "" })
-	if err := f.host.engine.FailNode(ctx, id, node(rows, "a").ID, workflow.Failure{Kind: workflow.FailureSession, Message: "boom"}); err != nil {
-		t.Fatal(err)
-	}
+	// A fails the run while D's turn is still executing.
+	f.exec.finish(started["a"], sessionFailed)
 	f.await(t, id, terminal)
 	preview, err := f.host.PreviewRunResume(ctx, f.scope, id)
 	if err != nil || preview.Reason != workflow.ResumeRefusedRunning || !slices.Equal(preview.RunningNodeIDs, []string{"d"}) {
@@ -227,12 +227,13 @@ func TestResumeRefusedWhileASiblingRunsAndOnALiveRun(t *testing.T) {
 	}
 	// D's late result is recorded like desktop's, which opens the gate and is reused.
 	f.exec.finish(d, completed("旁支D"))
-	_, rows = f.await(t, id, func(_ store.WorkflowRun, rows []store.WorkflowNodeRun) bool {
+	_, rows := f.await(t, id, func(_ store.WorkflowRun, rows []store.WorkflowNodeRun) bool {
 		return node(rows, "d").Status == "succeeded"
 	})
 	if v := runPayload(t, f, id).VariablePool.Values["d.output"]; v != "旁支D" {
 		t.Fatalf("late answer not folded: %v", v)
 	}
+	f.await(t, id, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return !f.host.settling(id) })
 	// Another member may resume, as they may cancel; the Agents still run as the starter, who
 	// owns every session of the run.
 	other, tenant := storetest.Login(t, f.s, "resume-member")

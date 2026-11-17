@@ -370,9 +370,10 @@ func (s *Store) FailWorkflowEngineNode(
 }
 
 // AbandonWorkflowEngineNode settles a dispatched attempt whose run ended before the attempt began
-// executing. v2 executes a run's Agents one at a time, so a sibling queued behind a failed node
-// has not started anything yet; it is closed as cancelled, like the attempts a cancellation
-// closes, instead of starting a turn whose result could only be discarded. An attempt that already
+// executing. A sibling that had not started its session when another node failed the run (it was
+// still being prepared, or waiting for a session slot) has nothing to stop; it is closed as
+// cancelled, like the attempts a cancellation closes, instead of starting a turn whose result
+// could only be discarded. An attempt that already
 // holds a session is left to settle on its own. current_nodes and the run are not touched, so the
 // failure stays anchored on the node that caused it. It also refuses an attempt already
 // cancelled by LoopExit even while the root run is running.
