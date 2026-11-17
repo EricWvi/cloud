@@ -44,6 +44,8 @@ type Host struct {
 	now         func() time.Time
 	stopTimeout time.Duration
 	busyRetry   time.Duration
+	// endRetry is the first wait before an unconfirmed End is retried (see retryEnd); tests lower it.
+	endRetry time.Duration
 	// sessionLimit caps a run's unfinished sessions (see sessionsInUse); tests lower it.
 	sessionLimit int
 	engine       *workflow.Engine
@@ -146,6 +148,7 @@ func NewHost(c Config) (*Host, error) {
 		h.busyRetry = 10 * time.Second
 	}
 	h.sessionLimit = maxRunSessions
+	h.endRetry = time.Second
 	h.ctx, h.stop = context.WithCancel(context.Background())
 	h.engine = workflow.NewEngine(repository{c.Store}, h, h.hub.Publish, h.now)
 	return h, nil
@@ -299,6 +302,9 @@ type runState struct {
 	slotsChanged       chan struct{}
 	closedScopes       map[string]bool
 	scopeCleanupErrors map[string]error
+	// unended are the sessions no turn or node tracks any more whose End was not confirmed. Each
+	// keeps its session slot until a retry confirms the End (see linger).
+	unended map[string]bool
 
 	// interactive holds the root-scope interactive Agent nodes whose session is open between
 	// turns, by node ID. Process-local on purpose: a restart fails parked nodes.
