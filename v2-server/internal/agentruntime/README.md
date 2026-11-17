@@ -18,7 +18,7 @@ err = driver.Close(ctx)
 
 ## 项目与会话
 
-每项目一个 Node、一组 Git/插件/模型服务和一个 IPC Receive dispatcher。不同 `WorkspaceID` 对应不同 clone 执行和 checkout；同 workflow run 由上层给相同 WorkspaceID。Node 可并发接收 clone，实际 Git 步骤串行；不同 checkout 的 Agent session 可以同时运行。同一 workflow run 的多个 session 可以同时留在它的 checkout 上（例如等待输入的交互节点和之后开始的节点），各自 End；其他调用方的 WorkspaceID 各不相同，一个 checkout 只有一个 session。这依赖 Node 的 `shared_checkout_sessions` 能力，握手时必须具备：同一 `checkout_execution_id` 最多 8 个未结束的 Agent 会话，超出的那个会话以 `agent_failed` 加 `checkout_session_limit`（另有 `checkout_busy`、`checkout_too_deep`）结束，这一轮的失败码就是这个代码，控制会话和其他会话不受影响。workflow 的 Skill 投影是 checkout 上各个存活 session 所选 Skill 的并集，同名时以后开始的 session 为准。
+每项目一个 Node、一组 Git/插件/模型服务和一个 IPC Receive dispatcher。不同 `WorkspaceID` 对应不同 clone 执行和 checkout；同 workflow run 由上层给相同 WorkspaceID。Node 可并发接收 clone，实际 Git 步骤串行；不同 checkout 的 Agent session 可以同时运行。同一 workflow run 的多个 session 可以同时留在它的 checkout 上（例如等待输入的交互节点和之后开始的节点），各自 End；其他调用方的 WorkspaceID 各不相同，一个 checkout 只有一个 session。这依赖 Node 的 `shared_checkout_sessions` 能力，握手时必须具备：同一 `checkout_execution_id` 最多 8 个未结束的 Agent 会话，超出的那个会话以 `agent_failed` 加 `checkout_session_limit`（另有 `checkout_busy`、`checkout_too_deep`）结束，这一轮的失败码就是这个代码，控制会话和其他会话不受影响。workflow 的 Skill 投影是 checkout 上各个存活 session 所选 Skill 的并集。同名的是同一个包版本或同一篇文档时共用；不同时，后开始的 session 以 `workflow_skill_name_conflict` 启动失败，不替换兄弟 Agent 可能正在读的文件。
 
 Agent 自己结束的一轮（`end_turn` 之外的停止原因）不返回错误，物理会话仍可接 `submit_user_turn`；会话在轮次中结束（`agent_session_ended`）时返回 `ErrSessionEnded`，结果带 `AgentLost`，历史读取失败时同样带 `AgentLost`，上层据此区分“这一轮没完成”和“会话已不在”。
 
