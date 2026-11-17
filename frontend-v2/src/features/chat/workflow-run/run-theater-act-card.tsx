@@ -169,9 +169,11 @@ export function RunTheaterActCard({
   const hasHitl = interaction !== undefined;
   const retryWait =
     state.status === "retry_waiting" ? state.retryWait : undefined;
-  // A waiting retry has not started, so its countdown replaces the time range.
+  // A waiting retry has not started, so its countdown replaces the time range; a node queued for a
+  // session slot has not started either (its start instant is only when it was dispatched).
   const timingRange =
     state.status !== "retry_waiting" &&
+    state.status !== "session_waiting" &&
     (state.startedAt !== undefined || state.finishedAt !== undefined)
       ? [
           state.startedAt !== undefined
