@@ -168,8 +168,10 @@ func (h *Host) Close() {
 
 const interruptedMessage = "the server restarted while this run was executing"
 
-// workflowInterrupts keeps pending LoopExit cleanup and running Iterations alive. Every other
-// active row must be a running Iteration member; outer work and retry waits still fail the run.
+// workflowInterrupts keeps pending LoopExit cleanup, running Iterations and valid interactive
+// waits alive. Every other active row must be a running Iteration member; outer work (a running
+// outer Agent fails the run with the nodes parked beside it, as on desktop) and retry waits still
+// fail the run.
 func workflowInterrupts(graph string, nodes []store.WorkflowNodeRun, rounds []store.WorkflowScope) map[string]bool {
 	g, err := workflow.ParseGraph(graph)
 	if err != nil {
@@ -192,6 +194,9 @@ func workflowInterrupts(graph string, nodes []store.WorkflowNodeRun, rounds []st
 	}
 	interrupted := map[string]bool{}
 	for _, row := range nodes {
+		if parkedInteractive(g, row) {
+			continue // a valid interactive wait survives the restart (see recoverParked)
+		}
 		if row.Status != store.WorkflowStatusRunning {
 			return nil
 		}
@@ -218,10 +223,13 @@ func workflowInterrupts(graph string, nodes []store.WorkflowNodeRun, rounds []st
 // Interrupt fails attempts a previous process left executing with desktop's interrupted_by_restart
 // detail. Pending LoopExit cleanup survives; other root and Loop work fails its run. An interrupted
 // Iteration round fails alone, then its owner applies the round's error strategy. Frozen forms
-// and deterministic post-review work survive; no interrupted Agent turn is replayed. It must run
-// after execution recovery has ended the old process's sessions, before the host serves requests and
-// after the owners of task runs have cancelled theirs, so an absorbed run is never task-owned
-// (package boot orders both).
+// and deterministic post-review work survive; no interrupted Agent turn is replayed. A valid
+// interactive wait survives too (desktop's is_awaiting_input): the node stays awaiting input on
+// its held session, which execution recovery kept open, and the starter can talk to it or
+// complete it again; any other parked node fails with its run, and its session is ended. It must
+// run after execution recovery has ended the old process's other sessions, before the host serves
+// requests and after the owners of task runs have cancelled theirs, so an absorbed run is never
+// task-owned (package boot orders both).
 func (h *Host) Interrupt(ctx context.Context) error {
 	f := workflow.Failure{Kind: workflow.FailureInterruptedByRestart, Message: interruptedMessage}
 	now := h.now()
@@ -230,6 +238,12 @@ func (h *Host) Interrupt(ctx context.Context) error {
 	}, workflowInterrupts)
 	if err != nil {
 		return fmt.Errorf("interrupt workflow runs: %w", err)
+	}
+	// Execution recovery kept the session of every node parked in a running run; those the sweep
+	// failed, or whose run it failed, have nothing left to talk to. This runs before any run is
+	// resumed, so the sessions resumed runs start are never mistaken for them.
+	if err := h.endUnparkedSessions(ctx, ""); err != nil {
+		return err
 	}
 	for _, id := range ids {
 		current, err := h.store.WorkflowEngineContext(ctx, id)
@@ -254,9 +268,18 @@ func (h *Host) Interrupt(ctx context.Context) error {
 			if _, err := h.store.FinishWorkflowRun(ctx, current.Run.TenantID, id, store.WorkflowStatusFailed, nil, &message); err != nil {
 				h.log.Error("fail recoverable workflow without a starter", "run", id, "error", err)
 			}
+			// Sessions kept for its parked nodes have nothing left to talk to; other runs' new
+			// sessions are left alone.
+			if err := h.endUnparkedSessions(ctx, id); err != nil {
+				return err
+			}
 			continue
 		}
 		st := h.register(id, execution.Scope{TenantID: current.Run.TenantID, UserID: actor})
+		if err := h.recoverParked(ctx, st, current); err != nil {
+			st.started()
+			return fmt.Errorf("recover the interactive nodes of %s: %w", id, err)
+		}
 		err = h.engine.Resume(ctx, id)
 		st.started()
 		h.forgetFinished(id, st)
@@ -307,7 +330,7 @@ type runState struct {
 	unended map[string]bool
 
 	// interactive holds the root-scope interactive Agent nodes whose session is open between
-	// turns, by node ID. Process-local on purpose: a restart fails parked nodes.
+	// turns, by node ID. A restart rebuilds it from the parked rows (see recoverParked).
 	interactive map[string]*interactiveNode
 }
 
