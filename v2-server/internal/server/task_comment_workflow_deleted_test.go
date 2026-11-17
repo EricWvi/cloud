@@ -19,7 +19,7 @@ func TestTaskCommentWorkflowDeletedRunHidesOutputAndError(t *testing.T) {
 	base := "/api/v2/tenants/" + tid
 	_, task := c.do("POST", base+"/tasks", map[string]any{"title": "DeletedOutput", "projectId": taskProjectID})
 	taskPath := base + "/tasks/" + task["id"].(string)
-	payload := map[string]any{"body": "@Deleted output", "workflow": map[string]any{"workflowId": wf.ID, "values": map[string]any{"branch": "private-input"}}}
+	payload := map[string]any{"body": "@Deleted output", "workflow": map[string]any{"workflowId": wf.ID, "values": map[string]any{"branch": "private-input", "tags": []any{}, "meta": map[string]any{}}}}
 	key := map[string]string{"Idempotency-Key": "deleted-output"}
 	status, created := c.doHeaders("POST", taskPath+"/comments", payload, key)
 	if status != 201 {

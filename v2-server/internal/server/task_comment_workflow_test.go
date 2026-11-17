@@ -483,7 +483,7 @@ func TestTaskCommentWorkflowCancelsOnStartFailure(t *testing.T) {
 			path := "/api/v2/tenants/" + tid + "/tasks/" + task["id"].(string) + "/comments"
 			payload := map[string]any{
 				"body":     "@Failure",
-				"workflow": map[string]any{"workflowId": wf.ID, "values": map[string]any{"branch": "main"}},
+				"workflow": map[string]any{"workflowId": wf.ID, "values": map[string]any{"branch": "main", "tags": []any{}, "meta": map[string]any{}}},
 			}
 			key := map[string]string{"Idempotency-Key": "fail-start"}
 			status, _ := c.doHeaders("POST", path, payload, key)
