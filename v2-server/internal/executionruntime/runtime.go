@@ -114,7 +114,10 @@ type Service struct {
 	concludeInterval  time.Duration
 	stopTimeout       time.Duration
 	finishTurn        func(context.Context, execution.Scope, execution.Ref, execution.Result) (execution.Result, error)
-	closed            bool
+	// observerReadFailed, when set by a test before admission, observes actual
+	// failed SQL reads so an outage need not be paced by sleeps.
+	observerReadFailed func()
+	closed             bool
 }
 
 var _ execution.Service = (*Service)(nil)
