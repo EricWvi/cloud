@@ -490,10 +490,16 @@ function AgentConfigurationFields({
       model.agentCli === config.executor.agentCli &&
       model.modelId === config.executor.modelId,
   );
+  const emptyExecutor =
+    config.executor.agentCli === "" && config.executor.modelId === "";
   const selectedModel = configuredModel ?? {
     agentCli: config.executor.agentCli,
     modelId: config.executor.modelId,
-    label: `${agentLabel(offeredAgents, config.executor.agentCli)} · ${config.executor.modelId}`,
+    label: emptyExecutor
+      ? modelsLoading
+        ? t("chat.modelSelector.loading")
+        : t("settings.workflow.noAvailableAgentModels")
+      : `${agentLabel(offeredAgents, config.executor.agentCli)} · ${config.executor.modelId}`,
   };
   const modelsForSelectedCli =
     modelsByCli?.get(currentAgentCli) ??
@@ -740,7 +746,10 @@ function AgentConfigurationFields({
             </Command>
           </PopoverContent>
         </Popover>
-        {!modelsLoading && !modelsError && configuredModel === undefined && (
+        {!modelsLoading &&
+          !modelsError &&
+          configuredModel === undefined &&
+          !(emptyExecutor && capabilities.agentModels.length === 0) && (
           <p role="status" className="mt-1 text-xs text-muted-foreground">
             {t("settings.workflow.selectAvailableAgentModel")}
           </p>

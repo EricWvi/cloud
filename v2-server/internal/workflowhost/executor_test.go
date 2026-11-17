@@ -82,3 +82,33 @@ func TestMissingModelFailureFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestMatchingModelByNameRecordsRequestedNameInPayload(t *testing.T) {
+	f := newFixture(t)
+	graph := strings.Replace(twoAgents, `"modelId":"fixture"`, `"modelId":"Other Model"`, 1)
+	runID := f.run(t, graph, str("input"))
+	if _, err := f.host.StartRun(context.Background(), f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.finish(f.exec.awaitStart(t), completed("draft"))
+	f.exec.finish(f.exec.awaitStart(t), completed("reviewed"))
+	run, nodes := f.await(t, runID, terminal)
+	if run.Status != store.WorkflowStatusSucceeded {
+		t.Fatalf("run = %+v", run)
+	}
+	var payload struct {
+		Model struct {
+			ID        string `json:"id"`
+			Name      string `json:"name"`
+			Requested string `json:"requested"`
+			Fallback  bool   `json:"fallback"`
+		} `json:"model"`
+	}
+	b := node(nodes, "b")
+	if err := json.Unmarshal(b.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Model.ID != "other" || payload.Model.Name != "Other Model" || payload.Model.Requested != "Other Model" || payload.Model.Fallback {
+		t.Fatalf("model payload = %+v (%s)", payload.Model, b.Payload)
+	}
+}
