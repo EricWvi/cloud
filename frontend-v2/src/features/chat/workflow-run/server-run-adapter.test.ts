@@ -524,4 +524,20 @@ describe('attempts a resume from failure replaced', () => {
     expect(adapted.startedBy).toBe('user-alice')
     expect(adapted.startedByName).toBe('Alice')
   })
+
+  it('projects payload.injected_failure_context when non-empty and omits otherwise', () => {
+    const injected = toGraphWorkflowRun(
+      detail({}, [
+        nodeRun({ id: 'a2', nodeId: 'a', nodeType: 'agent', status: 'running', finishedAt: null, payload: JSON.stringify({ injected_failure_context: '## 上一次尝试（第 1 次）失败信息' }) }),
+      ]),
+      definition,
+    )
+    expect(injected.nodeStates.a?.injectedFailureContext).toBe('## 上一次尝试（第 1 次）失败信息')
+
+    const empty = toGraphWorkflowRun(
+      detail({}, [nodeRun({ id: 'a3', nodeId: 'a', nodeType: 'agent', status: 'running', finishedAt: null, payload: JSON.stringify({ injected_failure_context: '' }) })]),
+      definition,
+    )
+    expect(empty.nodeStates.a?.injectedFailureContext).toBeUndefined()
+  })
 })

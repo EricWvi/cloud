@@ -44,7 +44,9 @@ func (k FailureKind) resumable() bool {
 	return false
 }
 
-func (k FailureKind) injectsIntoPrompt() bool {
+// InjectsIntoPrompt reports whether failures of this kind are safe and useful to feed back into
+// the Agent's prompt on a subsequent retry or manual resume.
+func (k FailureKind) InjectsIntoPrompt() bool {
 	switch k {
 	case FailureStructuredOutput, FailureAgentRefusal, FailureUnknownStopReason, FailureMultipleOutputs:
 		return true
@@ -108,7 +110,7 @@ func (f Failure) Detail(attempt int, injectLastFailure bool, now time.Time) map[
 		"source_chain":             chain,
 		"attempt":                  attempt,
 		"resumable":                f.Kind.resumable(),
-		"injects_previous_failure": f.Kind.injectsIntoPrompt() && injectLastFailure,
+		"injects_previous_failure": f.Kind.InjectsIntoPrompt() && injectLastFailure,
 		"auto_retryable":           f.Kind.autoRetryable(),
 		"recorded_at":              now.UnixMilli(),
 	}

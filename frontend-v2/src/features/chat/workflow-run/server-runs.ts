@@ -266,7 +266,7 @@ export function projectRunsQuery(tenantId: string, projectId: string) {
  * reused the version name for another graph, the run is refused rather than freezing a graph the
  * dialog did not name.
  */
-export async function createRun(library: WorkflowContracts, tenantId: string, projectId: string, offered: PublishedWorkflow, name: string): Promise<string> {
+export async function createRun(library: WorkflowContracts, tenantId: string, projectId: string, offered: PublishedWorkflow, name: string, injectLastFailure = true): Promise<string> {
   if (demoMockEnabled() && offered.id === cdaseWorkflow.id) return createCdaseRun(tenantId, projectId, name)
   const { published } = await library.get({ workflowId: offered.id })
   if (!published) throw new Error('这个工作流已经没有发布版本，请重新选择')
@@ -279,7 +279,7 @@ export async function createRun(library: WorkflowContracts, tenantId: string, pr
   }
   const trimmed = name.trim()
   const { run } = await call(() =>
-    createWorkflowRun(tenantId, offered.id, { projectId, snapshotId: offered.snapshotId, ...(trimmed ? { name: trimmed } : {}) }),
+    createWorkflowRun(tenantId, offered.id, { projectId, snapshotId: offered.snapshotId, ...(trimmed ? { name: trimmed } : {}), injectLastFailure }),
   )
   return run.id
 }

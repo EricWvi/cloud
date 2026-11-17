@@ -1280,7 +1280,8 @@
           "input": {"type": "string", "nullable": true},
           "name": {"type": "string"},
           "triggerKind": {"type": "string", "enum": ["manual", "schedule"]},
-          "triggerRef": {"type": "string"}
+          "triggerRef": {"type": "string"},
+          "injectLastFailure": {"type": "boolean"}
         }
       },
       "WorkflowRunCreated": {

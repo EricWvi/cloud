@@ -729,4 +729,34 @@ describe('workflow runs in chat', () => {
     expect(screen.getByRole('heading', { level: 2, name: '梳理 v2 接口缺口' })).toBeInTheDocument()
     expect(within(project()).getByRole('button', { name: '工作流运行 临时运行（未运行）' })).not.toHaveAttribute('aria-current')
   })
+
+  it('sends injectLastFailure true by default, false when unchecked, and resets on reopen', async () => {
+    const user = userEvent.setup()
+    await renderPage()
+    const openDialog = async () => {
+      await user.click(within(project()).getByRole('button', { name: '在 ora-space/cloud 新建对话' }))
+      await user.click(await screen.findByRole('menuitem', { name: '运行工作流' }))
+      fireEvent.click(await screen.findByRole('menuitem', { name: /示例：代码审查/ }))
+      return screen.findByRole('dialog', { name: '运行工作流' })
+    }
+
+    let dialog = await openDialog()
+    let checkbox = within(dialog).getByRole('checkbox', { name: '节点重跑时把上次失败原因告诉智能体' })
+    expect(checkbox).toBeChecked()
+    await user.click(within(dialog).getByRole('button', { name: '创建运行' }))
+    await waitFor(() => expect(runs.createdBodies).toHaveLength(1))
+    expect(runs.createdBodies[0]?.injectLastFailure).toBe(true)
+
+    dialog = await openDialog()
+    checkbox = within(dialog).getByRole('checkbox', { name: '节点重跑时把上次失败原因告诉智能体' })
+    expect(checkbox).toBeChecked()
+    await user.click(checkbox)
+    expect(checkbox).not.toBeChecked()
+    await user.click(within(dialog).getByRole('button', { name: '创建运行' }))
+    await waitFor(() => expect(runs.createdBodies).toHaveLength(2))
+    expect(runs.createdBodies[1]?.injectLastFailure).toBe(false)
+
+    dialog = await openDialog()
+    expect(within(dialog).getByRole('checkbox', { name: '节点重跑时把上次失败原因告诉智能体' })).toBeChecked()
+  })
 })

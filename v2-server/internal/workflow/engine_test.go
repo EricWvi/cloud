@@ -289,3 +289,36 @@ func TestRenderTemplate(t *testing.T) {
 		t.Error("a foreign writer set a variable")
 	}
 }
+
+func TestPreparePayloadPreservesInjectLastFailureBeforeStart(t *testing.T) {
+	for name, tc := range map[string]struct {
+		raw  []byte
+		want bool
+	}{
+		"omitted":       {nil, true},
+		"empty_object":  {[]byte(`{}`), true},
+		"disabled_stub": {[]byte(`{"injectLastFailure":false}`), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo := newMemoryRepo(chain, nil)
+			repo.run.Payload = tc.raw
+			e := NewEngine(repo, &recorder{}, nil, time.Now)
+			if err := e.UpdateInput(context.Background(), "run", str("主题"), map[string]json.RawMessage{"topic": json.RawMessage(`"支付"`)}); err != nil {
+				t.Fatal(err)
+			}
+			p, ok, err := DecodeRunPayload(repo.run.Payload)
+			if err != nil || !ok {
+				t.Fatalf("DecodeRunPayload = %+v %v %v", p, ok, err)
+			}
+			if p.StartNodeID == nil || *p.StartNodeID != "start" || p.Locale != LocaleZhCN {
+				t.Fatalf("prepared payload missing graph metadata: %+v", p)
+			}
+			if p.InjectLastFailure != tc.want {
+				t.Fatalf("InjectLastFailure = %v, want %v", p.InjectLastFailure, tc.want)
+			}
+			if got := p.VariablePool.Values["start.topic"]; got != "支付" {
+				t.Fatalf("start.topic = %v", got)
+			}
+		})
+	}
+}

@@ -165,6 +165,9 @@ function nodeState(runId: string, node: WorkflowNodeRun, decisions: Record<strin
   const detail = errorDetail(payload)
   if (detail) state.errorDetail = detail
   if (typeof payload.stop_reason === 'string') state.stopReason = payload.stop_reason
+  if (typeof payload.injected_failure_context === 'string' && payload.injected_failure_context !== '') {
+    state.injectedFailureContext = payload.injected_failure_context
+  }
   const executor = executorUsed(payload)
   if (executor) state.executor = executor
   const model = modelUsed(payload)

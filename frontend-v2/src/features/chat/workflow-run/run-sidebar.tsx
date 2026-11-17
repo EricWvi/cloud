@@ -2,6 +2,7 @@ import { MoreHorizontalIcon, SearchIcon, Trash2Icon, WorkflowIcon } from 'lucide
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import {
   DropdownMenu,
@@ -25,6 +26,7 @@ import { FadeText } from '../components/fade-text'
 import { useChatStore } from '../store'
 import { cancelRun, createRun, deleteRun, listPublishedWorkflows, projectRunsQuery, runKeys, type PublishedWorkflow, type RunListItem } from './server-runs'
 import { isNodeWorking, runStatusLabel, runStatusTone } from './run-status-style'
+import { workflowRunTranslations } from './translations'
 
 /**
  * The "运行工作流" submenu of a project's +, as in desktop: published workflows only, under a
@@ -131,55 +133,91 @@ function PublishedWorkflowPicker({ onPick }: { onPick: (workflow: PublishedWorkf
  */
 export function RunWorkflowDialog({ projectId, workflow, onClose }: { projectId: string; workflow?: PublishedWorkflow; onClose: () => void }) {
   const [busy, setBusy] = useState(false)
+  return (
+    <Dialog open={!!workflow} onOpenChange={(open) => !open && !busy && onClose()}>
+      <DialogContent>
+        {workflow && (
+          <RunWorkflowForm
+            key={`${workflow.id}:${workflow.snapshotId}`}
+            projectId={projectId}
+            workflow={workflow}
+            busy={busy}
+            onBusyChange={setBusy}
+            onClose={onClose}
+          />
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function RunWorkflowForm({
+  projectId,
+  workflow,
+  busy,
+  onBusyChange,
+  onClose,
+}: {
+  projectId: string
+  workflow: PublishedWorkflow
+  busy: boolean
+  onBusyChange: (busy: boolean) => void
+  onClose: () => void
+}) {
+  const [injectLastFailure, setInjectLastFailure] = useState(true)
   const [error, setError] = useState<string>()
   const selectRun = useChatStore((s) => s.selectRun)
   const tenantId = useChatStore((s) => s.tenantId)
   const queryClient = useQueryClient()
   return (
-    <Dialog open={!!workflow} onOpenChange={(open) => !open && !busy && (setError(undefined), onClose())}>
-      <DialogContent>
-        {workflow && (
-          <form
-            className="contents"
-            onSubmit={async (e) => {
-              e.preventDefault()
-              const name = new FormData(e.currentTarget).get('name') as string
-              setBusy(true)
-              try {
-                if (!tenantId) throw new Error('还没有读到团队，请稍后重试')
-                const runId = await createRun(createHttpWorkflowContracts(tenantId), tenantId, projectId, workflow, name)
-                void queryClient.invalidateQueries({ queryKey: runKeys.project(tenantId, projectId) })
-                selectRun(runId)
-                setError(undefined)
-                onClose()
-              } catch (err) {
-                setError(err instanceof ContractError ? localizeContractError(err, workflowI18n.t) : err instanceof Error ? err.message : '创建运行失败')
-              } finally {
-                setBusy(false)
-              }
-            }}
-          >
-            <DialogHeader>
-              <DialogTitle>运行工作流</DialogTitle>
-              <DialogDescription>
-                在项目里创建「{workflow.name}」{workflow.version} 的一次运行。创建后点「启动」填写输入。
-              </DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-1.5">
-              <Label htmlFor="run-name">运行名称</Label>
-              <Input id="run-name" name="name" defaultValue={workflow.name} autoFocus />
-            </div>
-            {error && <p className="text-sm text-destructive">{error}</p>}
-            <DialogFooter>
-              <DialogClose render={<Button variant="outline" type="button" />}>取消</DialogClose>
-              <Button type="submit" disabled={busy}>
-                创建运行
-              </Button>
-            </DialogFooter>
-          </form>
-        )}
-      </DialogContent>
-    </Dialog>
+    <form
+      className="contents"
+      onSubmit={async (e) => {
+        e.preventDefault()
+        const name = new FormData(e.currentTarget).get('name') as string
+        onBusyChange(true)
+        try {
+          if (!tenantId) throw new Error('还没有读到团队，请稍后重试')
+          const runId = await createRun(createHttpWorkflowContracts(tenantId), tenantId, projectId, workflow, name, injectLastFailure)
+          void queryClient.invalidateQueries({ queryKey: runKeys.project(tenantId, projectId) })
+          selectRun(runId)
+          setError(undefined)
+          onClose()
+        } catch (err) {
+          setError(err instanceof ContractError ? localizeContractError(err, workflowI18n.t) : err instanceof Error ? err.message : '创建运行失败')
+        } finally {
+          onBusyChange(false)
+        }
+      }}
+    >
+      <DialogHeader>
+        <DialogTitle>运行工作流</DialogTitle>
+        <DialogDescription>
+          在项目里创建「{workflow.name}」{workflow.version} 的一次运行。创建后点「启动」填写输入。
+        </DialogDescription>
+      </DialogHeader>
+      <div className="grid gap-1.5">
+        <Label htmlFor="run-name">运行名称</Label>
+        <Input id="run-name" name="name" defaultValue={workflow.name} autoFocus />
+      </div>
+      <div className="flex items-center gap-2">
+        <Checkbox
+          id="run-inject-last-failure"
+          checked={injectLastFailure}
+          onCheckedChange={(checked) => setInjectLastFailure(checked === true)}
+        />
+        <Label htmlFor="run-inject-last-failure" className="cursor-pointer font-normal">
+          {workflowRunTranslations['zh-CN']['workflowRun.injectLastFailure']}
+        </Label>
+      </div>
+      {error && <p className="text-sm text-destructive">{error}</p>}
+      <DialogFooter>
+        <DialogClose render={<Button variant="outline" type="button" />}>取消</DialogClose>
+        <Button type="submit" disabled={busy}>
+          创建运行
+        </Button>
+      </DialogFooter>
+    </form>
   )
 }
 

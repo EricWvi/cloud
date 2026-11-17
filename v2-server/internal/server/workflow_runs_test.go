@@ -6,6 +6,7 @@ import (
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
+	wf "github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
 
 func workflowRunProject(t *testing.T, s *store.Store, user, tenant string) store.Project {
@@ -225,5 +226,19 @@ func TestWorkflowRunsOverHTTP(t *testing.T) {
 	}
 	if status, deletedWorkflow := call("DELETE", base+"/"+secondID, nil); status != 200 || deletedWorkflow["workflowId"] != secondID {
 		t.Fatalf("delete released workflow = %d %v", status, deletedWorkflow)
+	}
+
+	// injectLastFailure=false persists into the pre-start run payload while omitted/true keeps it on.
+	status, noInject := call("POST", base+"/"+id+"/runs", map[string]any{"projectId": project.ID, "injectLastFailure": false})
+	if status != 201 {
+		t.Fatalf("create run with injectLastFailure=false = %d %v", status, noInject)
+	}
+	noInjectID := noInject["run"].(map[string]any)["id"].(string)
+	storedNoInject, err := s.WorkflowRun(ctx, tid, noInjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, ok, err := wf.DecodeRunPayload(storedNoInject.RuntimePayload); err != nil || !ok || p.InjectLastFailure {
+		t.Fatalf("decoded injectLastFailure=false payload = %+v ok=%v err=%v", p, ok, err)
 	}
 }
