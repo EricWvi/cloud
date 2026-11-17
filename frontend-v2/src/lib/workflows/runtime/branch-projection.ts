@@ -36,10 +36,11 @@ export function computeInactiveNodes(
           ? ("failed" as const)
           : status === "cancelled"
             ? ("cancelled" as const)
-            : // A waiting retry is a live `running` row on the backend, so its branch is
-              // still in flight and its successors must not be projected inactive.
+            : // A waiting retry or a queued attempt is a live `running` row on the backend, so
+              // its branch is still in flight and its successors must not be projected inactive.
               status === "running" ||
                 status === "retry_waiting" ||
+                status === "session_waiting" ||
                 status === "awaiting_input"
               ? ("running" as const)
               : null;

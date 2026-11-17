@@ -15,6 +15,7 @@ import {
   type WorkflowNodeExecutorUsed,
   type WorkflowNodeInteractiveSession,
   type WorkflowNodeModelUsed,
+  type WorkflowNodeSessionSlotWait,
 } from '@/lib/workflows/runtime'
 
 const iso = (ms: number | null): string | undefined => (ms === null ? undefined : new Date(ms).toISOString())
@@ -120,6 +121,17 @@ const awaitingRetry = (node: WorkflowNodeRun, payload: Record<string, unknown>):
   node.status === 'running' && node.startedAt === null && record(payload.retry_wait) !== undefined
 
 /**
+ * Reads `payload.session_slot_wait`, the marker of a running attempt still queued for a session
+ * slot. An attempt with a bound session is executing whatever the payload says: a marker the
+ * server failed to clear must not hide that.
+ */
+function sessionSlotWait(node: WorkflowNodeRun, payload: Record<string, unknown>): WorkflowNodeSessionSlotWait | undefined {
+  const w = record(payload.session_slot_wait)
+  if (node.status !== 'running' || node.sessionId !== null || !w) return undefined
+  return typeof w.since === 'number' && typeof w.limit === 'number' ? { since: w.since, limit: w.limit } : undefined
+}
+
+/**
  * Projects one attempt. `live` is false once the run is terminal: the server settles waits when a
  * run ends, and a wait it left behind can never fire, so it shows as cancelled, not as waiting.
  */
@@ -134,6 +146,14 @@ function nodeState(runId: string, node: WorkflowNodeRun, decisions: Record<strin
     state.status = 'retry_waiting'
     state.retryWait = { attempt: wait.attempt as number, maxAttempt: wait.max_attempt as number, retry: wait.retry as number,
       maxRetries: wait.max_retries as number, delayMs: wait.delay_ms as number, scheduledAt: wait.scheduled_at as number, dueAt: wait.due_at as number }
+  } else {
+    // A queued attempt has no session yet: it must not read as running. A terminal run never
+    // starts it, so there it keeps its stored status.
+    const slot = live ? sessionSlotWait(node, payload) : undefined
+    if (slot) {
+      state.status = 'session_waiting'
+      state.sessionSlotWait = slot
+    }
   }
   if (auto && typeof auto.retry === 'number' && typeof auto.max_retries === 'number') state.autoRetry = { retry: auto.retry, maxRetries: auto.max_retries }
   if (node.iteration !== null) state.iteration = node.iteration

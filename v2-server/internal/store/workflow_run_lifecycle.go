@@ -78,8 +78,11 @@ func (s *Store) BindWorkflowNodeSession(ctx context.Context, tenant, runID, node
 		if current.Status != WorkflowStatusRunning {
 			return ErrWorkflowNodeRunState
 		}
+		// A bound attempt is no longer queued for a session slot. The bridge clears that marker
+		// before its Start, but a failed clear must not leave an executing node reading as queued.
 		node, err = scanNodeRun(tx.QueryRow(ctx, `
-			UPDATE v2_workflow_node_runs SET session_id = $4, updated_at = now()
+			UPDATE v2_workflow_node_runs SET session_id = $4, updated_at = now(),
+				payload = CASE WHEN payload ? 'session_slot_wait' THEN payload - 'session_slot_wait' ELSE payload END
 			WHERE tenant_id = $1 AND run_id = $2 AND id = $3 AND deleted_at IS NULL
 			RETURNING `+workflowNodeRunColumns, tenant, runID, nodeRunID, sessionID))
 		return err

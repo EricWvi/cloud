@@ -6,7 +6,8 @@ import { workflowRunTranslations } from "./translations";
 
 /**
  * Node is actively executing or blocked on HITL—the only spinner-worthy states. A node waiting to
- * retry is deliberately excluded: it has no session and nothing is executing until the wait ends.
+ * retry or for a session slot is deliberately excluded: it has no session and nothing is executing
+ * until the wait ends.
  */
 export function isNodeWorking(
   status: GraphWorkflowRunStatus | GraphWorkflowNodeStatus,
@@ -49,6 +50,15 @@ export function runStatusTone(
         badge:
           "border-caution/30 bg-caution/10 text-caution",
         labelKey: "workflowRun.status.retry_waiting",
+      };
+    case "session_waiting":
+      // Muted info: the node will run by itself once a sibling's session ends; it is queued, not
+      // stuck, and nothing is expected from the user.
+      return {
+        dot: "bg-info/45",
+        ring: "border-info/30 ring-info/10",
+        badge: "border-info/25 bg-info/5 text-info/80",
+        labelKey: "workflowRun.status.session_waiting",
       };
     case "succeeded":
       return {

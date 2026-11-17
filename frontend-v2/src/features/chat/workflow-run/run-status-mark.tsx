@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import {
   IconBan,
   IconCheck,
+  IconHourglassEmpty,
   IconLoader2,
   IconRefresh,
   IconX,
@@ -32,6 +33,7 @@ const ICON_GLYPH = "size-2.5";
  * - `live`: spinner (working cue on the focused card only)
  * - terminal + not quiet: check / x glyph
  * - waiting to retry + not quiet: a still retry glyph, never a spinner (nothing runs yet)
+ * - waiting for a session slot + not quiet: a still hourglass, never a spinner (no session yet)
  * - otherwise: pure color dot (path, header, inspector, idle/pending)
  */
 export function RunStatusMark({
@@ -94,6 +96,22 @@ export function RunStatusMark({
         data-status-mark="retry_waiting"
       >
         <IconRefresh className={ICON_GLYPH} stroke={2.5} />
+      </span>
+    );
+  }
+
+  if (!quiet && status === "session_waiting") {
+    return (
+      <span
+        className={cn(
+          "inline-flex shrink-0 items-center justify-center rounded-full bg-info/45 text-background",
+          ICON_BOX,
+          className,
+        )}
+        aria-hidden
+        data-status-mark="session_waiting"
+      >
+        <IconHourglassEmpty className={ICON_GLYPH} stroke={2.5} />
       </span>
     );
   }

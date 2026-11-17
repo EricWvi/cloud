@@ -186,7 +186,7 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 		// The session outlives its turns until completion, a stop or the run's end ends it.
 		request.Lifetime = execution.LifetimeHeld
 	}
-	a := h.beginSession(st, d.NodeRunID, d.ScopeID, generation)
+	a := h.beginSession(st, d, generation)
 	if a == nil {
 		return
 	}
@@ -306,19 +306,43 @@ const maxRunSessions = 8
 // than the Node admits on its checkout, so a fan-out wider than the free slots queues here instead
 // of being refused by Node; parked interactive sessions keep their slots until they end. It
 // returns nil like beginStart, also when the host shuts down while it waits.
-func (h *Host) beginSession(st *runState, nodeRun, scopeID string, generation uint64) *attemptState {
+//
+// An attempt that has to wait says so: its row carries `session_slot_wait` from the first time it
+// finds no free slot until it takes one or gives up, so the run view can tell it from a turn that
+// is executing. One that finds a slot at once writes nothing.
+func (h *Host) beginSession(st *runState, d workflow.AgentDispatch, generation uint64) *attemptState {
+	a, waited := h.awaitSessionSlot(st, d, generation)
+	if waited {
+		// Cleared before the Start, so the node reads as running once its session is asked for, and
+		// also when the attempt gave up: a cancelled row must not keep reading as queued.
+		h.clearSessionSlotWait(d)
+	}
+	return a
+}
+
+// awaitSessionSlot is beginSession's wait; waited reports whether it marked the attempt as queued.
+func (h *Host) awaitSessionSlot(st *runState, d workflow.AgentDispatch, generation uint64) (a *attemptState, waited bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	for {
-		if st.cancelling || st.closedScopes[scopeID] || generation != st.generation || h.ctx.Err() != nil {
-			return nil
+		if st.cancelling || st.closedScopes[d.ScopeID] || generation != st.generation || h.ctx.Err() != nil {
+			return nil, waited
 		}
 		if st.sessionsInUse() < h.sessionLimit {
-			a := st.register(nodeRun, nodeRun, scopeID, generation)
+			a := st.register(d.NodeRunID, d.NodeRunID, d.ScopeID, generation)
 			if a != nil {
 				a.session = true
 			}
-			return a
+			return a, waited
+		}
+		if !waited {
+			// Written outside mu, so siblings freeing slots never wait on the database; the slots
+			// are looked at again right after.
+			waited = true
+			st.mu.Unlock()
+			h.markAwaitingSessionSlot(d)
+			st.mu.Lock()
+			continue
 		}
 		if st.slotsChanged == nil {
 			st.slotsChanged = make(chan struct{})
@@ -331,6 +355,31 @@ func (h *Host) beginSession(st *runState, nodeRun, scopeID string, generation ui
 		}
 		st.mu.Lock()
 	}
+}
+
+// markAwaitingSessionSlot records that the attempt queues for a session slot. A failed write only
+// costs the hint: the attempt still waits and starts as usual.
+func (h *Host) markAwaitingSessionSlot(d workflow.AgentDispatch) {
+	wait := store.WorkflowSessionSlotWait{Since: h.now().UnixMilli(), Limit: h.sessionLimit}
+	if err := h.store.MarkWorkflowNodeAwaitingSessionSlot(h.ctx, d.RunID, d.NodeRunID, wait); err != nil {
+		if h.ctx.Err() == nil {
+			h.log.Warn("record a workflow node waiting for a session slot", "run", d.RunID, "node_run", d.NodeRunID, "error", err)
+		}
+		return
+	}
+	h.hub.Publish(d.RunID)
+}
+
+// clearSessionSlotWait drops the marker markAwaitingSessionSlot wrote. It also runs while the host
+// shuts down, so the row the next start finds does not keep reading as queued.
+func (h *Host) clearSessionSlotWait(d workflow.AgentDispatch) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(h.ctx), h.stopTimeout)
+	defer cancel()
+	if err := h.store.ClearWorkflowNodeSessionSlotWait(ctx, d.RunID, d.NodeRunID); err != nil {
+		h.log.Warn("clear the session slot wait of a workflow node", "run", d.RunID, "node_run", d.NodeRunID, "error", err)
+		return
+	}
+	h.hub.Publish(d.RunID)
 }
 
 // sessionsInUse counts the run's unfinished sessions: every turn starting a new session, from just

@@ -55,7 +55,7 @@ export function RunTasksStage({ tenantId, runId, nodeTitle, state, onOpenForm, t
   const ownedText = taskOwnedRetryText(taskLink)
   const tasks = readTasks(state)
   const status = state?.status ?? 'idle'
-  const pending = status === 'running' || status === 'awaiting_input' || status === 'retry_waiting'
+  const pending = status === 'running' || status === 'awaiting_input' || status === 'retry_waiting' || status === 'session_waiting'
   // Same key as the form stage: one read for the whole run, not a second source of truth.
   const form = useQuery({ queryKey: ['workflow-form', tenantId, runId], queryFn: () => getWorkflowForm(tenantId, runId), retry: false, enabled: tasks.length > 0 })
   const created = tasks.filter(task => task.action !== 'reused').length

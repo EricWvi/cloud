@@ -297,6 +297,8 @@ export const workflowRunTranslations = {
     "workflowRun.status.running": "运行中",
     "workflowRun.status.awaiting_input": "等待处理",
     "workflowRun.status.retry_waiting": "等待重试",
+    "workflowRun.status.session_waiting": "等待会话名额",
+    "workflowRun.sessionSlotWaitHint": "运行里已有 {{limit}} 个会话未结束，其中一个结束后自动开始",
     "workflowRun.completeNode.action": "完成当前节点",
     "workflowRun.completeNode.disabledHint":
       "请等待节点回复完成后再完成当前节点。",
@@ -877,6 +879,8 @@ export const workflowRunTranslations = {
     "workflowRun.status.running": "Running",
     "workflowRun.status.awaiting_input": "Awaiting input",
     "workflowRun.status.retry_waiting": "Waiting to retry",
+    "workflowRun.status.session_waiting": "Waiting for a session slot",
+    "workflowRun.sessionSlotWaitHint": "The run already has {{limit}} open sessions; this node starts once one of them ends",
     "workflowRun.completeNode.action": "Complete current node",
     "workflowRun.completeNode.disabledHint":
       "Wait for the node to finish replying before completing it.",

@@ -42,6 +42,7 @@ function lastTurnStatus(nodeStatus: GraphWorkflowNodeStatus): Turn['status'] {
     case 'running':
     case 'awaiting_input':
     case 'retry_waiting':
+    case 'session_waiting':
       return 'streaming'
     case 'failed':
       return 'failed'

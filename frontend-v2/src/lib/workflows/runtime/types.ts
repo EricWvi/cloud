@@ -336,17 +336,29 @@ export type GraphWorkflowRunStatus =
   | "cancelled";
 
 /**
+ * An attempt queued for a session slot, from `payload.session_slot_wait`: its run already holds
+ * `limit` unfinished sessions on the shared checkout (parked interactive ones included), so it
+ * starts once one of them ends. `since` is when it began waiting, in Unix milliseconds.
+ */
+export interface WorkflowNodeSessionSlotWait {
+  since: number;
+  limit: number;
+}
+
+/**
  * Per-node execution status overlaid on a frozen definition snapshot.
  *
- * `inactive` and `retry_waiting` are display states derived by the adapter: the backend stores a
- * waiting retry as a `running` row with no start time, but that row has no session yet, so the
- * run view must not treat it as live work.
+ * `inactive`, `retry_waiting` and `session_waiting` are display states derived by the adapter: the
+ * backend stores a waiting retry as a `running` row with no start time, and an attempt queued for
+ * one of its run's session slots as a `running` row marked `session_slot_wait`. Neither has a
+ * session yet, so the run view must not treat it as live work.
  */
 export type GraphWorkflowNodeStatus =
   | "idle"
   | "inactive"
   | "running"
   | "retry_waiting"
+  | "session_waiting"
   | "succeeded"
   | "failed"
   | "cancelled"
@@ -586,6 +598,8 @@ export interface GraphWorkflowNodeState {
   aiDiagnosis?: WorkflowNodeAiDiagnosis;
   /** Present only while the status is `retry_waiting`. */
   retryWait?: WorkflowNodeRetryWait;
+  /** Present only while the status is `session_waiting`. */
+  sessionSlotWait?: WorkflowNodeSessionSlotWait;
   /**
    * Present when an automatic retry scheduled this attempt (kept after it fails). The attempt
    * itself only ran when `startedAt` is set; a wait that ended early leaves it unset.
