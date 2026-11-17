@@ -2,12 +2,15 @@ package workflowhost
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 )
 
@@ -26,6 +29,19 @@ func (f *fixture) refuseEndOf(t *testing.T, which func() string) (confirm func()
 		return end(ctx, scope, id)
 	}
 	return func() { confirmed.Store(true) }
+}
+
+// countEndsOf counts the End calls of the session reported by which(), whatever their outcome.
+func (f *fixture) countEndsOf(which func() string) func() int64 {
+	var n atomic.Int64
+	end := f.exec.EndFunc
+	f.exec.EndFunc = func(ctx context.Context, scope execution.Scope, id string) error {
+		if id == which() {
+			n.Add(1)
+		}
+		return end(ctx, scope, id)
+	}
+	return n.Load
 }
 
 // An automatic attempt gives its slot back only once its session's End returned: until then Node
@@ -140,11 +156,11 @@ func TestUnconfirmedEndOfAStoppedTurnKeepsTheSlot(t *testing.T) {
 	}
 }
 
-// A sibling failing the run releases the parked interactive node; when its session's End is not
-// confirmed, the session keeps its slot. A resume admitted right away therefore starts only as many
-// sessions as Node has room for, instead of being refused at the checkout's limit, and the rest
-// starts once a retry confirms the End.
-func TestOrphanWithAnUnconfirmedEndKeepsItsSlotAcrossAResume(t *testing.T) {
+// A sibling failing the run releases the parked interactive node. Its End is tried once; when it
+// is not confirmed, the failed run has no use for the slot, so the session gives it back without
+// a retry (a retry could make the execution service rebuild the project's Node early). A resume
+// admitted right away starts both nodes.
+func TestAnOrphanOfAFailedRunGivesItsSlotBackWithoutARetry(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	f.host.sessionLimit = 2
@@ -154,29 +170,72 @@ func TestOrphanWithAnUnconfirmedEndKeepsItsSlotAcrossAResume(t *testing.T) {
 	}
 	started := f.exec.awaitStarts(t, 2)
 	a, c := started["a"], started["c"]
-	confirm := f.refuseEndOf(t, func() string { return a })
+	f.refuseEndOf(t, func() string { return a })
+	f.host.endRetry = time.Hour // the slot must come back without waiting for a retry
+	ends := f.countEndsOf(func() string { return a })
 	f.exec.finish(a, completed("在"))
 	f.await(t, runID, parked("a"))
 	f.exec.finish(c, execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
 	f.await(t, runID, func(r store.WorkflowRun, n []store.WorkflowNodeRun) bool {
 		return r.Status == store.WorkflowStatusFailed && node(n, "a").Status == store.WorkflowStatusCancelled
 	})
+	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
+	if n := ends(); n != 1 {
+		t.Fatalf("A's session was ended %d times, want once and no retry", n)
+	}
 	if _, err := f.host.ResumeRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
 	}
-	first := f.exec.awaitStart(t)
-	f.exec.noStart(t, "the resume started a second session while A's old session may still be live")
-	confirm()
-	second := f.exec.awaitStart(t)
-	if !f.exec.isClosed(a) {
-		t.Fatal("the second session started before A's old session was ended")
-	}
-	resumed := map[string]string{}
-	for _, id := range []string{first, second} {
-		resumed[f.exec.request(id).Caller.NodeID] = id
-	}
+	resumed := f.exec.awaitStarts(t, 2)
 	if resumed["a"] == "" || resumed["c"] == "" {
 		t.Fatalf("resumed %v, want A and C", resumed)
+	}
+}
+
+// While the run runs, an unconfirmed End of an automatic attempt is retried; once the run fails or
+// is cancelled the retries stop and the slot is given back.
+func TestALingeringEndIsRetriedOnlyWhileTheRunRuns(t *testing.T) {
+	graph := strings.Replace(parallelAgents, `"prompt":"B"}`, `"prompt":"B","retry":{"enabled":false,"maxRetries":0,"initialDelaySeconds":1}}`, 1)
+	for name, stop := range map[string]func(t *testing.T, f *fixture, runID, b string){
+		"failed": func(_ *testing.T, f *fixture, _, b string) {
+			f.exec.finish(b, execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
+		},
+		"cancelled": func(t *testing.T, f *fixture, runID, _ string) {
+			if _, err := f.host.CancelRun(context.Background(), f.scope, runID); err != nil {
+				t.Error(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			var first atomic.Value
+			first.Store("")
+			f.refuseEndOf(t, func() string { return first.Load().(string) })
+			ends := f.countEndsOf(func() string { return first.Load().(string) })
+			runID := f.run(t, graph, nil)
+			if _, err := f.host.StartRun(context.Background(), f.scope, runID); err != nil {
+				t.Fatal(err)
+			}
+			started := f.exec.awaitStarts(t, 2)
+			first.Store(started["a"])
+			f.exec.finish(started["a"], completed("A"))
+			deadline := time.Now().Add(5 * time.Second)
+			for ends() < 2 {
+				if time.Now().After(deadline) {
+					t.Fatalf("A's End was tried %d times while the run ran, want retries", ends())
+				}
+				time.Sleep(f.host.endRetry)
+			}
+			stop(t, f, runID, started["b"])
+			f.await(t, runID, terminal)
+			f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
+			settled := ends()
+			// Retries back off: the window covers several of them.
+			time.Sleep(30 * f.host.endRetry)
+			if n := ends(); n > settled+1 {
+				t.Fatalf("A's End was tried %d more times after the run stopped", n-settled)
+			}
+		})
 	}
 }
 
@@ -252,25 +311,20 @@ func TestAnEndOfAGoneSessionFreesTheSlot(t *testing.T) {
 // once, and Node is left to end the session itself.
 func TestCloseDoesNotWaitForTheRetryOfALingeringEnd(t *testing.T) {
 	f := newFixture(t)
-	var last atomic.Value
-	last.Store("")
-	f.refuseEndOf(t, func() string { return last.Load().(string) })
+	f.host.sessionLimit = 1
+	var first atomic.Value
+	first.Store("")
+	f.refuseEndOf(t, func() string { return first.Load().(string) })
 	f.host.endRetry = time.Hour
 	runID := f.run(t, parallelAgents, nil)
 	if _, err := f.host.StartRun(context.Background(), f.scope, runID); err != nil {
 		t.Fatal(err)
 	}
-	f.exec.finish(f.exec.awaitStart(t), completed("one"))
-	b := f.exec.awaitStart(t)
-	last.Store(b)
-	f.exec.finish(b, completed("two"))
-	if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusSucceeded {
-		t.Fatalf("run %s", run.Status)
-	}
-	f.awaitIdle(t, runID, "an attempt outlived the run")
-	if st := f.host.state(runID); st == nil {
-		t.Fatal("the run's state was dropped while B's End was unconfirmed")
-	}
+	a := f.exec.awaitStart(t)
+	first.Store(a)
+	f.exec.finish(a, completed("one"))
+	// The sibling waits for A's slot, so the run keeps running and A's End keeps being retried.
+	f.exec.noStart(t, "the sibling started while A's session may still be live")
 	closed := make(chan struct{})
 	go func() { f.host.Close(); close(closed) }()
 	select {
@@ -316,4 +370,43 @@ func TestAParkedNodeWhoseSessionIsGoneCompletesAndCancels(t *testing.T) {
 			t.Fatalf("run %s", run.Status)
 		}
 	})
+}
+
+// A parked node whose End keeps failing after a stopped turn is retried while the run runs. A
+// cancellation stops the retries, also while the run stays open because the stop was not
+// confirmed.
+func TestACancellationStopsTheRetryOfAParkedNodesEnd(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	runID, a := f.startParked(t, interactiveChain, "初稿")
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "继续"); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.awaitAppend(t)
+	f.refuseEndOf(t, func() string { return a })
+	ends := f.countEndsOf(func() string { return a })
+	f.exec.onCancel = func(ref execution.Ref) error {
+		f.exec.finish(ref.SessionID, completed("停"))
+		return nil
+	}
+	if _, err := f.host.StopNodeTurn(ctx, f.scope, runID, "a"); err != nil {
+		t.Fatal(err)
+	}
+	f.await(t, runID, parked("a"))
+	deadline := time.Now().Add(5 * time.Second)
+	for ends() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("A's End was tried %d times while the run ran, want retries", ends())
+		}
+		time.Sleep(f.host.endRetry)
+	}
+	if _, err := f.host.CancelRun(ctx, f.scope, runID); !errors.Is(err, server.ErrWorkflowRunStopUnconfirmed) {
+		t.Fatalf("cancel = %v, want the stop unconfirmed", err)
+	}
+	settled := ends()
+	// Retries back off: the window covers several of them.
+	time.Sleep(30 * f.host.endRetry)
+	if n := ends(); n > settled+1 {
+		t.Fatalf("A's End was tried %d more times after the cancellation", n-settled)
+	}
 }

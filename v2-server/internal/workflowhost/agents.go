@@ -453,7 +453,7 @@ func (st *runState) endTurn(a *attemptState, endErr error) (cancelling, last boo
 func (h *Host) endTurn(st *runState, runID string, a *attemptState, endErr error) (cancelling, last bool) {
 	cancelling, last, session := st.endSessionTurn(a, endErr)
 	if session != "" {
-		h.retryEnd(st, runID, session, false)
+		h.retryEnd(st, runID, session)
 	}
 	return cancelling, last
 }

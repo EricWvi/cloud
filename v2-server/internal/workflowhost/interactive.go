@@ -176,10 +176,10 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 	if err == nil && n.turns == 0 && !n.stopping && result.AgentLost && (result.NotStarted || execution.CheckoutRefused(result.FailureCode)) {
 		// Nothing is running, so End is idempotent; until it is confirmed the session keeps
 		// its slot.
-		retry := st.dropInteractive(n)
+		lingering := st.dropInteractive(n)
 		st.mu.Unlock()
-		if retry {
-			h.retryEnd(st, n.d.RunID, n.session, true)
+		if lingering {
+			h.endLingering(st, n.d.RunID, n.session)
 		}
 		message := "the Agent session could not be set up: " + result.FailureCode
 		if execution.CheckoutRefused(result.FailureCode) {
@@ -244,7 +244,7 @@ func (h *Host) park(st *runState, n *interactiveNode) {
 	if !moved {
 		// Only a run that stopped running refuses the park of its own running attempt.
 		h.endInteractive(st, n)
-		h.forgetInteractive(st, n, false)
+		h.forgetInteractive(st, n)
 		h.closeOrphan(n)
 		h.hub.Publish(n.d.RunID)
 		return
@@ -599,7 +599,7 @@ func (h *Host) runStopped(ctx context.Context, runID string) bool {
 // drops the run's state once nothing else of it is in flight. Its session was ended, or lingers
 // until a retry confirms the End (see linger).
 func (h *Host) closeLost(st *runState, n *interactiveNode) {
-	h.forgetInteractive(st, n, false) // its completion already tried to end the session
+	h.forgetInteractive(st, n) // its completion already tried to end the session
 	h.closeOrphan(n)
 	h.hub.Publish(n.d.RunID)
 	h.forgetFinished(n.d.RunID, st)
@@ -683,7 +683,7 @@ func (h *Host) releaseOrphans(st *runState, runID string) {
 		// orphans before it admits its fan-out, which must not be refused by Node at the
 		// checkout's session limit while Node still holds this session.
 		h.endInteractive(st, n)
-		h.forgetInteractive(st, n, false)
+		h.forgetInteractive(st, n)
 		h.hub.Publish(runID)
 	}
 }

@@ -179,14 +179,15 @@ func TestLoopExitDropsAMemberWaitingForASlot(t *testing.T) {
 	}
 }
 
-// A lingering session is the last thing the run's state waits for: the run can succeed while the
-// End is unconfirmed, and the state is forgotten once a retry confirms it.
-func TestARunForgetsItsStateOnceTheLingeringEndIsConfirmed(t *testing.T) {
+// A run that finished has no use for a slot: a session whose End was not confirmed gives it back
+// without further retries, and the run's state is forgotten.
+func TestAFinishedRunGivesUpALingeringEnd(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	var ended atomic.Value
 	ended.Store("")
-	confirm := f.refuseEndOf(t, func() string { return ended.Load().(string) })
+	f.refuseEndOf(t, func() string { return ended.Load().(string) })
+	ends := f.countEndsOf(func() string { return ended.Load().(string) })
 	runID := f.run(t, twoAgents, str("输入"))
 	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
@@ -199,14 +200,13 @@ func TestARunForgetsItsStateOnceTheLingeringEndIsConfirmed(t *testing.T) {
 	if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusSucceeded {
 		t.Fatalf("run %s", run.Status)
 	}
-	f.awaitIdle(t, runID, "the finished run kept an attempt")
-	if f.host.state(runID) == nil {
-		t.Fatal("the run's state was forgotten while its last session's End was unconfirmed")
-	}
-	confirm()
+	// B's End runs before its result is recorded, so a retry may still come while the run runs;
+	// once the run finished, none does.
 	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
-	if !f.exec.isClosed(b) {
-		t.Fatal("the state was forgotten without ending the session")
+	settled := ends()
+	time.Sleep(10 * f.host.endRetry)
+	if n := ends(); n != settled {
+		t.Fatalf("B's End was tried %d more times after the run finished", n-settled)
 	}
 }
 
