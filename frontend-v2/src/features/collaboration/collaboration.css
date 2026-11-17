@@ -203,3 +203,28 @@
  .mc-workflow-meta { white-space: normal !important; overflow: visible !important; text-overflow: clip !important; }
  .mc-workflow-meta time { display: block; white-space: nowrap; }
 }
+
+.mc-composer-workflow { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--mc-line); border-radius: 10px; background: var(--mc-surface); }
+.mc-composer-workflow-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mc-composer-workflow-title { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--foreground); }
+.mc-composer-workflow-retry { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--mc-danger); }
+.mc-wf-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.mc-wf-field { display: flex; flex-direction: column; gap: 4px; }
+.mc-wf-label { font-size: 12px; font-weight: 500; color: var(--foreground); }
+.mc-required { margin-left: 2px; color: var(--mc-danger); }
+.mc-wf-checkbox { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+.mc-wf-multi { display: flex; flex-wrap: wrap; gap: 10px; }
+.mc-field-error { margin: 0; font-size: 12px; color: var(--mc-danger); }
+
+.mc-tag.workflow { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 999px; font-size: 11px; color: var(--mc-human); background: var(--mc-human-bg); white-space: nowrap; flex-shrink: 0; }
+.mc-comment header { flex-wrap: wrap; }
+.mc-chip.workflow { color: var(--mc-human); background: var(--mc-human-bg); }
+.mc-comment-workflow { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--mc-line); border-radius: 8px; background: var(--mc-surface); display: flex; flex-direction: column; gap: 6px; }
+.mc-comment-workflow-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; }
+.mc-comment-workflow-name { font-weight: 600; color: var(--foreground); }
+.mc-comment-workflow-version { color: var(--mc-muted); font-size: 11px; }
+.mc-comment-workflow-deleted { color: var(--mc-muted); font-size: 11px; margin-left: auto; }
+.mc-comment-workflow-link { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+.mc-comment-workflow-output { margin: 0; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--mc-line); background: var(--background); font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; }
+.mc-comment-workflow-error { margin: 0; font-size: 12px; color: var(--mc-danger); }
+.mc-comment-workflow-note { margin: 0; font-size: 12px; color: var(--mc-muted); }

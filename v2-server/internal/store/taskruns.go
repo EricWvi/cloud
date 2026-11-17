@@ -78,16 +78,31 @@ type TaskMention struct {
 	DisplayName string `json:"displayName"`
 }
 
-// TaskComment is a person's entry in a task's timeline. RunID is set when it was sent to the Agent.
+// TaskCommentWorkflowRun summarizes the workflow run started by a @ workflow comment.
+type TaskCommentWorkflowRun struct {
+	ID           string    `json:"id"`
+	WorkflowID   string    `json:"workflowId"`
+	WorkflowName string    `json:"workflowName"`
+	Version      string    `json:"version"`
+	Status       string    `json:"status"`
+	Output       *string   `json:"output"`
+	Error        *string   `json:"error"`
+	Deleted      bool      `json:"deleted"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
+// TaskComment is a person's entry in a task's timeline. RunID is set when it was sent to the Agent,
+// and WorkflowRun is set when the comment launched a workflow via @ workflow.
 type TaskComment struct {
-	ID         string        `json:"id"`
-	TaskID     string        `json:"taskId"`
-	AuthorID   string        `json:"authorId"`
-	AuthorName string        `json:"authorName"`
-	Body       string        `json:"body"`
-	Mentions   []TaskMention `json:"mentions"`
-	RunID      string        `json:"runId"`
-	CreatedAt  time.Time     `json:"createdAt"`
+	ID          string                  `json:"id"`
+	TaskID      string                  `json:"taskId"`
+	AuthorID    string                  `json:"authorId"`
+	AuthorName  string                  `json:"authorName"`
+	Body        string                  `json:"body"`
+	Mentions    []TaskMention           `json:"mentions"`
+	RunID       string                  `json:"runId"`
+	WorkflowRun *TaskCommentWorkflowRun `json:"workflowRun,omitempty"`
+	CreatedAt   time.Time               `json:"createdAt"`
 }
 
 const taskRunColumns = `r.id, r.task_id, r.tenant_id::text, r.started_by::text, u.display_name, r.start_key,
@@ -142,6 +157,21 @@ func taskRuns(ctx context.Context, q dbTX, where string, args ...any) ([]TaskRun
 	return out, rows.Err()
 }
 
+const taskCommentSelect = `
+	SELECT c.id, c.task_id, c.author_id::text, u.display_name, c.body, c.mentions,
+		COALESCE(c.run_id::text, ''), c.created_at,
+		COALESCE(c.workflow_run_id::text, ''), COALESCE(r.workflow_id::text, ''),
+		COALESCE(w.name, ''), COALESCE(s.version, ''),
+		CASE WHEN r.id IS NULL THEN '' ELSE ` + derivedRunStatus + ` END,
+		CASE WHEN r.deleted_at IS NULL THEN r.output END,
+		CASE WHEN r.deleted_at IS NULL THEN r.error END,
+		COALESCE(r.deleted_at IS NOT NULL, false), r.created_at
+	FROM v2_task_comments c
+	JOIN users u ON u.id = c.author_id
+	LEFT JOIN v2_workflow_runs r ON r.id = c.workflow_run_id AND r.tenant_id = c.tenant_id
+	LEFT JOIN v2_workflows w ON w.id = r.workflow_id
+	LEFT JOIN v2_workflow_snapshots s ON s.id = r.snapshot_id`
+
 // TaskTimeline returns a task's runs and comments, oldest first, to a current workspace member.
 func (s *Store) TaskTimeline(ctx context.Context, tenant, taskID string) ([]TaskRun, []TaskComment, error) {
 	if _, e := s.Task(ctx, tenant, taskID); e != nil {
@@ -151,10 +181,7 @@ func (s *Store) TaskTimeline(ctx context.Context, tenant, taskID string) ([]Task
 	if e != nil {
 		return nil, nil, e
 	}
-	rows, e := s.pool.Query(ctx, `
-		SELECT c.id, c.task_id, c.author_id::text, u.display_name, c.body, c.mentions,
-			COALESCE(c.run_id::text, ''), c.created_at
-		FROM v2_task_comments c JOIN users u ON u.id = c.author_id
+	rows, e := s.pool.Query(ctx, taskCommentSelect+`
 		WHERE c.tenant_id = $1 AND c.task_id = $2 ORDER BY c.created_at, c.id`, tenant, taskID)
 	if e != nil {
 		return nil, nil, fmt.Errorf("list task comments: %w", e)
@@ -174,7 +201,12 @@ func (s *Store) TaskTimeline(ctx context.Context, tenant, taskID string) ([]Task
 func scanTaskComment(row pgx.Row) (TaskComment, error) {
 	var c TaskComment
 	var mentions []byte
-	if e := row.Scan(&c.ID, &c.TaskID, &c.AuthorID, &c.AuthorName, &c.Body, &mentions, &c.RunID, &c.CreatedAt); e != nil {
+	var wfRunID, wfID, wfName, wfVersion, wfStatus string
+	var wfOutput, wfErr *string
+	var wfDeleted bool
+	var wfCreatedAt *time.Time
+	if e := row.Scan(&c.ID, &c.TaskID, &c.AuthorID, &c.AuthorName, &c.Body, &mentions, &c.RunID, &c.CreatedAt,
+		&wfRunID, &wfID, &wfName, &wfVersion, &wfStatus, &wfOutput, &wfErr, &wfDeleted, &wfCreatedAt); e != nil {
 		if errors.Is(e, pgx.ErrNoRows) {
 			return c, ErrNotFound
 		}
@@ -183,6 +215,19 @@ func scanTaskComment(row pgx.Row) (TaskComment, error) {
 	c.Mentions = []TaskMention{}
 	if e := json.Unmarshal(mentions, &c.Mentions); e != nil {
 		return c, fmt.Errorf("decode comment mentions: %w", e)
+	}
+	if wfRunID != "" && wfCreatedAt != nil {
+		c.WorkflowRun = &TaskCommentWorkflowRun{
+			ID:           wfRunID,
+			WorkflowID:   wfID,
+			WorkflowName: wfName,
+			Version:      wfVersion,
+			Status:       wfStatus,
+			Output:       wfOutput,
+			Error:        wfErr,
+			Deleted:      wfDeleted,
+			CreatedAt:    *wfCreatedAt,
+		}
 	}
 	return c, nil
 }
@@ -352,12 +397,17 @@ type NewTaskComment struct {
 	RunID, TurnID                               string
 }
 
+type commentQueryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
 // TaskCommentByKey finds the comment a person's request with this key created.
 func (s *Store) TaskCommentByKey(ctx context.Context, tenant, taskID, author, key string) (TaskComment, error) {
-	return scanTaskComment(s.pool.QueryRow(ctx, `
-		SELECT c.id, c.task_id, c.author_id::text, u.display_name, c.body, c.mentions,
-			COALESCE(c.run_id::text, ''), c.created_at
-		FROM v2_task_comments c JOIN users u ON u.id = c.author_id
+	return taskCommentByKey(ctx, s.pool, tenant, taskID, author, key)
+}
+
+func taskCommentByKey(ctx context.Context, q commentQueryer, tenant, taskID, author, key string) (TaskComment, error) {
+	return scanTaskComment(q.QueryRow(ctx, taskCommentSelect+`
 		WHERE c.tenant_id = $1 AND c.task_id = $2 AND c.author_id = $3 AND c.create_key = $4`, tenant, taskID, author, key))
 }
 
@@ -382,6 +432,14 @@ func (s *Store) ResolveTaskMentions(ctx context.Context, tenant string, in []Tas
 			if e = requireActiveAgent(ctx, s.pool, tenant, m.ID); e == nil {
 				e = s.pool.QueryRow(ctx, `SELECT name FROM v2_space_agents WHERE id = $1`, m.ID).Scan(&name)
 			}
+		case "workflow":
+			e = s.pool.QueryRow(ctx, `
+				SELECT name FROM v2_workflows
+				WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND published_snapshot_id IS NOT NULL`,
+				tenant, m.ID).Scan(&name)
+			if errors.Is(e, pgx.ErrNoRows) {
+				return nil, ErrInvalidMention
+			}
 		default:
 			return nil, ErrInvalidMention
 		}
@@ -398,12 +456,9 @@ func (s *Store) ResolveTaskMentions(ctx context.Context, tenant string, in []Tas
 
 // CreateTaskComment records a comment once per key; a retry returns the comment it made.
 func (s *Store) CreateTaskComment(ctx context.Context, in NewTaskComment) (TaskComment, error) {
-	mentions, e := json.Marshal(in.Mentions)
+	mentions, e := marshalTaskMentions(in.Mentions)
 	if e != nil {
 		return TaskComment{}, e
-	}
-	if in.Mentions == nil {
-		mentions = []byte("[]")
 	}
 	if _, e := s.pool.Exec(ctx, `
 		INSERT INTO v2_task_comments (task_id, tenant_id, author_id, create_key, body, mentions, run_id, turn_id)
@@ -413,6 +468,84 @@ func (s *Store) CreateTaskComment(ctx context.Context, in NewTaskComment) (TaskC
 		return TaskComment{}, fmt.Errorf("insert task comment: %w", e)
 	}
 	return s.TaskCommentByKey(ctx, in.TenantID, in.TaskID, in.AuthorID, in.CreateKey)
+}
+
+func marshalTaskMentions(in []TaskMention) ([]byte, error) {
+	if in == nil {
+		return []byte("[]"), nil
+	}
+	return json.Marshal(in)
+}
+
+// NewTaskWorkflowComment carries a comment and validated published snapshot to create atomically.
+type NewTaskWorkflowComment struct {
+	TenantID   string
+	TaskID     string
+	AuthorID   string
+	CreateKey  string
+	Body       string
+	Mentions   []TaskMention
+	WorkflowID string
+	SnapshotID string
+	Input      *string
+}
+
+// CreateTaskWorkflowComment atomically creates a pending workflow run as the commenter and binds
+// a new comment to it. Retries with the same key return the existing comment (fresh=false).
+// Unlike CreateTaskWorkflowRun, this leaves task status and handling locks untouched.
+func (s *Store) CreateTaskWorkflowComment(ctx context.Context, in NewTaskWorkflowComment) (TaskComment, bool, error) {
+	var comment TaskComment
+	var fresh bool
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var taskStatus, projectID string
+		err := tx.QueryRow(ctx, `
+			SELECT status, project_id::text FROM v2_tasks
+			WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, in.TenantID, in.TaskID).Scan(&taskStatus, &projectID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("lock task for comment workflow: %w", err)
+		}
+		if existing, err := taskCommentByKey(ctx, tx, in.TenantID, in.TaskID, in.AuthorID, in.CreateKey); err == nil {
+			comment = existing
+			return nil
+		} else if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		if taskStatus == TaskDone || taskStatus == TaskCancelled {
+			return ErrInvalidTransition
+		}
+		run, err := createWorkflowRun(ctx, tx, in.TenantID, in.WorkflowID, in.SnapshotID, WorkflowRunInput{
+			ProjectID: projectID,
+			Input:     in.Input,
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE v2_workflow_runs SET started_by = $2::uuid WHERE tenant_id = $1 AND id = $3`,
+			in.TenantID, in.AuthorID, run.ID); err != nil {
+			return fmt.Errorf("bind comment workflow starter: %w", err)
+		}
+		mentions, err := marshalTaskMentions(in.Mentions)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO v2_task_comments (task_id, tenant_id, author_id, create_key, body, mentions, workflow_run_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			in.TaskID, in.TenantID, in.AuthorID, in.CreateKey, in.Body, mentions, run.ID); err != nil {
+			return fmt.Errorf("insert workflow comment: %w", err)
+		}
+		comment, err = taskCommentByKey(ctx, tx, in.TenantID, in.TaskID, in.AuthorID, in.CreateKey)
+		if err != nil {
+			return err
+		}
+		fresh = true
+		return nil
+	})
+	return comment, fresh, err
 }
 
 // TaskAgentIdentifier returns the plugin identity (namespace/identifier) of a Space Agent.

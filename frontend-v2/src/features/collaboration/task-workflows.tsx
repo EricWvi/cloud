@@ -21,7 +21,7 @@ const STATUS: Record<string, { label: string; tone: string }> = {
 
 /** A durable task workflow association, including inspection sources. */
 export type TaskWorkflowRun = TaskWorkflowRecord
-const kindLabel = { handle: '处理', decomposition: '拆分', source: '巡检来源' }
+const kindLabel = { handle: '处理', decomposition: '拆分', source: '巡检来源', mention: '评论 @' }
 
 function outcome(d: TaskWorkflowRun): string {
   if (d.deleted) return '运行已删除'

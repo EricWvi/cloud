@@ -262,6 +262,7 @@ export type TaskMentionType = typeof TaskMentionType[keyof typeof TaskMentionTyp
 export const TaskMentionType = {
   user: 'user',
   agent: 'agent',
+  workflow: 'workflow',
 } as const;
 
 export interface TaskMention {
@@ -276,11 +277,39 @@ export type TaskMentionRefType = typeof TaskMentionRefType[keyof typeof TaskMent
 export const TaskMentionRefType = {
   user: 'user',
   agent: 'agent',
+  workflow: 'workflow',
 } as const;
 
 export interface TaskMentionRef {
   type: TaskMentionRefType;
   id: string;
+}
+
+export type TaskCommentWorkflowRunStatus = typeof TaskCommentWorkflowRunStatus[keyof typeof TaskCommentWorkflowRunStatus];
+
+
+export const TaskCommentWorkflowRunStatus = {
+  pending: 'pending',
+  running: 'running',
+  awaitingInput: 'awaitingInput',
+  succeeded: 'succeeded',
+  failed: 'failed',
+  cancelled: 'cancelled',
+  interrupted: 'interrupted',
+} as const;
+
+export interface TaskCommentWorkflowRun {
+  id: string;
+  workflowId: string;
+  workflowName: string;
+  version: string;
+  status: TaskCommentWorkflowRunStatus;
+  /** @nullable */
+  output: string | null;
+  /** @nullable */
+  error: string | null;
+  deleted: boolean;
+  createdAt: string;
 }
 
 export interface TaskComment {
@@ -292,6 +321,7 @@ export interface TaskComment {
   mentions: TaskMention[];
   /** The run the comment was sent to as a turn; empty for a plain comment. */
   runId: string;
+  workflowRun?: TaskCommentWorkflowRun;
   createdAt: string;
 }
 
@@ -326,6 +356,19 @@ export interface TaskRunStart {
   note?: string;
 }
 
+export type TaskCommentWorkflowInputValues = { [key: string]: unknown };
+
+export interface TaskCommentWorkflowInput {
+  workflowId: string;
+  snapshotId?: string;
+  /**
+     * @maxLength 4000
+     * @nullable
+     */
+  input?: string | null;
+  values?: TaskCommentWorkflowInputValues;
+}
+
 export interface TaskCommentCreate {
   /**
      * @minLength 1
@@ -338,6 +381,7 @@ export interface TaskCommentCreate {
   toAgent?: boolean;
   /** @maxLength 200 */
   executorId?: string;
+  workflow?: TaskCommentWorkflowInput;
 }
 
 export interface PendingMention {
