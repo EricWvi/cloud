@@ -101,7 +101,9 @@ test('real Agent task history and model requests appear in dashboard', async ({ 
   await page.getByRole('button', { name: '应用筛选' }).click()
   await expect(page).toHaveURL(/agent=official%2Fora-space.opencode/)
   await page.reload()
-  await page.getByRole('link', { name: title, exact: true }).click()
+  // The dashboard lists the same task in both the session list and the Agent 产出 panel once it is
+  // waiting for review, so open it from the session it belongs to rather than by title alone.
+  await page.getByRole('list', { name: 'Agent 会话' }).getByRole('link', { name: title, exact: true }).click()
   await expect(page.getByRole('region', { name: '会话概览' })).toBeVisible()
   await page.getByRole('button', { name: '时间轴', exact: true }).click()
   await expect(page.getByRole('region', { name: '会话时间轴' })).toBeVisible()

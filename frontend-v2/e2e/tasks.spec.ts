@@ -70,10 +70,21 @@ test('drag a card on the board to move it one legal step', async ({ page }) => {
   // A drag is real pointer movement, so the board's pointer sensor picks the card up as for a person.
   const card = page.getByRole('button', { name: `查看任务 ${title}` })
   const drag = async (column: string) => {
-    const from = (await card.boundingBox())!, to = (await page.getByRole('listitem', { name: column }).boundingBox())!
-    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2)
-    await page.mouse.down()
-    await page.mouse.move(from.x + from.width / 2 + 12, from.y + from.height / 2, { steps: 4 })
+    // The board orders the team's tasks by last update, so while the whole suite runs at once this
+    // card keeps moving between slots, and one below its column's scroll edge has no point a pointer
+    // can reach. Read the fixed column first, then hover: it scrolls the card into sight, waits until
+    // it sits still and leaves the pointer on it. A response can still re-sort the column before the
+    // press, so check the board lifted this card and put a neighbour back rather than moving it.
+    const to = (await page.getByRole('listitem', { name: column }).boundingBox())!
+    for (let attempt = 1; ; attempt++) {
+      await card.hover()
+      const from = (await card.boundingBox())!
+      await page.mouse.down()
+      await page.mouse.move(from.x + from.width / 2 + 12, from.y + from.height / 2, { steps: 4 })
+      if (await page.locator('.mc-card-lifted').filter({ hasText: title }).waitFor({ state: 'attached', timeout: 1_000 }).then(() => true, () => false)) break
+      await page.keyboard.press('Escape')
+      if (attempt === 3) throw new Error(`没有拿起任务 ${title}`)
+    }
     await page.mouse.move(to.x + to.width / 2, to.y + 80, { steps: 12 })
     await page.mouse.up()
   }
