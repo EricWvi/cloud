@@ -45,7 +45,7 @@ Keep configuration and secrets in protected process-manager configuration, outsi
 
 - `V2_LOGIN=idaas`: the only deployment login. This build does not provide it and refuses startup.
   Once IDaaS is enabled, the frontend reads `/auth/providers` to detect deployment mode and hides
-  the browser-only model-connections and roles pages as well as workflow role fields.
+  only the browser-only model-connections page; the workspace roles page and workflow role fields remain available.
 - `V2_PUBLIC_URL`: public HTTPS address; configure `V2_IDAAS_BASE_URL`, `V2_IDAAS_CLIENT_ID` and
   `V2_IDAAS_CLIENT_SECRET` as specified by A6. This build does not yet support IDaaS login.
 - `V2_DATABASE_URL`: dedicated PostgreSQL connection with required TLS and least privilege.
@@ -55,7 +55,7 @@ Keep configuration and secrets in protected process-manager configuration, outsi
   may be writable by group or others. Do not use `/tmp`. Prefer mode `0700` owned by the service account.
 - `V2_MARKET_CREDENTIAL_KEY`: persist a stable 32-byte Base64-encoded key in the format required by
   pluginmarket and projectrepos. Back it up securely; replacing or losing it makes existing marketplace
-  S3 AK/SK credentials, custom marketplace Git credentials, and private project repository tokens unreadable.
+  S3 AK/SK credentials, custom marketplace Git credentials, tenant MCP settings, and private project repository tokens unreadable.
 - `V2_PLUGIN_MARKETPLACE_URL`: the launcher defaults to empty, disabling the official market.
   Direct binary startup retains the development default when unset; explicit empty disables sync
   and visibility of saved official catalog entries. Custom space markets support S3+AKSK and internal HTTPS Git authentication

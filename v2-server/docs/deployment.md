@@ -37,7 +37,7 @@ PostgreSQL、IDaaS、模型和内部 Git/S3 服务。Git 和系统库须预先�
 在进程管理器的受保护配置中设置以下变量，不将密钥写入包或命令日志：
 
 - `V2_LOGIN=idaas`：唯一部署登录方式；当前构建不提供此能力，启动会明确拒绝。
-  启用 IDaaS 后，前端从 `/auth/providers` 识别部署模式，自动隐藏只写浏览器的「模型连接」「角色」两页和工作流角色字段。
+  启用 IDaaS 后，前端从 `/auth/providers` 识别部署模式，只隐藏只写浏览器的「模型连接」页；角色目录由服务端提供，设置页「角色」与工作流角色字段照常显示。
 - `V2_PUBLIC_URL`：部署公开 HTTPS 地址；`V2_IDAAS_BASE_URL`、`V2_IDAAS_CLIENT_ID`、
   `V2_IDAAS_CLIENT_SECRET` 是 A6 规定的部署配置；当前构建尚不支持 IDaaS 登录。
 - `V2_DATABASE_URL`：专用 PostgreSQL 连接，按企业要求启用 TLS 和最小权限。
@@ -46,7 +46,7 @@ PostgreSQL、IDaaS、模型和内部 Git/S3 服务。Git 和系统库须预先�
 - `V2_DATA_DIR`：绝对、持久化目录，例如 `/srv/ora/data`；目录和所有父目录均不可被组或其他人写入，
   不能放 `/tmp`。由运行账号创建，建议 `0700`，不要通过宽化权限解决 Node 启动失败。
 - `V2_MARKET_CREDENTIAL_KEY`：按 pluginmarket 与 projectrepos 要求的密钥格式生成（32 字节 Base64）；
-  作为稳定密钥持久保存，与数据一起备份。重建、替换或丢失会使现有市场 S3 AK/SK、自定义市场 Git 凭据以及私有项目仓库令牌无法解密。
+  作为稳定密钥持久保存，与数据一起备份。重建、替换或丢失会使现有市场 S3 AK/SK、自定义市场 Git 凭据、租户 MCP 设置以及私有项目仓库令牌无法解密。
 - `V2_PLUGIN_MARKETPLACE_URL`：启动器未配置时设为空，关闭官方市场。直接启动 binary 时未设置仍使用开发默认；
   显式空字符串关闭同步和旧官方目录可见性。自定义空间市场支持 S3+AKSK 及管理员在设置页配置的内部 HTTPS Git 认证
   （用户名与令牌/密码，经 `V2_MARKET_CREDENTIAL_KEY` 加密存库）；Git 同步禁用重定向（`http.followRedirects=false`），
