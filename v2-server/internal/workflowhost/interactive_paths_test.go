@@ -732,7 +732,8 @@ func TestParkedInteractiveSessionHoldsItsSlot(t *testing.T) {
 }
 
 // A completion whose End is not confirmed keeps the node's slot, since Node may still hold the
-// session: the waiting sibling starts only once a retried completion ends the session.
+// session: the retried completion ends the session again, and only then does the waiting
+// sibling start.
 func TestUnconfirmedEndKeepsTheInteractiveSlot(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -762,9 +763,86 @@ func TestUnconfirmedEndKeepsTheInteractiveSlot(t *testing.T) {
 	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
 		t.Fatalf("retried completion: %v", err)
 	}
+	if !f.exec.isClosed(a) {
+		t.Fatal("the retried completion freed the slot without ending A's session")
+	}
 	c := f.exec.awaitStart(t)
 	f.exec.finish(c, completed("好"))
 	if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusSucceeded {
 		t.Fatalf("run %s", run.Status)
 	}
+}
+
+// A stopped follow-up gives its slot back only once End returned: until then Node may still hold
+// the session, and the waiting sibling stays queued.
+func TestStoppedTurnKeepsTheSlotUntilEndReturns(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.host.sessionLimit = 1
+	waiting, release := f.holdDispatchOf(t, "c")
+	runID := f.run(t, parallelInteractive, nil)
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	a := f.exec.awaitStart(t)
+	<-waiting
+	release()
+	f.exec.finish(a, completed("在"))
+	f.await(t, runID, parked("a"))
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "继续"); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.awaitAppend(t)
+	ending, finishEnd := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(finishEnd) }) })
+	confirm := f.exec.EndFunc
+	f.exec.EndFunc = func(ctx context.Context, scope execution.Scope, id string) error {
+		if id == a {
+			close(ending)
+			<-finishEnd
+		}
+		return confirm(ctx, scope, id)
+	}
+	f.exec.onCancel = func(ref execution.Ref) error {
+		f.exec.finish(ref.SessionID, completed("停"))
+		return nil
+	}
+	if _, err := f.host.StopNodeTurn(ctx, f.scope, runID, "a"); err != nil {
+		t.Fatal(err)
+	}
+	<-ending
+	f.exec.noStart(t, "C started before A's End returned")
+	once.Do(func() { close(finishEnd) })
+	c := f.exec.awaitStart(t)
+	if f.exec.request(c).Caller.NodeID != "c" {
+		t.Fatalf("started %s, want C", f.exec.request(c).Caller.NodeID)
+	}
+}
+
+// A sibling waiting behind a parked interactive session only (no executing turn whose end would
+// wake it) is dropped by a cancellation, and the run's state is forgotten.
+func TestCancelDropsASiblingWaitingBehindAParkedSession(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.host.sessionLimit = 1
+	waiting, release := f.holdDispatchOf(t, "c")
+	runID := f.run(t, parallelInteractive, nil)
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	a := f.exec.awaitStart(t)
+	<-waiting
+	release()
+	f.exec.finish(a, completed("在"))
+	f.await(t, runID, parked("a"))
+	f.exec.noStart(t, "C started beside A's parked session")
+	if _, err := f.host.CancelRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusCancelled {
+		t.Fatalf("run %s", run.Status)
+	}
+	f.exec.noStart(t, "the waiting sibling started after the cancellation")
+	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
 }

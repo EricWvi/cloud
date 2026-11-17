@@ -503,7 +503,7 @@ func (h *Host) CompleteNode(ctx context.Context, scope server.WorkflowRunScope, 
 		return store.WorkflowRun{}, &server.WorkflowNodeIncomplete{Reason: reason, Detail: detail}
 	}
 	n.phase = phaseCompleting
-	accepted, ended := *n.accepted, n.sessionEnded
+	accepted, gone := *n.accepted, n.sessionGone
 	keys := completionKeys(accepted, n.executor, n.cfg, n.task)
 	st.mu.Unlock()
 	// release gives the claim back and republishes the summary, which may have changed while the
@@ -516,8 +516,10 @@ func (h *Host) CompleteNode(ctx context.Context, scope server.WorkflowRunScope, 
 	}
 
 	// Desktop revalidates after shutting the session down: no turn can slip in between the
-	// accepted answer and the output that names it.
-	if !ended {
+	// accepted answer and the output that names it. A session Node may still hold is ended
+	// again, including after an earlier completion's End went unconfirmed: the retry confirms
+	// the end before the node gives up its slot.
+	if !gone {
 		stopCtx, cancel := context.WithTimeout(ctx, h.stopTimeout)
 		err := h.exec.End(stopCtx, st.scope, n.session)
 		cancel()
