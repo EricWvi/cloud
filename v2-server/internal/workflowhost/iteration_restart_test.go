@@ -34,7 +34,7 @@ func settleBetweenRounds(t *testing.T, f *fixture, runID string, row store.Workf
 	ctx := context.Background()
 	if output == nil {
 		message := "round zero broke"
-		if _, err := f.s.FailWorkflowEngineNode(ctx, runID, row.ID, message, nil, func(int, []byte, []byte) ([]byte, error) {
+		if _, _, err := f.s.FailWorkflowEngineNode(ctx, runID, row.ID, message, nil, func(int, []byte, []byte) ([]byte, error) {
 			return []byte(`{"error_detail":{"kind":"session"}}`), nil
 		}); err != nil {
 			t.Fatal(err)

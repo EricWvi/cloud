@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -491,6 +492,8 @@ func TestLoopAdvancementRollsBackScopeAndPayloadTogether(t *testing.T) {
 	}
 }
 
+// A failing child or a cancellation closes the Loop round; either way the sibling still executing
+// in it is stopped.
 func TestLoopChildFailureAndCancellationCloseScope(t *testing.T) {
 	for _, cancel := range []bool{false, true} {
 		t.Run(fmt.Sprint(cancel), func(t *testing.T) {
@@ -540,12 +543,18 @@ func TestLoopChildFailureAndCancellationCloseScope(t *testing.T) {
 					t.Fatalf("cancelling the run stopped %d turns, want both", cancelled)
 				}
 			} else {
-				// The scope closed while the sibling executed; its late answer changes nothing.
-				f.exec.finish(sessions["sibling"], completed("late"))
+				// The failure closed the round while the sibling executed: its turn is stopped
+				// instead of running to its end, and its outcome changes nothing.
 				f.await(t, id, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(id) == nil })
+				f.exec.mu.Lock()
+				stopped := slices.ContainsFunc(f.exec.cancels, func(ref execution.Ref) bool { return ref.SessionID == sessions["sibling"] })
+				f.exec.mu.Unlock()
+				if !stopped || !f.exec.isClosed(sessions["sibling"]) {
+					t.Fatalf("the failed round left its sibling running (stopped %v, closed %v)", stopped, f.exec.isClosed(sessions["sibling"]))
+				}
 				children, _ = f.s.WorkflowEngineScopeNodes(ctx, id, rounds[0].ID)
 				if late := node(children, "sibling"); late.Status != "cancelled" || late.Output != nil {
-					t.Fatalf("late sibling answer changed the closed scope: %+v", late)
+					t.Fatalf("the stopped sibling changed the closed scope: %+v", late)
 				}
 			}
 			if !cancel {

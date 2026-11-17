@@ -82,17 +82,17 @@ func (m *memoryRepo) CompleteNode(_ context.Context, _, id string, output *strin
 	return true, nil
 }
 
-func (m *memoryRepo) FailNode(_ context.Context, _, id, _ string, output *string, detail func(int, []byte) map[string]any) (bool, error) {
+func (m *memoryRepo) FailNode(_ context.Context, _, id, _ string, output *string, detail func(int, []byte) map[string]any) (bool, string, error) {
 	r := m.find(id)
 	if r == nil || r.Status != StatusRunning {
-		return false, nil
+		return false, "", nil
 	}
 	r.Status, r.Output = StatusFailed, output
 	m.payload[id], _ = MergePayload(m.payload[id], map[string]any{"error_detail": detail(1, m.run.Payload)})
 	if m.run.Status == StatusRunning {
 		m.run.Status = StatusFailed
 	}
-	return true, nil
+	return true, "", nil
 }
 
 func (m *memoryRepo) AbandonNode(_ context.Context, _, id string) (bool, error) {

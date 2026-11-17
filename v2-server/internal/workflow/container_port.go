@@ -50,3 +50,10 @@ type ContainerRepository interface {
 type LoopExitDispatcher interface {
 	CleanupLoopExit(runID, parentID, scopeID string)
 }
+
+// FailedScopeDispatcher stops the Agent turns still executing in a Loop round that a failure
+// closed: their attempts are already cancelled, so whatever they produce is discarded. It is
+// called under the engine's run gate and must not wait for the turns to stop.
+type FailedScopeDispatcher interface {
+	StopFailedScope(runID, scopeID string)
+}

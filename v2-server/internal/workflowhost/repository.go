@@ -89,7 +89,7 @@ func (r repository) CompleteNode(ctx context.Context, runID, nodeRunID string, o
 
 // FailNode stores the failure detail under the attempt payload's error_detail key, as desktop's
 // fail_node_run, keeping every other key the attempt already carried.
-func (r repository) FailNode(ctx context.Context, runID, nodeRunID, message string, output *string, detail func(int, []byte) map[string]any) (bool, error) {
+func (r repository) FailNode(ctx context.Context, runID, nodeRunID, message string, output *string, detail func(int, []byte) map[string]any) (bool, string, error) {
 	return r.s.FailWorkflowEngineNode(ctx, runID, nodeRunID, message, output, func(attempt int, node, run []byte) ([]byte, error) {
 		return workflow.MergePayload(node, map[string]any{"error_detail": detail(attempt, run)})
 	})
