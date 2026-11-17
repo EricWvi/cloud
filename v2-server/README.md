@@ -411,6 +411,8 @@ HTTP 集成测试按此候选 OpenAPI 校验每一次响应，并覆盖创建、
 - `collaboration/forms/{formRef}` 只投影根节点 `Start` 的 `inputVariables`，不含 `globalVariables`、版本选择器或模型槽位字段；`file-list`（`array[file]`）与 `json`（`object`、`array`、`array[...]`）变量映射为 `textarea`。
 - 可选查询参数 `issueId` 在 v2 被忽略，传其他租户或不存在的 `issueId` 仍返回 200（Cloud 对未知或跨租户 `issueId` 返回 404）。
 - 通过 `POST /api/v2/tenants/{tid}/tasks/{taskid}/comments` `@` 工作流提交时，对声明为 `object`、`array`、`array[...]`、`array[file]` 的文本输入在 `workflow.CheckStart` 前先按 JSON 解码（非法 JSON 返回 `400 workflow_run_input_invalid`、`reason: "type_mismatch"`）；直接传结构化 JSON 值也照常接受。
+- 普通评论与工作流评论共用 `(task_id, author_id, create_key)`：同一个 key 换内容仍返回原评论，不比较请求体；正式 Cloud 返回 `409 idempotency_conflict`。
+- 工作流评论在准备或启动被拒绝、且运行从未开始执行时，事务撤销评论、运行及初始 scope，释放 key；同 key 重试可重新启动。若 `Start` 已进入执行后才报错，则保留评论与运行，确认停止后标为已取消并记录安全的失败原因；同 key 重试返回这条记录，不重复执行。后一种情况与正式 Cloud 的失败请求不留记录约定不同，重新发起须使用新 key。
 
 ### 项目仓库
 

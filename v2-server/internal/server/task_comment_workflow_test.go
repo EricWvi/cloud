@@ -454,47 +454,148 @@ func waitForCommentWorkflowStatus(t *testing.T, client *taskClient, timelinePath
 }
 
 func TestTaskCommentWorkflowCancelsOnStartFailure(t *testing.T) {
-	f := newSquadServer(t)
-	boom := errors.New("start boom")
-	failing := taskworkflow.New(f.store, failingStartRuns{err: boom})
-	t.Cleanup(failing.Close)
-	f.srv.Close()
-	f.srv = httptest.NewServer(server.New(f.store, server.Options{SessionTTL: time.Hour, TaskWorkflows: failing}))
-	t.Cleanup(f.srv.Close)
+	for _, prepare := range []bool{true, false} {
+		name := "start"
+		if prepare {
+			name = "prepare"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newSquadServer(t)
+			boom := errors.New("start boom")
+			failing := taskworkflow.New(f.store, failingStartRuns{err: boom, prepare: prepare})
+			t.Cleanup(failing.Close)
+			f.srv.Close()
+			f.srv = httptest.NewServer(server.New(f.store, server.Options{SessionTTL: time.Hour, TaskWorkflows: failing}))
+			t.Cleanup(f.srv.Close)
 
+			c := f.taskClient()
+			c.login()
+			tid := f.tenant(t)
+			f.project(t)
+			wf, _, err := f.store.CreateWorkflow(f.ctx, tid, "Failure", commentWorkflowGraph)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.store.PublishWorkflow(f.ctx, tid, wf.ID, "v1", nil); err != nil {
+				t.Fatal(err)
+			}
+			_, task := c.do("POST", "/api/v2/tenants/"+tid+"/tasks", map[string]any{"title": "StartFailure", "projectId": taskProjectID})
+			path := "/api/v2/tenants/" + tid + "/tasks/" + task["id"].(string) + "/comments"
+			payload := map[string]any{
+				"body":     "@Failure",
+				"workflow": map[string]any{"workflowId": wf.ID, "values": map[string]any{"branch": "main"}},
+			}
+			key := map[string]string{"Idempotency-Key": "fail-start"}
+			status, _ := c.doHeaders("POST", path, payload, key)
+			if status != 500 {
+				t.Fatalf("failing start status = %d, want 500", status)
+			}
+			for _, table := range []string{"v2_task_comments", "v2_workflow_runs", "v2_workflow_scopes", "v2_workflow_run_roots"} {
+				var count int
+				if err := f.db.QueryRow(f.ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
+					t.Fatal(err)
+				}
+				if count != 0 {
+					t.Fatalf("refused admission left %d rows in %s", count, table)
+				}
+			}
+			if status, timeline := c.do("GET", "/api/v2/tenants/"+tid+"/tasks/"+task["id"].(string)+"/timeline", nil); status != 200 || len(timeline["comments"].([]any)) != 0 {
+				t.Fatalf("refused admission timeline = %d %v", status, timeline)
+			}
+			// Restore the real host, then retry exactly the failed request and key.
+			commentWorkflowServer(t, f)
+			c = f.taskClient()
+			c.login()
+			status, created := c.doHeaders("POST", path, payload, key)
+			if status != 201 {
+				t.Fatalf("retry after refusal = %d %v", status, created)
+			}
+			runID := created["workflowRun"].(map[string]any)["id"].(string)
+			waitForCommentWorkflowStatus(t, c, "/api/v2/tenants/"+tid+"/tasks/"+task["id"].(string)+"/timeline", runID, "succeeded")
+			status, replay := c.doHeaders("POST", path, payload, key)
+			if status != 201 || replay["id"] != created["id"] || replay["workflowRun"].(map[string]any)["id"] != runID {
+				t.Fatalf("successful replay = %d %v", status, replay)
+			}
+			for _, table := range []string{"v2_task_comments", "v2_workflow_runs"} {
+				var count int
+				if err := f.db.QueryRow(f.ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
+					t.Fatal(err)
+				}
+				if count != 1 {
+					t.Fatalf("successful retry left %d rows in %s, want 1", count, table)
+				}
+			}
+		})
+	}
+}
+
+func TestTaskCommentWorkflowRetainsHistoryAfterExecutionStarted(t *testing.T) {
+	f := newSquadServer(t)
+	port := failingStartRuns{err: errors.New("private infrastructure detail"), start: func(ctx context.Context, tenant, runID string) error {
+		_, err := f.store.StartWorkflowRun(ctx, tenant, runID)
+		return err
+	}}
+	host := taskworkflow.New(f.store, port)
+	t.Cleanup(host.Close)
+	f.srv.Close()
+	f.srv = httptest.NewServer(server.New(f.store, server.Options{SessionTTL: time.Hour, TaskWorkflows: host}))
+	t.Cleanup(f.srv.Close)
 	c := f.taskClient()
 	c.login()
 	tid := f.tenant(t)
 	f.project(t)
-	wf, _, err := f.store.CreateWorkflow(f.ctx, tid, "Failure", commentWorkflowGraph)
+	wf, _, err := f.store.CreateWorkflow(f.ctx, tid, "Started failure", commentWorkflowGraph)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.store.PublishWorkflow(f.ctx, tid, wf.ID, "v1", nil); err != nil {
 		t.Fatal(err)
 	}
-	_, task := c.do("POST", "/api/v2/tenants/"+tid+"/tasks", map[string]any{"title": "StartFailure", "projectId": taskProjectID})
-	status, _ := c.doHeaders("POST", "/api/v2/tenants/"+tid+"/tasks/"+task["id"].(string)+"/comments", map[string]any{
-		"body":     "@Failure",
-		"workflow": map[string]any{"workflowId": wf.ID, "values": map[string]any{"branch": "main"}},
-	}, map[string]string{"Idempotency-Key": "fail-start"})
-	if status != 500 {
-		t.Fatalf("failing start status = %d, want 500", status)
+	_, task := c.do("POST", "/api/v2/tenants/"+tid+"/tasks", map[string]any{"title": "StartedFailure", "projectId": taskProjectID})
+	path := "/api/v2/tenants/" + tid + "/tasks/" + task["id"].(string) + "/comments"
+	payload := map[string]any{"body": "@Started failure", "workflow": map[string]any{"workflowId": wf.ID, "values": map[string]any{"branch": "main"}}}
+	key := map[string]string{"Idempotency-Key": "already-started"}
+	if status, body := c.doHeaders("POST", path, payload, key); status != 500 {
+		t.Fatalf("failed start = %d %v", status, body)
 	}
-	var runStatus string
-	if err := f.db.QueryRow(f.ctx, `SELECT status FROM v2_workflow_runs WHERE tenant_id = $1`, tid).Scan(&runStatus); err != nil {
-		t.Fatal(err)
+	status, replay := c.doHeaders("POST", path, payload, key)
+	if status != 201 {
+		t.Fatalf("replay = %d %v", status, replay)
 	}
-	if runStatus != store.WorkflowStatusCancelled {
-		t.Fatalf("post-commit failed start left run in %q, want cancelled", runStatus)
+	run := replay["workflowRun"].(map[string]any)
+	if run["status"] != "cancelled" || run["error"] != "工作流启动失败，请重新发起。" {
+		t.Fatalf("failed start lost its safe reason: %v", run)
+	}
+	for _, table := range []string{"v2_task_comments", "v2_workflow_runs"} {
+		var count int
+		if err := f.db.QueryRow(f.ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("started admission left %d rows in %s, want 1", count, table)
+		}
 	}
 }
 
-type failingStartRuns struct{ err error }
+type failingStartRuns struct {
+	err     error
+	prepare bool
+	start   func(context.Context, string, string) error
+}
 
 func (f failingStartRuns) Prepare(context.Context, string, string, string, *string, map[string]json.RawMessage) error {
+	if f.prepare {
+		return f.err
+	}
 	return nil
 }
-func (f failingStartRuns) Start(context.Context, string, string, string) error { return f.err }
-func (failingStartRuns) Cancel(context.Context, string, string, string) error  { return nil }
-func (failingStartRuns) Subscribe(string) (<-chan struct{}, func())            { return nil, func() {} }
+func (f failingStartRuns) Start(ctx context.Context, tenant, _ string, runID string) error {
+	if f.start != nil {
+		if err := f.start(ctx, tenant, runID); err != nil {
+			return err
+		}
+	}
+	return f.err
+}
+func (failingStartRuns) Cancel(context.Context, string, string, string) error { return nil }
+func (failingStartRuns) Subscribe(string) (<-chan struct{}, func())           { return nil, func() {} }

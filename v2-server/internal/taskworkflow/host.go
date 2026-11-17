@@ -186,12 +186,10 @@ func (h *Host) CommentWorkflow(ctx context.Context, in CommentWorkflowInput) (st
 	owned := context.WithoutCancel(ctx)
 	runID := comment.WorkflowRun.ID
 	if err := h.runs.Prepare(owned, in.TenantID, in.AuthorID, runID, startInput, decodedValues); err != nil {
-		h.cancelCommentWorkflow(owned, in.TenantID, in.AuthorID, runID)
-		return store.TaskComment{}, err
+		return store.TaskComment{}, errors.Join(err, h.rejectCommentWorkflow(owned, in, runID, "工作流输入准备失败，请重新发起。"))
 	}
 	if err := h.runs.Start(owned, in.TenantID, in.AuthorID, runID); err != nil {
-		h.cancelCommentWorkflow(owned, in.TenantID, in.AuthorID, runID)
-		return store.TaskComment{}, err
+		return store.TaskComment{}, errors.Join(err, h.rejectCommentWorkflow(owned, in, runID, "工作流启动失败，请重新发起。"))
 	}
 	if latest, err := h.db.TaskCommentByKey(owned, in.TenantID, in.TaskID, in.AuthorID, in.CreateKey); err == nil {
 		return latest, nil
@@ -199,13 +197,19 @@ func (h *Host) CommentWorkflow(ctx context.Context, in CommentWorkflowInput) (st
 	return comment, nil
 }
 
-func (h *Host) cancelCommentWorkflow(ctx context.Context, tenant, user, runID string) {
-	if err := h.runs.Cancel(ctx, tenant, user, runID); err != nil && !errors.Is(err, store.ErrWorkflowRunState) && !errors.Is(err, store.ErrWorkflowRunNotFound) {
-		slog.Warn("cancel failed comment workflow", "run", runID, "error", err)
+func (h *Host) rejectCommentWorkflow(ctx context.Context, in CommentWorkflowInput, runID, message string) error {
+	if discarded, err := h.db.DiscardUnstartedCommentWorkflow(ctx, in.TenantID, in.TaskID, in.AuthorID, in.CreateKey, runID); err != nil || discarded {
+		return err
 	}
-	if _, err := h.db.CancelWorkflowRun(ctx, tenant, runID); err != nil && !errors.Is(err, store.ErrWorkflowRunState) && !errors.Is(err, store.ErrWorkflowRunNotFound) {
-		slog.Warn("cancel pending comment workflow", "run", runID, "error", err)
+	// Execution may already have begun before Start reported an error. Keep its history and
+	// never mark it stopped unless the execution host confirms cancellation.
+	if err := h.runs.Cancel(ctx, in.TenantID, in.AuthorID, runID); err != nil && !errors.Is(err, store.ErrWorkflowRunState) && !errors.Is(err, store.ErrWorkflowRunNotFound) {
+		return err
 	}
+	if _, err := h.db.CancelWorkflowRun(ctx, in.TenantID, runID); err != nil && !errors.Is(err, store.ErrWorkflowRunState) {
+		return err
+	}
+	return h.db.RecordCommentWorkflowStartFailure(ctx, in.TenantID, runID, message)
 }
 
 // watch settles the run's outcome, woken by run events and a periodic tick, until it commits.
