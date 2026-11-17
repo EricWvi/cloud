@@ -14,7 +14,8 @@ import { RunTenantContext } from './run-tenant'
 import { workflowRunTranslations } from './translations'
 
 const calls = vi.hoisted(() => ({
-  sendNodeTurn: vi.fn(async () => {}),
+  // Resolves to the number v2 gave the message: 1 unless a test says otherwise.
+  sendNodeTurn: vi.fn(async (): Promise<number> => 1),
   stopNodeTurn: vi.fn(async () => {}),
   completeNode: vi.fn(async () => {}),
 }))
@@ -144,6 +145,7 @@ describe('RunNodeSessionActions', () => {
     // With the text back in the composer there is nothing left to restore.
     expect(screen.queryByRole('button', { name: zh['workflowRun.v2.interactive.restoreDraft'] })).toBeNull()
 
+    calls.sendNodeTurn.mockResolvedValueOnce(2)
     fireEvent.click(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.send'] }))
     await waitFor(() => expect(calls.sendNodeTurn).toHaveBeenCalledTimes(2))
     expect(calls.sendNodeTurn).toHaveBeenLastCalledWith('tenant-1', 'run-1', 'a', '再改一版')
@@ -160,6 +162,7 @@ describe('RunNodeSessionActions', () => {
     const first = { ...parked, sent: 1, lastTurnError: 'not_delivered' }
     const shown = view({ session: first })
     expect(screen.getByRole('status')).toBeTruthy()
+    calls.sendNodeTurn.mockResolvedValueOnce(2)
     const box = await sendFromComposer('第二条')
 
     // The run on screen is still the one read before the send, however long that lasts (the
@@ -175,11 +178,11 @@ describe('RunNodeSessionActions', () => {
     expect(box.value).toBe('第二条')
   })
 
-  it('numbers a message after this view\'s previous one when the run on screen has not caught up', async () => {
+  it('takes each message\'s number from v2 when the run on screen has not caught up', async () => {
     const shown = view({ session: { ...parked, sent: 0 } })
     await sendFromComposer('第一条')
-    // The run has not been read again, and the starter already sends the next message: it is
-    // the second one, whatever the screen says.
+    // The run has not been read again, and the starter already sends the next message.
+    calls.sendNodeTurn.mockResolvedValueOnce(2)
     const box = await sendFromComposer('第二条')
     // A read from between the two sends: the first message was not delivered. The notice is not
     // about the second one, which this view would otherwise put back while it runs.
@@ -188,6 +191,53 @@ describe('RunNodeSessionActions', () => {
     shown.show({ session: { ...parked, sent: 2, lastTurnError: 'not_delivered' } })
     fireEvent.click(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.restoreDraft'] }))
     expect(box.value).toBe('第二条')
+  })
+
+  it('does not take another view\'s undelivered message for the one it sent meanwhile', async () => {
+    // Nothing sent yet as far as this view's run goes. The starter sends from a second tab, and
+    // then from here before this view reads the run again: v2 accepts this message as the second.
+    const shown = view({ session: { ...parked, sent: 0 } })
+    calls.sendNodeTurn.mockResolvedValueOnce(2)
+    await sendFromComposer('这一条')
+    // A read from before v2 claimed this message: the other tab's message, the first, was not
+    // delivered. Counting from the screen would call this view's message the first as well and
+    // offer to send again a message that is running.
+    shown.show({ session: { ...parked, sent: 1, lastTurnError: 'not_delivered' } })
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.queryByRole('button', { name: zh['workflowRun.v2.interactive.restoreDraft'] })).toBeNull()
+    // This view's message was delivered.
+    shown.show({ session: { ...parked, turns: 2, sent: 2 } })
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('does not remember a message v2 refused', async () => {
+    const shown = view({})
+    const box = await sendFromComposer('第一条')
+    shown.show({ session: { ...parked, sent: 1, lastTurnError: 'not_delivered' } })
+    // The next message is refused outright: it was never the starter's second message.
+    calls.sendNodeTurn.mockRejectedValueOnce(new ContractError('workflow_node_not_awaiting_input', {}))
+    fireEvent.change(box, { target: { value: '第二条' } })
+    fireEvent.click(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.send'] }))
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1))
+    expect(box.value).toBe('第二条')
+    // The notice is still about the first message, so that is the one put back.
+    fireEvent.change(box, { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.restoreDraft'] }))
+    expect(box.value).toBe('第一条')
+  })
+
+  it('offers nothing to put back when its only send was refused', async () => {
+    const shown = view({ session: { ...parked, sent: 0 } })
+    calls.sendNodeTurn.mockRejectedValueOnce(new ContractError('workflow_node_not_awaiting_input', {}))
+    const box = screen.getByRole('textbox', { name: zh['workflowRun.v2.interactive.composerLabel'] }) as HTMLTextAreaElement
+    fireEvent.change(box, { target: { value: '没发出去' } })
+    fireEvent.click(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.send'] }))
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1))
+    fireEvent.change(box, { target: { value: '' } })
+    // Another view's first message was not delivered: true, but this view sent nothing.
+    shown.show({ session: { ...parked, sent: 1, lastTurnError: 'not_delivered' } })
+    expect(screen.getByRole('status').textContent).toContain(zh['workflowRun.v2.interactive.undelivered'])
+    expect(screen.queryByRole('button', { name: zh['workflowRun.v2.interactive.restoreDraft'] })).toBeNull()
   })
 
   it('never puts back a message other than the undelivered one', async () => {

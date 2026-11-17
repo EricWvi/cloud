@@ -54,8 +54,8 @@ export function RunNodeSessionActions({ target }: { target: InteractiveNodeTarge
   const starter = useIsRunStarter()
   const queryClient = useQueryClient()
   const [draft, setDraft] = useState('')
-  // The last message this view sent and its number among the starter's messages, kept so that
-  // exactly that message can be put back in the composer if v2 reports it undelivered.
+  // The last message this view sent and the number v2 gave it among the starter's messages, kept
+  // so that exactly that message can be put back in the composer if v2 reports it undelivered.
   const [lastSent, setLastSent] = useState<{ text: string; number: number }>()
   const [busy, setBusy] = useState(false)
   const { runId, nodeId, status, session } = target
@@ -84,12 +84,12 @@ export function RunNodeSessionActions({ target }: { target: InteractiveNodeTarge
   const canSend = awaiting && !ended && !busy && text !== '' && draft.length <= maxTurnLength
   const send = async () => {
     if (!canSend) return
-    // v2 numbers the starter's messages as it accepts them. This one follows those on screen,
-    // and this view's previous one when the screen has not caught up with it yet.
-    const sent = { text: draft, number: Math.max(session?.sent ?? 0, lastSent?.number ?? 0) + 1 }
+    const message = draft
     await act(async () => {
-      await sendNodeTurn(tenantId, runId, nodeId, sent.text)
-      setLastSent(sent)
+      // v2 numbers the starter's messages as it accepts them and answers with this one's number.
+      // The run on screen cannot tell: another view of the starter's may have sent in between.
+      const number = await sendNodeTurn(tenantId, runId, nodeId, message)
+      setLastSent({ text: message, number })
       setDraft('')
     })
   }
