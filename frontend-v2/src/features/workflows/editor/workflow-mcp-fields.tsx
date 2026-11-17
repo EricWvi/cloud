@@ -41,7 +41,7 @@ export function WorkflowMcpFields({
   const enabledMcpCount = config.mcps.filter((mcp) => mcp.enabled).length;
   /** Adds a new MCP in its enabled state, preserving configuration order. */
   function addMcp(mcpId: string): void {
-    if (config.mcps.some((mcp) => mcp.mcpId === mcpId)) return;
+    if (enabledMcpCount >= 16 || config.mcps.some((mcp) => mcp.mcpId === mcpId)) return;
     onChange({
       ...config,
       mcps: [...config.mcps, { mcpId, enabled: true }],
@@ -51,6 +51,7 @@ export function WorkflowMcpFields({
 
   /** Updates only the enabled state of a configured MCP. */
   function setMcpEnabled(mcpId: string, enabled: boolean): void {
+    if (enabled && enabledMcpCount >= 16) return;
     onChange({
       ...config,
       mcps: config.mcps.map((mcp) =>
@@ -90,6 +91,7 @@ export function WorkflowMcpFields({
                   size="icon-sm"
                   disabled={
                     choices.length === 0 ||
+                    enabledMcpCount >= 16 ||
                     catalog?.isLoading === true ||
                     catalog?.isError === true
                   }
@@ -143,6 +145,11 @@ export function WorkflowMcpFields({
       <p className="text-[10px] leading-relaxed text-muted-foreground">
         {t("settings.workflow.mcpAuthorizationHint")}
       </p>
+      {enabledMcpCount >= 16 && (
+        <p role="status" className="text-xs text-muted-foreground">
+          {t("settings.workflow.mcp.limit")}
+        </p>
+      )}
       <div className="min-w-0 divide-y overflow-hidden rounded-md border border-border">
         {catalog?.isLoading && (
           <p role="status" className="p-2.5 text-xs">
@@ -200,6 +207,7 @@ export function WorkflowMcpFields({
                 size="sm"
                 className="shrink-0 data-checked:bg-brand hover:data-checked:bg-brand/90"
                 checked={configuredMcp.enabled}
+                disabled={!configuredMcp.enabled && enabledMcpCount >= 16}
                 aria-label={t("settings.workflow.toggleMcp", {
                   name: mcp.label,
                 })}

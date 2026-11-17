@@ -73,10 +73,11 @@ func (f Failure) Interactive() Failure {
 // Failure is one node failure as reported by a runtime or the execution bridge. Output keeps
 // the raw answer of a failed structured response so it stays inspectable.
 type Failure struct {
-	Kind        FailureKind
-	Message     string
-	SourceChain []string
-	Output      *string
+	Code, PluginID, SettingID, Transport string
+	Kind                                 FailureKind
+	Message                              string
+	SourceChain                          []string
+	Output                               *string
 }
 
 // runtimeFailure classifies a swift runtime's refusal, as desktop's NodeFailure::from_runtime.
@@ -100,7 +101,7 @@ func (f Failure) Detail(attempt int, injectLastFailure bool, now time.Time) map[
 	if chain == nil {
 		chain = []string{}
 	}
-	return map[string]any{
+	detail := map[string]any{
 		"kind":                     string(f.Kind),
 		"message":                  f.Message,
 		"source_chain":             chain,
@@ -110,6 +111,12 @@ func (f Failure) Detail(attempt int, injectLastFailure bool, now time.Time) map[
 		"auto_retryable":           f.Kind.autoRetryable(),
 		"recorded_at":              now.UnixMilli(),
 	}
+	for key, value := range map[string]string{"code": f.Code, "plugin_id": f.PluginID, "setting_id": f.SettingID, "transport": f.Transport} {
+		if value != "" {
+			detail[key] = value
+		}
+	}
+	return detail
 }
 
 // MergePayload sets keys on a node payload object, treating NULL or invalid JSON as empty and

@@ -50,6 +50,21 @@ function detail(over: Partial<WorkflowRunDetail['run']>, nodes: WorkflowNodeRun[
 }
 
 describe('toGraphWorkflowRun', () => {
+  it('retains safe MCP setup diagnostics and does not project arbitrary values', () => {
+    const run = toGraphWorkflowRun(detail({ status: 'failed' }, [nodeRun({
+      nodeId: 'a', status: 'failed', error: 'mcp_setting_missing',
+      payload: JSON.stringify({ error_detail: {
+        kind: 'missing_agent_config', code: 'mcp_setting_missing',
+        plugin_id: 'official/acme.search', setting_id: 'token', transport: 'http',
+        value: 'must-not-project', auto_retryable: false, resumable: true,
+      } }),
+    })]), definition)
+    expect(run.nodeStates.a.errorDetail).toMatchObject({
+      code: 'mcp_setting_missing', pluginId: 'official/acme.search',
+      settingId: 'token', transport: 'http', autoRetryable: false,
+    })
+    expect(JSON.stringify(run.nodeStates.a.errorDetail)).not.toContain('must-not-project')
+  })
   it('keeps Loop scope sessions and Condition branches separate from root and from other rounds', () => {
     const graph = normalizeWorkflowDefinition({ ...definition, nodes: [
       graphNode('start', 'start'), graphNode('loop', 'loop'),

@@ -2,7 +2,9 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { PluginCatalogEntry } from '@/api/generated.schemas'
+import { getListMcpQueryKey, type McpInstallation } from '@/lib/mcp-api/generated'
 import {
+  MARKET_TENANT,
   installMarketplaceBackend,
   marketplaceEntry,
   marketplaceSelection,
@@ -67,6 +69,17 @@ const hook = marketplaceEntry('sample-hooks', {
   description: '生命周期 Hook 的安装和卸载只记录空间选择。',
 })
 
+function installedGithub(): McpInstallation {
+  return {
+    id: github.id, name: github.title, pluginVersion: github.version, revision: 1, state: 'installed',
+    settings: [
+      { id: 'timeout', label: '超时秒数', type: 'number', secret: false, required: false, description: '' },
+      { id: 'token', label: 'API Token', type: 'string', secret: true, required: false, description: '' },
+    ],
+    values: { timeout: 1 }, configuredSecrets: ['token'], complete: true, settingsMissing: [],
+  }
+}
+
 beforeEach(() => {
   mock.enabled = false
   useDemoPluginSelections.getState().reset()
@@ -113,23 +126,40 @@ it('searches and filters the server catalog, then confirms a server-backed remov
   })
 })
 
-it('keeps MCP read-only with no install entry', async () => {
+it('installs and configures a tenant MCP through the server, keeping secrets write-only', async () => {
   const backend = installMarketplaceBackend({
     catalog: [writing, github, pack],
   })
   const user = userEvent.setup()
   renderSettingsPage(<PluginsPage />)
+  expect(await screen.findByText(/启用 MCP 的节点暂时无法运行/)).toBeInTheDocument()
   const row = await screen.findByRole('article', { name: 'GitHub 工具' })
-  expect(within(row).getByText('暂不支持安装')).toBeInTheDocument()
-  expect(within(row).queryByRole('button', { name: '安装' })).not.toBeInTheDocument()
+  await user.click(within(row).getByRole('button', { name: '安装' }))
+  await waitFor(() => expect(within(row).getByText('已安装')).toBeInTheDocument())
   await user.click(
     within(row).getByRole('button', { name: '查看插件 GitHub 工具' }),
   )
   expect(await screen.findByRole('dialog')).toHaveTextContent(
     'demo/github-tools',
   )
-  expect(backend.bodies).toHaveLength(0)
+  const token = screen.getByLabelText('API Token（必填）')
+  expect(token).toHaveAttribute('type', 'password')
+  await user.type(token, 'test-secret')
+  await user.click(screen.getByRole('button', { name: '保存 MCP 配置' }))
+  await screen.findByText('MCP 配置已保存')
+  expect(token).toHaveValue('')
+  expect(await screen.findByText('秘密值已配置')).toBeInTheDocument()
+  expect(backend.bodies).toEqual([
+    { identifier: 'demo/github-tools', pluginVersion: '2.1.0', revision: 0 },
+    { identifier: 'demo/github-tools', revision: 1, values: { token: 'test-secret' }, clear: [] },
+  ])
   expect(localStorage.getItem('ora-v2-plugin-demo:v1')).toBeNull()
+  await user.click(screen.getByRole('button', { name: '清除 API Token' }))
+  await user.click(screen.getByRole('button', { name: '保存 MCP 配置' }))
+  await waitFor(() => expect(backend.state.mcps[0].configuredSecrets).toEqual([]))
+  expect(backend.bodies.at(-1)).toEqual({
+    identifier: 'demo/github-tools', revision: 2, values: {}, clear: ['token'],
+  })
 })
 
 it('keeps Hooks read-only with no install entry', async () => {
@@ -140,6 +170,67 @@ it('keeps Hooks read-only with no install entry', async () => {
   expect(within(row).getByText('暂不支持安装')).toBeInTheDocument()
   expect(within(row).queryByRole('button', { name: '安装' })).not.toBeInTheDocument()
   expect(backend.bodies).toHaveLength(0)
+})
+
+it('explains an unavailable MCP download and keeps installation available for retry', async () => {
+  const backend = installMarketplaceBackend({ catalog: [github], mcpInstallFailure: 'plugin_package_unavailable' })
+  const user = userEvent.setup()
+  renderSettingsPage(<PluginsPage />)
+  const row = await screen.findByRole('article', { name: 'GitHub 工具' })
+  await user.click(within(row).getByRole('button', { name: '安装' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('插件包暂时无法下载，请稍后重试。')
+  await waitFor(() => expect(within(row).getByRole('button', { name: '安装' })).toBeEnabled())
+  expect(within(row).getByText('未安装')).toBeInTheDocument()
+  expect(backend.state.mcps).toEqual([])
+})
+
+it('saves decimal MCP settings without browser integer-step validation', async () => {
+  const backend = installMarketplaceBackend({ catalog: [github] })
+  backend.state.mcps.push(installedGithub())
+  const user = userEvent.setup()
+  renderSettingsPage(<PluginsPage />)
+  await user.click(await screen.findByRole('button', { name: '查看插件 GitHub 工具' }))
+  const timeout = screen.getByLabelText('超时秒数') as HTMLInputElement
+  const token = screen.getByLabelText('API Token')
+  await user.type(token, 'discard-this-draft')
+  await user.clear(token)
+  await user.clear(timeout)
+  await user.type(timeout, '1.5')
+  expect(timeout.checkValidity()).toBe(true)
+  await user.click(screen.getByRole('button', { name: '保存 MCP 配置' }))
+  await screen.findByText('MCP 配置已保存')
+  expect(backend.bodies.at(-1)).toEqual({ identifier: github.id, revision: 1, values: { timeout: 1.5 }, clear: [] })
+  expect(backend.state.mcps[0].configuredSecrets).toEqual(['token'])
+})
+
+it('preserves a conflicting draft until the user reloads, then saves against the latest revision', async () => {
+  const backend = installMarketplaceBackend({ catalog: [github] })
+  backend.state.mcps.push(installedGithub())
+  const user = userEvent.setup()
+  const { client } = renderSettingsPage(<PluginsPage />)
+  await user.click(await screen.findByRole('button', { name: '查看插件 GitHub 工具' }))
+  const timeout = screen.getByLabelText('超时秒数')
+  const token = screen.getByLabelText('API Token')
+  await user.clear(timeout)
+  await user.type(timeout, '1.5')
+  await user.type(token, 'unsaved-secret')
+  backend.state.mcps[0] = { ...backend.state.mcps[0], revision: 2, values: { timeout: 2.5 } }
+  await client.invalidateQueries({ queryKey: getListMcpQueryKey(MARKET_TENANT) })
+  await user.click(screen.getByRole('button', { name: '保存 MCP 配置' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('配置已被其他操作修改')
+  expect(backend.bodies.at(-1)).toMatchObject({ revision: 1 })
+  expect(timeout).toHaveValue(1.5)
+  expect(token).toHaveValue('unsaved-secret')
+  expect(screen.getByRole('button', { name: '保存 MCP 配置' })).toBeDisabled()
+  await user.click(screen.getByRole('button', { name: '放弃修改并重新加载' }))
+  await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
+  expect(timeout).toHaveValue(2.5)
+  expect(token).toHaveValue('')
+  await user.clear(timeout)
+  await user.type(timeout, '3.5')
+  await user.click(screen.getByRole('button', { name: '保存 MCP 配置' }))
+  await screen.findByText('MCP 配置已保存')
+  expect(backend.bodies.at(-1)).toEqual({ identifier: github.id, revision: 2, values: { timeout: 3.5 }, clear: [] })
 })
 
 it('keeps unsupported packs disabled and clears no-result filters', async () => {
@@ -418,22 +509,13 @@ it('keeps Git credentials untouched when editing does not change them', async ()
   )
 })
 
-it('installs the demo MCP and a market Agent in the browser only, without a server request', async () => {
+it('offers no demo MCP while retaining the market Agent demo action', async () => {
   mock.enabled = true
   const backend = installMarketplaceBackend({ catalog: [writing, codex] })
   const user = userEvent.setup()
   renderSettingsPage(<PluginsPage />)
-  const mcpRow = await screen.findByRole('article', { name: '示例 MCP 工具' })
-  expect(within(mcpRow).getByRole('button', { name: '安装' })).toBeInTheDocument()
-  await user.click(within(mcpRow).getByRole('button', { name: '安装' }))
-  await waitFor(() =>
-    expect(
-      within(mcpRow).getByRole('button', { name: '移除' }),
-    ).toBeInTheDocument(),
-  )
-  expect(within(mcpRow).getByText('已安装（演示）')).toBeInTheDocument()
-
   const agentRow = await screen.findByRole('article', { name: 'Codex' })
+  expect(screen.queryByRole('article', { name: '示例 MCP 工具' })).not.toBeInTheDocument()
   expect(within(agentRow).getByRole('button', { name: '安装' })).toBeInTheDocument()
   await user.click(within(agentRow).getByRole('button', { name: '安装' }))
   await waitFor(() =>
@@ -442,7 +524,7 @@ it('installs the demo MCP and a market Agent in the browser only, without a serv
     ).toBeInTheDocument(),
   )
   expect(backend.bodies).toHaveLength(0)
-  expect(localStorage.getItem('ora-v2-plugin-demo:v1')).toContain(
+  expect(localStorage.getItem('ora-v2-plugin-demo:v1')).not.toContain(
     'demo/sample-mcp',
   )
   expect(localStorage.getItem('ora-v2-plugin-demo:v1')).toContain(

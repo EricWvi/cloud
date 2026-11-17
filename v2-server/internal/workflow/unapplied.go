@@ -32,9 +32,6 @@ func unappliedAgentSettings(config object, at placement) []string {
 	if role, _ := config["roleId"].(string); strings.TrimSpace(role) != "" {
 		unapplied = append(unapplied, "role")
 	}
-	if len(enabledBindings(config, "mcps", "mcpId")) != 0 {
-		unapplied = append(unapplied, "mcp")
-	}
 	interactive := agentInteractive(config)
 	// v2 parks a root-graph interactive Agent for its starter; a Loop member runs automatically
 	// (desktop would park it). Publication rejects interactive Iteration members, so they never run.

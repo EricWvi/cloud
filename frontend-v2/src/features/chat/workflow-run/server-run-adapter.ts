@@ -37,6 +37,10 @@ function errorDetail(payload: Record<string, unknown>): WorkflowNodeErrorDetail 
   if (typeof detail.kind !== 'string') return undefined
   return {
     kind: detail.kind,
+    code: typeof detail.code === 'string' ? detail.code : undefined,
+    pluginId: typeof detail.plugin_id === 'string' ? detail.plugin_id : undefined,
+    settingId: typeof detail.setting_id === 'string' ? detail.setting_id : undefined,
+    transport: detail.transport === 'stdio' || detail.transport === 'http' ? detail.transport : undefined,
     message: typeof detail.message === 'string' ? detail.message : '',
     sourceChain: Array.isArray(detail.source_chain) ? detail.source_chain.filter((s): s is string => typeof s === 'string') : [],
     attempt: typeof detail.attempt === 'number' ? detail.attempt : 1,

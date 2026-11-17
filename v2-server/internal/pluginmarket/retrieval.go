@@ -71,6 +71,40 @@ func marketCipher() (cipher.AEAD, error) {
 	}
 	return cipher.NewGCM(c)
 }
+
+// SealMCPSettings binds encrypted scalar overrides to one tenant and plugin identity.
+func SealMCPSettings(values map[string]any, binding string) ([]byte, error) {
+	a, err := marketCipher()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(values)
+	if err != nil {
+		return nil, ErrCredentials
+	}
+	nonce := make([]byte, a.NonceSize())
+	if _, err = rand.Read(nonce); err != nil {
+		return nil, ErrCredentials
+	}
+	return a.Seal(nonce, nonce, raw, []byte("mcp/"+binding)), nil
+}
+
+// OpenMCPSettings returns memory-only overrides and never includes ciphertext or values in errors.
+func OpenMCPSettings(sealed []byte, binding string) (map[string]any, error) {
+	if len(sealed) == 0 {
+		return map[string]any{}, nil
+	}
+	a, err := marketCipher()
+	if err != nil || len(sealed) < a.NonceSize() {
+		return nil, ErrCredentials
+	}
+	raw, err := a.Open(nil, sealed[:a.NonceSize()], sealed[a.NonceSize():], []byte("mcp/"+binding))
+	var values map[string]any
+	if err != nil || json.Unmarshal(raw, &values) != nil || values == nil {
+		return nil, ErrCredentials
+	}
+	return values, nil
+}
 func SealCredentials(c Credentials, binding string) ([]byte, error) {
 	if strings.TrimSpace(c.AccessKey) == "" || strings.TrimSpace(c.SecretKey) == "" {
 		return nil, ErrCredentials

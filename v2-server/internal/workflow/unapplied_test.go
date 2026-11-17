@@ -199,16 +199,16 @@ func TestUnappliedAgentSettingsRule(t *testing.T) {
 		"enabled retry":                       {obj{"retry": obj{"enabled": true, "maxRetries": 2, "initialDelaySeconds": 5}}, nil, false},
 		"disabled retry":                      {obj{"retry": off}, nil, false},
 		"enabled retry with no budget":        {obj{"retry": obj{"enabled": true, "maxRetries": 0, "initialDelaySeconds": 5}}, nil, false},
-		"mcp binding without an enabled flag": {obj{"retry": off, "mcps": []any{obj{"mcpId": "official/tools"}}}, []string{"mcp"}, true},
+		"mcp binding without an enabled flag": {obj{"retry": off, "mcps": []any{obj{"mcpId": "official/tools"}}}, nil, true},
 		"disabled mcp binding":                {obj{"retry": off, "mcps": []any{obj{"mcpId": "official/tools", "enabled": false}}}, nil, false},
 		// Desktop never retries an interactive node (node_runtime.rs:373-379), so retry is not listed.
 		"every setting, interactive": {obj{"retry": obj{"enabled": true, "maxRetries": 1, "initialDelaySeconds": 1},
 			"interactive": true, "mcps": []any{obj{"mcpId": "official/tools", "enabled": true}}, "roleId": "reviewer"},
-			[]string{"role", "mcp"}, false},
+			[]string{"role"}, false},
 		"interactive without a retry policy": {obj{"interactive": true}, nil, false},
 		"every setting but interactive, in the payload order": {obj{"retry": obj{"enabled": true, "maxRetries": 1, "initialDelaySeconds": 1},
 			"mcps": []any{obj{"mcpId": "official/tools", "enabled": true}}, "roleId": "reviewer"},
-			[]string{"role", "mcp"}, false},
+			[]string{"role"}, false},
 	} {
 		for _, inLoop := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/loop=%v", name, inLoop), func(t *testing.T) {

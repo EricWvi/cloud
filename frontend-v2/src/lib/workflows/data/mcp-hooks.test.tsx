@@ -13,14 +13,14 @@ import { ContractsClientProvider } from './contracts-client-provider'
 const original = http.defaults.adapter
 afterEach(() => { http.defaults.adapter = original; useDemoPluginSelections.getState().reset() })
 
-// The first test exercises the demo recording, where Settings installs the sample MCP into
-// browser state and the workflow editor picks it up; outside VITE_DEMO_MOCK the sample entry
-// does not exist.
 const mock = vi.hoisted(() => ({ enabled: true }))
 vi.mock('@/lib/demo/flags', () => ({ demoMockEnabled: () => mock.enabled }))
 
-it('updates mounted MCP pickers on Settings installation and removal without stale cache', async () => {
-  fakeBackend((config) => ({ status: 200, data: { items: config.url === '/api/v1/tenants/t/spaces' ? [{ id: 's' }] : [] } }))
+it('ignores historical browser MCP choices and refreshes after server installation changes', async () => {
+  let installed = false
+  fakeBackend((config) => config.url === '/api/v1/tenants/t/mcp' ? ({ status: 200, data: { items: installed ? [{
+    id: 'official/acme.tools', name: 'Tools', pluginVersion: '1.0.0', complete: true,
+  }] : [] } }) : { status: 503 })
   const client = createContractsClient(createHttpWorkflowContracts('t'), 't')
   const query = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
   const wrapper = ({ children }: { children: ReactNode }) => <UserContext.Provider value={demoUser}>
@@ -29,8 +29,12 @@ it('updates mounted MCP pickers on Settings installation and removal without sta
   const { result } = renderHook(useInstalledPlugins, { wrapper })
   await waitFor(() => expect(result.current.data).toEqual([]))
   act(() => useDemoPluginSelections.getState().setSelected(`${demoUser.id}:t:s`, 'demo/sample-mcp', true))
-  await waitFor(() => expect(result.current.data?.map((p) => p.id)).toEqual(['demo/sample-mcp']))
-  act(() => useDemoPluginSelections.getState().setSelected(`${demoUser.id}:t:s`, 'demo/sample-mcp', false))
+  expect(result.current.data).toEqual([])
+  installed = true
+  await act(() => query.invalidateQueries({ queryKey: ['workflow-catalog', 'plugins'] }))
+  await waitFor(() => expect(result.current.data?.map((p) => p.id)).toEqual(['official/acme.tools']))
+  installed = false
+  await act(() => query.invalidateQueries({ queryKey: ['workflow-catalog', 'plugins'] }))
   await waitFor(() => expect(result.current.data).toEqual([]))
 })
 

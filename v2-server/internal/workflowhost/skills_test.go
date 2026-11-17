@@ -62,7 +62,7 @@ func TestWorkflowRejectsMissingSkillBeforeExecution(t *testing.T) {
 	}
 }
 
-func TestWorkflowRunsWithMCPAndReportsOnlyEnabledBindingsUnapplied(t *testing.T) {
+func TestWorkflowRejectsMissingEnabledMCPAndIgnoresDisabledBindings(t *testing.T) {
 	for _, enabled := range []bool{true, false} {
 		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
 			f := newFixture(t)
@@ -71,6 +71,27 @@ func TestWorkflowRunsWithMCPAndReportsOnlyEnabledBindingsUnapplied(t *testing.T)
 			runID := f.run(t, graph, str("check"))
 			if _, err := f.host.StartRun(context.Background(), f.scope, runID); err != nil {
 				t.Fatal(err)
+			}
+			if enabled {
+				run, nodes := f.await(t, runID, terminal)
+				if run.Status != store.WorkflowStatusFailed || errorKind(t, node(nodes, "a")) != "missing_agent_config" {
+					t.Fatal("missing MCP was not rejected")
+				}
+				var payload struct {
+					ErrorDetail struct {
+						Code          string
+						AutoRetryable bool `json:"auto_retryable"`
+					} `json:"error_detail"`
+				}
+				if err := json.Unmarshal(node(nodes, "a").Payload, &payload); err != nil || payload.ErrorDetail.Code != "mcp_plugin_missing" || payload.ErrorDetail.AutoRetryable {
+					t.Fatal("missing MCP is not a stable non-retryable failure")
+				}
+				f.exec.mu.Lock()
+				defer f.exec.mu.Unlock()
+				if len(f.exec.started) != 0 {
+					t.Fatal("started with missing MCP")
+				}
+				return
 			}
 			a := f.exec.awaitStart(t)
 			if strings.Contains(promptText(t, f.exec.request(a).Prompt), "official/tavily") {
@@ -89,10 +110,9 @@ func TestWorkflowRunsWithMCPAndReportsOnlyEnabledBindingsUnapplied(t *testing.T)
 				if err := json.Unmarshal(node(nodes, id).Payload, &payload); err != nil {
 					t.Fatal(err)
 				}
-				want := enabled && id == "a"
 				// Neither node sets a retry policy; desktop's default retry applies to root Agents.
-				if slices.Contains(payload.Unapplied, "mcp") != want || (want && !slices.Equal(payload.Unapplied, []string{"mcp"})) {
-					t.Fatalf("node %s unapplied = %v, want MCP = %v", id, payload.Unapplied, want)
+				if slices.Contains(payload.Unapplied, "mcp") {
+					t.Fatalf("node %s retains unapplied MCP = %v", id, payload.Unapplied)
 				}
 			}
 		})

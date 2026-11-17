@@ -685,3 +685,31 @@ CREATE INDEX IF NOT EXISTS v2_workflow_forms_task_results ON v2_workflow_forms U
 -- task_version is retained for old readers but is no longer a settlement fence.
 ALTER TABLE v2_task_workflow_runs ADD COLUMN IF NOT EXISTS status_revision bigint NOT NULL DEFAULT 1;
 ALTER TABLE v2_task_workflow_runs ADD COLUMN IF NOT EXISTS task_status text NOT NULL DEFAULT 'running';
+
+-- Tenant MCP installation caches verified package bytes. Credentials are encrypted before SQL.
+CREATE TABLE IF NOT EXISTS v2_tenant_mcps (
+ tenant_id uuid NOT NULL REFERENCES tenants(id),
+ plugin_id text NOT NULL,
+ name text NOT NULL,
+ plugin_version text NOT NULL,
+ revision bigint NOT NULL DEFAULT 1,
+ digest text NOT NULL,
+ target text NOT NULL DEFAULT '',
+ archive bytea NOT NULL,
+ declaration jsonb NOT NULL,
+ settings bytea,
+ PRIMARY KEY(tenant_id,plugin_id)
+);
+
+-- Keep the optimistic-lock generation after uninstall, so an old editor cannot
+-- update or remove a later installation of the same tenant/plugin identity.
+CREATE TABLE IF NOT EXISTS v2_tenant_mcp_revisions (
+ tenant_id uuid NOT NULL REFERENCES tenants(id),
+ plugin_id text NOT NULL,
+ revision bigint NOT NULL,
+ PRIMARY KEY(tenant_id,plugin_id)
+);
+INSERT INTO v2_tenant_mcp_revisions(tenant_id,plugin_id,revision)
+ SELECT tenant_id,plugin_id,revision FROM v2_tenant_mcps
+ ON CONFLICT(tenant_id,plugin_id) DO UPDATE
+ SET revision=GREATEST(v2_tenant_mcp_revisions.revision,excluded.revision);

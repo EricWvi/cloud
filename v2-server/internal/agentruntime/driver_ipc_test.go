@@ -27,18 +27,31 @@ import (
 // The fake replaces only the IPC peer and supervisor proof. The dispatcher, control waits,
 // session ownership, history reader, journal, publication and lifecycle are the real driver.
 type fakeNodeIPC struct {
-	project *projectRuntime
-	id      node.Identity
-	in      chan node.Message
-	sent    chan node.Message
-	acked   chan node.Message
-	closed  chan struct{}
-	once    sync.Once
-	stopOK  atomic.Bool
-	stops   atomic.Int32
-	history map[string][]json.RawMessage
-	seq     map[string]uint64
-	hook    func(*fakeNodeIPC, node.Message) bool
+	project           *projectRuntime
+	id                node.Identity
+	in                chan node.Message
+	sent              chan node.Message
+	acked             chan node.Message
+	closed            chan struct{}
+	once              sync.Once
+	stopOK            atomic.Bool
+	stops             atomic.Int32
+	history           map[string][]json.RawMessage
+	seq               map[string]uint64
+	hook              func(*fakeNodeIPC, node.Message) bool
+	missingCapability atomic.Pointer[string]
+}
+
+func (f *fakeNodeIPC) Supports(capability string) bool {
+	if missing := f.missingCapability.Load(); missing != nil && *missing == capability {
+		return false
+	}
+	switch capability {
+	case "agent_session", "session_mcp", "session_mcp_lifecycle":
+		return true
+	default:
+		return false
+	}
 }
 
 func (f *fakeNodeIPC) Identity() node.Identity { return f.id }
@@ -77,7 +90,20 @@ func (f *fakeNodeIPC) Send(ctx context.Context, m node.Message) error {
 	}
 	switch m.Type {
 	case "install_plugins":
-		f.reply(m, "plugins_result", map[string]any{"kind": "plugins_completed", "result": map[string]any{"items": []any{map[string]any{"outcome": map[string]string{"kind": "installed"}}}}})
+		var request struct {
+			Spec struct {
+				Plugins []struct {
+					ID      string `json:"plugin_id"`
+					Version string
+				}
+			}
+		}
+		_ = json.Unmarshal(m.Payload, &request)
+		id, version := "", ""
+		if len(request.Spec.Plugins) == 1 {
+			id, version = request.Spec.Plugins[0].ID, request.Spec.Plugins[0].Version
+		}
+		f.reply(m, "plugins_result", map[string]any{"kind": "plugins_completed", "result": map[string]any{"items": []any{map[string]any{"plugin_id": id, "outcome": map[string]string{"kind": "installed", "version": version}}}}})
 	case "clone_repository":
 		f.reply(m, "clone_result", map[string]any{"kind": "clone_ready", "result": map[string]string{"path": filepath.Join(f.project.root, "w", "r", m.ExecutionID), "commit": f.project.configuration.Commit}})
 	}

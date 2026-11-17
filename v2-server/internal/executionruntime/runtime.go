@@ -117,15 +117,28 @@ func (s *Service) Start(ctx context.Context, scope execution.Scope, req executio
 	default:
 		return execution.Ref{}, execution.ErrInvalidRequest
 	}
-	return s.start(ctx, scope, req.Caller, req.Prompt, &req.Target, req.ExecutorID, req.AgentID, req.ModelID, req.Skills, req.Lifetime)
+	if req.MCP != nil && req.Caller.Kind != execution.CallerWorkflow {
+		return execution.Ref{}, execution.ErrInvalidRequest
+	}
+	if err := req.MCP.Validate(); err != nil {
+		return execution.Ref{}, err
+	}
+	// Controller generation admission and lifecycle events are not implemented yet. Reject
+	// before copying packages, stopping an idle predecessor, or persisting a Session/Turn.
+	// The driver's independent Node capability gate remains defense in depth.
+	if req.MCP != nil && len(req.MCP.Bindings) != 0 {
+		return execution.Ref{}, &execution.MCPFailure{Code: "mcp_lifecycle_not_ready"}
+	}
+	req.MCP = req.MCP.Clone()
+	return s.start(ctx, scope, req.Caller, req.Prompt, &req.Target, req.ExecutorID, req.AgentID, req.ModelID, req.Skills, req.MCP, req.Lifetime)
 }
 
 // StartModel starts an independent model conversation without creating a directory or Node.
 func (s *Service) StartModel(ctx context.Context, scope execution.Scope, req execution.ModelStartRequest) (execution.Ref, error) {
-	return s.start(ctx, scope, req.Caller, req.Prompt, nil, "", "", req.ModelID, nil, execution.LifetimeTurn)
+	return s.start(ctx, scope, req.Caller, req.Prompt, nil, "", "", req.ModelID, nil, nil, execution.LifetimeTurn)
 }
 
-func (s *Service) start(ctx context.Context, scope execution.Scope, caller execution.Caller, prompt execution.Prompt, target *execution.Target, executorID, agentID, modelID string, skills *execution.Skills, lifetime execution.Lifetime) (execution.Ref, error) {
+func (s *Service) start(ctx context.Context, scope execution.Scope, caller execution.Caller, prompt execution.Prompt, target *execution.Target, executorID, agentID, modelID string, skills *execution.Skills, mcp *execution.MCPSelection, lifetime execution.Lifetime) (execution.Ref, error) {
 	if err := validate(caller, prompt); err != nil {
 		return execution.Ref{}, err
 	}
@@ -155,7 +168,7 @@ func (s *Service) start(ctx context.Context, scope execution.Scope, caller execu
 		if e != nil {
 			return execution.Ref{}, publicError(e)
 		}
-		if !reflect.DeepEqual(session.Skills, skills) || !sameJSON(old.Prompt, prompt) || !reflect.DeepEqual(session.Target, target) || (target == nil && session.Model.ID != modelID) || (target != nil && !sameAgentSelection(session.Executor, executorID, agentID, modelID)) {
+		if !sameJSON(session.MCP, mcp) || !reflect.DeepEqual(session.Skills, skills) || !sameJSON(old.Prompt, prompt) || !reflect.DeepEqual(session.Target, target) || (target == nil && session.Model.ID != modelID) || (target != nil && !sameAgentSelection(session.Executor, executorID, agentID, modelID)) {
 			return execution.Ref{}, execution.ErrConflict
 		}
 		return old.Ref, nil
@@ -186,7 +199,7 @@ func (s *Service) start(ctx context.Context, scope execution.Scope, caller execu
 	if !ok || (target == nil && choice.Binding.Protocol != nodeservices.OpenAICompletions) {
 		return execution.Ref{}, execution.ErrNotFound
 	}
-	session := execution.Session{Skills: skills, ID: newID(), Target: target, Executor: executor, Model: choice.Model, CreatedAt: time.Now().UTC()}
+	session := execution.Session{MCP: mcp, Skills: skills, ID: newID(), Target: target, Executor: executor, Model: choice.Model, CreatedAt: time.Now().UTC()}
 	if target != nil {
 		session.WorkspaceID = newID()
 		if caller.Kind == execution.CallerWorkflow {

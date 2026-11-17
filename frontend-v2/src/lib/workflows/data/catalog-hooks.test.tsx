@@ -56,7 +56,7 @@ describe("workflow executor catalog", () => {
             createdAt: "2026-11-02T08:00:00Z",
             updatedAt: "2026-11-02T08:00:00Z",
           }] } }
-        : config.url === `/api/v1/tenants/${tid}/spaces`
+        : config.url === `/api/v1/tenants/${tid}/spaces` || config.url === `/api/v1/tenants/${tid}/mcp`
           ? { status: 200, data: { items: [] } } : undefined);
     const { result, client } = mount();
     await waitFor(() => expect(result.current.agentModels).toHaveLength(3));

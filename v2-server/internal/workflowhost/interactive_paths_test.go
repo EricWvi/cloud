@@ -638,7 +638,7 @@ func TestStopDuringPreparationParksInsteadOfFailing(t *testing.T) {
 	if _, err := f.host.StopNodeTurn(ctx, f.scope, runID, "a"); err != nil {
 		t.Fatal(err)
 	}
-	run, nodes := f.await(t, runID, parked("a"))
+	run, nodes := f.await(t, runID, awaitingInput("a"))
 	row := node(nodes, "a")
 	if p := interactivePayload(t, row); run.Status != store.WorkflowRunAwaitingInput || errorKind(t, row) != "" || p["session_ended"] != true || p["blocker"].(map[string]any)["reason"] != blockerNoCompletedTurn {
 		t.Fatalf("run %s, A %+v, summary %v; want parked by the stop, never failed", run.Status, row, p)

@@ -37,6 +37,7 @@ import { pluginKind, pluginKindOrder } from './plugin-kind'
 import { PluginMark } from './plugin-mark'
 import { isPreinstalledAgent } from '@/lib/plugin-runtime'
 import { useUser } from '@/app/auth/user'
+import { McpSettings } from './mcp-settings'
 
 const stateLabels: Record<string, string> = {
   installed: '已安装',
@@ -63,7 +64,7 @@ function StateBadge({
   // the (missing) selection. Other kinds have no server state to report and show no badge.
   const state = selection?.observedState ?? 'removed'
   const label =
-    kind === 'skill' || kind === 'workflow'
+    kind === 'skill' || kind === 'workflow' || kind === 'mcp'
       ? (stateLabels[state] ?? state)
       : null
   if (label == null) return null
@@ -171,11 +172,9 @@ export default function PluginsPage() {
   const serverSelection = (entry: PluginCatalogEntry) =>
     market.selection(entry)
   const selectedSelection = selected ? serverSelection(selected) : undefined
-  // Only Skill and workflow plugins have a server-backed install in v2; everything else is
-  // read-only (runtime-preinstalled Agents, market Agents, Hooks, MCP, packs). Demo mode records
-  // the agent/hook/mcp lifecycle in the browser instead of pretending to install it.
+  const selectedMcp = selected ? market.mcps.find((item) => item.id === pluginKey(selected)) : undefined
   const installable = (entry: PluginCatalogEntry) =>
-    entry.kind === 'skill' || entry.kind === 'workflow'
+    entry.kind === 'skill' || entry.kind === 'workflow' || entry.kind === 'mcp'
   const demoSelected = (entry: PluginCatalogEntry) =>
     demoInstallable(entry) && demoSelection.includes(pluginKey(entry))
   const filtered = catalog
@@ -305,7 +304,7 @@ export default function PluginsPage() {
           安装中…
         </Button>
       )
-    // Agents, Hooks and MCP have no server-backed install; only the demo mock records their
+    // Agents and Hooks have no server-backed install; only the demo mock records their
     // lifecycle (in the browser) so the recording can show it.
     if (demoInstallable(entry))
       return demoSelected(entry) ? (
@@ -360,7 +359,7 @@ export default function PluginsPage() {
     if (selection?.desiredState === 'installed') {
       return (
         <>
-          {(entry.kind === 'skill' || entry.kind === 'workflow') &&
+          {(entry.kind === 'skill' || entry.kind === 'workflow' || entry.kind === 'mcp') &&
             (entry.version !== selection.desiredVersion ||
               selection.observedState === 'failed' ||
               selection.observedState === 'pending') && (
@@ -440,8 +439,7 @@ export default function PluginsPage() {
           </p>
         )}
         <p className="text-sm text-muted-foreground">
-          技能和工作流插件通过服务端安装；运行时预装 Agent、市场
-          Agent、Hook、MCP 与合集当前仅浏览，不提供安装。
+          技能、工作流和 MCP 通过服务端安装。MCP 安装与配置由团队共享；启用 MCP 的节点暂时无法运行，需等待 Node 与服务端支持完整生命周期。
         </p>
         <div className="settings-toolbar">
           {market.spaces.length > 1 && (
@@ -628,6 +626,15 @@ export default function PluginsPage() {
             {actions(selected)}
           </div>
           <ActionError error={market.mutationError} />
+          {selected.kind === 'mcp' && selectedMcp && (
+            <McpSettings
+              key={pluginKey(selected)}
+              installation={selectedMcp}
+              tenantId={market.tenantId}
+              spaceId={market.spaceId}
+              canManage={market.canManage}
+            />
+          )}
           {selected.kind === 'skill' && market.selection(selected) && (
             <ProjectResults
               tenant={market.tenantId}
@@ -692,7 +699,9 @@ export default function PluginsPage() {
           )}
           <p className="rounded-lg bg-muted p-3 text-xs leading-relaxed text-muted-foreground">
             {installable(selected)
-              ? selected.kind === 'workflow'
+              ? selected.kind === 'mcp'
+                ? 'MCP 安装与配置适用于整个团队。当前可保存配置和节点选择；启用 MCP 的节点暂时无法运行，需等待 Node 与服务端支持完整生命周期。'
+                : selected.kind === 'workflow'
                 ? '安装会导入工作流并发布初始版本，可在工作流库中运行。'
                 : '空间选择适用于该空间的项目。 只有项目节点确认后才显示已安装。'
               : demoInstallable(selected)
@@ -728,6 +737,8 @@ export default function PluginsPage() {
           description={
             removing.entry.kind === 'workflow'
               ? '已导入的工作流和运行历史会保留。'
+              : removing.entry.kind === 'mcp'
+                ? '将从团队移除该 MCP。已有节点绑定会提示不可用，新会话使用它时将失败。'
               : removing.entry.kind === 'skill'
                 ? '将请求项目节点卸载该技能包，完成后不再提供其中的技能。'
                 : removing.demo
