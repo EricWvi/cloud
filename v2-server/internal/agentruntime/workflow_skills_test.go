@@ -179,3 +179,37 @@ func TestWorkflowSkillsRefuseADifferentSkillUnderALiveSiblingsName(t *testing.T)
 		t.Fatalf("siblings clashing among themselves refused the start: %v", err)
 	}
 }
+
+// Two versions of one package are different Skills: a starting session that selected another
+// version of the package a live sibling projects is refused, and the sibling's link stays.
+func TestWorkflowSkillsRefuseAnotherVersionOfALiveSiblingsPackage(t *testing.T) {
+	p := &projectRuntime{root: t.TempDir()}
+	checkout := t.TempDir()
+	links := []skillLink{{"official/one", "1.0.0", "one"}, {"official/one", "2.0.0", "one"}}
+	for _, l := range links {
+		if err := os.MkdirAll(p.assetPath(l), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(p.assetPath(l), "SKILL.md"), []byte(l.Version), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeSkillIndex(p.linksPath(), links); err != nil {
+		t.Fatal(err)
+	}
+	parked := execution.Skills{Plugins: []execution.SkillPlugin{{ID: "official/one", Version: "1.0.0"}}}
+	if err := p.applyWorkflowSkills(checkout, "run", parked, nil); err != nil {
+		t.Fatal(err)
+	}
+	next := execution.Skills{Plugins: []execution.SkillPlugin{{ID: "official/one", Version: "2.0.0"}}}
+	if err := p.applyWorkflowSkills(checkout, "run", next, []execution.Skills{parked}); err == nil || err.Error() != "workflow_skill_name_conflict" {
+		t.Fatalf("err = %v, want workflow_skill_name_conflict", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(checkout, ".opencode/skills/one/SKILL.md")); err != nil || string(data) != "1.0.0" {
+		t.Fatalf("the sibling's package = %q, %v", data, err)
+	}
+	// The same version is shared.
+	if err := p.applyWorkflowSkills(checkout, "run", parked, []execution.Skills{parked}); err != nil {
+		t.Fatalf("the same version was refused: %v", err)
+	}
+}
