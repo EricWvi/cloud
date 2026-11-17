@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Preparation is deliberately outside the demo hot path and never changes the source checkout.
-source_commit=28da0a4e77ec2257468b15bffd99e166a186b31c
+source_commit=a7ffd3da4326f7c5a30bec32d1d0289848f1e8ec
 # Keep the per-architecture digests in step with internal/nodeservices/packages.go.
 [[ $(uname -s) == Linux ]] || { echo 'Preparation supports Linux x86_64 and aarch64.' >&2; exit 1; }
 case $(uname -m) in
