@@ -2,10 +2,14 @@ package executionruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
@@ -19,6 +23,8 @@ type failureAgent struct {
 	endEntered     chan string
 	allowEnd       chan struct{}
 	once           sync.Once
+	mu             sync.Mutex
+	rebuilt        []string
 }
 
 func (a *failureAgent) release() { a.once.Do(func() { close(a.allowEnd) }) }
@@ -28,7 +34,10 @@ func (a *failureAgent) Run(ctx context.Context, _ execution.Scope, _ execution.S
 			return execution.Result{}, err
 		}
 	}
-	return a.result, a.runErr
+	a.mu.Lock()
+	result := a.result
+	a.mu.Unlock()
+	return result, a.runErr
 }
 func (a *failureAgent) End(ctx context.Context, sid string) error {
 	select {
@@ -41,6 +50,16 @@ func (a *failureAgent) End(ctx context.Context, sid string) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+func (a *failureAgent) Rebuild(sid string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.rebuilt = append(a.rebuilt, sid)
+}
+func (a *failureAgent) rebuilds() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.rebuilt)
 }
 func (a *failureAgent) Close(context.Context) error { return nil }
 
@@ -134,20 +153,40 @@ func TestRuntimeAgentFailureRequiresStopBeforeSessionEnd(t *testing.T) {
 				if session.EndedAt != nil || len(events) != 1 || events[0].Kind != execution.EventTurnEnded {
 					t.Fatalf("failed physical stop published session end: session=%+v events=%+v", session, events)
 				}
-				if _, err := f.service.Start(f.ctx, f.scope, next); !errors.Is(err, execution.ErrUnavailable) {
-					t.Fatalf("stop failure did not fence workflow admission: %v", err)
+				if got := a.rebuilds(); !slices.Equal(got, []string{ref.SessionID}) {
+					t.Fatalf("unconfirmed stop did not mark only its project's Node for rebuild: %v", got)
 				}
-				if _, err := f.service.StartModel(f.ctx, f.scope, modelRequest("another", "attempt", "hello")); !errors.Is(err, execution.ErrUnavailable) {
-					t.Fatalf("failed runtime accepted more work: %v", err)
+				// Nothing is fenced. The run's next node shares the directory with the session
+				// that could not be stopped; the driver retires the marked Node before serving it.
+				nextRef, err := f.service.Start(f.ctx, f.scope, next)
+				if err != nil {
+					t.Fatalf("stop failure fenced the run's next node: %v", err)
 				}
-				if _, err := f.service.ListModels(f.ctx, f.scope); !errors.Is(err, execution.ErrUnavailable) {
-					t.Fatalf("failed runtime advertised model readiness: %v", err)
+				observeTurn(t, f, nextRef, 0)
+				nextSession, err := f.service.ReadSession(f.ctx, f.scope, nextRef.SessionID)
+				if err != nil || nextSession.WorkspaceID != session.WorkspaceID {
+					t.Fatalf("next node left the run's directory: %+v err=%v", nextSession, err)
 				}
-				if _, err := f.service.ListExecutors(f.ctx, f.scope); !errors.Is(err, execution.ErrUnavailable) {
-					t.Fatalf("failed runtime advertised Agent readiness: %v", err)
+				// Models, executors and other projects keep running as well.
+				if result, _ := observeTurn(t, f, startModel(t, f, modelRequest("another", "attempt", "hello")), 0); result.Status != execution.StatusCompleted {
+					t.Fatalf("another conversation after a stop failure: %+v", result)
 				}
-				if _, err := f.service.ReadAttempt(f.ctx, f.scope, next.Caller); !errors.Is(err, execution.ErrNotFound) {
-					t.Fatalf("rejected workflow was recorded: %v", err)
+				if _, err := f.service.ListModels(f.ctx, f.scope); err != nil {
+					t.Fatalf("one stop failure withdrew model readiness: %v", err)
+				}
+				if _, err := f.service.ListExecutors(f.ctx, f.scope); err != nil {
+					t.Fatalf("one stop failure withdrew Agent readiness: %v", err)
+				}
+				if _, err := f.db.CreateProject(f.ctx, f.scope, store.Project{ID: "other", Name: "Other", RepositoryURL: "https://example.com/other.git", Commit: "fixed", MirrorPath: "/fake/other"}); err != nil {
+					t.Fatal(err)
+				}
+				other := execution.StartRequest{Caller: execution.Caller{Kind: execution.CallerChat, ID: "other-chat", AttemptID: "other"}, Target: execution.Target{ProjectID: "other"}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("run")}
+				otherRef, err := f.service.Start(f.ctx, f.scope, other)
+				if err != nil {
+					t.Fatalf("other project's new conversation was refused: %v", err)
+				}
+				if result, _ := observeTurn(t, f, otherRef, 0); !reflect.DeepEqual(result, tc.result) {
+					t.Fatalf("other project's conversation did not run: %+v", result)
 				}
 			} else {
 				if session.EndedAt == nil || len(events) != 2 || events[1].Kind != execution.EventSessionEnded {
@@ -171,5 +210,526 @@ func TestRuntimeAgentFailureRequiresStopBeforeSessionEnd(t *testing.T) {
 				t.Fatalf("cleanup overwrote the original result: %+v err=%v", persisted, err)
 			}
 		})
+	}
+}
+
+// flakyFinish fails the turn-result write of the first session it sees, as a database fault
+// that outlasts that turn would, and counts every attempt. Other sessions write normally.
+type flakyFinish struct {
+	write    func(context.Context, execution.Scope, execution.Ref, execution.Result) (execution.Result, error)
+	failures atomic.Int32 // remaining failures; negative fails until reset
+	calls    atomic.Int32
+	victim   atomic.Pointer[string]
+}
+
+func (f *flakyFinish) finish(ctx context.Context, scope execution.Scope, ref execution.Ref, result execution.Result) (execution.Result, error) {
+	f.victim.CompareAndSwap(nil, &ref.SessionID)
+	if *f.victim.Load() == ref.SessionID {
+		f.calls.Add(1)
+		if n := f.failures.Load(); n != 0 {
+			if n > 0 {
+				f.failures.Add(-1)
+			}
+			return execution.Result{}, errors.New("database unavailable")
+		}
+	}
+	return f.write(ctx, scope, ref, result)
+}
+
+func brokenResultWrites(t *testing.T, f *runtimeFixture, failures int32) *flakyFinish {
+	t.Helper()
+	f.service.finishRetryDelays, f.service.concludeInterval = []time.Duration{time.Millisecond, time.Millisecond}, 20*time.Millisecond
+	flaky := &flakyFinish{write: f.service.finishTurn}
+	flaky.failures.Store(failures)
+	f.service.finishTurn = flaky.finish
+	return flaky
+}
+
+// waitUnsaved returns once the session's worker has given up on its result write and gone.
+func waitUnsaved(t *testing.T, f *runtimeFixture, sid string) {
+	t.Helper()
+	for {
+		f.service.mu.Lock()
+		_, unsaved := f.service.unsaved[sid]
+		idle := len(f.service.workers) == 0
+		f.service.mu.Unlock()
+		if unsaved && idle {
+			return
+		}
+		select {
+		case <-f.ctx.Done():
+			t.Fatal("result write failure was not retained for its session")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func waitSessionEnded(t *testing.T, f *runtimeFixture, sid string) {
+	t.Helper()
+	for {
+		session, err := f.service.ReadSession(f.ctx, f.scope, sid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if session.EndedAt != nil {
+			return
+		}
+		select {
+		case <-f.ctx.Done():
+			t.Fatal("session with a recovered result write never ended")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func TestRuntimeRetriesAResultWriteBeforeFailingTheSession(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	flaky := brokenResultWrites(t, f, 2)
+	ref := startModel(t, f, modelRequest("chat", "first", "hello"))
+	if result, _ := observeTurn(t, f, ref, 0); result.Status != execution.StatusCompleted {
+		t.Fatalf("retried write: %+v", result)
+	}
+	if got := flaky.calls.Load(); got != 3 {
+		t.Fatalf("write attempts=%d", got)
+	}
+	if _, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: ref.SessionID, Caller: execution.Caller{Kind: execution.CallerChat, ID: "chat", AttemptID: "second"}, Prompt: execution.TextPrompt("again")}); err != nil {
+		t.Fatalf("a recovered write still failed its session: %v", err)
+	}
+}
+
+// Callers never End a turn they are still waiting for: workflows and task runs wait on the
+// subscription, schedules poll the attempt. A result the worker could not write must reach
+// them by itself once the database returns.
+func TestRuntimeUnstoredResultReachesWaitingCallersWithoutEnd(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	flaky := brokenResultWrites(t, f, -1)
+	ref := startModel(t, f, modelRequest("chat", "first", "hello"))
+	first := execution.Caller{Kind: execution.CallerChat, ID: "chat", AttemptID: "first"}
+	waitUnsaved(t, f, ref.SessionID)
+	if got := flaky.calls.Load(); got < 3 {
+		t.Fatalf("worker gave up after %d write attempts", got)
+	}
+	if _, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: ref.SessionID, Caller: execution.Caller{Kind: execution.CallerChat, ID: "chat", AttemptID: "second"}, Prompt: execution.TextPrompt("again")}); !errors.Is(err, execution.ErrSessionEnded) {
+		t.Fatalf("session with an unstored result accepted Append: %v", err)
+	}
+	if turn, err := f.service.ReadAttempt(f.ctx, f.scope, first); err != nil || turn.Result != nil {
+		t.Fatalf("unstored result was readable: %+v err=%v", turn, err)
+	}
+
+	// Only this session failed: the catalog and other conversations were never fenced.
+	if _, err := f.service.ListModels(f.ctx, f.scope); err != nil {
+		t.Fatalf("one write failure withdrew model readiness: %v", err)
+	}
+	if result, _ := observeTurn(t, f, startModel(t, f, modelRequest("other", "first", "hello")), 0); result.Status != execution.StatusCompleted {
+		t.Fatalf("another conversation during a write failure: %+v", result)
+	}
+
+	// The database returns. Nobody calls End or Cancel.
+	flaky.failures.Store(0)
+	if result, _ := observeTurn(t, f, ref, 0); result.Status != execution.StatusCompleted {
+		t.Fatalf("subscriber did not receive the recovered result: %+v", result)
+	}
+	if turn, err := f.service.ReadAttempt(f.ctx, f.scope, first); err != nil || turn.Result == nil || turn.Result.Status != execution.StatusCompleted {
+		t.Fatalf("attempt reader did not receive the recovered result: %+v err=%v", turn, err)
+	}
+	waitSessionEnded(t, f, ref.SessionID)
+}
+
+func TestRuntimeAgentResultWriteFailureStopsOnlyThatAgent(t *testing.T) {
+	f, a, completed := silentStopFixture(t)
+	a.release()
+	flaky := brokenResultWrites(t, f, -1)
+	ref, err := f.service.Start(f.ctx, f.scope, projectChat("chat", "project"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitUnsaved(t, f, ref.SessionID)
+	select {
+	case sid := <-a.endEntered:
+		if sid != ref.SessionID {
+			t.Fatalf("stopped wrong Agent: %s", sid)
+		}
+	default:
+		t.Fatal("a session whose result was not stored kept its physical Agent")
+	}
+	if got := a.rebuilds(); len(got) != 0 {
+		t.Fatalf("confirmed stop still marked the Node for rebuild: %v", got)
+	}
+	startAgentTurn(t, f, projectChat("other-chat", "other"), completed)
+
+	flaky.failures.Store(0)
+	if result, _ := observeTurn(t, f, ref, 0); !reflect.DeepEqual(result, completed) {
+		t.Fatalf("subscriber did not receive the original result: %+v", result)
+	}
+	waitSessionEnded(t, f, ref.SessionID)
+}
+
+func TestRuntimeUnstoredResultIsWrittenButSessionStaysOpenWhileStopIsUnconfirmed(t *testing.T) {
+	f, a, completed := silentStopFixture(t)
+	a.endErr = execution.ErrStopUnconfirmed
+	a.release()
+	flaky := brokenResultWrites(t, f, -1)
+	ref, err := f.service.Start(f.ctx, f.scope, projectChat("chat", "project"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitUnsaved(t, f, ref.SessionID)
+	if got := a.rebuilds(); !slices.Equal(got, []string{ref.SessionID}) {
+		t.Fatalf("unconfirmed stop did not mark its Node: %v", got)
+	}
+	flaky.failures.Store(0)
+	if result, _ := observeTurn(t, f, ref, 0); !reflect.DeepEqual(result, completed) {
+		t.Fatalf("subscriber did not receive the original result: %+v", result)
+	}
+	// Several retry intervals later the session is still open: only stop proof may end it.
+	time.Sleep(5 * f.service.concludeInterval)
+	if session, err := f.service.ReadSession(f.ctx, f.scope, ref.SessionID); err != nil || session.EndedAt != nil {
+		t.Fatalf("session ended without stop confirmation: %+v err=%v", session, err)
+	}
+}
+
+func TestRuntimeInvalidResultFailsItsTurnInsteadOfNeverEndingIt(t *testing.T) {
+	f, a, completed := silentStopFixture(t)
+	// AnswerComplete is missing, so the store refuses this as a completed turn.
+	a.result = execution.Result{Status: execution.StatusCompleted, Answer: "truncated", StopReason: "end_turn", Usage: []byte(`{"total_tokens":7}`)}
+	a.release()
+	ref, err := f.service.Start(f.ctx, f.scope, projectChat("chat", "project"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the status and failure code change: what the turn produced is still readable.
+	result, _ := observeTurn(t, f, ref, 0)
+	var usage struct {
+		Total int `json:"total_tokens"`
+	}
+	if result.Status != execution.StatusFailed || result.FailureCode != "execution_failed" || result.Answer != "truncated" || result.StopReason != "end_turn" || json.Unmarshal(result.Usage, &usage) != nil || usage.Total != 7 {
+		t.Fatalf("unstorable result: %+v", result)
+	}
+	waitSessionEnded(t, f, ref.SessionID)
+	a.mu.Lock()
+	a.result = completed
+	a.mu.Unlock()
+	startAgentTurn(t, f, projectChat("other-chat", "other"), completed)
+}
+
+// What tells a caller that the Agent was lost, or never started, survives the same conversion.
+func TestRuntimeInvalidResultKeepsWhetherItsAgentWasLost(t *testing.T) {
+	f, a, _ := silentStopFixture(t)
+	a.result = execution.Result{Status: execution.StatusCompleted, Answer: "truncated", StopReason: "end_turn", NotStarted: true}
+	a.runErr = errors.New("fixture transport ended")
+	a.release()
+	ref, err := f.service.Start(f.ctx, f.scope, projectChat("chat", "project"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, _ := observeTurn(t, f, ref, 0); result.Status != execution.StatusFailed || result.FailureCode != "execution_failed" || !result.AgentLost || !result.NotStarted {
+		t.Fatalf("unstorable result of a lost Agent: %+v", result)
+	}
+}
+
+func TestRuntimeEndStoresAnUnsavedResultBeforeEndingTheSession(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	flaky := brokenResultWrites(t, f, -1)
+	f.service.concludeInterval = time.Hour // Only End below may store the result.
+	ref := startModel(t, f, modelRequest("ended", "first", "hello"))
+	waitUnsaved(t, f, ref.SessionID)
+	flaky.failures.Store(0)
+	// The turn has no stored result yet, so the session cannot end before End writes it.
+	if err := f.service.End(f.ctx, f.scope, ref.SessionID); err != nil {
+		t.Fatalf("End of a session with an unstored result: %v", err)
+	}
+	turn, err := f.service.ReadAttempt(f.ctx, f.scope, execution.Caller{Kind: execution.CallerChat, ID: "ended", AttemptID: "first"})
+	if err != nil || turn.Result == nil || turn.Result.Status != execution.StatusCompleted {
+		t.Fatalf("End did not store the unsaved result: %+v err=%v", turn, err)
+	}
+	if session, err := f.service.ReadSession(f.ctx, f.scope, ref.SessionID); err != nil || session.EndedAt == nil {
+		t.Fatalf("End left the session open: %+v err=%v", session, err)
+	}
+	f.service.mu.Lock()
+	_, unsaved := f.service.unsaved[ref.SessionID]
+	f.service.mu.Unlock()
+	if unsaved {
+		t.Fatal("End kept a result it had already stored")
+	}
+}
+
+func TestRuntimeCancelStoresAnUnsavedResultItself(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	flaky := brokenResultWrites(t, f, -1)
+	f.service.concludeInterval = time.Hour // Only Cancel below may store the result.
+	cancelled := startModel(t, f, modelRequest("cancelled", "first", "hello"))
+	waitUnsaved(t, f, cancelled.SessionID)
+	flaky.failures.Store(0)
+	result, err := f.service.Cancel(f.ctx, f.scope, cancelled)
+	if err != nil || result.Status != execution.StatusCompleted {
+		t.Fatalf("Cancel of a turn with an unstored result: %+v err=%v", result, err)
+	}
+	if session, err := f.service.ReadSession(f.ctx, f.scope, cancelled.SessionID); err != nil || session.EndedAt == nil {
+		t.Fatalf("session with an unstored result stayed open: %+v err=%v", session, err)
+	}
+
+	// A healthy conversation is untouched by the same late Cancel: its session stays open.
+	healthy := startModel(t, f, modelRequest("healthy", "first", "hello"))
+	observeTurn(t, f, healthy, 0)
+	if result, err := f.service.Cancel(f.ctx, f.scope, healthy); err != nil || result.Status != execution.StatusCompleted {
+		t.Fatalf("late Cancel of a finished turn: %+v err=%v", result, err)
+	}
+	if _, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: healthy.SessionID, Caller: execution.Caller{Kind: execution.CallerChat, ID: "healthy", AttemptID: "second"}, Prompt: execution.TextPrompt("again")}); err != nil {
+		t.Fatalf("late Cancel ended a healthy conversation: %v", err)
+	}
+}
+
+func TestRuntimeCloseJoinsPendingResultWrites(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	flaky := brokenResultWrites(t, f, -1)
+	// Once the worker has gone, every write is a background one. Those notice cancellation
+	// late, as a database call can, so Close returns before one only if it does not wait.
+	var late atomic.Bool
+	var writing atomic.Int32
+	entered := make(chan struct{}, 1)
+	f.service.finishTurn = func(ctx context.Context, scope execution.Scope, ref execution.Ref, result execution.Result) (execution.Result, error) {
+		if !late.Load() {
+			return flaky.finish(ctx, scope, ref, result)
+		}
+		writing.Add(1)
+		defer writing.Add(-1)
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		time.Sleep(100 * time.Millisecond)
+		return execution.Result{}, ctx.Err()
+	}
+	ref := startModel(t, f, modelRequest("chat", "first", "hello"))
+	waitUnsaved(t, f, ref.SessionID)
+	late.Store(true)
+	select {
+	case <-entered:
+	case <-f.ctx.Done():
+		t.Fatal("no background result write started")
+	}
+	if err := f.service.Close(f.ctx); err != nil {
+		t.Fatalf("Close with a result write still pending: %v", err)
+	}
+	if n := writing.Load(); n != 0 {
+		t.Fatalf("Close returned with %d result write(s) still running", n)
+	}
+	time.Sleep(3 * f.service.concludeInterval)
+	if n := writing.Load(); n != 0 {
+		t.Fatal("a result write started after Close")
+	}
+}
+
+func TestRuntimeCloseJoinsAStopStillInFlight(t *testing.T) {
+	f, a, completed := silentStopFixture(t)
+	chat := startAgentTurn(t, f, projectChat("chat", "project"), completed)
+	impatient, cancel := context.WithTimeout(f.ctx, 20*time.Millisecond)
+	defer cancel()
+	if err := f.service.End(impatient, f.scope, chat.SessionID); !errors.Is(err, execution.ErrStopUnconfirmed) {
+		t.Fatalf("End that stopped waiting: %v", err)
+	}
+	// The caller left; the attempt it started is still asking the Node to stop.
+	closed := make(chan error, 1)
+	go func() { closed <- f.service.Close(f.ctx) }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned while a stop was still in flight: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	a.release()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-f.ctx.Done():
+		t.Fatal("Close did not return after the stop settled")
+	}
+	f.service.mu.Lock()
+	running := len(f.service.stops)
+	f.service.mu.Unlock()
+	if running != 0 {
+		t.Fatalf("Close returned with %d stop attempt(s) still running", running)
+	}
+	// Nothing starts behind Close: a late End is refused instead of leaving a new attempt.
+	for len(a.endEntered) > 0 {
+		<-a.endEntered
+	}
+	if err := f.service.End(f.ctx, f.scope, chat.SessionID); !errors.Is(err, execution.ErrStopUnconfirmed) {
+		t.Fatalf("End after Close: %v", err)
+	}
+	if len(a.endEntered) != 0 {
+		t.Fatal("End after Close started a new stop attempt")
+	}
+}
+
+// silentStopFixture runs turns that complete normally on an Agent whose End stays unconfirmed
+// until the test releases it, as a Node that swallows end_session would.
+func silentStopFixture(t *testing.T) (*runtimeFixture, *failureAgent, execution.Result) {
+	t.Helper()
+	f := runtimeDatabase(t, nil)
+	if err := f.service.Close(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	completed := execution.Result{Status: execution.StatusCompleted, Answer: "complete", AnswerComplete: true, StopReason: "end_turn"}
+	a := &failureAgent{result: completed, endEntered: make(chan string, 8), allowEnd: make(chan struct{})}
+	t.Cleanup(a.release)
+	var err error
+	if f.service, err = New(f.ctx, Config{Store: f.db, Models: f.models, Agent: a}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"project", "other"} {
+		if _, err := f.db.CreateProject(f.ctx, f.scope, store.Project{ID: id, Name: id, RepositoryURL: "https://example.com/" + id + ".git", Commit: "fixed", MirrorPath: "/fake/" + id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return f, a, completed
+}
+
+func projectChat(id, project string) execution.StartRequest {
+	return execution.StartRequest{Caller: execution.Caller{Kind: execution.CallerChat, ID: id, AttemptID: "first"}, Target: execution.Target{ProjectID: project}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("run")}
+}
+
+func workflowNode(node string) execution.StartRequest {
+	return execution.StartRequest{Caller: execution.Caller{Kind: execution.CallerWorkflow, ID: "workflow", NodeID: node, AttemptID: node}, Target: execution.Target{ProjectID: "project"}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("run")}
+}
+
+func startAgentTurn(t *testing.T, f *runtimeFixture, req execution.StartRequest, want execution.Result) execution.Ref {
+	t.Helper()
+	ref, err := f.service.Start(f.ctx, f.scope, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, _ := observeTurn(t, f, ref, 0); !reflect.DeepEqual(result, want) {
+		t.Fatalf("turn %+v: %+v", req.Caller, result)
+	}
+	return ref
+}
+
+func TestRuntimeStopBudgetAfterACompletedTurnMarksOnlyThatNode(t *testing.T) {
+	f, a, completed := silentStopFixture(t)
+	f.service.stopTimeout = 150 * time.Millisecond
+
+	// An explicit End after a normally completed turn: the service's budget, not the caller's
+	// far deadline, bounds the wait, and running out of it marks the Node.
+	chat := startAgentTurn(t, f, projectChat("chat", "project"), completed)
+	began := time.Now()
+	if err := f.service.End(context.Background(), f.scope, chat.SessionID); !errors.Is(err, execution.ErrStopUnconfirmed) {
+		t.Fatalf("End on a silent Node: %v", err)
+	}
+	if waited := time.Since(began); waited > 5*time.Second {
+		t.Fatalf("End without a caller deadline waited %s", waited)
+	}
+	if got := a.rebuilds(); !slices.Equal(got, []string{chat.SessionID}) {
+		t.Fatalf("unconfirmed End did not mark its Node for rebuild: %v", got)
+	}
+
+	// A workflow run is not held up by a node it could not stop: the session stays open, only
+	// its Node is marked, and the run's next node starts beside it on the same directory.
+	first := startAgentTurn(t, f, workflowNode("first"), completed)
+	if err := f.service.End(context.Background(), f.scope, first.SessionID); !errors.Is(err, execution.ErrStopUnconfirmed) {
+		t.Fatalf("End of a workflow node on a silent Node: %v", err)
+	}
+	if got := a.rebuilds(); !slices.Equal(got, []string{chat.SessionID, first.SessionID}) {
+		t.Fatalf("unconfirmed End of a workflow node did not mark its Node for rebuild: %v", got)
+	}
+	stuck, err := f.service.ReadSession(f.ctx, f.scope, first.SessionID)
+	if err != nil || stuck.EndedAt != nil {
+		t.Fatalf("unconfirmed stop advertised ended: %+v err=%v", stuck, err)
+	}
+	next := startAgentTurn(t, f, workflowNode("next"), completed)
+	if session, err := f.service.ReadSession(f.ctx, f.scope, next.SessionID); err != nil || session.WorkspaceID != stuck.WorkspaceID {
+		t.Fatalf("next node left the run's directory: %+v err=%v", session, err)
+	}
+
+	// Once the stop is confirmed, the same Ends succeed.
+	a.release()
+	for _, sid := range []string{chat.SessionID, first.SessionID} {
+		if err := f.service.End(f.ctx, f.scope, sid); err != nil {
+			t.Fatal(err)
+		}
+		if session, err := f.service.ReadSession(f.ctx, f.scope, sid); err != nil || session.EndedAt == nil {
+			t.Fatalf("confirmed stop did not end the session: %+v err=%v", session, err)
+		}
+	}
+}
+
+func TestRuntimeImpatientCallerNeverMarksASlowNode(t *testing.T) {
+	f, a, completed := silentStopFixture(t)
+	chat := startAgentTurn(t, f, projectChat("chat", "project"), completed)
+	impatient, cancel := context.WithTimeout(f.ctx, 20*time.Millisecond)
+	defer cancel()
+	if err := f.service.End(impatient, f.scope, chat.SessionID); !errors.Is(err, execution.ErrStopUnconfirmed) {
+		t.Fatalf("End that stopped waiting: %v", err)
+	}
+	// The Node was only slow: its confirmation still settles the shared attempt.
+	a.release()
+	if err := f.service.End(f.ctx, f.scope, chat.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.rebuilds(); len(got) != 0 {
+		t.Fatalf("a caller's short deadline marked a healthy Node: %v", got)
+	}
+}
+
+// A stop the Node has not confirmed yet is waited for outside the admission lock, so it holds
+// up nothing but its own session: not the catalog, other projects, or its run's next node.
+func TestRuntimePendingStopHoldsUpNothingButItsOwnSession(t *testing.T) {
+	f, a, completed := silentStopFixture(t)
+	first := startAgentTurn(t, f, workflowNode("first"), completed)
+	ended := make(chan error, 1)
+	go func() { ended <- f.service.End(f.ctx, f.scope, first.SessionID) }()
+	select {
+	case sid := <-a.endEntered:
+		if sid != first.SessionID {
+			t.Fatalf("End stopped the wrong Agent: %s", sid)
+		}
+	case <-f.ctx.Done():
+		t.Fatal(f.ctx.Err())
+	}
+
+	prompt, cancel := context.WithTimeout(f.ctx, 5*time.Second)
+	defer cancel()
+	if _, err := f.service.ListModels(prompt, f.scope); err != nil {
+		t.Fatalf("catalog during a pending stop: %v", err)
+	}
+	if _, err := f.service.ListExecutors(prompt, f.scope); err != nil {
+		t.Fatalf("executors during a pending stop: %v", err)
+	}
+	if _, err := f.service.StartModel(prompt, f.scope, modelRequest("model-chat", "first", "hello")); err != nil {
+		t.Fatalf("model conversation during a pending stop: %v", err)
+	}
+	other, err := f.service.Start(prompt, f.scope, projectChat("other-chat", "other"))
+	if err != nil {
+		t.Fatalf("other project during a pending stop: %v", err)
+	}
+	if result, _ := observeTurn(t, f, other, 0); !reflect.DeepEqual(result, completed) {
+		t.Fatalf("other project's turn during a pending stop: %+v", result)
+	}
+	next, err := f.service.Start(prompt, f.scope, workflowNode("next"))
+	if err != nil {
+		t.Fatalf("the run's next node during a pending stop: %v", err)
+	}
+	if result, _ := observeTurn(t, f, next, 0); !reflect.DeepEqual(result, completed) {
+		t.Fatalf("the run's next node: %+v", result)
+	}
+	if _, err := f.service.Append(prompt, f.scope, execution.AppendRequest{SessionID: first.SessionID, Caller: workflowNode("late").Caller, Prompt: execution.TextPrompt("late")}); !errors.Is(err, execution.ErrSessionEnded) {
+		t.Fatalf("session accepted a turn while being ended: %v", err)
+	}
+	select {
+	case err := <-ended:
+		t.Fatalf("End returned before its stop was confirmed: %v", err)
+	default:
+	}
+
+	a.release()
+	select {
+	case err := <-ended:
+		if err != nil {
+			t.Fatalf("End after the stop was confirmed: %v", err)
+		}
+	case <-f.ctx.Done():
+		t.Fatal(f.ctx.Err())
 	}
 }

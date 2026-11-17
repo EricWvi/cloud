@@ -224,6 +224,9 @@ func (p *projectRuntime) start() error {
 		return err
 	}
 	p.client, p.stop = p.runtime.Client, p.runtime.Stop
+	if wrap := p.driver.wrapClient; wrap != nil {
+		p.client = wrap(p.client)
+	}
 	// Start the receiver before any control wait. It also drains terminal events during cleanup.
 	p.journal, err = os.OpenFile(filepath.Join(p.root, "node-events.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {

@@ -71,6 +71,8 @@ type Driver struct {
 	serial         atomic.Uint64
 	controlTimeout time.Duration
 	startProject   func(*projectRuntime) error
+	// wrapClient lets real-Node tests interpose on IPC before the receiver starts.
+	wrapClient func(nodeClient) nodeClient
 }
 
 // New validates deployment wiring. Processes start lazily for an already-admitted project turn.
@@ -252,17 +254,59 @@ func (d *Driver) End(ctx context.Context, sid string) error {
 	select {
 	case <-a.stopped:
 		return nil
+	default:
+	}
+	a.project.mu.Lock()
+	fatal := a.project.fatal
+	a.project.mu.Unlock()
+	if fatal {
+		// An incarnation marked for rebuild is no longer trusted to acknowledge End.
+		return d.retire(ctx, a.project)
+	}
+	select {
+	case <-a.stopped:
+		return nil
 	case <-ctx.Done():
 		return execution.ErrStopUnconfirmed
 	case <-a.project.dead:
 		// A disconnected Node cannot acknowledge End. Retire its entire incarnation
 		// and require the supervisor's process-tree proof before releasing any owner.
-		if err := a.project.close(ctx); err != nil {
-			return execution.ErrStopUnconfirmed
-		}
-		d.dropProject(a.project)
-		return nil
+		return d.retire(ctx, a.project)
 	}
+}
+
+// retire stops a project's whole incarnation through its supervisor and forgets it only after
+// that proof, so the next session builds a fresh Node and never overlaps the old process tree.
+func (d *Driver) retire(ctx context.Context, p *projectRuntime) error {
+	if err := p.close(ctx); err != nil {
+		return execution.ErrStopUnconfirmed
+	}
+	d.dropProject(p)
+	return nil
+}
+
+// Rebuild marks the Node serving sid for replacement after its stop could not be confirmed.
+// It stops nothing itself: the project's next session, or End, first retires the old process
+// tree through the supervisor and only then starts a new Node. Other projects are unaffected.
+func (d *Driver) Rebuild(sid string) {
+	d.mu.Lock()
+	a := d.sessions[sid]
+	d.mu.Unlock()
+	if a == nil {
+		return
+	}
+	select {
+	case <-a.ready:
+	default:
+		// Preparation still owns a.project; its own bounded wait settles that session.
+		return
+	}
+	if a.project == nil {
+		return
+	}
+	a.project.mu.Lock()
+	a.project.fatal = true
+	a.project.mu.Unlock()
 }
 
 // Close stops all owned sessions and Nodes. A failed stop remains retryable.
