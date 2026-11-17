@@ -51,9 +51,14 @@ export function animateOverlayWidth({
     return;
   }
 
-  const startedAt = window.performance.now();
+  // Anchor to the first rAF timestamp so progress uses the same clock as frames even when rAF and
+  // performance.now() have different origins (e.g. after module-load offset in jsdom).
+  let startedAt: number | null = null;
   const animate = (now: number): void => {
-    const progress = Math.min(1, (now - startedAt) / duration);
+    if (startedAt === null) {
+      startedAt = now;
+    }
+    const progress = duration <= 0 ? 1 : Math.max(0, Math.min(1, (now - startedAt) / duration));
     const easedProgress = 1 - (1 - progress) ** 3;
     onFrame(fromWidth + (targetWidth - fromWidth) * easedProgress);
     if (progress < 1) {
