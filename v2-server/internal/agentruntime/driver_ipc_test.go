@@ -1200,3 +1200,143 @@ func TestDriverIPCEndOfANeverStartedSessionNeedsNoStopProofFromAMarkedNode(t *te
 		t.Fatalf("End of a never-started session asked the supervisor to stop the Node: calls=%d", old.stops.Load())
 	}
 }
+
+// sentIPC drains the commands the fake Node has received so far and returns their types.
+func sentIPC(f *fakeNodeIPC) []string {
+	var kinds []string
+	for {
+		select {
+		case m := <-f.sent:
+			kinds = append(kinds, m.Type)
+		default:
+			return kinds
+		}
+	}
+}
+
+// A first turn refused before anything reached Node (here: the model permit) never started its
+// Agent. The turn is marked NotStarted, so a workflow fails the node as a session that could not
+// be set up instead of parking it as a lost conversation, and ending the session needs nothing
+// from Node.
+func TestDriverIPCFirstTurnRefusedBeforeNodeIsNotStarted(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	session := h.session("session", "workspace")
+	a, err := h.driver.session(ctx, h.scope, session, h.config, execution.CallerWorkflow, newPreparation(execution.Ref{SessionID: session.ID, TurnID: "first"}, discardIPCEvent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := receiveIPC(t, h.created)
+	// The execution already holds a permit for another model, so the session's own is refused.
+	if err := a.project.services.Permit(a.execution, "messages-fixture"); err != nil {
+		t.Fatal(err)
+	}
+	sentIPC(f)
+	got := receiveIPC(t, startIPCRun(h, ctx, session, "first", discardIPCEvent))
+	if got.err == nil || got.result.Status != execution.StatusFailed || got.result.FailureCode != "agent_dispatch_failed" || !got.result.NotStarted {
+		t.Fatalf("turn refused before Node = %+v, want a failed turn marked NotStarted", got)
+	}
+	if err := h.driver.End(ctx, session.ID); err != nil {
+		t.Fatalf("End of the session that never started: %v", err)
+	}
+	if kinds := sentIPC(f); len(kinds) != 0 {
+		t.Fatalf("Node received %v for a session that never started", kinds)
+	}
+	// Ending released the execution's permit and its hold on the workspace.
+	if err := a.project.services.Permit(a.execution, "fixture"); err != nil {
+		t.Fatalf("the refused session kept its permit: %v", err)
+	}
+	a.project.services.End(a.execution)
+	a.project.mu.Lock()
+	owners := len(a.project.owners[session.WorkspaceID])
+	a.project.mu.Unlock()
+	if owners != 0 {
+		t.Fatalf("the refused session still owns its workspace: %d", owners)
+	}
+}
+
+// A Node whose transport fails while the first turn is still being permitted never receives the
+// start, so the session does not count as started and its turn is reported NotStarted.
+func TestDriverIPCFirstTurnLostBeforeItsStartIsNotStarted(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	session := h.session("session", "workspace")
+	a, err := h.driver.session(ctx, h.scope, session, h.config, execution.CallerWorkflow, newPreparation(execution.Ref{SessionID: session.ID, TurnID: "first"}, discardIPCEvent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := receiveIPC(t, h.created)
+	sentIPC(f)
+	a.commandMu.Lock()
+	if _, fresh, err := a.begin("first", discardIPCEvent); err != nil || !fresh {
+		t.Fatalf("begin: fresh=%v err=%v", fresh, err)
+	}
+	_ = f.Close()
+	select {
+	case <-a.project.dead:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the closed transport never failed the project")
+	}
+	err = a.submit("first", "prompt", true)
+	a.commandMu.Unlock()
+	if !errors.Is(err, execution.ErrUnavailable) {
+		t.Fatalf("submit on a dead Node = %v, want ErrUnavailable", err)
+	}
+	if h.driver.agentStarted(session.ID) {
+		t.Fatal("the session counts as started although its start was never sent")
+	}
+	if kinds := sentIPC(f); len(kinds) != 0 {
+		t.Fatalf("Node received %v after its transport failed", kinds)
+	}
+}
+
+// An End that arrives while the first turn is still being permitted finds no Agent to stop, so
+// the turn must not start one afterwards: nothing would ever end it.
+func TestDriverIPCFirstTurnDoesNotStartAnAgentAfterEnd(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	session := h.session("session", "workspace")
+	a, err := h.driver.session(ctx, h.scope, session, h.config, execution.CallerWorkflow, newPreparation(execution.Ref{SessionID: session.ID, TurnID: "first"}, discardIPCEvent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := receiveIPC(t, h.created)
+	sentIPC(f)
+	a.commandMu.Lock()
+	if _, fresh, err := a.begin("first", discardIPCEvent); err != nil || !fresh {
+		t.Fatalf("begin: fresh=%v err=%v", fresh, err)
+	}
+	// End runs between begin and submit: the session has not started, so it only waits for
+	// commandMu to release the session.
+	ended := make(chan error, 1)
+	go func() { ended <- h.driver.End(ctx, session.ID) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		a.mu.Lock()
+		ending := a.ending
+		a.mu.Unlock()
+		if ending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("End never reached the session")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	err = a.submit("first", "prompt", true)
+	a.commandMu.Unlock()
+	if !errors.Is(err, execution.ErrSessionEnded) {
+		t.Fatalf("submit after End = %v, want ErrSessionEnded", err)
+	}
+	if err := receiveIPC(t, ended); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if kinds := sentIPC(f); len(kinds) != 0 {
+		t.Fatalf("Node received %v after the session was ended", kinds)
+	}
+	// End released the permit the turn had taken.
+	if err := a.project.services.Permit(a.execution, "messages-fixture"); err != nil {
+		t.Fatalf("the ended session kept its permit: %v", err)
+	}
+	a.project.services.End(a.execution)
+}

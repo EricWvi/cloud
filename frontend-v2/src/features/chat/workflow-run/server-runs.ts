@@ -292,10 +292,11 @@ export async function cancelRun(tenantId: string, runId: string): Promise<void> 
 
 /**
  * Sends the starter's next message to a parked interactive node; it runs in the node's own
- * session, whose events stream carries the answer.
+ * session, whose events stream carries the answer. Resolves to the number v2 gave the message
+ * among the starter's messages to the node, which the node's summary counts in `sent`.
  */
-export async function sendNodeTurn(tenantId: string, runId: string, nodeId: string, content: string): Promise<void> {
-  await call(() => sendWorkflowNodeTurn(tenantId, runId, nodeId, { content }))
+export async function sendNodeTurn(tenantId: string, runId: string, nodeId: string, content: string): Promise<number> {
+  return (await call(() => sendWorkflowNodeTurn(tenantId, runId, nodeId, { content }))).sent
 }
 
 /**

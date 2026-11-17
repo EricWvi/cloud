@@ -44,7 +44,9 @@ function refusal(error: unknown, t: (key: string, options?: Record<string, unkno
  * while the node waits for input, "停止本轮" while it runs a turn. v2 implements desktop's legacy
  * end_turn completion only, so the starter confirms completion and the note says so; stopping a
  * turn ends the node's session (the pinned Node has no other way to stop), so the note warns that
- * the conversation cannot continue after it. Everyone else reads the transcript.
+ * the conversation cannot continue after it. A message v2 accepted and then could not deliver is
+ * reported above the composer; the view that sent it, while it still has the text, offers to put
+ * it back. Everyone else reads the transcript.
  */
 export function RunNodeSessionActions({ target }: { target: InteractiveNodeTarget }) {
   const { t } = useTranslation()
@@ -52,6 +54,9 @@ export function RunNodeSessionActions({ target }: { target: InteractiveNodeTarge
   const starter = useIsRunStarter()
   const queryClient = useQueryClient()
   const [draft, setDraft] = useState('')
+  // The last message this view sent and the number v2 gave it among the starter's messages, kept
+  // so that exactly that message can be put back in the composer if v2 reports it undelivered.
+  const [lastSent, setLastSent] = useState<{ text: string; number: number }>()
   const [busy, setBusy] = useState(false)
   const { runId, nodeId, status, session } = target
 
@@ -79,8 +84,22 @@ export function RunNodeSessionActions({ target }: { target: InteractiveNodeTarge
   const canSend = awaiting && !ended && !busy && text !== '' && draft.length <= maxTurnLength
   const send = async () => {
     if (!canSend) return
-    if (await act(() => sendNodeTurn(tenantId, runId, nodeId, draft))) setDraft('')
+    const message = draft
+    await act(async () => {
+      // v2 numbers the starter's messages as it accepts them and answers with this one's number.
+      // The run on screen cannot tell: another view of the starter's may have sent in between.
+      const number = await sendNodeTurn(tenantId, runId, nodeId, message)
+      setLastSent({ text: message, number })
+      setDraft('')
+    })
   }
+  // The send itself succeeded; v2 reports afterwards, on the parked node, that the message never
+  // ran. A summary read before this view's last send is about an earlier message: its notice says
+  // nothing about the one just sent, so it is not shown.
+  const behind = lastSent !== undefined && (session?.sent ?? 0) < lastSent.number
+  const undelivered = awaiting && !behind && session?.lastTurnError === 'not_delivered'
+  // Only the message the notice is about goes back into the composer.
+  const restorable = undelivered && !ended && lastSent !== undefined && lastSent.number === session?.sent && draft === ''
   const blocker = session?.blocker
   // Once the session has ended nobody can ask the Agent for another answer, so a blocker that
   // would otherwise say "keep talking" says what is left instead.
@@ -90,6 +109,16 @@ export function RunNodeSessionActions({ target }: { target: InteractiveNodeTarge
   return (
     <div className="flex w-full flex-col gap-2 border-t pt-2" data-interactive-actions="">
       <p className="text-[11px] leading-4 text-muted-foreground">{t('workflowRun.v2.interactive.partialNote')}</p>
+      {undelivered && (
+        <div role="status" className="flex items-center justify-between gap-2 text-xs text-warning" data-interactive-undelivered="">
+          <span>{t(ended ? 'workflowRun.v2.interactive.undeliveredEnded' : 'workflowRun.v2.interactive.undelivered')}</span>
+          {restorable && (
+            <Button type="button" variant="outline" size="xs" disabled={busy} onClick={() => setDraft(lastSent.text)}>
+              {t('workflowRun.v2.interactive.restoreDraft')}
+            </Button>
+          )}
+        </div>
+      )}
       {awaiting && !ended && (
         <div className="flex items-end gap-2">
           <Textarea

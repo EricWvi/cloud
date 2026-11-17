@@ -189,10 +189,12 @@ type fakeTurnHost struct {
 	lastContent  string
 }
 
-func (f *fakeTurnHost) SendNodeTurn(_ context.Context, scope server.WorkflowRunScope, runID, nodeID, content string) (store.WorkflowRun, error) {
+func (f *fakeTurnHost) SendNodeTurn(_ context.Context, scope server.WorkflowRunScope, runID, nodeID, content string) (server.WorkflowNodeTurnAccepted, error) {
 	f.turns++
 	f.lastScope, f.lastNodeID, f.lastContent = scope, nodeID, content
-	return f.run(runID, store.WorkflowStatusRunning)
+	run, err := f.run(runID, store.WorkflowStatusRunning)
+	// Not the call count, so the route is seen to pass the bridge's number through.
+	return server.WorkflowNodeTurnAccepted{Run: run, Sent: 7}, err
 }
 
 func (f *fakeTurnHost) StopNodeTurn(_ context.Context, scope server.WorkflowRunScope, runID, nodeID string) (store.WorkflowRun, error) {
@@ -209,7 +211,8 @@ func TestWorkflowNodeTurnRoutesDelegateToBridge(t *testing.T) {
 	base := "/api/v2/tenants/" + tid + "/workflow-runs/11111111-1111-4111-8111-111111111111/nodes/agent-1"
 
 	status, sent := call("POST", base+"/turns", map[string]any{"content": "再改一版"})
-	if status != 200 || sent["run"] == nil {
+	// The response names which of the starter's messages this one is, as the bridge numbered it.
+	if status != 200 || sent["run"] == nil || sent["sent"] != float64(7) {
 		t.Fatalf("turn = %d %v", status, sent)
 	}
 	if host.turns != 1 || host.lastNodeID != "agent-1" || host.lastContent != "再改一版" || host.lastScope.UserID != me["id"] || host.lastScope.TenantID != tid {

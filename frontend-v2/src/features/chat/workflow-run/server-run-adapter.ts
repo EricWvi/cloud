@@ -83,6 +83,8 @@ function interactiveSession(payload: Record<string, unknown>): WorkflowNodeInter
   const blocker = record(i.blocker)
   if (blocker !== undefined && text(blocker.reason) !== '') session.blocker = { reason: text(blocker.reason), detail: text(blocker.detail) }
   if (typeof i.answer === 'string') session.answer = i.answer
+  if (typeof i.sent === 'number') session.sent = i.sent
+  if (text(i.last_turn_error) !== '') session.lastTurnError = text(i.last_turn_error)
   return session
 }
 

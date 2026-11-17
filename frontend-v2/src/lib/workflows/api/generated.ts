@@ -398,6 +398,15 @@ export interface WorkflowRunActionResponse {
   run: WorkflowRun;
 }
 
+export interface WorkflowNodeTurnResponse {
+  run: WorkflowRun;
+  /**
+     * The number of the accepted message among the starter's messages to this node. A later payload.interactive.last_turn_error on the node is about the message whose number equals payload.interactive.sent.
+     * @minimum 1
+     */
+  sent: number;
+}
+
 /**
  * @nullable
  */
@@ -3318,7 +3327,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     }
 
 /**
- * v2-only: queues a human turn on a parked interactive root-scope Agent node, in the node's own session. Only the run's starter may send (409 run_owned); a node whose session was stopped returns 409 workflow_node_session_ended. The answer arrives over the node's session events; the node runs during the turn and parks again after it.
+ * v2-only: queues a human turn on a parked interactive root-scope Agent node, in the node's own session. Only the run's starter may send (409 run_owned); a node whose session was stopped returns 409 workflow_node_session_ended. The answer arrives over the node's session events; the node runs during the turn and parks again after it. The response numbers the accepted message among the starter's messages to the node, as payload.interactive.sent counts them.
  */
 export const sendWorkflowNodeTurn = (
     tid: string,
@@ -3329,7 +3338,7 @@ export const sendWorkflowNodeTurn = (
 ) => {
 
 
-      return customInstance<WorkflowRunActionResponse>(
+      return customInstance<WorkflowNodeTurnResponse>(
       {url: `/api/v2/tenants/${tid}/workflow-runs/${rid}/nodes/${nodeId}/turns`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
       data: workflowNodeTurn, signal

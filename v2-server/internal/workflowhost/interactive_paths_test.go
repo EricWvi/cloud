@@ -191,11 +191,156 @@ func TestAppendToAnEndedSessionMarksItEnded(t *testing.T) {
 	_, nodes := f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
 		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["session_ended"] == true
 	})
-	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != true || p["turns"] != float64(1) {
-		t.Fatalf("summary = %v", p)
+	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != true || p["turns"] != float64(1) || p["last_turn_error"] != turnErrorNotDelivered {
+		t.Fatalf("summary = %v, want the message reported as not delivered", p)
 	}
 	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再试"); !errors.Is(err, server.ErrWorkflowNodeSessionEnded) {
 		t.Fatalf("turn after the refused append = %v", err)
+	}
+}
+
+// awaitClaimable waits until the bridge has finished parking the node: the row turns pending just
+// before the node can be claimed again.
+func (f *fixture) awaitClaimable(t *testing.T, runID, nodeID string) {
+	t.Helper()
+	st := f.host.state(runID)
+	waitUntil(t, func() bool {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		n := st.interactive[nodeID]
+		return n != nil && n.phase == phaseParked
+	})
+}
+
+// A message that cannot be claimed (the run stopped meanwhile) replaces nothing: the node still
+// knows its last accepted message was not delivered.
+func TestRefusedClaimKeepsTheUndeliveredNotice(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	waiting, release := f.holdDispatchOf(t, "c")
+	runID := f.run(t, parallelInteractive, nil)
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	a := f.exec.awaitStart(t)
+	f.exec.finish(a, completed("在"))
+	f.await(t, runID, parked("a"))
+	f.refuseAppendsOf(a, execution.ErrUnavailable)
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); err != nil {
+		t.Fatal(err)
+	}
+	f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["last_turn_error"] == turnErrorNotDelivered
+	})
+	f.awaitClaimable(t, runID, "a")
+	<-waiting
+	// Held here, because the failed run's sweep forgets the node (the refused follow-up's own
+	// goroutine may still be the one to run it).
+	st := f.host.state(runID)
+	st.mu.Lock()
+	tracked := st.interactive["a"]
+	st.mu.Unlock()
+	// C fails the run while its attempt is still held, so A's row can no longer move to running.
+	c := f.nodeRow(t, runID, "c")
+	if err := f.host.engine.FailNode(ctx, runID, c.ID, workflow.Failure{Kind: workflow.FailureSession, Message: "旁支失败"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "还在吗"); !errors.Is(err, server.ErrWorkflowNodeNotAwaitingInput) {
+		t.Fatalf("turn under a failed run = %v", err)
+	}
+	st.mu.Lock()
+	summary := tracked.summary()
+	st.mu.Unlock()
+	if summary["last_turn_error"] != turnErrorNotDelivered || summary["sent"] != 1 {
+		t.Fatalf("summary after the refused claim = %v; want the notice kept and still one message sent", summary)
+	}
+	release()
+	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
+}
+
+// refuseAppendsOf makes every Append to session fail with err until the returned func is called.
+func (f *fixture) refuseAppendsOf(session string, err error) (accept func()) {
+	appendTurn := f.exec.AppendFunc
+	f.exec.AppendFunc = func(ctx context.Context, scope execution.Scope, req execution.AppendRequest) (execution.Ref, error) {
+		if req.SessionID == session {
+			return execution.Ref{}, err
+		}
+		return appendTurn(ctx, scope, req)
+	}
+	return func() { f.exec.AppendFunc = appendTurn }
+}
+
+// A follow-up the bridge accepted and the execution service then refused (for a reason other than
+// an ended session) never ran, and SendNodeTurn has already returned. The node parks as it was,
+// and its summary says the message was not delivered until the starter's next message is claimed.
+func TestRefusedFollowUpIsReportedAsNotDelivered(t *testing.T) {
+	for name, refusal := range map[string]error{"unavailable": execution.ErrUnavailable, "conflict": execution.ErrConflict} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			ctx := context.Background()
+			runID, a := f.startParked(t, interactiveChain, "初稿一")
+			accept := f.refuseAppendsOf(a, refusal)
+			// The answer numbers the message as the summary will: the sender matches the two to
+			// know that a later notice is about this message.
+			if accepted, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); err != nil || accepted.Sent != 1 {
+				t.Fatalf("the turn is accepted before the execution service sees it, as message 1: %+v %v", accepted.Sent, err)
+			}
+			_, nodes := f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+				return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["last_turn_error"] != nil
+			})
+			p := interactivePayload(t, node(nodes, "a"))
+			if p["last_turn_error"] != turnErrorNotDelivered || p["sent"] != float64(1) || p["session_ended"] != false || p["completable"] != true || p["turns"] != float64(1) || p["answer"] != "初稿一" {
+				t.Fatalf("summary = %v, want the node as it was plus the notice about the first message", p)
+			}
+			if f.exec.isClosed(a) {
+				t.Fatal("a refused message ended the session")
+			}
+
+			// The resent message is delivered: the notice is gone as soon as the turn is claimed.
+			f.awaitClaimable(t, runID, "a")
+			accept()
+			if accepted, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); err != nil || accepted.Sent != 2 {
+				t.Fatalf("the resent message = %+v %v, want message 2", accepted.Sent, err)
+			}
+			if again := f.exec.awaitAppend(t); again != a {
+				t.Fatalf("the resent message went to session %s, want %s", again, a)
+			}
+			if row := f.nodeRow(t, runID, "a"); row.Status != store.WorkflowStatusRunning || interactivePayload(t, row)["last_turn_error"] != nil || interactivePayload(t, row)["sent"] != float64(2) {
+				t.Fatalf("running A = %s, summary %v; want the notice cleared and the second message counted", row.Status, interactivePayload(t, row))
+			}
+			f.exec.finish(a, completed("初稿二"))
+			_, nodes = f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+				return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["turns"] == float64(2)
+			})
+			if p := interactivePayload(t, node(nodes, "a")); p["last_turn_error"] != nil || p["answer"] != "初稿二" {
+				t.Fatalf("summary after the delivered turn = %v", p)
+			}
+		})
+	}
+}
+
+// A resent message that is refused as well is reported again, and completing with the earlier
+// answer leaves no notice on the finished node.
+func TestUndeliveredNoticeFollowsTheLatestMessage(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	runID, a := f.startParked(t, interactiveChain, "初稿一")
+	f.refuseAppendsOf(a, execution.ErrUnavailable)
+	undelivered := func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["last_turn_error"] == turnErrorNotDelivered
+	}
+	for range 2 {
+		if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); err != nil {
+			t.Fatal(err)
+		}
+		f.await(t, runID, undelivered)
+		f.awaitClaimable(t, runID, "a")
+	}
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+		t.Fatalf("completing with the earlier answer: %v", err)
+	}
+	if row := f.nodeRow(t, runID, "a"); row.Status != store.WorkflowStatusSucceeded || interactivePayload(t, row)["last_turn_error"] != nil {
+		t.Fatalf("completed A = %s, summary %v", row.Status, interactivePayload(t, row))
 	}
 }
 
@@ -480,6 +625,10 @@ func TestAcceptedFollowUpDoesNotRunAfterTheRunFailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-waiting
+	st := f.host.state(runID)
+	st.mu.Lock()
+	tracked := st.interactive["a"]
+	st.mu.Unlock()
 	f.exec.finish(c, execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
 	f.await(t, runID, func(r store.WorkflowRun, _ []store.WorkflowNodeRun) bool {
 		return r.Status == store.WorkflowStatusFailed
@@ -497,6 +646,13 @@ func TestAcceptedFollowUpDoesNotRunAfterTheRunFailed(t *testing.T) {
 	f.exec.mu.Unlock()
 	if appended != 0 {
 		t.Fatal("the follow-up ran under the failed run")
+	}
+	// Had the run been running again by the park, the node would have said the message was lost.
+	st.mu.Lock()
+	undelivered := tracked.undelivered
+	st.mu.Unlock()
+	if !undelivered {
+		t.Fatal("the accepted follow-up that never ran is not recorded as undelivered")
 	}
 }
 
@@ -603,6 +759,9 @@ func TestFirstTurnWithoutASessionFailsTheInteractiveNode(t *testing.T) {
 	}{
 		"Node refused the session": {execution.Result{Status: execution.StatusFailed, FailureCode: execution.FailureCheckoutSessionLimit, AgentLost: true}, "Node refused the Agent session on the run's directory: checkout_session_limit"},
 		"preparation failed":       {execution.Result{Status: execution.StatusFailed, FailureCode: "agent_prepare_failed", AgentLost: true, NotStarted: true}, "the Agent session could not be set up: agent_prepare_failed"},
+		// How a first turn refused before anything reached Node arrives here (the driver's
+		// tests cover that it is reported this way).
+		"refused before Node": {execution.Result{Status: execution.StatusFailed, FailureCode: "agent_dispatch_failed", AgentLost: true, NotStarted: true}, "the Agent session could not be set up: agent_dispatch_failed"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)

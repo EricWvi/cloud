@@ -36,6 +36,7 @@ export type {
   WorkflowNodeCompletion,
   WorkflowNodeInteractiveSession,
   WorkflowNodeInteractiveBlockerReason,
+  WorkflowNodeInteractiveTurnError,
   WorkflowNodeCompletionBlocker,
   WorkflowNodeCompletionBlockerKind,
   WorkflowNodeTurnKey,

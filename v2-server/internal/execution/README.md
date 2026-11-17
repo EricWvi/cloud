@@ -36,7 +36,7 @@ chat 的 ID 是 conversation，workflow 是 run，schedule 是 occurrence；容�
 接收执行只用单进程内的锁和一次数据库写入，持久记录建立后返回 Ref。
 `ErrWorkspaceBusy` 仅表示同一 session 的上一轮尚未结束（对话等非 workflow 调用方按调用方计）；同一次 workflow run 的不同会话各自执行，互不排队。页面自己排队，公共层不另设队列。
 
-`Result.NotStarted` 标出首轮在 Agent 启动之前就失败（项目、checkout、插件或 Skill 没准备好），和 `AgentLost` 一起出现；`FailureCode` 为 `checkout_busy`、`checkout_session_limit`、`checkout_too_deep` 时是 Node 按 checkout 拒绝了这个会话（`CheckoutRefused`）。调用方据此区分“从来没有会话”和“会话中途丢了”。
+`Result.NotStarted` 标出首轮在 Agent 启动之前就失败（项目、checkout、插件或 Skill 没准备好，或在发给 Node 之前就被拒绝：Agent 配置或模型授权没通过，或这期间会话被结束、Node 断开），和 `AgentLost` 一起出现；`FailureCode` 为 `checkout_busy`、`checkout_session_limit`、`checkout_too_deep` 时是 Node 按 checkout 拒绝了这个会话（`CheckoutRefused`）。调用方据此区分“从来没有会话”和“会话中途丢了”。
 
 `StartRequest.Lifetime` 默认 `LifetimeTurn`：没有完成的一轮结束会话。工作流的交互节点用 `LifetimeHeld`：Agent 自己结束、但没有完成的一轮（拒绝、截断、未知停止、非调用方要求的取消）不结束会话，调用方可以接着发下一轮；Agent 丢失（崩溃、事件流断开、历史读不全、会话已结束或被停止）时仍结束会话，这一轮的 `Result.AgentLost` 为 true，调用方据此知道会话已不能继续。非 workflow 调用方用 `LifetimeHeld` 返回 `ErrInvalidRequest`。
 Start/StartModel/Append 的 context 控制本次调用，调用返回或浏览器断开不停止已开始的执行。

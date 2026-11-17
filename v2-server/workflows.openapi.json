@@ -639,10 +639,10 @@
       "post": {
         "operationId": "sendWorkflowNodeTurn",
         "tags": ["workflowRuns"],
-        "description": "v2-only: queues a human turn on a parked interactive root-scope Agent node, in the node's own session. Only the run's starter may send (409 run_owned); a node whose session was stopped returns 409 workflow_node_session_ended. The answer arrives over the node's session events; the node runs during the turn and parks again after it.",
+        "description": "v2-only: queues a human turn on a parked interactive root-scope Agent node, in the node's own session. Only the run's starter may send (409 run_owned); a node whose session was stopped returns 409 workflow_node_session_ended. The answer arrives over the node's session events; the node runs during the turn and parks again after it. The response numbers the accepted message among the starter's messages to the node, as payload.interactive.sent counts them.",
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WorkflowNodeTurn"}}}},
         "responses": {
-          "200": {"description": "Response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WorkflowRunActionResponse"}}}},
+          "200": {"description": "Response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WorkflowNodeTurnResponse"}}}},
           "400": {"$ref": "#/components/responses/WorkflowError"},
           "401": {"$ref": "#/components/responses/WorkflowError"},
           "404": {"$ref": "#/components/responses/WorkflowError"},
@@ -1298,6 +1298,15 @@
         "required": ["run"],
         "additionalProperties": false,
         "properties": {"run": {"$ref": "#/components/schemas/WorkflowRun"}}
+      },
+      "WorkflowNodeTurnResponse": {
+        "type": "object",
+        "required": ["run", "sent"],
+        "additionalProperties": false,
+        "properties": {
+          "run": {"$ref": "#/components/schemas/WorkflowRun"},
+          "sent": {"type": "integer", "minimum": 1, "description": "The number of the accepted message among the starter's messages to this node. A later payload.interactive.last_turn_error on the node is about the message whose number equals payload.interactive.sent."}
+        }
       },
       "WorkflowRunResumePreview": {
         "type": "object",
