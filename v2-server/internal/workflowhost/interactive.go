@@ -302,14 +302,15 @@ func (st *runState) nodeOf(nodeID string) (*interactiveNode, error) {
 }
 
 // SendNodeTurn claims a parked node for a human turn, marks it running and starts the turn. The
-// answer arrives over the node's session; the node parks again after it.
-func (h *Host) SendNodeTurn(ctx context.Context, scope server.WorkflowRunScope, runID, nodeID, content string) (store.WorkflowRun, error) {
+// answer arrives over the node's session; the node parks again after it. It answers with the
+// number the message was claimed under, the value payload.interactive.sent has from now on.
+func (h *Host) SendNodeTurn(ctx context.Context, scope server.WorkflowRunScope, runID, nodeID, content string) (server.WorkflowNodeTurnAccepted, error) {
 	st, err := h.starter(ctx, scope, runID)
 	if err != nil {
-		return store.WorkflowRun{}, err
+		return server.WorkflowNodeTurnAccepted{}, err
 	}
 	if st == nil {
-		return store.WorkflowRun{}, server.ErrWorkflowNodeNotAwaitingInput
+		return server.WorkflowNodeTurnAccepted{}, server.ErrWorkflowNodeNotAwaitingInput
 	}
 	st.mu.Lock()
 	n, err := st.nodeOf(nodeID)
@@ -322,11 +323,12 @@ func (h *Host) SendNodeTurn(ctx context.Context, scope server.WorkflowRunScope, 
 	}
 	if err != nil {
 		st.mu.Unlock()
-		return store.WorkflowRun{}, err
+		return server.WorkflowNodeTurnAccepted{}, err
 	}
 	n.phase = phaseTurn
 	n.seq++
-	caller := execution.Caller{Kind: execution.CallerWorkflow, ID: runID, NodeID: nodeID, AttemptID: n.d.NodeRunID + "/turn-" + strconv.Itoa(n.seq)}
+	sent := n.seq
+	caller := execution.Caller{Kind: execution.CallerWorkflow, ID: runID, NodeID: nodeID, AttemptID: n.d.NodeRunID + "/turn-" + strconv.Itoa(sent)}
 	// This message replaces the one that was not delivered, so the row stops saying so as it
 	// starts running; if this one is refused too, the park writes the notice again.
 	undelivered := n.undelivered
@@ -347,7 +349,7 @@ func (h *Host) SendNodeTurn(ctx context.Context, scope server.WorkflowRunScope, 
 		if err == nil {
 			err = server.ErrWorkflowNodeNotAwaitingInput
 		}
-		return store.WorkflowRun{}, err
+		return server.WorkflowNodeTurnAccepted{}, err
 	}
 	h.hub.Publish(runID)
 	st.mu.Lock()
@@ -355,13 +357,13 @@ func (h *Host) SendNodeTurn(ctx context.Context, scope server.WorkflowRunScope, 
 		// The run was cancelled after the row moved: the turn would never run, so do not accept
 		// it. The cancellation ends the session and closes the row.
 		st.mu.Unlock()
-		return store.WorkflowRun{}, server.ErrWorkflowNodeNotAwaitingInput
+		return server.WorkflowNodeTurnAccepted{}, server.ErrWorkflowNodeNotAwaitingInput
 	}
 	// Registered before the goroutine runs, so a stop arriving first finds the turn starting.
 	a := st.register(caller.AttemptID, n.d.NodeRunID, "", st.generation)
 	if a == nil {
 		st.mu.Unlock()
-		return store.WorkflowRun{}, server.ErrWorkflowNodeNotAwaitingInput
+		return server.WorkflowNodeTurnAccepted{}, server.ErrWorkflowNodeNotAwaitingInput
 	}
 	st.dispatched++
 	h.workers.Add(1)
@@ -370,7 +372,11 @@ func (h *Host) SendNodeTurn(ctx context.Context, scope server.WorkflowRunScope, 
 		h.runFollowUp(st, a, followUp{node: n, caller: caller, prompt: execution.TextPrompt(content)})
 	}()
 	st.mu.Unlock()
-	return h.store.WorkflowRun(ctx, scope.TenantID, runID)
+	run, err := h.store.WorkflowRun(ctx, scope.TenantID, runID)
+	if err != nil {
+		return server.WorkflowNodeTurnAccepted{}, err
+	}
+	return server.WorkflowNodeTurnAccepted{Run: run, Sent: sent}, nil
 }
 
 // runFollowUp executes one human turn registered as a and parks the node after it.

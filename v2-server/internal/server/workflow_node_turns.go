@@ -16,8 +16,16 @@ import (
 // these routes are v2-only (api/openapi.json has no node-level turn or stop route); a bridge that
 // does not implement it keeps them unavailable.
 type WorkflowNodeTurns interface {
-	SendNodeTurn(ctx context.Context, scope WorkflowRunScope, runID, nodeID, content string) (store.WorkflowRun, error)
+	SendNodeTurn(ctx context.Context, scope WorkflowRunScope, runID, nodeID, content string) (WorkflowNodeTurnAccepted, error)
 	StopNodeTurn(ctx context.Context, scope WorkflowRunScope, runID, nodeID string) (store.WorkflowRun, error)
+}
+
+// WorkflowNodeTurnAccepted answers an accepted human turn: the run, and the number the bridge gave
+// the message among the starter's messages to this node. payload.interactive.sent counts the same
+// messages, so the sender can tell whether a later not_delivered notice is about this message.
+type WorkflowNodeTurnAccepted struct {
+	Run  store.WorkflowRun
+	Sent int
 }
 
 var (
@@ -67,7 +75,8 @@ func (h *handler) workflowNodeTurns(w http.ResponseWriter, r *http.Request, a ac
 }
 
 // sendWorkflowNodeTurn queues a human turn on a parked interactive node. The answer arrives over
-// the node's session events; the response only confirms the node is running the turn.
+// the node's session events; the response only confirms the node is running the turn, and says
+// which of the starter's messages this one is.
 func (h *handler) sendWorkflowNodeTurn(w http.ResponseWriter, r *http.Request, a access) {
 	turns, scope, runID, nodeID, ok := h.workflowNodeTurns(w, r, a)
 	if !ok {
@@ -83,12 +92,12 @@ func (h *handler) sendWorkflowNodeTurn(w http.ResponseWriter, r *http.Request, a
 		fault(w, http.StatusBadRequest, "invalid_content")
 		return
 	}
-	run, err := turns.SendNodeTurn(r.Context(), scope, runID, nodeID, in.Content)
+	accepted, err := turns.SendNodeTurn(r.Context(), scope, runID, nodeID, in.Content)
 	if err != nil {
 		workflowRunLifecycleFault(w, err, "send workflow node turn")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"run": toWorkflowRunView(run)})
+	writeJSON(w, http.StatusOK, map[string]any{"run": toWorkflowRunView(accepted.Run), "sent": accepted.Sent})
 }
 
 // stopWorkflowNodeTurn stops the turn an interactive node is executing. The pinned Node can only

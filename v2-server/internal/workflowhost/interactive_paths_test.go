@@ -280,8 +280,10 @@ func TestRefusedFollowUpIsReportedAsNotDelivered(t *testing.T) {
 			ctx := context.Background()
 			runID, a := f.startParked(t, interactiveChain, "初稿一")
 			accept := f.refuseAppendsOf(a, refusal)
-			if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); err != nil {
-				t.Fatalf("the turn is accepted before the execution service sees it: %v", err)
+			// The answer numbers the message as the summary will: the sender matches the two to
+			// know that a later notice is about this message.
+			if accepted, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); err != nil || accepted.Sent != 1 {
+				t.Fatalf("the turn is accepted before the execution service sees it, as message 1: %+v %v", accepted.Sent, err)
 			}
 			_, nodes := f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
 				return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["last_turn_error"] != nil
@@ -297,8 +299,8 @@ func TestRefusedFollowUpIsReportedAsNotDelivered(t *testing.T) {
 			// The resent message is delivered: the notice is gone as soon as the turn is claimed.
 			f.awaitClaimable(t, runID, "a")
 			accept()
-			if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); err != nil {
-				t.Fatal(err)
+			if accepted, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); err != nil || accepted.Sent != 2 {
+				t.Fatalf("the resent message = %+v %v, want message 2", accepted.Sent, err)
 			}
 			if again := f.exec.awaitAppend(t); again != a {
 				t.Fatalf("the resent message went to session %s, want %s", again, a)
