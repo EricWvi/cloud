@@ -74,6 +74,8 @@ type WorkflowRun struct {
 	ProjectID      string
 	Name           string
 	Status         string
+	StartedBy      string
+	StartedByName  string
 	State          []byte
 	Input          *string
 	Output         *string
@@ -87,15 +89,17 @@ type WorkflowRun struct {
 
 // WorkflowRunSummary is a run list row: identity, frozen version and lifecycle, no graph or payload.
 type WorkflowRunSummary struct {
-	ID         string
-	Name       string
-	ProjectID  string
-	WorkflowID string
-	Version    string
-	Status     string
-	StartedAt  *time.Time
-	FinishedAt *time.Time
-	CreatedAt  time.Time
+	ID            string
+	Name          string
+	ProjectID     string
+	WorkflowID    string
+	Version       string
+	Status        string
+	StartedBy     string
+	StartedByName string
+	StartedAt     *time.Time
+	FinishedAt    *time.Time
+	CreatedAt     time.Time
 }
 
 // WorkflowNodeRun is one node attempt. Failed attempts are soft-deleted rows, so a detail read sees
@@ -133,7 +137,7 @@ type WorkflowScope struct {
 	UpdatedAt           time.Time
 }
 
-const workflowRunColumns = `id, tenant_id, workflow_id, snapshot_id, project_id, name, status, state,
+const workflowRunColumns = `id, tenant_id, workflow_id, snapshot_id, project_id, name, status, started_by, state,
 	input, output, error, payload, started_at, finished_at, created_at, updated_at`
 
 const workflowNodeRunColumns = `id, tenant_id, run_id, scope_id, node_id, node_type, session_id,
@@ -156,8 +160,9 @@ const derivedRunStatus = `CASE WHEN r.status = 'running' AND EXISTS (
 
 func scanWorkflowRun(row pgx.Row) (WorkflowRun, error) {
 	var run WorkflowRun
+	var starter *string
 	err := row.Scan(&run.ID, &run.TenantID, &run.WorkflowID, &run.SnapshotID, &run.ProjectID,
-		&run.Name, &run.Status, &run.State, &run.Input, &run.Output, &run.Error, &run.RuntimePayload,
+		&run.Name, &run.Status, &starter, &run.State, &run.Input, &run.Output, &run.Error, &run.RuntimePayload,
 		&run.StartedAt, &run.FinishedAt, &run.CreatedAt, &run.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return WorkflowRun{}, ErrWorkflowRunNotFound
@@ -165,7 +170,42 @@ func scanWorkflowRun(row pgx.Row) (WorkflowRun, error) {
 	if err != nil {
 		return WorkflowRun{}, fmt.Errorf("scan workflow run: %w", err)
 	}
+	if starter != nil {
+		run.StartedBy = *starter
+	}
 	return run, nil
+}
+
+func scanWorkflowRunWithStarter(row pgx.Row) (WorkflowRun, error) {
+	var run WorkflowRun
+	err := row.Scan(&run.ID, &run.TenantID, &run.WorkflowID, &run.SnapshotID, &run.ProjectID,
+		&run.Name, &run.Status, &run.StartedBy, &run.StartedByName, &run.State, &run.Input, &run.Output, &run.Error,
+		&run.RuntimePayload, &run.StartedAt, &run.FinishedAt, &run.CreatedAt, &run.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return WorkflowRun{}, ErrWorkflowRunNotFound
+	}
+	if err != nil {
+		return WorkflowRun{}, fmt.Errorf("scan workflow run: %w", err)
+	}
+	return run, nil
+}
+
+func fillWorkflowStarterName(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, run *WorkflowRun) error {
+	if run.StartedBy == "" {
+		return nil
+	}
+	var name string
+	err := q.QueryRow(ctx, `SELECT COALESCE(display_name, '') FROM users WHERE id = $1::uuid`, run.StartedBy).Scan(&name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read workflow starter name: %w", err)
+	}
+	run.StartedByName = name
+	return nil
 }
 
 // CreateWorkflowRun freezes a published version and the project into a pending run, and opens the
@@ -330,7 +370,13 @@ func (s *Store) StartWorkflowRun(ctx context.Context, tenant, runID string) (Wor
 		UPDATE v2_workflow_runs SET status = 'running', started_at = now(), updated_at = now()
 		WHERE tenant_id = $1 AND id = $2 AND status = 'pending' AND deleted_at IS NULL
 		RETURNING `+workflowRunColumns, tenant, runID))
-	if err == nil || !errors.Is(err, ErrWorkflowRunNotFound) {
+	if err == nil {
+		if ferr := fillWorkflowStarterName(ctx, s.pool, &run); ferr != nil {
+			return WorkflowRun{}, ferr
+		}
+		return run, nil
+	}
+	if !errors.Is(err, ErrWorkflowRunNotFound) {
 		return run, err
 	}
 	// The update matched nothing: tell "gone" apart from "not pending".
@@ -421,9 +467,11 @@ func (s *Store) WorkflowRuns(ctx context.Context, tenant, workflowID, projectID 
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT r.id, r.name, r.project_id, r.workflow_id, COALESCE(s.version, ''), `+derivedRunStatus+`,
+			COALESCE(r.started_by::text, ''), COALESCE(u.display_name, ''),
 			r.started_at, r.finished_at, r.created_at
 		FROM v2_workflow_runs r
 		LEFT JOIN v2_workflow_snapshots s ON s.id = r.snapshot_id
+		LEFT JOIN users u ON u.id = r.started_by
 		WHERE r.tenant_id = $1 AND r.deleted_at IS NULL
 			AND ($2::uuid IS NULL OR r.workflow_id = $2::uuid)
 			AND ($3::text IS NULL OR r.project_id = $3)
@@ -434,7 +482,8 @@ func (s *Store) WorkflowRuns(ctx context.Context, tenant, workflowID, projectID 
 	summaries, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (WorkflowRunSummary, error) {
 		var summary WorkflowRunSummary
 		err := row.Scan(&summary.ID, &summary.Name, &summary.ProjectID, &summary.WorkflowID,
-			&summary.Version, &summary.Status, &summary.StartedAt, &summary.FinishedAt, &summary.CreatedAt)
+			&summary.Version, &summary.Status, &summary.StartedBy, &summary.StartedByName,
+			&summary.StartedAt, &summary.FinishedAt, &summary.CreatedAt)
 		return summary, err
 	})
 	if err != nil {
@@ -445,20 +494,24 @@ func (s *Store) WorkflowRuns(ctx context.Context, tenant, workflowID, projectID 
 
 // WorkflowRun reads one live run in the tenant.
 func (s *Store) WorkflowRun(ctx context.Context, tenant, runID string) (WorkflowRun, error) {
-	return scanWorkflowRun(s.pool.QueryRow(ctx, `
+	return scanWorkflowRunWithStarter(s.pool.QueryRow(ctx, `
 		SELECT r.id, r.tenant_id, r.workflow_id, r.snapshot_id, r.project_id, r.name, `+derivedRunStatus+`,
+			COALESCE(r.started_by::text, ''), COALESCE(u.display_name, ''),
 			r.state, r.input, r.output, r.error, r.payload, r.started_at, r.finished_at, r.created_at, r.updated_at
 		FROM v2_workflow_runs r
+		LEFT JOIN users u ON u.id = r.started_by
 		WHERE r.tenant_id = $1 AND r.id = $2 AND r.deleted_at IS NULL`, tenant, runID))
 }
 
 // ScheduledWorkflowRun returns the run a scheduled trigger created, found by the trigger's stable
 // reference (its occurrence ID), so a dispatcher that lost track of it never creates another.
 func (s *Store) ScheduledWorkflowRun(ctx context.Context, tenant, triggerRef string) (WorkflowRun, error) {
-	return scanWorkflowRun(s.pool.QueryRow(ctx, `
+	return scanWorkflowRunWithStarter(s.pool.QueryRow(ctx, `
 		SELECT r.id, r.tenant_id, r.workflow_id, r.snapshot_id, r.project_id, r.name, `+derivedRunStatus+`,
+			COALESCE(r.started_by::text, ''), COALESCE(u.display_name, ''),
 			r.state, r.input, r.output, r.error, r.payload, r.started_at, r.finished_at, r.created_at, r.updated_at
 		FROM v2_workflow_runs r
+		LEFT JOIN users u ON u.id = r.started_by
 		WHERE r.tenant_id = $1 AND r.trigger_kind = 'schedule' AND r.trigger_ref = $2 AND r.deleted_at IS NULL`,
 		tenant, triggerRef))
 }

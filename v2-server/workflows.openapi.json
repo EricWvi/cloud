@@ -525,7 +525,7 @@
         "operationId": "streamWorkflowNodeRunEvents",
         "tags": ["workflowRuns"],
         "summary": "Follow one node attempt's session events, as Server-Sent Events",
-        "description": "The same stream as chat.openapi.json's conversation events: each message's id is its session sequence and its data a ChatEvent (a turn_ended carries its prompt); an `end` event follows session_ended and `failure` (data `{code}`) reports a broken stream. The session is read in the caller's own scope, so only whoever started the run can read it. 404 workflow_node_run_not_found when the attempt is not this run's; 404 workflow_node_session_not_found before the attempt was dispatched or when the session is not the caller's.",
+        "description": "The same stream as chat.openapi.json's conversation events: each message's id is its session sequence and its data a ChatEvent (a turn_ended carries its prompt); an `end` event follows session_ended and `failure` (data `{code}`) reports a broken stream. Any member of the tenant can follow the session; the server checks tenant membership and reads the shared execution session under the run starter's scope. 404 workflow_node_run_not_found when the attempt is not this run's; 404 workflow_node_session_not_found before the attempt was dispatched.",
         "parameters": [{"$ref": "#/components/parameters/EventCursor"}],
         "responses": {
           "200": {"description": "An event stream of the attempt's session events.", "content": {"text/event-stream": {"schema": {"type": "string"}}}},
@@ -1223,7 +1223,7 @@
       },
       "WorkflowRun": {
         "type": "object",
-        "required": ["id", "workflowId", "snapshotId", "projectId", "name", "status", "state", "input", "output", "error", "startedAt", "finishedAt", "createdAt", "updatedAt"],
+        "required": ["id", "workflowId", "snapshotId", "projectId", "name", "status", "startedByName", "state", "input", "output", "error", "startedAt", "finishedAt", "createdAt", "updatedAt"],
         "additionalProperties": false,
         "properties": {
           "taskId": { "type": "string", "description": "Owning handling or decomposition task, when present." },
@@ -1234,6 +1234,7 @@
           "projectId": {"type": "string"},
           "name": {"type": "string"},
           "status": {"type": "string", "enum": ["pending", "running", "awaitingInput", "succeeded", "failed", "cancelled"]},
+          "startedByName": {"type": "string", "description": "Starter display name, or empty before the run starts or when unknown. The starter id is the run detail envelope's `startedBy`."},
           "state": {"type": "string", "nullable": true},
           "input": {"type": "string", "nullable": true},
           "output": {"type": "string", "nullable": true},
@@ -1246,7 +1247,7 @@
       },
       "WorkflowRunSummary": {
         "type": "object",
-        "required": ["id", "name", "projectId", "workflowId", "version", "status", "startedAt", "finishedAt", "createdAt"],
+        "required": ["id", "name", "projectId", "workflowId", "version", "status", "startedByName", "startedAt", "finishedAt", "createdAt"],
         "additionalProperties": false,
         "properties": {
           "id": {"type": "string", "format": "uuid"},
@@ -1255,6 +1256,7 @@
           "workflowId": {"type": "string", "format": "uuid"},
           "version": {"type": "string"},
           "status": {"type": "string", "enum": ["pending", "running", "awaitingInput", "succeeded", "failed", "cancelled"]},
+          "startedByName": {"type": "string", "description": "Starter display name, or empty before the run starts or when unknown."},
           "startedAt": {"type": "integer", "format": "int64", "nullable": true},
           "finishedAt": {"type": "integer", "format": "int64", "nullable": true},
           "createdAt": {"type": "integer", "format": "int64"}

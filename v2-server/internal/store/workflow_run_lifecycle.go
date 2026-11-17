@@ -328,7 +328,10 @@ func (s *Store) FinishWorkflowRun(ctx context.Context, tenant, runID, status str
 				finished_at = now(), updated_at = now()
 			WHERE tenant_id = $1 AND id = $2
 			RETURNING `+workflowRunColumns, tenant, runID, status, output, runError))
-		return err
+		if err != nil {
+			return err
+		}
+		return fillWorkflowStarterName(ctx, tx, &run)
 	})
 	return run, err
 }
@@ -364,7 +367,10 @@ func cancelWorkflowRun(ctx context.Context, tx pgx.Tx, tenant, runID string) (Wo
 			run, err = scanWorkflowRun(tx.QueryRow(ctx, `
 				SELECT `+workflowRunColumns+` FROM v2_workflow_runs
 				WHERE tenant_id = $1 AND id = $2`, tenant, runID))
-			return err
+			if err != nil {
+				return err
+			}
+			return fillWorkflowStarterName(ctx, tx, &run)
 		case WorkflowStatusPending, WorkflowStatusRunning:
 		default:
 			return ErrWorkflowRunState
@@ -395,7 +401,10 @@ func cancelWorkflowRun(ctx context.Context, tx pgx.Tx, tenant, runID string) (Wo
 				finished_at = now(), updated_at = now()
 			WHERE tenant_id = $1 AND id = $2
 			RETURNING `+workflowRunColumns, tenant, runID))
-		return err
+		if err != nil {
+			return err
+		}
+		return fillWorkflowStarterName(ctx, tx, &run)
 	}()
 	return run, err
 }

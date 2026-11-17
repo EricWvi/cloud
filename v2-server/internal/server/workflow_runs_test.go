@@ -80,7 +80,7 @@ func TestWorkflowRunsOverHTTP(t *testing.T) {
 		t.Fatalf("workflow runs = %v", listed)
 	}
 	summary := runs[0].(map[string]any)
-	if summary["version"] != "v1" || summary["id"] != runID || summary["projectId"] != project.ID {
+	if summary["version"] != "v1" || summary["id"] != runID || summary["projectId"] != project.ID || summary["startedByName"] != "" {
 		t.Fatalf("summary = %v", summary)
 	}
 	task, err := s.CreateTask(ctx, tid, user, store.TaskInput{Title: "Owned run", ProjectID: project.ID, Assignee: &store.TaskAssigneeRef{Type: "human", ID: user}})
@@ -150,9 +150,10 @@ func TestWorkflowRunsOverHTTP(t *testing.T) {
 	}
 
 	// The execution bridge owns starting and dispatching; parking is what turns the run into the
-	// derived awaitingInput the page renders. The starter it records is the one member who may
-	// talk to the parked node, so the detail names them.
-	if err := s.SetWorkflowStarter(ctx, tid, runID, me["id"].(string)); err != nil {
+	// derived awaitingInput the page renders. The starter it records owns the node's session and is
+	// the only member who may talk to the parked node, so the detail names them; every other member
+	// of the tenant can still read that session.
+	if err := s.SetWorkflowStarter(ctx, tid, runID, user); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.StartWorkflowRun(ctx, tid, runID); err != nil {
@@ -167,8 +168,16 @@ func TestWorkflowRunsOverHTTP(t *testing.T) {
 	}
 	_, detail = call("GET", "/api/v2/tenants/"+tid+"/workflow-runs/"+runID, nil)
 	run = detail["run"].(map[string]any)
-	if run["status"] != "awaitingInput" || run["startedAt"] == nil || detail["startedBy"] != me["id"] {
-		t.Fatalf("derived status = %v, started by %v", run, detail["startedBy"])
+	if run["status"] != "awaitingInput" || run["startedAt"] == nil || detail["startedBy"] != me["id"] || run["startedByName"] != "Owner" {
+		t.Fatalf("derived status = %v, started by %v (%v)", run, detail["startedBy"], run["startedByName"])
+	}
+	_, byProjectAfterStart := call("GET", "/api/v2/tenants/"+tid+"/workflow-runs?projectId="+project.ID, nil)
+	if got := byProjectAfterStart["runs"].([]any)[0].(map[string]any); got["startedByName"] != "Owner" {
+		t.Fatalf("project runs starter = %v", got)
+	}
+	_, byWorkflowAfterStart := call("GET", base+"/"+id+"/runs", nil)
+	if got := byWorkflowAfterStart["runs"].([]any)[0].(map[string]any); got["startedByName"] != "Owner" {
+		t.Fatalf("workflow runs starter = %v", got)
 	}
 	nodes := detail["nodes"].([]any)
 	if len(nodes) != 1 {

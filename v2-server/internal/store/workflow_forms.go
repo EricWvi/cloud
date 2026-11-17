@@ -80,6 +80,13 @@ func (s *Store) SetWorkflowStarter(ctx context.Context, tenant, runID, user stri
 	return err
 }
 
+// EnsureWorkflowStarter records a starter on a legacy run that predated started_by so team
+// members can read resumed sessions under one consistent starter identity.
+func (s *Store) EnsureWorkflowStarter(ctx context.Context, runID, user string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE v2_workflow_runs SET started_by=$2::uuid WHERE id=$1 AND started_by IS NULL`, runID, user)
+	return err
+}
+
 // OpenWorkflowForm freezes evidence and parks its node in one transaction.
 func (s *Store) OpenWorkflowForm(ctx context.Context, runID, nodeRunID string, in WorkflowForm) (WorkflowForm, error) {
 	var out WorkflowForm

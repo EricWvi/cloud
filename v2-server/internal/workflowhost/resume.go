@@ -83,6 +83,9 @@ func (h *Host) ResumeRun(ctx context.Context, scope server.WorkflowRunScope, run
 	}
 	if owner == "" {
 		owner = scope.UserID
+		if err := h.store.EnsureWorkflowStarter(ctx, runID, owner); err != nil {
+			return store.WorkflowRun{}, fmt.Errorf("persist workflow run starter: %w", err)
+		}
 	}
 	// A run that a sibling failed may still have interactive nodes parked in this process, their
 	// rows pending and their sessions open. Close them before planning, so the resume restarts
