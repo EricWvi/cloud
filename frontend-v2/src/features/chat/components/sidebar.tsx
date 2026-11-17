@@ -22,6 +22,7 @@ import {
   PencilIcon,
   PlusIcon,
   RefreshCwIcon,
+  Settings2Icon,
   SquarePenIcon,
   TriangleAlertIcon,
   Trash2Icon,
@@ -40,6 +41,7 @@ import { type Project, type Session, useChatStore } from '../store'
 import { AgentActivityDots } from './agent-activity-dots'
 import { FadeText } from './fade-text'
 import { NewProjectDialog } from './new-project-dialog'
+import { ProjectTokenDialog } from './project-token-dialog'
 import type { PublishedWorkflow } from '../workflow-run/server-runs'
 import { ProjectRuns, RunWorkflowDialog, RunWorkflowSubmenu } from '../workflow-run/run-sidebar'
 import { subtleScrollbar } from '@/lib/scrollbar'
@@ -159,6 +161,7 @@ function ProjectGroup({ project, dropLine }: { project: Project; dropLine?: 'bef
   // Sortable for the drop targets and keyboard moves only: nothing shifts while dragging.
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, isDragging } = useSortable({ id: project.id })
   const [runWorkflow, setRunWorkflow] = useState<PublishedWorkflow>()
+  const [tokenOpen, setTokenOpen] = useState(false)
 
   return (
     <section ref={setNodeRef} className="relative rounded-md" aria-label={`项目 ${project.name}`} data-dragging={isDragging || undefined}>
@@ -195,6 +198,11 @@ function ProjectGroup({ project, dropLine }: { project: Project; dropLine?: 'bef
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <RunWorkflowSubmenu onPick={setRunWorkflow} />
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => setTokenOpen(true)}>
+                <Settings2Icon />
+                项目设置
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
@@ -210,6 +218,7 @@ function ProjectGroup({ project, dropLine }: { project: Project; dropLine?: 'bef
         </CollapsibleContent>
       </Collapsible>
       <RunWorkflowDialog projectId={project.id} workflow={runWorkflow} onClose={() => setRunWorkflow(undefined)} />
+      <ProjectTokenDialog project={project} open={tokenOpen} onOpenChange={setTokenOpen} />
     </section>
   )
 }

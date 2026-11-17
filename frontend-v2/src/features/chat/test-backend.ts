@@ -90,6 +90,16 @@ export interface ChatBackend {
   refuseSync?: { status: number; data: unknown }
   /** The recorded syncError a failed sync leaves on the project, read back by the page. */
   syncError?: string
+  /** When the listed project last synced successfully. */
+  syncAt?: string
+  /** The caller's workspace role; the page hides token actions for a member of another's project. */
+  role?: 'owner' | 'member'
+  /** Overrides the listed projects' creator, so a member can be tested against someone else's project. */
+  ownerUserId?: string
+  /** Whether the projects carry a configured repository token. */
+  tokenConfigured?: boolean
+  /** When the repository token was last set or cleared. */
+  tokenSetAt?: string
   /** Requests seen, as "METHOD /path". */
   seen: string[]
   bodies: unknown[]
@@ -112,26 +122,28 @@ export function chatBackend(options: { unavailable?: boolean } = {}): ChatBacken
   }
   let next = 0
   const base = `/api/v2/tenants/${tenantId}/chat`
+  const tokenFields = () => ({ repositoryTokenConfigured: state.tokenConfigured ?? false, repositoryTokenSetAt: state.tokenSetAt })
   const route = (config: InternalAxiosRequestConfig) => {
     const url = config.url ?? ''
     const method = config.method?.toUpperCase()
     const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
     if (body !== undefined) state.bodies.push(body)
     if (url === '/api/v1/me') return { status: 200, data: demoUser }
-    if (url === '/api/v1/me/tenants') return { status: 200, data: { items: [{ id: tenantId, name: '演示团队', status: 'active', role: 'owner' }], nextCursor: '' } }
+    if (url === '/api/v1/me/tenants') return { status: 200, data: { items: [{ id: tenantId, name: '演示团队', status: 'active', role: state.role ?? 'owner' }], nextCursor: '' } }
     // One project per page, so the page has to follow nextCursor to see both.
     if (url === `/api/v2/tenants/${tenantId}/projects` && method === 'POST') {
       const refused = state.refuseProject
       state.refuseProject = undefined
       if (refused) return refused
-      const p = { ...project(`p-new-${state.created.length + 1}`, body.name), repositoryUrl: body.repositoryUrl, defaultBranch: body.defaultBranch }
+      const p = { ...project(`p-new-${state.created.length + 1}`, body.name), repositoryUrl: body.repositoryUrl, defaultBranch: body.defaultBranch, ...tokenFields() }
       state.created.push(p)
       return { status: 201, data: p }
     }
     if (url === `/api/v2/tenants/${tenantId}/projects`) {
+      const listed = (id: string, name: string) => ({ ...project(id, name), ownerUserId: state.ownerUserId ?? demoUser.id, syncAt: state.syncAt, syncError: state.syncError, ...tokenFields() })
       return config.params?.after === 'p-cloud'
-        ? { status: 200, data: { items: [project('p-desktop', 'ora-space/desktop'), ...state.created], nextCursor: '' } }
-        : { status: 200, data: { items: [project('p-cloud', 'ora-space/cloud')], nextCursor: 'p-cloud' } }
+        ? { status: 200, data: { items: [listed('p-desktop', 'ora-space/desktop'), ...state.created], nextCursor: '' } }
+        : { status: 200, data: { items: [listed('p-cloud', 'ora-space/cloud')], nextCursor: 'p-cloud' } }
     }
     const projectMatch = url.match(new RegExp(`^/api/v2/tenants/${tenantId}/projects/([^/]+)(/sync)?$`))
     if (projectMatch) {
@@ -144,10 +156,26 @@ export function chatBackend(options: { unavailable?: boolean } = {}): ChatBacken
           state.refuseSync = undefined
           return refused
         }
-        return { status: 200, data: { ...project(id, id), syncAt: at, syncError: state.syncError ?? '' } }
+        return { status: 200, data: { ...project(id, id), syncAt: at, syncError: state.syncError ?? '', ...tokenFields() } }
       }
       if (!sync && method === 'GET') {
-        return { status: 200, data: { ...project(id, id), syncAt: at, syncError: state.syncError ?? '' } }
+        return { status: 200, data: { ...project(id, id), syncAt: at, syncError: state.syncError ?? '', ...tokenFields() } }
+      }
+    }
+    const tokenMatch = url.match(new RegExp(`^/api/v2/tenants/${tenantId}/projects/([^/]+)/repository-token$`))
+    if (tokenMatch) {
+      const id = tokenMatch[1]
+      if (method === 'PUT') {
+        state.tokenConfigured = true
+        state.tokenSetAt = at
+        state.seen.push(`PUT /projects/${id}/repository-token`)
+        return { status: 200, data: { ...project(id, id), ...tokenFields() } }
+      }
+      if (method === 'DELETE') {
+        state.tokenConfigured = false
+        state.tokenSetAt = at
+        state.seen.push(`DELETE /projects/${id}/repository-token`)
+        return { status: 200, data: { ...project(id, id), ...tokenFields() } }
       }
     }
     if (!url.startsWith(base)) return undefined

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, screen, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -339,5 +339,64 @@ describe('chat page', () => {
     const cloud = within(sidebar()).getByRole('region', { name: '项目 ora-space/cloud' })
     await userEvent.click(within(cloud).getByRole('button', { name: '同步 ora-space/cloud' }))
     expect(await within(cloud).findByText(/同步失败：外部分支已删除/)).toBeInTheDocument()
+  })
+
+  it('shows a sync failure recorded by the server as soon as the page loads', async () => {
+    backend.syncError = '上次同步被中断，请重新同步。'
+    await renderReady()
+    const cloud = within(sidebar()).getByRole('region', { name: '项目 ora-space/cloud' })
+    expect(within(cloud).getByText(/同步失败：上次同步被中断，请重新同步。/)).toBeInTheDocument()
+  })
+
+  const openProjectSettings = async (name = 'ora-space/cloud') => {
+    const cloud = within(sidebar()).getByRole('region', { name: `项目 ${name}` })
+    await userEvent.click(within(cloud).getByRole('button', { name: `在 ${name} 新建对话` }))
+    await userEvent.click(await screen.findByRole('menuitem', { name: '项目设置' }))
+    return within(await screen.findByRole('dialog'))
+  }
+
+  it('shows an unconfigured token and sets one without echoing it', async () => {
+    await renderReady()
+    const dialog = await openProjectSettings()
+    expect(dialog.getByText('未配置令牌')).toBeInTheDocument()
+    await userEvent.type(dialog.getByLabelText('仓库令牌（私有仓库选填）'), 's3cr3t')
+    await userEvent.click(dialog.getByRole('button', { name: '设置令牌' }))
+    expect(backend.seen).toContain('PUT /projects/p-cloud/repository-token')
+    expect(backend.bodies.at(-1)).toEqual({ token: 's3cr3t' })
+    expect(await dialog.findByText(/已配置令牌/)).toBeInTheDocument()
+    expect(dialog.getByLabelText('仓库令牌（私有仓库选填）')).toHaveValue('')
+  })
+
+  it('forgets a half-typed token when the dialog closes', async () => {
+    await renderReady()
+    let dialog = await openProjectSettings()
+    await userEvent.type(dialog.getByLabelText('仓库令牌（私有仓库选填）'), 'half-typed')
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    dialog = await openProjectSettings()
+    expect(dialog.getByLabelText('仓库令牌（私有仓库选填）')).toHaveValue('')
+    expect(backend.seen).not.toContain('PUT /projects/p-cloud/repository-token')
+  })
+
+  it('shows the configured token age and clears it after a confirmation', async () => {
+    backend.tokenConfigured = true
+    backend.tokenSetAt = '2026-11-17T00:00:00Z'
+    await renderReady()
+    const dialog = await openProjectSettings()
+    expect(dialog.getByText(/已配置令牌/)).toBeInTheDocument()
+    await userEvent.click(dialog.getByRole('button', { name: '清除令牌' }))
+    await userEvent.click(dialog.getByRole('button', { name: '确认清除？' }))
+    expect(backend.seen).toContain('DELETE /projects/p-cloud/repository-token')
+    expect(await dialog.findByText('未配置令牌')).toBeInTheDocument()
+  })
+
+  it('hides token actions from a member who did not create the project', async () => {
+    backend.role = 'member'
+    backend.ownerUserId = '00000000-0000-4000-8000-0000000000ff'
+    await renderReady()
+    const dialog = await openProjectSettings()
+    expect(dialog.getByText('未配置令牌')).toBeInTheDocument()
+    expect(dialog.queryByRole('button', { name: '设置令牌' })).not.toBeInTheDocument()
+    expect(dialog.queryByRole('button', { name: '清除令牌' })).not.toBeInTheDocument()
   })
 })

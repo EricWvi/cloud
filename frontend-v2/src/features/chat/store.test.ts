@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { demoUser } from '@/test/backend'
 import { emptyConversation } from '@/components/agent-thread/model/types'
 import { agentsOf, emptyDraft, isEnded, newChatKey, resetChatStore, useChatStore } from './store'
 import { type RemoteState, remote } from './remote'
@@ -39,6 +40,21 @@ describe('chat store: backend conversations', () => {
     expect(state().projects.map((p) => p.name)).toEqual(['ora-space/cloud', 'ora-space/desktop'])
     expect(state().sessions.find((s) => s.id === 'c-style')).toMatchObject({ projectId: 'p-cloud', agent: 'OpenCode', model: 'Fixture' })
     expect(state().newChat).toEqual({ projectId: 'p-cloud', agent: 'OpenCode', model: 'Fixture' })
+  })
+
+  it('keeps the sync and token state the server lists with each project', async () => {
+    resetChatStore()
+    backend = chatBackend()
+    backend.syncError = '上次同步被中断，请重新同步。'
+    backend.tokenConfigured = true
+    backend.tokenSetAt = '2026-11-17T00:00:00Z'
+    await state().connect(tenantId, userId)
+    expect(state().projects.find((p) => p.id === 'p-cloud')).toMatchObject({
+      ownerUserId: demoUser.id,
+      syncError: '上次同步被中断，请重新同步。',
+      repositoryTokenConfigured: true,
+      repositoryTokenSetAt: '2026-11-17T00:00:00Z',
+    })
   })
 
   it('marks a conversation whose saved executor is no longer in the catalog', async () => {

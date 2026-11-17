@@ -6,7 +6,7 @@ import type { CreateProject } from '@/lib/projects-api/generated'
 import { applyEvent, isResponding } from '@/components/agent-thread/model/conversation'
 import { applySessionEvent, conversationOf, emptySessionView, type SessionView } from '@/components/agent-thread/model/history'
 import { type Attachment, type Conversation, emptyConversation, type PluginRef } from '@/components/agent-thread/model/types'
-import { type Failure, failureOf, projectFailureOf, remote, type RemoteState, syncFailureOf } from './remote'
+import { type Failure, failureOf, projectFailureOf, remote, type RemoteState, syncFailureOf, tokenFailureOf } from './remote'
 
 /**
  * What the first version of the chat backend can do. The input and the history hide what it
@@ -20,6 +20,8 @@ export interface Project {
   name: string
   /** Where the project's main checkout lives, for projects the person added. */
   path?: string
+  /** The user who created the project; only they and an owner may change its token. */
+  ownerUserId?: string
   /** The last successful manual sync, if any. */
   syncAt?: string
   /** A user-facing reason the last sync failed or was interrupted, if it did. */
@@ -30,6 +32,8 @@ export interface Project {
   syncRunning?: boolean
   /** Whether a private-repository token is configured. */
   repositoryTokenConfigured?: boolean
+  /** When the private-repository token was last set or cleared. */
+  repositoryTokenSetAt?: string
 }
 
 export interface Session {
@@ -154,6 +158,16 @@ interface State {
    * Resolves to why it failed, if it did; the failure reason stays on the project for the sidebar.
    */
   syncProject: (id: string) => Promise<string | undefined>
+  /**
+   * Replaces the project's private-repository token and refreshes its token state.
+   * Resolves to why it failed, if it did.
+   */
+  setRepositoryToken: (id: string, token: string) => Promise<string | undefined>
+  /**
+   * Clears the project's private-repository token so later pulls are anonymous.
+   * Resolves to why it failed, if it did.
+   */
+  clearRepositoryToken: (id: string) => Promise<string | undefined>
   /** Moves project `id` to where `overId` is, as a drag and drop does. */
   moveProject: (id: string, overId: string) => void
   send: (id: string, draft: Draft) => void
@@ -410,7 +424,19 @@ export const useChatStore = create<State>()(
           }
           // An old account's request may finish after a switch. Never let it replace the new state.
           if (version !== connectionVersion || !isCurrent(tenantId, userId)) return
-          const projects = loaded.projects.map((p): Project => ({ id: p.id, name: p.name }))
+          // The project keeps its sync and token state so the sidebar shows the server-recorded
+          // failure reason, an in-flight sync, and whether a token is configured after a reload.
+          const projects = loaded.projects.map((p): Project => ({
+            id: p.id,
+            name: p.name,
+            ownerUserId: p.ownerUserId,
+            syncAt: p.syncAt,
+            syncError: p.syncError,
+            syncForcePushed: p.syncForcePushed,
+            syncRunning: p.syncRunning,
+            repositoryTokenConfigured: p.repositoryTokenConfigured,
+            repositoryTokenSetAt: p.repositoryTokenSetAt,
+          }))
           const order = loaded.projectOrder.length ? loaded.projectOrder : projects.map((p) => p.id)
           const first = loaded.executors[0]
           set((s) => ({
@@ -576,6 +602,32 @@ export const useChatStore = create<State>()(
               // Keep the last known state; the toast already says it failed.
             }
             return syncFailureOf(error)
+          }
+        },
+        setRepositoryToken: async (id, token) => {
+          const { tenantId: tid, userId } = get()
+          if (!tid || !userId) return '还没连上后端，请稍后再试。'
+          try {
+            const project = await remote.setRepositoryToken(tid, id, token)
+            if (!isCurrent(tid, userId)) return undefined
+            set((s) => ({ projects: s.projects.map((p) => (p.id === project.id ? project : p)) }))
+            return undefined
+          } catch (error) {
+            if (!isCurrent(tid, userId)) return undefined
+            return tokenFailureOf(error)
+          }
+        },
+        clearRepositoryToken: async (id) => {
+          const { tenantId: tid, userId } = get()
+          if (!tid || !userId) return '还没连上后端，请稍后再试。'
+          try {
+            const project = await remote.clearRepositoryToken(tid, id)
+            if (!isCurrent(tid, userId)) return undefined
+            set((s) => ({ projects: s.projects.map((p) => (p.id === project.id ? project : p)) }))
+            return undefined
+          } catch (error) {
+            if (!isCurrent(tid, userId)) return undefined
+            return tokenFailureOf(error)
           }
         },
         moveProject: (id, overId) => {
