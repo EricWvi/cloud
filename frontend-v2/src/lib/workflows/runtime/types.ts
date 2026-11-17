@@ -423,6 +423,9 @@ export type WorkflowNodeInteractiveBlockerReason =
   | "turn_not_completed"
   | "structured_output";
 
+/** Why the starter's last message to an interactive node never ran. */
+export type WorkflowNodeInteractiveTurnError = "not_delivered";
+
 /**
  * v2's summary of an interactive Agent node's session, written as `payload.interactive` each time
  * the node parks (desktop's legacy end_turn completion only; v2 has no completion snapshot).
@@ -437,6 +440,13 @@ export interface WorkflowNodeInteractiveSession {
   blocker?: { reason: WorkflowNodeInteractiveBlockerReason | string; detail: string };
   /** The answer completing would accept: the last turn that ended normally. */
   answer?: string;
+  /** Messages the starter has sent to the node so far, counting the one being run. */
+  sent?: number;
+  /**
+   * Message number `sent` was accepted and then never reached the session, so it did not run.
+   * v2 clears it when the next message is accepted.
+   */
+  lastTurnError?: WorkflowNodeInteractiveTurnError | string;
 }
 
 /** Structured failure persisted on a node run as `payload.error_detail`. */

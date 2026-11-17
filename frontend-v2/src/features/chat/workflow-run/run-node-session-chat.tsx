@@ -57,7 +57,7 @@ export function RunNodeSessionChat({
       </div>
       {interactive && (interactive.status === 'running' || interactive.status === 'awaiting_input') && (
         <div className="shrink-0">
-          <RunNodeSessionActions target={interactive} />
+          <RunNodeSessionActions key={session?.nodeRunId} target={interactive} />
         </div>
       )}
       {sessionActions && <div className="flex shrink-0 items-center pt-1">{sessionActions}</div>}

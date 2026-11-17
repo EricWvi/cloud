@@ -138,6 +138,14 @@ describe('toGraphWorkflowRun', () => {
     expect(run.nodeStates.start!.interactiveSession).toBeUndefined()
   })
 
+  it('reads that the starter\'s last message to a parked node was not delivered', () => {
+    const summary = { turns: 1, session_ended: false, completable: true, answer: '初稿' }
+    const parked = (interactive: Record<string, unknown>) =>
+      toGraphWorkflowRun(detail({ status: 'awaitingInput' }, [nodeRun({ id: 'nr-a', nodeId: 'a', nodeType: 'agent', status: 'pending', sessionId: 's', finishedAt: null, payload: JSON.stringify({ interactive }) })]), definition).nodeStates.a!.interactiveSession
+    expect(parked({ ...summary, sent: 2, last_turn_error: 'not_delivered' })).toEqual({ turns: 1, sent: 2, sessionEnded: false, completable: true, answer: '初稿', lastTurnError: 'not_delivered' })
+    expect(parked(summary)).toEqual({ turns: 1, sessionEnded: false, completable: true, answer: '初稿' })
+  })
+
   it('reads a failure detail written with the engine\'s snake_case keys', () => {
     const run = toGraphWorkflowRun(
       detail({ status: 'failed', error: '会话失败' }, [

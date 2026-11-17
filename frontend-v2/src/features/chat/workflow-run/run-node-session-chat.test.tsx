@@ -1,5 +1,6 @@
 import '@/lib/workflows/test/dom'
-import { render, screen } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { I18nextProvider } from 'react-i18next'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Conversation, emptyConversation } from '@/components/agent-thread/model/types'
@@ -7,6 +8,7 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { createWorkflowI18n } from '@/lib/workflows/host/i18n'
 import type { GraphWorkflowNodeStatus } from '@/lib/workflows/runtime'
 import { RunNodeSessionChat } from './run-node-session-chat'
+import { RunStarterContext } from './run-starter'
 import { workflowRunTranslations } from './translations'
 
 const stream = vi.hoisted(() => ({ conversation: null as Conversation | null, refused: false }))
@@ -64,5 +66,35 @@ describe('RunNodeSessionChat before the first turn', () => {
   it('never shows a node that has stopped working as preparing', () => {
     view('retry_waiting')
     expect(screen.queryByText('正在准备…')).toBeNull()
+  })
+})
+
+describe('RunNodeSessionChat on an interactive node', () => {
+  it('starts the starter\'s composer afresh for a new attempt of the node', () => {
+    const client = new QueryClient()
+    const attempt = (nodeRunId: string) => (
+      <I18nextProvider i18n={runI18n}>
+        <QueryClientProvider client={client}>
+          <TooltipProvider>
+            <RunStarterContext.Provider value={true}>
+              <RunNodeSessionChat
+                conversation={[]}
+                status="awaiting_input"
+                session={{ runId: 'run-1', nodeRunId }}
+                interactive={{ runId: 'run-1', nodeId: 'a', status: 'awaiting_input', session: { turns: 1, sessionEnded: false, completable: true } }}
+              />
+            </RunStarterContext.Provider>
+          </TooltipProvider>
+        </QueryClientProvider>
+      </I18nextProvider>
+    )
+    const composer = () => screen.getByRole('textbox', { name: workflowRunTranslations['zh-CN']['workflowRun.v2.interactive.composerLabel'] }) as HTMLTextAreaElement
+    const shown = render(attempt('node-run-1'))
+    fireEvent.change(composer(), { target: { value: '上一次尝试里没发出的话' } })
+    // The same attempt keeps what the starter typed; a new attempt is a new conversation.
+    shown.rerender(attempt('node-run-1'))
+    expect(composer().value).toBe('上一次尝试里没发出的话')
+    shown.rerender(attempt('node-run-2'))
+    expect(composer().value).toBe('')
   })
 })

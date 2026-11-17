@@ -537,6 +537,9 @@ export const workflowRunTranslations = {
     "workflowRun.v2.interactive.send": "发送",
     "workflowRun.v2.interactive.stop": "停止本轮",
     "workflowRun.v2.interactive.complete": "完成",
+    "workflowRun.v2.interactive.undelivered": "上一条消息未送达，请重发。",
+    "workflowRun.v2.interactive.undeliveredEnded": "上一条消息未送达，会话已结束，不能重发。",
+    "workflowRun.v2.interactive.restoreDraft": "重新填入",
     "workflowRun.v2.interactive.sessionEnded":
       "会话已结束（停止了本轮或 Agent 断开），不能继续对话；可以用最后一次正常结束的回答完成这一步。",
     "workflowRun.v2.interactive.sessionEndedBlocked":
@@ -1142,6 +1145,9 @@ export const workflowRunTranslations = {
     "workflowRun.v2.interactive.send": "Send",
     "workflowRun.v2.interactive.stop": "Stop this turn",
     "workflowRun.v2.interactive.complete": "Complete",
+    "workflowRun.v2.interactive.undelivered": "Your last message was not delivered. Send it again.",
+    "workflowRun.v2.interactive.undeliveredEnded": "Your last message was not delivered, and the session has ended, so it cannot be sent again.",
+    "workflowRun.v2.interactive.restoreDraft": "Put it back",
     "workflowRun.v2.interactive.sessionEnded":
       "The session has ended (the turn was stopped or the agent disconnected), so the conversation cannot continue. You can complete the step with the last answer that ended normally.",
     "workflowRun.v2.interactive.sessionEndedBlocked":
