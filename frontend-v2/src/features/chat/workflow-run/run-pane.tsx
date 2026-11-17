@@ -317,6 +317,9 @@ function RunWorkspace({ tenantId, run, readOnly, hostedWorkspace, leading, refre
           <FadeText text={run.name} />
           {run.taskId && <Link className="text-xs underline shrink-0" to={`/collaboration/tasks/${run.taskId}?tab=workflows&workflow=${run.id}`}>返回任务</Link>}
         </h2>
+        {run.startedByName && (
+          <span className="shrink-0 text-xs text-muted-foreground">由 {run.startedByName} 发起</span>
+        )}
         <Badge variant="outline" className={cn('gap-1.5', tone.badge)}>
           <span className={cn('size-1.5 rounded-full', tone.dot)} />
           {runStatusLabel(run.status)}

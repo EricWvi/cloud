@@ -147,7 +147,8 @@ export function serveRuns(tenantId: string, backend: LocalWorkflowBackend): RunS
       const at = now()
       const run: WorkflowRun = {
         id: `run-${++ids}`, workflowId: created[1]!, snapshotId: published.id, projectId: body.projectId as string,
-        name: (body.name as string | undefined) ?? '', status: 'pending', state: JSON.stringify({ current_nodes: [] }),
+        name: (body.name as string | undefined) ?? '', status: 'pending', startedByName: '',
+        state: JSON.stringify({ current_nodes: [] }),
         input: null, output: null, error: null, startedAt: null, finishedAt: null, createdAt: at, updatedAt: at,
       }
       server.runs.set(run.id, { detail: { run, nodes: [], scopes: [], conditionDecisions: {}, iterationConditionDecisions: {}, variables: [], failedAttempts: [], startedBy: null }, graph: published.graph, version: published.version })
@@ -157,7 +158,10 @@ export function serveRuns(tenantId: string, backend: LocalWorkflowBackend): RunS
       const projectId = (config.params as { projectId?: string } | undefined)?.projectId
       const runs = [...server.runs.values()]
         .filter(({ detail }) => projectId === undefined || detail.run.projectId === projectId)
-        .map(({ detail: { run }, version }) => ({ id: run.id, name: run.name, projectId: run.projectId, workflowId: run.workflowId, version, status: run.status, startedAt: run.startedAt, finishedAt: run.finishedAt, createdAt: run.createdAt }))
+        .map(({ detail: { run }, version }) => ({
+          id: run.id, name: run.name, projectId: run.projectId, workflowId: run.workflowId, version, status: run.status,
+          startedByName: run.startedByName, startedAt: run.startedAt, finishedAt: run.finishedAt, createdAt: run.createdAt,
+        }))
       return respond(config, 200, { runs })
     }
     const [, runId, action = ''] = url.slice(runsBase.length).match(/^\/([^/]+)(\/[a-z-]+)?$/) ?? []
@@ -182,6 +186,8 @@ export function serveRuns(tenantId: string, backend: LocalWorkflowBackend): RunS
     if (action === '/start') {
       if (run.status !== 'pending') return refuse(config, 400, 'workflow_run_start_failed')
       run.status = 'running'
+      entry.detail.startedBy = entry.detail.startedBy || 'user-me'
+      run.startedByName = run.startedByName || '演示用户'
       run.startedAt = now()
       execute(entry)
       return respond(config, 200, { run })

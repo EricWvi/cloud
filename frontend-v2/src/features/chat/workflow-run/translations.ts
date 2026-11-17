@@ -556,7 +556,7 @@ export const workflowRunTranslations = {
       "回答不符合这个节点要求的结构化输出，请继续对话让 Agent 按格式回答后再完成。",
     "workflowRun.v2.sessionWaiting": "正在等待 Agent 的会话…",
     "workflowRun.v2.sessionRefused":
-      "只有启动这次运行的人能查看实时会话；节点完成后会显示任务和回答。",
+      "无法读取这个节点的实时会话；节点完成后会显示任务和回答。",
   },
   "en-US": {
     "workflowRun.loopExit.completed": "Loop ended through an exit node",
@@ -1166,6 +1166,6 @@ export const workflowRunTranslations = {
       "The answer does not match this node's structured output. Continue the conversation until the agent answers in that format.",
     "workflowRun.v2.sessionWaiting": "Waiting for the Agent's session…",
     "workflowRun.v2.sessionRefused":
-      "Only whoever started this run can follow its live session; the task and answer show once the node finishes.",
+      "Could not follow this node's live session; the task and answer show once the node finishes.",
   },
 } as const;

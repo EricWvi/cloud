@@ -321,6 +321,8 @@ export interface WorkflowRun {
   projectId: string;
   name: string;
   status: WorkflowRunStatus;
+  /** Starter display name, or empty before the run starts or when unknown. The starter id is the run detail envelope's `startedBy`. */
+  startedByName: string;
   /** @nullable */
   state: string | null;
   /** @nullable */
@@ -356,6 +358,8 @@ export interface WorkflowRunSummary {
   workflowId: string;
   version: string;
   status: WorkflowRunSummaryStatus;
+  /** Starter display name, or empty before the run starts or when unknown. */
+  startedByName: string;
   /** @nullable */
   startedAt: number | null;
   /** @nullable */
@@ -2799,7 +2803,7 @@ export function useStreamWorkflowRunEvents<TData = Awaited<ReturnType<typeof str
 
 
 /**
- * The same stream as chat.openapi.json's conversation events: each message's id is its session sequence and its data a ChatEvent (a turn_ended carries its prompt); an `end` event follows session_ended and `failure` (data `{code}`) reports a broken stream. The session is read in the caller's own scope, so only whoever started the run can read it. 404 workflow_node_run_not_found when the attempt is not this run's; 404 workflow_node_session_not_found before the attempt was dispatched or when the session is not the caller's.
+ * The same stream as chat.openapi.json's conversation events: each message's id is its session sequence and its data a ChatEvent (a turn_ended carries its prompt); an `end` event follows session_ended and `failure` (data `{code}`) reports a broken stream. Any member of the tenant can follow the session; the server checks tenant membership and reads the shared execution session under the run starter's scope. 404 workflow_node_run_not_found when the attempt is not this run's; 404 workflow_node_session_not_found before the attempt was dispatched.
  * @summary Follow one node attempt's session events, as Server-Sent Events
  */
 export const streamWorkflowNodeRunEvents = (

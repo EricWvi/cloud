@@ -225,11 +225,18 @@ export interface RunListItem {
   id: string
   name: string
   status: GraphWorkflowRunStatus
+  startedByName?: string
   createdAt: string
 }
 
 function listItem(summary: WorkflowRunSummary): RunListItem {
-  return { id: summary.id, name: summary.name, status: toDisplayRunStatus(summary.status), createdAt: new Date(summary.createdAt).toISOString() }
+  return {
+    id: summary.id,
+    name: summary.name,
+    status: toDisplayRunStatus(summary.status),
+    startedByName: summary.startedByName,
+    createdAt: new Date(summary.createdAt).toISOString(),
+  }
 }
 
 /** A project's runs, newest first; read again while any of them still executes. */
@@ -239,7 +246,13 @@ export function projectRunsQuery(tenantId: string, projectId: string) {
     staleTime: 0,
     queryFn: async ({ signal }) => {
       const { runs } = await call(() => listWorkflowRuns(tenantId, { projectId }, undefined, signal))
-      const local = cdaseProjectRuns(tenantId, projectId).map(({ id, name, status, createdAt }) => ({ id, name, status, createdAt }))
+      const local = cdaseProjectRuns(tenantId, projectId).map(({ id, name, status, startedByName, createdAt }) => ({
+        id,
+        name,
+        status,
+        startedByName,
+        createdAt,
+      }))
       return [...local, ...runs.map(listItem)].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     },
     refetchInterval: (query) => (query.state.data?.some((run) => !isTerminalRunStatus(run.status)) ? runRefreshMs.interval : false),

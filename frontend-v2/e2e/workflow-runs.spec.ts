@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { signIn } from './login.ts'
+import { ownerName, signIn, signInAsInvitedMember } from './login.ts'
 
 // With prepared Node assets (`task v2:node:prepare`, then V2_NODE_ASSETS_DIR) v2-server runs real
 // Agents on the fixture model; without them, as in CI, it has no Agent to run.
@@ -191,6 +191,8 @@ test('workflow runs: a Condition takes one branch and the other shows as inactiv
   await start.getByLabel('初始 Prompt').fill('客户反馈导出按钮偶尔无响应')
   await start.getByRole('button', { name: '启动' }).click()
   await expect(row(realAgents ? '成功' : '失败')).toBeVisible({ timeout: 150_000 })
+  await expect(pane.getByText(`由 ${ownerName} 发起`)).toBeVisible()
+  await expect(row(realAgents ? '成功' : '失败')).toContainText(`由 ${ownerName} 发起`)
 
   await pane.getByRole('button', { name: '全图', exact: true }).click()
   const overview = pane.getByLabel('工作流全图俯瞰')
@@ -219,4 +221,115 @@ test('workflow runs: a Condition takes one branch and the other shows as inactiv
   await pane.getByRole('button', { name: '打开节点详情' }).click()
   await expect(pane.getByLabel('实际执行').filter({ visible: true }).first()).toContainText('· Fixture')
   await screenshot(page, testInfo.outputPath('s2-branch-agent-details.png'))
+})
+
+test('workflow runs: another workspace member sees starter, full live and replayed node session, and cross-tenant stays 404', async ({ browser, page }, testInfo) => {
+  test.setTimeout(240_000)
+  await page.goto('/chat')
+  await signIn(page)
+
+  const tenantId = ((await (await page.request.get('/api/v1/me/tenants')).json()) as { items: { id: string }[] }).items[0]!.id
+  const suffix = Date.now().toString(36)
+  const name = `双人协作 ${suffix}`
+  const runName = `双人可见运行 ${suffix}`
+  const created = await page.request.post(`/api/v2/tenants/${tenantId}/workflows`, { data: { name, graph: chain } })
+  expect(created.status()).toBe(201)
+  const workflowId = ((await created.json()) as { draft: { workflowId: string } }).draft.workflowId
+  expect((await page.request.post(`/api/v2/tenants/${tenantId}/workflows/${workflowId}/publish`, { data: { version: 'v1' } })).ok()).toBe(true)
+
+  await page.reload()
+  await page.getByRole('button', { name: '选择项目' }).click()
+  await page.getByRole('option', { name: 'Demo', exact: true }).click()
+  const createdRunResponse = page.waitForResponse((r) => r.request().method() === 'POST' && new RegExp(`/workflows/${workflowId}/runs$`).test(new URL(r.url()).pathname))
+  const demo = page.getByRole('complementary', { name: '聊天记录' }).getByRole('region', { name: '项目 Demo' })
+  await page.getByRole('button', { name: '运行工作流', exact: true }).click()
+  await page.getByRole('menuitem', { name: new RegExp(name) }).click()
+  const dialog = page.getByRole('dialog', { name: '运行工作流' })
+  await dialog.getByLabel('运行名称').fill(runName)
+  await dialog.getByRole('button', { name: '创建运行' }).click()
+  const runId = ((await (await createdRunResponse).json()) as { run: { id: string } }).run.id
+
+  const pane = page.getByRole('region', { name: '工作流运行' })
+  await expect(pane.getByRole('heading', { name: runName })).toBeVisible()
+  await expect(pane.getByText(/由 .+ 发起/)).toHaveCount(0)
+
+  const colleagueContext = await browser.newContext()
+  const colleague = await colleagueContext.newPage()
+  try {
+    await signInAsInvitedMember(colleague, `/chat?run=${encodeURIComponent(runId)}`)
+    const colleaguePane = colleague.getByRole('region', { name: '工作流运行' })
+    await expect(colleaguePane.getByRole('heading', { name: runName })).toBeVisible({ timeout: 30_000 })
+    const colleagueDemo = colleague.getByRole('complementary', { name: '聊天记录' }).getByRole('region', { name: '项目 Demo' })
+    const colleagueRow = (status: string) => colleagueDemo.getByRole('button', { name: `工作流运行 ${runName}（${status}）` })
+    await expect(colleagueRow('未运行')).toBeVisible()
+
+    // Owner starts the run while colleague is watching, so colleague observes both live and finished states.
+    await pane.getByRole('button', { name: '启动' }).click()
+    const start = page.getByRole('dialog')
+    await start.getByLabel('初始 Prompt').fill('请检查双人节点会话可见性')
+    await start.getByRole('button', { name: '启动' }).click()
+
+    await expect(pane.getByText(`由 ${ownerName} 发起`)).toBeVisible()
+    await expect(demo.getByRole('button', { name: new RegExp(`工作流运行 ${runName}（`) })).toContainText(`由 ${ownerName} 发起`)
+
+    await expect(colleaguePane.getByText(`由 ${ownerName} 发起`)).toBeVisible({ timeout: 15_000 })
+    await expect(colleagueDemo.getByRole('button', { name: new RegExp(`工作流运行 ${runName}（`) })).toContainText(`由 ${ownerName} 发起`)
+
+    if (!realAgents) {
+      await expect(colleagueRow('失败')).toBeVisible({ timeout: 60_000 })
+      await expect(colleagueRow('失败')).toContainText(`由 ${ownerName} 发起`)
+      await colleague.reload()
+      await expect(colleaguePane.getByRole('heading', { name: runName })).toBeVisible({ timeout: 30_000 })
+      await expect(colleaguePane.getByText(`由 ${ownerName} 发起`)).toBeVisible()
+      await expect(colleagueRow('失败')).toContainText(`由 ${ownerName} 发起`)
+      await colleaguePane.getByRole('button', { name: '全图', exact: true }).click()
+      await colleaguePane.getByLabel('工作流全图俯瞰').getByText('起草', { exact: true }).click()
+      await colleaguePane.getByRole('button', { name: '查看节点会话' }).click()
+      await expect(colleaguePane.getByText(/只有启动这次运行的人能查看实时会话/)).toHaveCount(0)
+    } else {
+      // Wait for 起草's session stream to become active while the workflow runs or finishes, and read full session as colleague.
+      await colleaguePane.getByRole('button', { name: '全图', exact: true }).click()
+      await expect(colleaguePane.getByLabel('工作流全图俯瞰').getByText('起草', { exact: true })).toBeVisible()
+      await colleaguePane.getByLabel('工作流全图俯瞰').getByText('起草', { exact: true }).click()
+      await colleaguePane.getByRole('button', { name: '查看节点会话' }).click()
+      await expect(colleaguePane.getByText(/根据需求起草方案：请检查双人节点会话可见性/)).toBeVisible({ timeout: 60_000 })
+      await expect(colleaguePane.getByText('<workspace_root>', { exact: false }).first()).toBeVisible({ timeout: 60_000 })
+      await expect(colleaguePane.getByText(/只有启动这次运行的人能查看实时会话/)).toHaveCount(0)
+      await screenshot(colleague, testInfo.outputPath('member-live-session.png'))
+
+      await expect(colleagueRow('成功')).toBeVisible({ timeout: 150_000 })
+      await screenshot(colleague, testInfo.outputPath('member-finished-header-sidebar.png'))
+      await colleaguePane.getByRole('button', { name: '全图', exact: true }).click()
+      await colleaguePane.getByLabel('工作流全图俯瞰').getByText('审阅', { exact: true }).click()
+      await colleaguePane.getByRole('button', { name: '查看节点会话' }).click()
+      await expect(colleaguePane.getByText(/审阅上一步的方案：V2 fixture complete\./)).toBeVisible({ timeout: 30_000 })
+      const toEnd = colleaguePane.getByRole('button', { name: '滚动到底部' })
+      if (await toEnd.isVisible()) await toEnd.click()
+      await expect(colleaguePane.getByText(/v2 fixture tool executed/).first()).toBeVisible()
+      await expect(colleaguePane.getByText(/只有启动这次运行的人能查看实时会话/)).toHaveCount(0)
+
+      // Reloading the page keeps starter display and full session replay for the non-starter colleague.
+      await colleague.reload()
+      await expect(colleaguePane.getByRole('heading', { name: runName })).toBeVisible({ timeout: 30_000 })
+      await expect(colleaguePane.getByText(`由 ${ownerName} 发起`)).toBeVisible()
+      await expect(colleagueRow('成功')).toContainText(`由 ${ownerName} 发起`)
+      await colleaguePane.getByRole('button', { name: '全图', exact: true }).click()
+      await colleaguePane.getByLabel('工作流全图俯瞰').getByText('审阅', { exact: true }).click()
+      await colleaguePane.getByRole('button', { name: '查看节点会话' }).click()
+      await expect(colleaguePane.getByText(/审阅上一步的方案：V2 fixture complete\./)).toBeVisible({ timeout: 30_000 })
+      const toEndAfterReload = colleaguePane.getByRole('button', { name: '滚动到底部' })
+      if (await toEndAfterReload.isVisible()) await toEndAfterReload.click()
+      await expect(colleaguePane.getByText(/v2 fixture tool executed/).first()).toBeVisible()
+      await expect(colleaguePane.getByText(/只有启动这次运行的人能查看实时会话/)).toHaveCount(0)
+      await screenshot(colleague, testInfo.outputPath('member-reloaded-session.png'))
+    }
+
+    // Cross-tenant requests remain rejected with 404.
+    const crossRun = await colleague.request.get(`/api/v2/tenants/00000000-0000-0000-0000-000000000000/workflow-runs/${runId}`)
+    expect(crossRun.status()).toBe(404)
+    const crossEvents = await colleague.request.get(`/api/v2/tenants/00000000-0000-0000-0000-000000000000/workflow-runs/${runId}/nodes/00000000-0000-4000-8000-000000000000/events`)
+    expect(crossEvents.status()).toBe(404)
+  } finally {
+    await colleagueContext.close()
+  }
 })

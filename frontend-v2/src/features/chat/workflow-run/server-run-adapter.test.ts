@@ -35,7 +35,7 @@ function graphNode(id: string, kind: (typeof definition.nodes)[number]['data']['
 function detail(over: Partial<WorkflowRunDetail['run']>, nodes: WorkflowNodeRun[], conditionDecisions: Record<string, string> = {}): WorkflowRunDetail {
   return {
     run: {
-      id: 'run', workflowId: 'wf', snapshotId: 'snap', projectId: 'p', name: '运行', status: 'running', state: '{"current_nodes":["a"]}',
+      id: 'run', workflowId: 'wf', snapshotId: 'snap', projectId: 'p', name: '运行', status: 'running', startedByName: '', state: '{"current_nodes":["a"]}',
       input: '需求', output: null, error: null, startedAt: 1_000, finishedAt: null, createdAt: 500, updatedAt: 2_000,
       ...over,
     },
@@ -516,5 +516,12 @@ describe('attempts a resume from failure replaced', () => {
     expect(labels([again], [3])).toEqual([[3, undefined]])
     const adjacent = nodeRun({ id: 'a4', nodeId: 'a', nodeType: 'agent', status: 'failed', payload: JSON.stringify({ error_detail: { kind: 'session', attempt: 4 } }) })
     expect(labels([adjacent], [3])).toEqual([[3, 'manual_resume']])
+  })
+
+  it('preserves the starter identity and display name on the adapted run', () => {
+    const graph = normalizeWorkflowDefinition({ ...definition, nodes: [graphNode('start', 'start'), graphNode('a', 'agent')], edges: [{ id: 'e1', source: 'start', target: 'a' }] })
+    const adapted = toGraphWorkflowRun({ ...detail({ startedByName: 'Alice' }, []), startedBy: 'user-alice' }, graph)
+    expect(adapted.startedBy).toBe('user-alice')
+    expect(adapted.startedByName).toBe('Alice')
   })
 })

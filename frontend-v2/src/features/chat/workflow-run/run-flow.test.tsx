@@ -149,6 +149,8 @@ describe('workflow runs in chat', () => {
     await user.click(within(start).getByRole('button', { name: '启动' }))
     expect(within(pane).getByRole('button', { name: '舞台' })).toHaveAttribute('aria-pressed', 'true')
     await waitFor(() => expect(within(project()).getByRole('button', { name: '工作流运行 审查 cloud#210（成功）' })).toBeInTheDocument(), { timeout: 25_000 })
+    expect(within(pane).getByText('由 演示用户 发起')).toBeInTheDocument()
+    expect(within(within(project()).getByRole('button', { name: '工作流运行 审查 cloud#210（成功）' })).getByText('由 演示用户 发起')).toBeInTheDocument()
     // The run went pending → running → succeeded under polling; its frozen graph was analyzed once.
     expect(workflows.seen.filter((request) => request.endsWith('/workflows/analyze'))).toHaveLength(1)
     expect(await within(pane).findByText('运行完成')).toBeInTheDocument()
@@ -418,24 +420,57 @@ describe('workflow runs in chat', () => {
     expect(stream.closed).toBe(true)
   }, 30_000)
 
-  it("tells a member that a running node's live session belongs to whoever started the run", async () => {
+  it('lets another workspace member see the starter and follow the full live node session', async () => {
     runs.hold = true
     const user = userEvent.setup()
     await renderPage()
     await createRun(user, '别人的运行')
     const pane = await screen.findByRole('region', { name: '工作流运行' })
     await within(pane).findByRole('heading', { level: 2, name: '别人的运行' }, { timeout: 10_000 })
+    const [entry] = [...runs.runs.values()]
+    entry!.detail.startedBy = 'user-alice'
+    entry!.detail.run.startedByName = '爱丽丝'
+    await user.click(within(pane).getByRole('button', { name: '启动' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '启动' }))
+
+    expect(await within(pane).findByText('由 爱丽丝 发起')).toBeInTheDocument()
+    const row = within(project()).getByRole('button', { name: '工作流运行 别人的运行（运行中）' })
+    expect(within(row).getByText('由 爱丽丝 发起')).toBeInTheDocument()
+
+    await user.click(await within(pane).findByRole('button', { name: '查看节点会话' }))
+    expect(within(pane).getByText('正在准备…')).toBeInTheDocument()
+
+    const attempt = entry!.detail.nodes.find((n) => n.nodeType === 'agent')!
+    const stream = FakeEventSource.all.find((s) => s.url.endsWith(`/nodes/${attempt.id}/events`))!
+    act(() => {
+      stream.emit({
+        kind: 'history_snapshot',
+        history: { records: [line.user(1, '请审查变更'), line.say(2, '正在检查差异…')], incomplete: true },
+      })
+    })
+    expect(await within(pane).findByText('请审查变更')).toBeInTheDocument()
+    expect(within(pane).getByText('正在检查差异…')).toBeInTheDocument()
+    expect(within(pane).queryByText(/只有启动这次运行的人能查看实时会话/)).not.toBeInTheDocument()
+  }, 30_000)
+
+  it('shows an unavailable notice when a node session stream closes before any event arrives', async () => {
+    runs.hold = true
+    const user = userEvent.setup()
+    await renderPage()
+    await createRun(user, '失效会话的运行')
+    const pane = await screen.findByRole('region', { name: '工作流运行' })
+    await within(pane).findByRole('heading', { level: 2, name: '失效会话的运行' }, { timeout: 10_000 })
     await user.click(within(pane).getByRole('button', { name: '启动' }))
     await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '启动' }))
     await user.click(await within(pane).findByRole('button', { name: '查看节点会话' }))
     expect(within(pane).getByText('正在准备…')).toBeInTheDocument()
 
-    // v2-server answers 404 to anyone but the run's starter; the browser closes the stream for good.
     const [entry] = [...runs.runs.values()]
     const attempt = entry!.detail.nodes.find((n) => n.nodeType === 'agent')!
     const stream = FakeEventSource.all.find((s) => s.url.endsWith(`/nodes/${attempt.id}/events`))!
     act(() => stream.refuse())
-    expect(within(pane).getByText('只有启动这次运行的人能查看实时会话；节点完成后会显示任务和回答。')).toBeInTheDocument()
+    expect(within(pane).getByText('无法读取这个节点的实时会话；节点完成后会显示任务和回答。')).toBeInTheDocument()
+    expect(within(pane).queryByText(/只有启动这次运行的人能查看实时会话/)).not.toBeInTheDocument()
   }, 30_000)
 
   it('stops a run that is still executing', async () => {
