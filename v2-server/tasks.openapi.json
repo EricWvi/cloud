@@ -2039,7 +2039,8 @@
             "type": "string",
             "enum": [
               "user",
-              "agent"
+              "agent",
+              "workflow"
             ]
           },
           "id": {
@@ -2062,11 +2063,68 @@
             "type": "string",
             "enum": [
               "user",
-              "agent"
+              "agent",
+              "workflow"
             ]
           },
           "id": {
             "type": "string"
+          }
+        }
+      },
+      "TaskCommentWorkflowRun": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "workflowId",
+          "workflowName",
+          "version",
+          "status",
+          "output",
+          "error",
+          "deleted",
+          "createdAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "workflowId": {
+            "type": "string"
+          },
+          "workflowName": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "awaitingInput",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "interrupted"
+            ]
+          },
+          "output": {
+            "type": "string",
+            "nullable": true
+          },
+          "error": {
+            "type": "string",
+            "nullable": true
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -2108,6 +2166,9 @@
           "runId": {
             "type": "string",
             "description": "The run the comment was sent to as a turn; empty for a plain comment."
+          },
+          "workflowRun": {
+            "$ref": "#/components/schemas/TaskCommentWorkflowRun"
           },
           "createdAt": {
             "type": "string",
@@ -2200,6 +2261,32 @@
           }
         }
       },
+      "TaskCommentWorkflowInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workflowId"
+        ],
+        "properties": {
+          "workflowId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "snapshotId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "input": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 4000
+          },
+          "values": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
       "TaskCommentCreate": {
         "type": "object",
         "additionalProperties": false,
@@ -2226,6 +2313,9 @@
           "executorId": {
             "type": "string",
             "maxLength": 200
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/TaskCommentWorkflowInput"
           }
         }
       },

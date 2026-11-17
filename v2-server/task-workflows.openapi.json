@@ -345,7 +345,8 @@
             "enum": [
               "handle",
               "decomposition",
-              "source"
+              "source",
+              "mention"
             ]
           },
           "createdCount": {

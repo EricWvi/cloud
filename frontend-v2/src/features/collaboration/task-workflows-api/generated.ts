@@ -45,6 +45,7 @@ export const TaskWorkflowRunKind = {
   handle: 'handle',
   decomposition: 'decomposition',
   source: 'source',
+  mention: 'mention',
 } as const;
 
 export interface TaskWorkflowRun {

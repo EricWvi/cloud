@@ -713,3 +713,7 @@ INSERT INTO v2_tenant_mcp_revisions(tenant_id,plugin_id,revision)
  SELECT tenant_id,plugin_id,revision FROM v2_tenant_mcps
  ON CONFLICT(tenant_id,plugin_id) DO UPDATE
  SET revision=GREATEST(v2_tenant_mcp_revisions.revision,excluded.revision);
+
+-- A comment may start a workflow run via @ workflow; added after v2_workflow_runs is created.
+ALTER TABLE v2_task_comments ADD COLUMN IF NOT EXISTS workflow_run_id uuid REFERENCES v2_workflow_runs (id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS v2_task_comments_workflow_run ON v2_task_comments (tenant_id, task_id, workflow_run_id) WHERE workflow_run_id IS NOT NULL;

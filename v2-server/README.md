@@ -235,7 +235,7 @@ Agent 成员只引用 `v2_space_agents` 里由系统预装、可执行且观测�
 | `POST /api/v2/tenants/{tid}/tasks/{taskid}/runs` | 必须带 `Idempotency-Key`；`{executorId?, note?}` 用调用者身份开一次新运行，返回 201。见下文「任务运行」 |
 | `POST /api/v2/tenants/{tid}/tasks/{taskid}/runs/{rid}/stop` | 结束一次活着的运行：正在执行的一轮先取消，空闲的会话直接结束；任何成员都可以停 |
 | `GET /api/v2/tenants/{tid}/tasks/{taskid}/runs/{rid}/events` | 运行会话的 SSE，形状与对话事件流相同；工作区任何成员都能读 |
-| `POST /api/v2/tenants/{tid}/tasks/{taskid}/comments` | 必须带 `Idempotency-Key`；`{body, mentions?, toAgent?, executorId?}` 记一条评论，`toAgent` 同时发给 Agent |
+| `POST /api/v2/tenants/{tid}/tasks/{taskid}/comments` | 必须带 `Idempotency-Key`；`{body, mentions?, toAgent?, executorId?, workflow?}` 记一条评论，`toAgent` 同时发给 Agent；`workflow` 按发布工作流的 Start 表单校验输入后以评论人身份启动运行并在评论上返回 `workflowRun` 摘要 |
 | `GET /api/v2/tenants/{tid}/decomposition-workflows` | 拆分选择器专用目录，返回工作流摘要及服务端判定的 `canDecompose`、`decompositionBlockedReason`；独立候选契约 [`decomposition-workflows.openapi.json`](decomposition-workflows.openapi.json) |
 | `GET /api/v2/tenants/{tid}/tasks/{taskid}/decompositions` | 任务的拆分记录，最新在前；运行已结束但还没结算的先结算再返回 |
 | `POST /api/v2/tenants/{tid}/tasks/{taskid}/decompositions` | 必须带 `Idempotency-Key`；`{workflowId}` 用一个已发布的工作流拆分任务，返回 201。见下文「任务拆分」 |
@@ -291,7 +291,7 @@ Space Agent），写入时解析名字；正文里手打的「@名字」不路�
 | 路由 / Route | 行为 / Behavior |
 |---|---|
 | `POST /api/v2/tenants/{tid}/tasks/{taskid}/workflow-runs` | 必须带 `Idempotency-Key`；`workflowId`、可选 `snapshotId`、`input`、Start `values`；以负责人身份启动冻结的发布版本 / Requires an idempotency key; starts a frozen published snapshot as the assignee |
-| `GET /api/v2/tenants/{tid}/tasks/{taskid}/workflow-runs` | 返回处理、拆分、巡检来源三类记录及工作流名称、版本、真实发起人、状态和失败原因 / Lists handling, decomposition and inspection sources with workflow name, version, actual starter, status and failure |
+| `GET /api/v2/tenants/{tid}/tasks/{taskid}/workflow-runs` | 返回处理、拆分、巡检来源、评论 @ 四类记录及工作流名称、版本、真实发起人、状态和失败原因 / Lists handling, decomposition, inspection sources and mention comments with workflow name, version, actual starter, status and failure |
 
 权限与 Agent 任务运行共用同一函数：派给人时仅本人可启动，派给小队时仅当前人类队员可启动，
 派给 Agent 时工作区成员均可启动；不符合指派范围返回 409 `not_assignee`，未指派返回
@@ -405,6 +405,12 @@ HTTP 集成测试按此候选 OpenAPI 校验每一次响应，并覆盖创建、
 
 `GET /api/v1/tenants/{tid}/collaboration/forms/{formRef}` 按正式契约返回 `FormDescriptor`，从该工作流当前激活的**已发布快照**
 根节点 `Start` 的 `inputVariables` 生成启动表单字段（忽略未发布草稿改动）；未发布、已删除或跨租户工作流返回 `404 form_descriptor_not_found`。
+
+与正式 Cloud 的已知差异：
+- `collaboration/targets` 只列出**已发布**的未删除工作流；Cloud 会列出所有未删除工作流。
+- `collaboration/forms/{formRef}` 只投影根节点 `Start` 的 `inputVariables`，不含 `globalVariables`、版本选择器或模型槽位字段；`file-list`（`array[file]`）与 `json`（`object`、`array`、`array[...]`）变量映射为 `textarea`。
+- 可选查询参数 `issueId` 在 v2 被忽略，传其他租户或不存在的 `issueId` 仍返回 200（Cloud 对未知或跨租户 `issueId` 返回 404）。
+- 通过 `POST /api/v2/tenants/{tid}/tasks/{taskid}/comments` `@` 工作流提交时，对声明为 `object`、`array`、`array[...]`、`array[file]` 的文本输入在 `workflow.CheckStart` 前先按 JSON 解码（非法 JSON 返回 `400 workflow_run_input_invalid`、`reason: "type_mismatch"`）；直接传结构化 JSON 值也照常接受。
 
 ### 项目仓库
 
