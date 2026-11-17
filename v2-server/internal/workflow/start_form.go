@@ -1,7 +1,10 @@
 package workflow
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"math"
 	"strings"
 	"unicode/utf8"
@@ -57,6 +60,78 @@ func BuildStartForm(formRef, title, description, graph string) FormDescriptor {
 		Description: clipUTF8(description, maxFormDescBytes),
 		Fields:      projectStartFormFields(graph),
 	}
+}
+
+// DecodeFormStartValues decodes string-encoded JSON text for structured Start variables
+// (`object`, `array`, `array[...]`, `array[file]`), matching Cloud's Form Mode admission:
+// collaboration forms render structured variables as textareas submitting JSON text, while
+// direct callers may still supply structured values directly.
+func DecodeFormStartValues(graph string, values map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	if len(values) == 0 {
+		return values, nil
+	}
+	g, err := ParseGraph(graph)
+	if err != nil {
+		return nil, err
+	}
+	start, ok := g.Start()
+	if !ok {
+		return values, nil
+	}
+	structured := map[string]StartVariable{}
+	for _, sv := range start.StartVariables() {
+		if isStructuredValueType(sv.ValueType) {
+			structured[sv.Name] = sv
+		}
+	}
+	if len(structured) == 0 {
+		return values, nil
+	}
+	out := make(map[string]json.RawMessage, len(values))
+	for k, raw := range values {
+		sv, isStruct := structured[k]
+		if !isStruct {
+			out[k] = raw
+			continue
+		}
+		trimmedRaw := bytes.TrimSpace(raw)
+		if len(trimmedRaw) == 0 || trimmedRaw[0] != '"' {
+			out[k] = raw
+			continue
+		}
+		var text string
+		if err := json.Unmarshal(trimmedRaw, &text); err != nil {
+			return nil, &InputRejection{Variable: k, Reason: "type_mismatch", Detail: sv.ValueType}
+		}
+		trimmedText := strings.TrimSpace(text)
+		if trimmedText == "" {
+			if sv.Required {
+				return nil, &InputRejection{Variable: k, Reason: "required value is missing", Detail: sv.ValueType}
+			}
+			out[k] = json.RawMessage("null")
+			continue
+		}
+		var decoded any
+		dec := json.NewDecoder(strings.NewReader(trimmedText))
+		dec.UseNumber()
+		if err := dec.Decode(&decoded); err != nil {
+			return nil, &InputRejection{Variable: k, Reason: "type_mismatch", Detail: sv.ValueType}
+		}
+		var extra any
+		if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+			return nil, &InputRejection{Variable: k, Reason: "type_mismatch", Detail: sv.ValueType}
+		}
+		encoded, err := json.Marshal(decoded)
+		if err != nil {
+			return nil, &InputRejection{Variable: k, Reason: "type_mismatch", Detail: sv.ValueType}
+		}
+		out[k] = encoded
+	}
+	return out, nil
+}
+
+func isStructuredValueType(typ string) bool {
+	return typ == "object" || typ == "array" || strings.HasPrefix(typ, "array[")
 }
 
 func projectStartFormFields(graph string) []FormField {

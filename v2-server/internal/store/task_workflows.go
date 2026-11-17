@@ -212,7 +212,7 @@ func (s *Store) LiveTaskWorkflows(ctx context.Context) ([]struct{ Tenant, TaskID
 	return out, rows.Err()
 }
 
-// TaskWorkflowRuns lists all three kinds using durable identities, never task titles.
+// TaskWorkflowRuns lists all four task-workflow link kinds using durable identities, never task titles.
 func (s *Store) TaskWorkflowRuns(ctx context.Context, tenant, taskID string) ([]TaskWorkflowRun, error) {
 	if _, err := s.Task(ctx, tenant, taskID); err != nil {
 		return nil, err
@@ -224,6 +224,9 @@ func (s *Store) TaskWorkflowRuns(ctx context.Context, tenant, taskID string) ([]
  UNION ALL
  SELECT f.run_id,r.started_by,'source',r.status,COALESCE(r.error,''),0,COALESCE(f.submitted_at,r.created_at) FROM v2_workflow_forms f JOIN v2_workflow_runs r ON r.id=f.run_id AND r.tenant_id=f.tenant_id
  WHERE f.tenant_id=$1 AND f.results @> jsonb_build_array(jsonb_build_object('taskId',$2::text))
+ UNION ALL
+ SELECT c.workflow_run_id,c.author_id,'mention',r.status,COALESCE(r.error,''),0,c.created_at FROM v2_task_comments c JOIN v2_workflow_runs r ON r.id=c.workflow_run_id AND r.tenant_id=c.tenant_id
+ WHERE c.tenant_id=$1 AND c.task_id=$2 AND c.workflow_run_id IS NOT NULL
  ) SELECT r.id::text,r.workflow_id::text,w.name,s.version,COALESCE(l.started_by::text,''),COALESCE(u.display_name,''),
  CASE WHEN l.kind IN ('handle','decomposition') AND l.status<>'running' THEN l.status ELSE `+derivedRunStatus+` END,
  CASE WHEN l.failure<>'' THEN l.failure ELSE COALESCE(r.error,'') END,l.kind,l.created_count,l.created_at,r.deleted_at IS NOT NULL,l.status
