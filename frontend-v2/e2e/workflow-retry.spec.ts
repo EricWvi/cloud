@@ -229,3 +229,41 @@ test('a wait left under a failed run shows neither a countdown nor a scheduled r
     await db.end()
   }
 })
+
+test('retried node exposes injected previous failure context in node details', async ({ page }, testInfo) => {
+  const { tid, rid } = await createRun(page)
+  const db = database()
+  await db.connect()
+  try {
+    const previous = randomUUID(), current = randomUUID(), now = Date.now()
+    const injected = '## 上一次尝试（第 1 次）失败信息\n\n原因: 结构化输出校验失败：缺少 summary 字段'
+    const firstFailure = { error_detail: { kind: 'structured_output', message: '缺少 summary 字段', source_chain: [], attempt: 1, auto_retryable: true, recorded_at: now } }
+    const secondFailure = {
+      error_detail: { kind: 'structured_output', message: '仍然缺少 summary 字段', source_chain: [], attempt: 2, auto_retryable: false, recorded_at: now + 1000 },
+      injected_failure_context: injected,
+      retry_chain: [previous],
+    }
+    await db.query(`INSERT INTO v2_workflow_node_runs (tenant_id,run_id,scope_id,node_id,node_type,status,output,started_at,finished_at)
+      VALUES ($1,$2,$3,'start','start','succeeded','',now(),now())`, [tid, rid, `root:${rid}`])
+    await db.query(`INSERT INTO v2_workflow_node_runs (id,tenant_id,run_id,scope_id,node_id,node_type,status,error,payload,started_at,finished_at,deleted_at)
+      VALUES ($1,$2,$3,$4,'agent','agent','failed','缺少 summary 字段',$5,now(),now(),now())`, [previous, tid, rid, `root:${rid}`, JSON.stringify(firstFailure)])
+    await db.query(`INSERT INTO v2_workflow_node_runs (id,tenant_id,run_id,scope_id,node_id,node_type,status,error,payload,started_at,finished_at)
+      VALUES ($1,$2,$3,$4,'agent','agent','failed','仍然缺少 summary 字段',$5,now(),now())`, [current, tid, rid, `root:${rid}`, JSON.stringify(secondFailure)])
+    await db.query(`UPDATE v2_workflow_runs SET status='failed',error='仍然缺少 summary 字段',state='{"current_nodes":["agent"]}',started_at=now(),finished_at=now() WHERE id=$1`, [rid])
+
+    await page.goto(`/chat?run=${rid}`)
+    const pane = page.getByRole('region', { name: '工作流运行' })
+    await pane.getByRole('button', { name: '全图', exact: true }).click()
+    await pane.getByLabel('工作流全图俯瞰').getByText('重试任务', { exact: true }).click()
+    await pane.getByRole('button', { name: '打开节点详情' }).click()
+    const summary = pane.getByText('本次尝试注入的上次失败信息', { exact: true }).filter({ visible: true }).first()
+    await expect(summary).toBeVisible()
+    await summary.click()
+    const injectedContent = pane.getByText(/缺少 summary 字段/).filter({ visible: true }).first()
+    await expect(injectedContent).toBeVisible()
+    await injectedContent.scrollIntoViewIfNeeded()
+    await page.screenshot({ path: testInfo.outputPath('retry-injected-failure.png'), animations: 'disabled', fullPage: true })
+  } finally {
+    await db.end()
+  }
+})
