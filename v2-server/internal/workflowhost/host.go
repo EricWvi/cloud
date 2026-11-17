@@ -356,7 +356,12 @@ func executionScope(s server.WorkflowRunScope) execution.Scope {
 	return execution.Scope{TenantID: s.TenantID, UserID: s.UserID}
 }
 
-// StartRun authorizes the run against the caller's tenant, then starts it and its first wave.
+// StartRun authorizes the run against the caller's tenant, then checks the roles its graph
+// references, then starts it and its first wave. Roles are a start hard-dependency exactly as on
+// desktop: the whole frozen graph is checked before anything runs, so a role missing from a node
+// this run would not reach still refuses the start, and the run stays pending until the role
+// exists again. A graph that does not parse is left to the engine, which reports it as it always
+// has.
 func (h *Host) StartRun(ctx context.Context, scope server.WorkflowRunScope, runID string) (store.WorkflowRun, error) {
 	run, err := h.store.WorkflowRun(ctx, scope.TenantID, runID)
 	if err != nil {
@@ -364,6 +369,9 @@ func (h *Host) StartRun(ctx context.Context, scope server.WorkflowRunScope, runI
 	}
 	if run.Status != store.WorkflowStatusPending {
 		return store.WorkflowRun{}, server.ErrWorkflowRunNotStartable
+	}
+	if err := h.checkRoles(ctx, scope.TenantID, runID); err != nil {
+		return store.WorkflowRun{}, err
 	}
 	st := h.register(runID, executionScope(scope))
 	// The run outlives the request once it starts; a disconnecting client must not abandon the
@@ -377,6 +385,33 @@ func (h *Host) StartRun(ctx context.Context, scope server.WorkflowRunScope, runI
 		return store.WorkflowRun{}, lifecycleError(err)
 	}
 	return h.store.WorkflowRun(ctx, scope.TenantID, runID)
+}
+
+// checkRoles resolves every role the frozen graph references in the caller's tenant. Roles are
+// shared by the tenant, so the check reads the same catalog the settings page writes.
+func (h *Host) checkRoles(ctx context.Context, tenant, runID string) error {
+	frozen, err := h.store.WorkflowEngineContext(ctx, runID)
+	if err != nil {
+		return err
+	}
+	graph, err := workflow.ParseGraph(frozen.Graph)
+	if err != nil {
+		return nil // the engine reports the parse failure on start
+	}
+	for _, reference := range graph.RoleReferences() {
+		if _, err := h.store.ResolveWorkflowRole(ctx, tenant, reference); err != nil {
+			return roleCheckError(reference, err)
+		}
+	}
+	return nil
+}
+
+// roleCheckError names the missing role while keeping the server sentinel the route maps.
+func roleCheckError(reference string, err error) error {
+	if errors.Is(err, store.ErrRoleNotFound) {
+		return fmt.Errorf("%w: role %q is not available in this workspace", server.ErrWorkflowRoleNotFound, reference)
+	}
+	return err
 }
 
 // UpdateRunInput replaces the kickoff text and Start values while the run is still pending.

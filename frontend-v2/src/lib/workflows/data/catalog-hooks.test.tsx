@@ -102,12 +102,34 @@ describe("workflow executor catalog", () => {
 });
 
 describe("workflow role catalog", () => {
-  it("reads the signed-in user's local roles", async () => {
+  it("reads the workspace's server-side roles", async () => {
+    fakeBackend((config) => config.url === "/api/v1/me/tenants"
+      ? { status: 200, data: { items: [{ id: tid, name: "演示团队", role: "member", status: "active" }], nextCursor: "" } }
+      : config.url === `/api/v2/tenants/${tid}/roles`
+        ? { status: 200, data: { items: [{
+            id: "role-reviewer",
+            name: "代码审查",
+            description: "检查改动",
+            content: "# 代码审查",
+            version: 1,
+            createdAt: "2026-11-02T08:00:00Z",
+            updatedAt: "2026-11-02T08:00:00Z",
+          }] } }
+        : undefined);
     const { result } = mountAgents();
-    await waitFor(() => expect(result.current.data?.length).toBe(2));
-    expect(result.current.data?.map((role) => role.name)).toEqual([
-      "代码审查",
-      "技术写作",
-    ]);
+    await waitFor(() => expect(result.current.data?.length).toBe(1));
+    expect(result.current.data?.map((role) => role.name)).toEqual(["代码审查"]);
+    expect(result.current.data?.[0].namespace).toBe("local");
+  });
+
+  it("shows an empty catalog when the workspace has no roles", async () => {
+    fakeBackend((config) => config.url === "/api/v1/me/tenants"
+      ? { status: 200, data: { items: [{ id: tid, name: "演示团队", role: "member", status: "active" }], nextCursor: "" } }
+      : config.url === `/api/v2/tenants/${tid}/roles`
+        ? { status: 200, data: { items: [] } }
+        : undefined);
+    const { result } = mountAgents();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual([]);
   });
 });

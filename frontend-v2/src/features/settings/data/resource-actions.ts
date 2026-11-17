@@ -1,46 +1,4 @@
-import type {
-  ConnectionDraft,
-  RoleDraft,
-  Snapshot,
-} from './types'
-
-export function saveRole(data: Snapshot, draft: RoleDraft, id?: string) {
-  const current = id ? data.roles.find((role) => role.id === id) : undefined
-  if (id && !current) throw new Error('角色已不存在，请刷新列表。')
-  const name = draft.name.trim()
-  if (!name || name.length > 80 || /[\r\n/\\]/.test(name))
-    throw new Error('标题需为 1–80 个字符，不能包含换行或路径分隔符。')
-  if (
-    data.roles.some(
-      (role) => role.id !== id && role.name.toLowerCase() === name.toLowerCase(),
-    )
-  )
-    throw new Error('已有同名角色，请使用其他标题。')
-  const description = draft.description.trim()
-  if (description.length > 500)
-    throw new Error('描述最多 500 个字符。')
-  if (draft.content.length > 100000)
-    throw new Error('内容最多 100,000 个字符。')
-  const fields = {
-    name,
-    description,
-    content: draft.content,
-    updatedAt: new Date().toISOString(),
-  }
-  if (current) Object.assign(current, fields)
-  else
-    data.roles.unshift({
-      id: crypto.randomUUID(),
-      namespace: 'local',
-      ...fields,
-    })
-}
-
-export function deleteRole(data: Snapshot, id: string) {
-  const role = data.roles.find((candidate) => candidate.id === id)
-  if (!role) throw new Error('角色已不存在，请刷新列表。')
-  data.roles = data.roles.filter((candidate) => candidate.id !== id)
-}
+import type { ConnectionDraft, Snapshot } from './types'
 
 export function validateConnection(draft: ConnectionDraft): string | undefined {
   if (!draft.name.trim() || draft.name.length > 120)

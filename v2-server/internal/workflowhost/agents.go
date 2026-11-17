@@ -124,9 +124,9 @@ func (h *Host) finishCancel(st *runState, runID string) {
 	h.hub.Publish(runID)
 }
 
-// runAgent drives one Agent attempt as desktop's drive_agent_node: resolve the executor, render
-// the prompt, start the session, bind it to the attempt, wait for the owning turn's result, end
-// the session and report the outcome to the engine.
+// runAgent drives one Agent attempt as desktop's drive_agent_node: resolve the executor, read the
+// role definition, render the prompt, start the session, bind it to the attempt, wait for the
+// owning turn's result, end the session and report the outcome to the engine.
 func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint64) {
 	cfg := d.Node.Agent()
 	// Interactive mode applies to root-scope nodes only. Desktop rejects it inside Iterations (graph
@@ -149,6 +149,23 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 		fail(mcpFailure(err))
 		return
 	}
+	// The role is read again here, live, as desktop does right before the session starts: the
+	// catalog may have changed since the run started, and the name is matched case-insensitively
+	// with an id fallback. A role deleted after the start refuses this node with a resumable
+	// failure, so creating it again lets the run continue from here.
+	roleContent := ""
+	if cfg.RoleID != "" {
+		role, err := h.store.ResolveWorkflowRole(h.ctx, st.scope.TenantID, cfg.RoleID)
+		switch {
+		case errors.Is(err, store.ErrRoleNotFound):
+			h.fail(d, workflow.Failure{Kind: workflow.FailureWorkflowRoleNotFound, Message: fmt.Sprintf("role %q is not available in this workspace", cfg.RoleID)})
+			return
+		case err != nil:
+			h.fail(d, workflow.Failure{Kind: workflow.FailureMissingAgentConfig, Message: err.Error()})
+			return
+		}
+		roleContent = role.Content
+	}
 	executor, failure := h.resolveExecutor(st.scope, cfg)
 	if failure != nil {
 		fail(*failure)
@@ -163,7 +180,7 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 	request := execution.StartRequest{
 		MCP:    mcp,
 		Skills: skills, Caller: caller, Target: execution.Target{ProjectID: d.ProjectID},
-		ExecutorID: executor.executor.ID, Prompt: agentPrompt(d, task),
+		ExecutorID: executor.executor.ID, Prompt: agentPrompt(d, task, roleContent),
 	}
 	if interactive {
 		// The session outlives its turns until completion, a stop or the run's end ends it.

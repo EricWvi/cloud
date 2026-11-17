@@ -1101,3 +1101,102 @@ func TestDriverIPCCheckoutRefusalEndsOnlyTheRefusedSession(t *testing.T) {
 		t.Fatalf("the live session after its sibling was refused: %+v", got)
 	}
 }
+
+// A Node that never acknowledges end_session is still connected, so only Rebuild marks it.
+func stuckEnd(t *testing.T, h *ipcHarness, ctx context.Context, sid string) *fakeNodeIPC {
+	t.Helper()
+	done := startIPCRun(h, ctx, h.session(sid, "workspace-"+sid), "turn", discardIPCEvent)
+	old := receiveIPC(t, h.created)
+	command := nextIPCCommand(t, old, "start_agent_session")
+	old.finishTurn(t, command, "turn", "first answer")
+	if got := receiveIPC(t, done); got.err != nil || got.result.Answer != "first answer" {
+		t.Fatalf("first turn: %+v", got)
+	}
+	ending, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if err := h.driver.End(ending, sid); !errors.Is(err, execution.ErrStopUnconfirmed) {
+		t.Fatalf("unacknowledged End: %v", err)
+	}
+	nextIPCCommand(t, old, "end_session")
+	if old.stops.Load() != 0 {
+		t.Fatal("a healthy but slow Node was stopped without Rebuild")
+	}
+	return old
+}
+
+func TestDriverIPCRebuildStopsOldNodeBeforeNextSession(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	old := stuckEnd(t, h, ctx, "first")
+	h.driver.Rebuild("first")
+
+	old.stopOK.Store(false)
+	got := receiveIPC(t, startIPCRun(h, ctx, h.session("next", "workspace-next"), "blocked", discardIPCEvent))
+	if !errors.Is(got.err, execution.ErrUnavailable) {
+		t.Fatalf("unconfirmed rebuild = %+v", got)
+	}
+	select {
+	case <-h.created:
+		t.Fatal("replacement Node started before the old process tree stopped")
+	default:
+	}
+	if old.stops.Load() != 1 {
+		t.Fatalf("next session did not ask the supervisor to stop the old Node: calls=%d", old.stops.Load())
+	}
+
+	old.stopOK.Store(true)
+	done := startIPCRun(h, ctx, h.session("next", "workspace-next"), "retry", discardIPCEvent)
+	f := receiveIPC(t, h.created)
+	if f.id == old.id || old.stops.Load() != 2 {
+		t.Fatalf("next session reused the marked Node: stops=%d", old.stops.Load())
+	}
+	command := nextIPCCommand(t, f, "start_agent_session")
+	f.finishTurn(t, command, "retry", "on a new Node")
+	if got := receiveIPC(t, done); got.err != nil || got.result.Answer != "on a new Node" {
+		t.Fatalf("rebuilt Node did not run the next session: %+v", got)
+	}
+	if err := h.driver.End(ctx, "first"); err != nil {
+		t.Fatalf("supervisor stop did not settle the stuck session: %v", err)
+	}
+}
+
+func TestDriverIPCEndRetiresNodeMarkedForRebuild(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	old := stuckEnd(t, h, ctx, "first")
+	h.driver.Rebuild("first")
+	// A workflow successor ends its predecessor before reusing the directory; that End
+	// must obtain supervisor proof instead of waiting for an acknowledgement that never comes.
+	if err := h.driver.End(ctx, "first"); err != nil {
+		t.Fatalf("End on a marked Node: %v", err)
+	}
+	h.driver.mu.Lock()
+	remaining := h.driver.projects["project"]
+	h.driver.mu.Unlock()
+	if remaining != nil || old.stops.Load() != 1 {
+		t.Fatalf("marked Node was not retired: retained=%v stops=%d", remaining != nil, old.stops.Load())
+	}
+	h.driver.Rebuild("unknown") // An unknown or settled session is a no-op.
+}
+
+// A session that was prepared but never started has no physical Agent, so ending it needs no
+// stop proof, even from a Node that is marked for rebuild and cannot be stopped right now.
+func TestDriverIPCEndOfANeverStartedSessionNeedsNoStopProofFromAMarkedNode(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	old := stuckEnd(t, h, ctx, "first")
+	// A turn cancelled during preparation leaves its session in this state.
+	idle := h.session("idle", "workspace-idle")
+	if _, err := h.driver.session(ctx, h.scope, idle, h.config, execution.CallerChat, newPreparation(execution.Ref{SessionID: idle.ID, TurnID: "turn"}, discardIPCEvent)); err != nil {
+		t.Fatal(err)
+	}
+	h.driver.Rebuild("first")
+	old.stopOK.Store(false)
+	defer old.stopOK.Store(true)
+	if err := h.driver.End(ctx, idle.ID); err != nil {
+		t.Fatalf("End of a never-started session on a marked Node: %v", err)
+	}
+	if old.stops.Load() != 0 {
+		t.Fatalf("End of a never-started session asked the supervisor to stop the Node: calls=%d", old.stops.Load())
+	}
+}

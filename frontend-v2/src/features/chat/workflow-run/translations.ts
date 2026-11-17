@@ -41,7 +41,8 @@ export const workflowRunTranslations = {
     "errors.workflow_run_input_invalid":
       "启动变量 {{variable}} 的输入无效：{{reason}}",
     "errors.workflow_skill_not_found": "该工作流需要的技能不可用。",
-    "errors.workflow_role_not_found": "未找到该工作流角色。",
+    "errors.workflow_role_not_found":
+      "工作流引用的角色在工作区角色目录里不存在，请先在设置的角色页新建同名角色再启动。",
     "errors.workflow_run_start_failed": "启动工作流运行失败。",
     "errors.workflow_run_not_restartable": "该工作流运行无法重新启动。",
     "errors.workflow_run_not_resumable": "该工作流运行当前无法从失败处继续。",
@@ -419,6 +420,9 @@ export const workflowRunTranslations = {
     "workflowRun.errorKind.missing_agent_ref": "节点未指定智能体",
     "workflowRun.errorHint.missing_agent_ref":
       "在工作流里给该节点选择一个智能体后发布新版本",
+    "workflowRun.errorKind.workflow_role_not_found": "角色不存在",
+    "workflowRun.errorHint.workflow_role_not_found":
+      "在工作区设置的角色页新建这个角色后，可直接从失败处继续",
     "workflowRun.errorKind.workflow_model_not_found": "模型不可用",
     "workflowRun.errorHint.workflow_model_not_found":
       "智能体当前不提供该模型，检查智能体配置或稍后重试",
@@ -598,7 +602,8 @@ export const workflowRunTranslations = {
       "Invalid input for start variable '{{variable}}': {{reason}}",
     "errors.workflow_skill_not_found":
       "A skill required by this workflow is unavailable.",
-    "errors.workflow_role_not_found": "Workflow role not found.",
+    "errors.workflow_role_not_found":
+      "The role this workflow references is missing from the workspace's role catalog. Create it on the Roles settings page, then start the run again.",
     "errors.workflow_run_start_failed": "Failed to start the workflow run.",
     "errors.workflow_run_not_restartable":
       "The workflow run cannot be restarted.",
@@ -1003,6 +1008,9 @@ export const workflowRunTranslations = {
     "workflowRun.errorKind.missing_agent_ref": "Node names no agent",
     "workflowRun.errorHint.missing_agent_ref":
       "Pick an agent for this node and publish a new version",
+    "workflowRun.errorKind.workflow_role_not_found": "Role not found",
+    "workflowRun.errorHint.workflow_role_not_found":
+      "Create this role on the workspace's Roles settings page, then resume from the failed step",
     "workflowRun.errorKind.workflow_model_not_found": "Model not available",
     "workflowRun.errorHint.workflow_model_not_found":
       "The agent does not advertise this model; check the agent config or retry later",

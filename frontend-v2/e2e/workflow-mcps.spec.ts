@@ -57,7 +57,9 @@ test('the deployed UI installs a real MCP and preserves its workflow binding aft
   if (prior) expect((await page.request.delete(mcpPath, { data: { identifier: prior.id, revision: prior.revision } })).ok()).toBe(true)
   await page.reload()
   const navigation = page.getByRole('navigation', { name: '设置导航' })
-  await expect(navigation.getByRole('link', { name: '角色', exact: true })).toHaveCount(0)
+  // Roles are the workspace's server catalog, so a deployed install keeps that page; only the
+  // browser-local model connections stay hidden.
+  await expect(navigation.getByRole('link', { name: '角色', exact: true })).toBeVisible()
   await expect(navigation.getByRole('link', { name: '模型连接', exact: true })).toHaveCount(0)
   await expect(navigation.getByRole('link', { name: 'Plugins', exact: true })).toBeVisible()
   const installing = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === mcpPath)
@@ -89,7 +91,7 @@ test('the deployed UI installs a real MCP and preserves its workflow binding aft
   await page.getByRole('toolbar', { name: '添加工作流节点' }).getByRole('button', { name: 'Agent', exact: true }).click()
   const agentNodeId = await page.locator('.react-flow__node.selected').getAttribute('data-id')
   expect(agentNodeId).toBeTruthy()
-  await expect(page.getByLabel('角色', { exact: true })).toHaveCount(0)
+  await expect(page.getByLabel('角色', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '添加 MCP', exact: true }).click()
   await page.getByRole('option', { name: /official\/ora-space.tavily-search/ }).click()
   await expect(page.getByRole('switch', { name: /Tavily/ })).toBeChecked()

@@ -10,7 +10,7 @@ import { useSettingsData } from './data/hooks'
 import './settings.css'
 
 /** Settings pages that only persist browser-local data, hidden in a deployed install. */
-const browserOnlyPages = new Set(['roles', 'model-connections'])
+const browserOnlyPages = new Set(['model-connections'])
 
 export default function SettingsPage() {
   const location = useLocation()
@@ -92,7 +92,7 @@ export default function SettingsPage() {
                   : location.pathname === '/settings/model-connections'
                     ? '个人设置'
                     : location.pathname === '/settings/roles'
-                      ? '本机角色'
+                      ? '工作区角色'
                       : '工作空间小队'}
           </span>
         </div>

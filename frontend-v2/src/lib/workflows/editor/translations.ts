@@ -477,8 +477,6 @@ export const workflowEditorTranslations = {
     "settings.workflow.field.interactiveDescription":
       "开启后节点首轮结束会停在等待人工输入，可在节点内持续对话。",
     "settings.workflow.unapplied.badge": "暂不生效",
-    "settings.workflow.unapplied.role":
-      "已保存，运行时暂不按角色设定执行。",
     "settings.workflow.unapplied.mcp":
       "已保存，运行时暂不连接已启用的 MCP，节点照常执行。",
     "settings.workflow.unapplied.interactive":
@@ -1091,8 +1089,6 @@ export const workflowEditorTranslations = {
     "settings.workflow.field.interactiveDescription":
       "When enabled the node pauses for human input after its first turn, so you can keep conversing inside the node.",
     "settings.workflow.unapplied.badge": "Not applied yet",
-    "settings.workflow.unapplied.role":
-      "Saved, but runs do not apply the role yet.",
     "settings.workflow.unapplied.mcp":
       "Saved, but runs do not connect the enabled MCPs yet; the node still runs.",
     "settings.workflow.unapplied.interactive":

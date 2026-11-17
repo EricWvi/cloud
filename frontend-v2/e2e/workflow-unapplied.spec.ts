@@ -11,20 +11,28 @@ test('the Agent inspector marks the settings v2-server does not apply', async ({
   await signIn(page)
   const tid = (await (await page.request.get('/api/v1/me/tenants')).json()).items[0].id
   const name = `暂不生效 ${Date.now()}`
+  // Roles, Skills, MCP and retry all apply now, so the one setting left is interactive mode on a
+  // Loop member: v2 runs that member automatically where desktop parks it. The role keeps a name
+  // the workspace need not have, so the analysis, not the catalog, decides the hints.
   const graph = JSON.stringify({
+    schemaVersion: 2,
     nodes: [
       { id: 'start', type: 'workflow', position: { x: 0, y: 0 }, data: { kind: 'start', title: '开始' } },
-      { id: 'agent', type: 'workflow', position: { x: 320, y: 0 }, data: { kind: 'agent', title: '审阅', agentConfig: {
+      { id: 'loop', type: 'workflow', position: { x: 320, y: 0 }, data: { kind: 'loop', title: '循环', loopConfig: {
+        maxIterations: 2, variables: [], until: { logic: 'and', conditions: [] }, outputs: [] } } },
+      { id: 'entry', type: 'workflow', position: { x: 340, y: 80 }, parentId: 'loop', data: { kind: 'start', title: '本轮开始', containerId: 'loop' } },
+      { id: 'agent', type: 'workflow', position: { x: 360, y: 160 }, parentId: 'loop', data: { kind: 'agent', title: '审阅', containerId: 'loop', agentConfig: {
         executor: { agentCli: 'official/ora-space.opencode', modelId: 'fixture' },
         prompt: '审阅改动',
         roleId: 'reviewer',
         skills: [],
         mcps: [{ mcpId: 'official/ora-space.tavily-search', enabled: true }],
         retry: { enabled: true, maxRetries: 2, initialDelaySeconds: 10 },
+        interactive: true,
       } } },
       { id: 'out', type: 'workflow', position: { x: 640, y: 0 }, data: { kind: 'output', title: '输出', outputs: [{ name: 'answer', variableSelector: ['agent', 'output'] }] } },
     ],
-    edges: [{ id: 'a', source: 'start', target: 'agent' }, { id: 'b', source: 'agent', target: 'out' }],
+    edges: [{ id: 'a', source: 'start', target: 'loop' }, { id: 'b', source: 'entry', target: 'agent' }, { id: 'c', source: 'loop', target: 'out' }],
   })
   const created = await page.request.post(`/api/v2/tenants/${tid}/workflows`, { data: { name, graph } })
   expect(created.status()).toBe(201)
@@ -38,25 +46,17 @@ test('the Agent inspector marks the settings v2-server does not apply', async ({
   await page.getByRole('complementary', { name: '工作流列表' }).getByRole('button', { name, exact: true }).click()
   await page.locator('.react-flow__node[data-id="agent"]').click()
   const inspector = page.locator('[data-workflow-inspector]')
-  for (const setting of ['role', 'mcp', 'retry']) {
+  for (const setting of ['role', 'mcp', 'retry', 'interactive']) {
     const hint = inspector.getByTestId(`workflow-unapplied-${setting}`)
     if (unapplied.includes(setting)) await expect(hint).toContainText('暂不生效')
     else await expect(hint).toHaveCount(0)
   }
-  expect(unapplied.length, 'this graph should still configure something v2 does not apply').toBeGreaterThan(0)
+  expect(unapplied, 'the Loop member should still configure something v2 does not apply').toEqual(['interactive'])
   await inspector.getByTestId(`workflow-unapplied-${unapplied[0]}`).scrollIntoViewIfNeeded()
   await page.screenshot({ path: testInfo.outputPath('inspector-unapplied.png'), animations: 'disabled' })
-  if (unapplied.includes('retry')) {
-    await inspector.getByTestId('workflow-unapplied-retry').scrollIntoViewIfNeeded()
-    await page.screenshot({ path: testInfo.outputPath('inspector-retry.png'), animations: 'disabled' })
-  }
-
-  // Clearing the role makes the server stop listing it, and the hint goes with it.
-  if (unapplied.includes('role')) {
-    await inspector.getByRole('button', { name: '角色', exact: true }).click()
-    await page.getByRole('option', { name: '无角色', exact: true }).click()
-    await expect(inspector.getByTestId('workflow-unapplied-role')).toHaveCount(0)
-  }
+  // The editor disables interactive mode inside a container, so the hint cannot be turned off from
+  // here; the server's analysis is what decides it, and the other settings already prove the hint
+  // stays away when a setting applies.
 })
 
 test('the retry hint follows the server for every retry policy form', async ({ page }) => {

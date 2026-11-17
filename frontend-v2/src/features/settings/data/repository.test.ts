@@ -3,9 +3,7 @@ import { DemoRepository } from './repository'
 import {
   changeConnection,
   connectionReady,
-  deleteRole,
   saveConnection,
-  saveRole,
   setModelDefault,
   validateConnection,
 } from './resource-actions'
@@ -89,13 +87,10 @@ describe('settings demo persistence', () => {
 })
 
 describe('browser-local settings boundary', () => {
-  it('keeps only connections and roles in browser storage', async () => {
+  it('keeps only model connections in browser storage', async () => {
     const state = await repository().read()
-    expect(state.schema).toBe(5)
-    expect(state.roles.map((role) => role.name)).toEqual([
-      '代码审查',
-      '技术写作',
-    ])
+    expect(state.schema).toBe(6)
+    expect(state).not.toHaveProperty('roles')
     expect(state).not.toHaveProperty('skills')
     expect(state).not.toHaveProperty('catalog')
     expect(state).not.toHaveProperty('installations')
@@ -103,7 +98,7 @@ describe('browser-local settings boundary', () => {
       expect(state).not.toHaveProperty(field)
   })
 
-  it('upgrades schemas 2, 3 and 4 while dropping skills and retaining roles', async () => {
+  it('upgrades older snapshots while dropping roles and skills', async () => {
     const repo = repository()
     const initial = await repo.read()
     const skills = [
@@ -117,34 +112,6 @@ describe('browser-local settings boundary', () => {
         availability: 'available',
       },
     ]
-
-    values.set(
-      repo.key,
-      JSON.stringify({
-        ...initial,
-        schema: 2,
-        catalog: [{ id: 'stale' }],
-        installations: [{ id: 'stale-selection' }],
-        skills,
-      }),
-    )
-    let upgraded = await repo.read()
-    expect(upgraded.schema).toBe(5)
-    expect(upgraded.roles).toHaveLength(2)
-    expect(upgraded).not.toHaveProperty('skills')
-    expect(upgraded).not.toHaveProperty('catalog')
-    expect(upgraded).not.toHaveProperty('installations')
-    expect(JSON.parse(values.get(repo.key) ?? '{}').schema).toBe(5)
-
-    values.set(
-      repo.key,
-      JSON.stringify({ ...initial, schema: 3, roles: undefined, skills }),
-    )
-    upgraded = await repo.read()
-    expect(upgraded.schema).toBe(5)
-    expect(upgraded.roles).toHaveLength(2)
-    expect(upgraded).not.toHaveProperty('skills')
-
     const customRole = {
       id: 'custom-role',
       namespace: 'local',
@@ -153,58 +120,27 @@ describe('browser-local settings boundary', () => {
       content: '# 自定义',
       updatedAt: '2026-11-02T08:00:00.000Z',
     }
-    values.set(
-      repo.key,
-      JSON.stringify({
-        ...initial,
-        schema: 4,
-        roles: [customRole],
-        skills,
-      }),
-    )
-    upgraded = await repo.read()
-    expect(upgraded.schema).toBe(5)
-    expect(upgraded.roles).toEqual([customRole])
-    expect(upgraded).not.toHaveProperty('skills')
-  })
-})
-
-describe('roles', () => {
-  it('supports local editing, deletion and isolation between users', async () => {
-    const repo = repository()
-    let state = await repo.read()
-    state = await repo.update(state.revision, (data) =>
-      saveRole(data, {
-        name: '发布检查',
-        description: '发布前核对版本和说明',
-        content: '# 发布检查\n\n核对版本。',
-      }),
-    )
-    const role = state.roles.find((candidate) => candidate.name === '发布检查')
-    expect(role?.namespace).toBe('local')
-    expect(
-      (
-        await new DemoRepository(
-          { id: 'other' },
-          port,
-        ).read()
-      ).roles.some((candidate) => candidate.name === '发布检查'),
-    ).toBe(false)
-    await expect(
-      repo.update(state.revision, (data) =>
-        saveRole(data, {
-          name: '发布检查',
-          description: '',
-          content: '',
+    for (const schema of [2, 3, 4] as const) {
+      values.set(
+        repo.key,
+        JSON.stringify({
+          ...initial,
+          schema,
+          roles: [customRole],
+          skills,
+          catalog: [{ id: 'stale' }],
+          installations: [{ id: 'stale-selection' }],
         }),
-      ),
-    ).rejects.toThrow('同名')
-    state = await repo.update(state.revision, (data) =>
-      deleteRole(data, role!.id),
-    )
-    expect(state.roles.some((candidate) => candidate.id === role!.id)).toBe(
-      false,
-    )
+      )
+      const upgraded = await repo.read()
+      expect(upgraded.schema).toBe(6)
+      // Roles moved to the server: an old browser snapshot does not carry them into the new one.
+      expect(upgraded).not.toHaveProperty('roles')
+      expect(upgraded).not.toHaveProperty('skills')
+      expect(upgraded).not.toHaveProperty('catalog')
+      expect(upgraded).not.toHaveProperty('installations')
+      expect(JSON.parse(values.get(repo.key) ?? '{}').schema).toBe(6)
+    }
   })
 })
 

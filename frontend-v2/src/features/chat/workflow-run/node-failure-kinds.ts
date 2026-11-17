@@ -2,6 +2,7 @@
 export const NODE_FAILURE_KINDS = [
   "missing_agent_ref",
   "workflow_model_not_found",
+  "workflow_role_not_found",
   "missing_agent_config",
   "invalid_run_payload",
   "prompt_template",

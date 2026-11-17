@@ -27,6 +27,9 @@ import (
 type AgentDriver interface {
 	Run(context.Context, execution.Scope, execution.Session, execution.Turn, func(context.Context, execution.Event) error) (execution.Result, error)
 	End(context.Context, string) error
+	// Rebuild marks the Node serving a session for replacement after End could not confirm
+	// its stop. The project's next session, or a later End, stops the old process tree first.
+	Rebuild(string)
 	Close(context.Context) error
 }
 
@@ -41,6 +44,33 @@ type Config struct {
 	Store  *store.Store
 	Models map[string]ModelChoice
 	Agent  AgentDriver
+}
+
+// pending is a turn result whose write still failed after retries. The service keeps storing it
+// until the database takes it, so a recovered database records the real outcome and observers
+// waiting on the durable turn end are released without a restart.
+type pending struct {
+	ref    execution.Ref
+	result execution.Result
+}
+
+// Limits of the per-session failure handling. Each Service copies them at construction, so a
+// test shortens its own instance without touching another's.
+var (
+	// How long one turn retries its result write before only its own session fails: a short
+	// database outage, not an indefinite wait.
+	defaultFinishRetryDelays = []time.Duration{time.Second, 2 * time.Second}
+	// The pace of the writes that continue after a worker's own retries are exhausted.
+	defaultConcludeInterval = 5 * time.Second
+	// The service's own budget for one physical stop. Callers may wait less, and a caller
+	// without a deadline never waits longer.
+	defaultStopTimeout = 30 * time.Second
+)
+
+// stopCall is one shared attempt to confirm a session's physical stop.
+type stopCall struct {
+	done chan struct{}
+	err  error
 }
 
 type worker struct {
@@ -64,10 +94,18 @@ type Service struct {
 	groups     map[string]string
 	workspaces map[string]string
 	// held lists the live LifetimeHeld sessions this process started.
-	held   map[string]bool
-	ending map[string]bool
-	closed bool
-	failed bool
+	held              map[string]bool
+	ending            map[string]bool
+	unsaved           map[string]pending
+	stops             map[string]*stopCall
+	stopping          sync.WaitGroup
+	joined            bool
+	concluding        sync.WaitGroup
+	finishRetryDelays []time.Duration
+	concludeInterval  time.Duration
+	stopTimeout       time.Duration
+	finishTurn        func(context.Context, execution.Scope, execution.Ref, execution.Result) (execution.Result, error)
+	closed            bool
 }
 
 var _ execution.Service = (*Service)(nil)
@@ -92,8 +130,9 @@ func New(ctx context.Context, cfg Config) (*Service, error) {
 		return nil, err
 	}
 	owned, cancel := context.WithCancel(ctx)
-	return &Service{db: cfg.Store, models: models, agent: cfg.Agent, ctx: owned, cancel: cancel,
-		workers: map[string]*worker{}, groups: map[string]string{}, workspaces: map[string]string{}, held: map[string]bool{}, ending: map[string]bool{}}, nil
+	return &Service{db: cfg.Store, models: models, agent: cfg.Agent, ctx: owned, cancel: cancel, finishTurn: cfg.Store.FinishExecutionTurn,
+		finishRetryDelays: defaultFinishRetryDelays, concludeInterval: defaultConcludeInterval, stopTimeout: defaultStopTimeout,
+		workers: map[string]*worker{}, groups: map[string]string{}, workspaces: map[string]string{}, held: map[string]bool{}, ending: map[string]bool{}, unsaved: map[string]pending{}, stops: map[string]*stopCall{}}, nil
 }
 
 // Start validates the project and freezes a binding before recording the first Agent turn.
@@ -154,7 +193,7 @@ func (s *Service) start(ctx context.Context, scope execution.Scope, caller execu
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.failed || s.ctx.Err() != nil {
+	if s.closed || s.ctx.Err() != nil {
 		return execution.Ref{}, execution.ErrUnavailable
 	}
 	// Admission is where execution starts on the user's behalf, so it applies tenant authorization;
@@ -290,7 +329,7 @@ func (s *Service) Append(ctx context.Context, scope execution.Scope, req executi
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for {
-		if s.closed || s.failed || s.ctx.Err() != nil {
+		if s.closed || s.ctx.Err() != nil {
 			return execution.Ref{}, execution.ErrUnavailable
 		}
 		session, err := s.db.ReadExecutionSession(ctx, scope, req.SessionID)
@@ -403,38 +442,166 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		// An Agent error means the session is gone; the driver marks the results it publishes
 		// itself, and this marks the ones only the runtime writes.
 		result.AgentLost = result.AgentLost || agentErr != nil
-		write, stop := context.WithTimeout(context.Background(), 10*time.Second)
-		_, err := s.db.FinishExecutionTurn(write, scope, turn.Ref, result)
-		stop()
-		if session.Target != nil && (agentErr != nil || (result.Status != execution.StatusCompleted && !held)) {
-			// A failed/cancelled physical Agent is never advertised as resumable. Keep
-			// admission occupied until stop is confirmed, even if its result is already stored.
-			// A held session survives a turn the Agent itself ended without completing: the
-			// driver reports no error then, and the Agent is still there to take the next turn.
+		result, err := s.finish(scope, turn.Ref, result)
+		// Failures stay with this session: nothing here stops admission for other sessions.
+		// A held session survives a turn the Agent itself ended without completing: the driver
+		// reports no error then, and the Agent is still there to take the next turn.
+		broken := session.Target != nil && (agentErr != nil || (result.Status != execution.StatusCompleted && !held))
+		if err != nil || broken {
+			// An unstored result or a failed/cancelled physical Agent is never advertised as
+			// resumable, held or not. Keep admission occupied until stop is confirmed.
 			s.mu.Lock()
 			s.ending[session.ID] = true
-			s.mu.Unlock()
-			finish, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			if endErr := s.agent.End(finish, session.ID); endErr != nil {
-				err = errors.Join(err, execution.ErrStopUnconfirmed)
-			} else {
-				err = errors.Join(err, s.db.EndExecutionSession(finish, scope, session.ID))
+			if err != nil {
+				// A held session's caller reads AgentLost to learn that no turn can follow, and
+				// a result that could not be stored ends the session as a lost Agent does.
+				result.AgentLost = result.AgentLost || held
+				s.unsaved[session.ID] = pending{ref: turn.Ref, result: result}
 			}
-			cancel()
-			s.mu.Lock()
-			delete(s.held, session.ID)
 			s.mu.Unlock()
+			stopped := true
+			if session.Target != nil && s.stopAgent(context.Background(), session.ID) != nil {
+				stopped = false
+				err = errors.Join(err, execution.ErrStopUnconfirmed)
+			}
+			write, stop := context.WithTimeout(context.Background(), 10*time.Second)
+			concludeErr := s.conclude(write, scope, session.ID, stopped)
+			stop()
+			if concludeErr != nil {
+				// Callers wait on the durable turn end, so the write must not depend on
+				// anyone calling End: keep trying until the database takes it.
+				err = errors.Join(err, concludeErr)
+				s.concludeLater(scope, session.ID, stopped)
+			}
 		}
 		s.mu.Lock()
 		w.err = err
-		if err != nil {
-			s.failed = true
-		}
 		delete(s.groups, group)
 		delete(s.workers, turn.Ref.TurnID)
 		close(w.done)
 		s.mu.Unlock()
 	}()
+}
+
+// finish retries a short database outage and returns the result it tried to store. A result
+// the store rejects as invalid can never be written as it is, so it is stored as a failed turn
+// rather than left running; everything else the turn produced is kept, AgentLost and NotStarted
+// included.
+func (s *Service) finish(scope execution.Scope, ref execution.Ref, result execution.Result) (execution.Result, error) {
+	for attempt := 0; ; attempt++ {
+		write, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		_, err := s.finishTurn(write, scope, ref, result)
+		stop()
+		if errors.Is(err, execution.ErrInvalidRequest) && result.Status != execution.StatusFailed {
+			result.Status, result.FailureCode = execution.StatusFailed, "execution_failed"
+			attempt--
+			continue
+		}
+		if err == nil || attempt >= len(s.finishRetryDelays) {
+			return result, err
+		}
+		select {
+		case <-s.ctx.Done():
+			return result, err
+		case <-time.After(s.finishRetryDelays[attempt]):
+		}
+	}
+}
+
+// conclude stores the result a session's worker could not write and, once its physical stop is
+// confirmed, ends the session. Both writes are idempotent, so the worker, its background retry
+// and End may race. It never holds mu across database I/O.
+func (s *Service) conclude(ctx context.Context, scope execution.Scope, sid string, stopped bool) error {
+	s.mu.Lock()
+	p, unsaved := s.unsaved[sid]
+	s.mu.Unlock()
+	if unsaved {
+		if _, err := s.finishTurn(ctx, scope, p.ref, p.result); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		delete(s.unsaved, sid)
+		s.mu.Unlock()
+	}
+	if !stopped {
+		// The Node is marked for rebuild; only an End that obtains stop proof ends the session.
+		return nil
+	}
+	if err := s.db.EndExecutionSession(ctx, scope, sid); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	delete(s.held, sid)
+	s.mu.Unlock()
+	return nil
+}
+
+// concludeLater repeats conclude after the worker has gone, until it succeeds, the store rejects
+// the write for good (the session no longer exists or the request is invalid), or the service
+// closes. Only workers call it, so Close can join every retry.
+func (s *Service) concludeLater(scope execution.Scope, sid string, stopped bool) {
+	s.concluding.Add(1)
+	go func() {
+		defer s.concluding.Done()
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-time.After(s.concludeInterval):
+			}
+			write, stop := context.WithTimeout(s.ctx, 10*time.Second)
+			err := s.conclude(write, scope, sid, stopped)
+			stop()
+			if err == nil || errors.Is(err, store.ErrNotFound) || errors.Is(err, execution.ErrNotFound) || errors.Is(err, execution.ErrInvalidRequest) {
+				return
+			}
+		}
+	}()
+}
+
+// stopAgent confirms a session's physical stop within the service's own budget. Concurrent
+// callers share one attempt and may stop waiting when their context ends; the attempt itself
+// continues. So a caller that gives up early never marks a healthy Node, a caller without a
+// deadline never waits forever, and a stop the Node does not confirm within the budget marks
+// only that project's Node for rebuild. Close joins every attempt, and none starts once it has.
+// The caller must not hold mu.
+func (s *Service) stopAgent(ctx context.Context, sid string) error {
+	s.mu.Lock()
+	call := s.stops[sid]
+	if call == nil {
+		if s.joined {
+			// Close has already stopped every Agent through the driver.
+			s.mu.Unlock()
+			return execution.ErrStopUnconfirmed
+		}
+		call = &stopCall{done: make(chan struct{})}
+		s.stops[sid] = call
+		s.stopping.Add(1)
+		go func() {
+			defer s.stopping.Done()
+			budget, cancel := context.WithTimeout(context.Background(), s.stopTimeout)
+			call.err = s.agent.End(budget, sid)
+			cancel()
+			if call.err != nil {
+				// Only this project's Node is untrusted; its next session or End retires it.
+				s.agent.Rebuild(sid)
+			}
+			s.mu.Lock()
+			delete(s.stops, sid)
+			s.mu.Unlock()
+			close(call.done)
+		}()
+	}
+	s.mu.Unlock()
+	select {
+	case <-call.done:
+		if call.err != nil {
+			return execution.ErrStopUnconfirmed
+		}
+		return nil
+	case <-ctx.Done():
+		return execution.ErrStopUnconfirmed
+	}
 }
 
 func (s *Service) messages(ctx context.Context, scope execution.Scope, current execution.Turn) ([]modelturn.Message, error) {
@@ -515,6 +682,16 @@ func (s *Service) Cancel(ctx context.Context, scope execution.Scope, ref executi
 	if w == nil {
 		// Completion can win after the initial read and remove the worker. Its durable
 		// result is still the authority; absence from the map is not a stop failure.
+		// Only a result its worker could not write is concluded here, and a model-only session
+		// has nothing physical left to stop. A turn that merely finished keeps its session open.
+		s.mu.Lock()
+		_, unsaved := s.unsaved[ref.SessionID]
+		s.mu.Unlock()
+		if unsaved {
+			if err := s.conclude(ctx, scope, ref.SessionID, true); err != nil {
+				return execution.Result{}, publicError(err)
+			}
+		}
 		turn, err = s.readTurn(ctx, scope, ref)
 		if err != nil {
 			return execution.Result{}, err
@@ -569,17 +746,11 @@ func (s *Service) End(ctx context.Context, scope execution.Scope, sid string) er
 		}
 	}
 	if session.Target != nil {
-		if err := s.agent.End(ctx, sid); err != nil {
+		if err := s.stopAgent(ctx, sid); err != nil {
 			return execution.ErrStopUnconfirmed
 		}
 	}
-	err = s.db.EndExecutionSession(ctx, scope, sid)
-	if err == nil {
-		s.mu.Lock()
-		delete(s.held, sid)
-		s.mu.Unlock()
-	}
-	return publicError(err)
+	return publicError(s.conclude(ctx, scope, sid, true))
 }
 
 // Close shuts down workers and physical Agents. Persisted sessions are ended by recovery on
@@ -600,10 +771,28 @@ func (s *Service) Close(ctx context.Context) error {
 		case <-w.done:
 		}
 	}
+	// Every worker has gone, so only End and Cancel could still start a stop.
+	s.mu.Lock()
+	s.joined = true
+	s.mu.Unlock()
+	var err error
 	if s.agent != nil {
-		return s.agent.Close(ctx)
+		err = s.agent.Close(ctx)
 	}
-	return nil
+	// Nothing of the service outlives Close: a stop attempt runs on its own budget and a
+	// background result write uses the database, so both are joined here.
+	settled := make(chan struct{})
+	go func() {
+		s.stopping.Wait()
+		s.concluding.Wait()
+		close(settled)
+	}()
+	select {
+	case <-ctx.Done():
+		return errors.Join(err, ctx.Err())
+	case <-settled:
+	}
+	return err
 }
 
 func (s *Service) ReadSession(ctx context.Context, scope execution.Scope, id string) (execution.Session, error) {
@@ -638,10 +827,10 @@ func (s *Service) readTurn(ctx context.Context, scope execution.Scope, ref execu
 }
 
 func (s *Service) ListModels(ctx context.Context, scope execution.Scope) ([]execution.Model, error) {
-	// Consumers use the catalog as an execution-readiness gate, so an unusable
-	// runtime must not keep advertising otherwise valid deployment selections.
+	// Consumers use the catalog as an execution-readiness gate, so a closing runtime must
+	// not keep advertising selections. One session's failure never closes it for others.
 	s.mu.Lock()
-	unavailable := s.closed || s.failed || s.ctx.Err() != nil
+	unavailable := s.closed || s.ctx.Err() != nil
 	s.mu.Unlock()
 	if unavailable {
 		return nil, execution.ErrUnavailable

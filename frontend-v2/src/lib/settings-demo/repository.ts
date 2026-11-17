@@ -2,12 +2,8 @@ import type {
   ModelConnection,
   ModelDefault,
 } from '@/api/generated.schemas'
-import { seed, seedRoles } from './seed'
-import {
-  DEMO_SPACE,
-  type Role,
-  type Snapshot,
-} from './types'
+import { seed } from './seed'
+import { DEMO_SPACE, type Snapshot } from './types'
 
 type StoragePort = Pick<Storage, 'getItem' | 'setItem'>
 /** Small local boundary: failed writes never become successful UI state. No HTTP or credentials. */
@@ -99,19 +95,13 @@ function rows(value: unknown, fields: string[]) {
 }
 /** Check persisted shape before exposing it to renderers; damaged data is never silently replaced. */
 function isSnapshot(value: unknown): value is Snapshot {
-  if (
-    !record(value) ||
-    value.schema !== 5 ||
-    !commonSnapshotFields(value) ||
-    !Array.isArray(value.roles) ||
-    !value.roles.every(isRole)
-  )
+  if (!record(value) || value.schema !== 6 || !commonSnapshotFields(value))
     return false
   return true
 }
 
 interface LegacySnapshot {
-  schema: 2 | 3 | 4
+  schema: 2 | 3 | 4 | 5
   revision: number
   connections: ModelConnection[]
   modelDefault: ModelDefault
@@ -121,26 +111,21 @@ interface LegacySnapshot {
 function isLegacySnapshot(value: unknown): value is LegacySnapshot {
   if (
     !record(value) ||
-    (value.schema !== 2 && value.schema !== 3 && value.schema !== 4) ||
+    (value.schema !== 2 && value.schema !== 3 && value.schema !== 4 && value.schema !== 5) ||
     !commonSnapshotFields(value)
   )
     return false
   return true
 }
 
+// Roles moved to the workspace's server-side catalog, so an upgraded browser snapshot keeps its
+// model connections and drops the roles it used to carry; nothing re-creates them.
 function migrate(value: LegacySnapshot): Snapshot {
-  const roles =
-    value.schema === 4 &&
-    Array.isArray(value.roles) &&
-    value.roles.every(isRole)
-      ? value.roles
-      : seedRoles()
   return {
-    schema: 5,
+    schema: 6,
     revision: value.revision,
     connections: value.connections,
     modelDefault: value.modelDefault,
-    roles,
   }
 }
 
@@ -155,15 +140,5 @@ function commonSnapshotFields(value: Record<string, unknown>): boolean {
     record(value.modelDefault) &&
     typeof value.modelDefault.connectionId === 'string' &&
     typeof value.modelDefault.modelId === 'string'
-  )
-}
-
-function isRole(value: unknown): value is Role {
-  return (
-    record(value) &&
-    value.namespace === 'local' &&
-    ['id', 'name', 'description', 'content', 'updatedAt'].every(
-      (field) => typeof value[field] === 'string',
-    )
   )
 }

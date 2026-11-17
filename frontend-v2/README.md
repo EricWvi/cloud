@@ -138,18 +138,18 @@ v2 只做核心执行，有几项界面在、但不会出现或不可用：服�
 
 以前的版本把工作流存在浏览器 localStorage 里。`data/legacy-library.ts` 只读这份旧数据：浏览器里还有旧工作流时，左栏顶部提示一次，点"导入"按名字逐个建到服务端（只带草稿，旧的发布版本要重新发布；同名的跳过），点"不导入"就不再提示；两种情况都不删浏览器里的旧数据。`data/local-workflow-backend.ts` 照搬 desktop Rust 实现的规则（名称去空格后不能为空、不能重名；一个可编辑的 `draft` 加不可变的发布版本；不能删除草稿和当前生效的版本等），现在用来读取旧数据，也是单元测试的假服务端（`lib/workflows/test/workflow-server.ts`）。
 
-Agent 和模型清单读取与 Chat 相同的 `/chat/executors`，保存后端返回的 `agentId` / `modelId`，目录为空或读取失败时不提供演示选项。旧占位配置保留并提示重新选择。角色目录读取 Settings 保存的本机角色；Skill 清单合并当前用户的服务端技能库与租户各空间已确认安装的 Skill 插件，插件标识保留 `namespace/identifier`，运行时检查目标项目的安装回执。MCP 候选读取租户真实安装目录，展示配置是否完整。卸载后已有绑定保留并提示不可用。每个节点最多启用 16 个 MCP，配置使用团队共享设置。安装和选择可以保存，非空执行须待 Node 与服务端完整生命周期接入；当前明确报错，不会忽略已启用的 MCP 后继续运行。
+Agent 和模型清单读取与 Chat 相同的 `/chat/executors`，保存后端返回的 `agentId` / `modelId`，目录为空或读取失败时不提供演示选项。旧占位配置保留并提示重新选择。角色目录读取工作区服务端目录（与设置页同一份数据）；Skill 清单合并当前用户的服务端技能库与租户各空间已确认安装的 Skill 插件，插件标识保留 `namespace/identifier`，运行时检查目标项目的安装回执。MCP 候选读取租户真实安装目录，展示配置是否完整。卸载后已有绑定保留并提示不可用。每个节点最多启用 16 个 MCP，配置使用团队共享设置。安装和选择可以保存，非空执行须待 Node 与服务端完整生命周期接入；当前明确报错，不会忽略已启用的 MCP 后继续运行。
 
-Agent 检查器在角色、MCP、交互模式、失败自动重试旁标「暂不生效」和一句原因（`editor/workflow-unapplied-setting-hint.tsx`）。标哪几项只看 v2-server analyze 返回的 `unappliedSettings`，它和运行结果里的 `payload.unapplied` 出自同一段服务端代码；前端只知道每项放在哪个字段旁、原因怎么说，不自己判断。重试已在根作用域和 Loop / Iteration 成员上应用，新分析不再列出 `retry`；历史运行 payload 里保存的 `retry` 标记仍按原样显示。服务端列出某项时提示出现，不再列出时自动消失；列出前端还没有对应字段的项时，在 Agent 设置末尾统一说明。浏览器里的旧工作流库（`local-workflow-backend.ts`）不执行运行，这两项总是空的。工作流页本身不运行工作流，运行在对话页里（见"运行工作流"）。
+Agent 检查器在交互模式旁标「暂不生效」和一句原因（`editor/workflow-unapplied-setting-hint.tsx`）。标哪几项只看 v2-server analyze 返回的 `unappliedSettings`，它和运行结果里的 `payload.unapplied` 出自同一段服务端代码；前端只知道每项放在哪个字段旁、原因怎么说，不自己判断。角色、Skill、MCP 与重试已经应用，新分析不再列出它们；历史运行 payload 里保存的 `role`、`skill`、`retry` 标记仍按原样显示。服务端列出某项时提示出现，不再列出时自动消失；列出前端还没有对应字段的项时，在 Agent 设置末尾统一说明。浏览器里的旧工作流库（`local-workflow-backend.ts`）不执行运行，这两项总是空的。工作流页本身不运行工作流，运行在对话页里（见"运行工作流"）。
 
 ### Unapplied settings and start warnings (English)
 
-The Agent inspector places a “Not applied yet” hint and a short reason beside role, MCP,
-interactive and retry fields only when server analysis lists that setting in `unappliedSettings`.
+The Agent inspector places a “Not applied yet” hint and a short reason beside the interactive
+field only when server analysis lists that setting in `unappliedSettings`.
 The server derives this list from the same decision as the `Node.Agent().Unapplied` used in
-attempt payloads, with the node's Iteration or Loop, including spare Agents. Retry now applies at
-every placement, so new analyses no longer list `retry`; the marker persisted in older run
-payloads still displays as recorded. Removing a setting from server policy removes its hint
+attempt payloads, with the node's Iteration or Loop, including spare Agents. Roles, Skills, MCP and
+retry now apply, so new analyses list none of them; the markers persisted in older run
+payloads still display as recorded. Removing a setting from server policy removes its hint
 without a frontend change. Settings without an inspector field appear together at the bottom. The
 legacy local workflow library runs nothing and reports empty policy lists.
 
@@ -171,7 +171,7 @@ at `ebd5b725a8a21d72ecf5e6fb7ced10d007b72dfe`.
 
 ## 设置
 
-主导航的「设置」包含成员、角色、模型连接、主题、Plugins、Skills 六个独立子页面，默认进入成员页。成员页读取真实的 `GET /api/v1/tenants/{tid}/members`，owner 还能填邮箱邀请（`POST /api/v2/tenants/{tid}/members`，契约之外，见 v2-server README）；主题真实作用于整个 V2；Plugins 使用真实市场目录与空间选择；Skills 使用按登录用户隔离的服务端技能库，支持新建和导入 `SKILL.md`，并会在新 Agent 会话中物化；角色保存在浏览器本机快照中，可新建、编辑、删除和导入 Markdown，并出现在工作流 Agent 节点的角色选择中，但 v2 执行仍不注入角色内容。模型连接状态只保存在当前浏览器（部署版隐藏角色、模型连接两页及工作流角色选择，见 settings README）；MCP 使用服务端租户安装和配置；市场 Agent、Hook 只浏览，演示安装只在 `VITE_DEMO_MOCK=1` 时由 `lib/demo/plugin-installs.ts` 记录到浏览器本地。模型连接示例不发起真实模型调用；详情见 [`src/features/settings/README.md`](src/features/settings/README.md)。
+主导航的「设置」包含成员、角色、模型连接、主题、Plugins、Skills 六个独立子页面，默认进入成员页。成员页读取真实的 `GET /api/v1/tenants/{tid}/members`，owner 还能填邮箱邀请（`POST /api/v2/tenants/{tid}/members`，契约之外，见 v2-server README）；主题真实作用于整个 V2；Plugins 使用真实市场目录与空间选择；Skills 使用按登录用户隔离的服务端技能库，支持新建和导入 `SKILL.md`，并会在新 Agent 会话中物化；角色使用工作区共享的服务端目录（`v2-server/roles.openapi.json`），可新建、编辑、删除和导入 Markdown，工作流 Agent 节点按名称选择它，运行时读取内容并注入提示词。模型连接状态只保存在当前浏览器，部署版因此隐藏模型连接页（角色与工作流的角色选择照常提供，见 settings README）；MCP 使用服务端租户安装和配置；市场 Agent、Hook 只浏览，演示安装只在 `VITE_DEMO_MOCK=1` 时由 `lib/demo/plugin-installs.ts` 记录到浏览器本地。模型连接示例不发起真实模型调用；详情见 [`src/features/settings/README.md`](src/features/settings/README.md)。
 
 端到端测试可通过 `E2E_WEB_PORT`、`E2E_SERVER_PORT` 指定独立端口，默认仍为 5174、8091。与其他应用共用机器时选择空闲端口；测试不会复用已启动的服务。
 

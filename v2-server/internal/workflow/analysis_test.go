@@ -35,6 +35,20 @@ func TestAnalysisReportsUnappliedAgentSettings(t *testing.T) {
 	}
 	// A spare Agent is still edited in the inspector, so its settings are explained as well.
 	addNode(g, "spare", "agent", obj{"agentConfig": obj{"roleId": "reviewer"}})
+	// A Loop member is the one placement that still records a setting: v2 runs an interactive member
+	// automatically where desktop parks it for its starter, and the member's container is part of the
+	// placement both sides read. Roles, Skills, MCP and retry all apply now, so without it the fixture
+	// below would list nothing and compare two empty maps.
+	g["schemaVersion"] = 2 // a container graph needs it
+	g["nodes"] = append(g["nodes"].([]any),
+		obj{"id": "loop", "data": obj{"kind": "loop", "loopConfig": obj{"maxIterations": 3, "variables": []any{},
+			"until": obj{"logic": "and", "conditions": []any{}}, "outputs": []any{}}}},
+		obj{"id": "entry", "parentId": "loop", "data": obj{"kind": "start", "containerId": "loop"}},
+		obj{"id": "loop-interactive", "parentId": "loop", "data": obj{"kind": "agent", "containerId": "loop",
+			"agentConfig": obj{"prompt": "x", "interactive": true}}},
+	)
+	connect(g, "start", "loop")
+	connect(g, "entry", "loop-interactive")
 	source := encode(t, g)
 	graph, err := workflow.ParseGraph(source)
 	if err != nil {
@@ -66,6 +80,9 @@ func TestAnalysisReportsUnappliedAgentSettings(t *testing.T) {
 	}
 	if node, _ := wired.Node("spare"); len(node.Agent().Unapplied) != 0 {
 		want["spare"] = node.Agent().Unapplied
+	}
+	if node := runPathView(t, graph, "loop-interactive"); len(node.Agent().Unapplied) != 0 {
+		want["loop-interactive"] = node.Agent().Unapplied
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unapplied settings = %v, want the run's own list %v", got, want)

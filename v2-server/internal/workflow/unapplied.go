@@ -1,7 +1,5 @@
 package workflow
 
-import "strings"
-
 // placement is the graph context of a node: the Iteration region or the Loop body that holds it.
 // It is derived from the authored node alone, so a spare member has the placement it would have
 // once wired. Containers do not nest, so at most one field is set.
@@ -29,9 +27,6 @@ type unappliedRule func(config object, at placement) []string
 // node sits reads the same inputs on both paths. The order is the payload's order.
 func unappliedAgentSettings(config object, at placement) []string {
 	var unapplied []string
-	if role, _ := config["roleId"].(string); strings.TrimSpace(role) != "" {
-		unapplied = append(unapplied, "role")
-	}
 	interactive := agentInteractive(config)
 	// v2 parks a root-graph interactive Agent for its starter; a Loop member runs automatically
 	// (desktop would park it). Publication rejects interactive Iteration members, so they never run.
