@@ -274,3 +274,103 @@ func TestARefusedStartAfterAGivenUpCancellationClosesTheRun(t *testing.T) {
 		t.Fatalf("run %s, want cancelled", run.Status)
 	}
 }
+
+// A failure that closes a Loop round stops only that round: the round of another Loop beside it
+// keeps executing.
+func TestAFailedRoundLeavesAnotherLoopsRoundRunning(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	i, j := strings.Index(loopGraph, `{"id":"loop"`), strings.Index(loopGraph, `{"id":"out"`)
+	second := strings.NewReplacer(`"id":"loop"`, `"id":"loop2"`, `"containerId":"loop"`, `"containerId":"loop2"`, `#loop.`, `#loop2.`, `"writer"`, `"writer2"`, `"entry"`, `"entry2"`).Replace(loopGraph[i:j])
+	graph := loopGraph[:j] + second + loopGraph[j:]
+	graph = strings.Replace(graph, `{"source":"start","target":"loop"}`, `{"source":"start","target":"loop"},{"source":"start","target":"loop2"},{"source":"entry2","target":"writer2"}`, 1)
+	runID := f.run(t, graph, str("kickoff"))
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	started := f.exec.awaitStarts(t, 2)
+	refused := completed("no")
+	refused.StopReason = "refusal"
+	f.exec.finish(started["writer"], refused)
+	f.await(t, runID, func(r store.WorkflowRun, _ []store.WorkflowNodeRun) bool {
+		return r.Status == store.WorkflowStatusFailed
+	})
+	f.exec.noStart(t, "the failed run started another session")
+	f.exec.mu.Lock()
+	stopped := slices.ContainsFunc(f.exec.cancels, func(ref execution.Ref) bool { return ref.SessionID == started["writer2"] })
+	f.exec.mu.Unlock()
+	if stopped || f.exec.isClosed(started["writer2"]) {
+		t.Fatal("the failed round stopped the round of another Loop")
+	}
+	f.exec.finish(started["writer2"], completed("done"))
+}
+
+// An interactive node whose first turn could not be set up gives its slot back once its End is
+// confirmed: a resume of the failed run starts it again under a limit of one session.
+func TestAFirstTurnThatCouldNotBeSetUpGivesItsSlotBack(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.host.sessionLimit = 1
+	runID := f.run(t, interactiveChain, str("支付重构"))
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	a := f.exec.awaitStart(t)
+	ends := f.countEndsOf(func() string { return a })
+	f.exec.finish(a, execution.Result{Status: execution.StatusFailed, FailureCode: "agent_prepare_failed", AgentLost: true, NotStarted: true})
+	if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusFailed {
+		t.Fatalf("run %s", run.Status)
+	}
+	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
+	if ends() == 0 {
+		t.Fatal("the session that could not be set up was never ended")
+	}
+	if _, err := f.host.ResumeRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	if again := f.exec.awaitStart(t); f.exec.request(again).Caller.NodeID != "a" {
+		t.Fatalf("resumed %s, want A", f.exec.request(again).Caller.NodeID)
+	}
+}
+
+// A turn that ends after a sibling failed the run cannot park: its session is ended, its row
+// closed and its slot given back, so a resume starts both nodes.
+func TestARefusedParkGivesTheSlotBack(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.host.sessionLimit = 2
+	runID := f.run(t, parallelInteractive, nil)
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	started := f.exec.awaitStarts(t, 2)
+	a, c := started["a"], started["c"]
+	f.exec.finish(a, completed("在"))
+	f.await(t, runID, parked("a"))
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "继续"); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.awaitAppend(t)
+	ends := f.countEndsOf(func() string { return a })
+	f.exec.finish(c, execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
+	f.await(t, runID, func(r store.WorkflowRun, _ []store.WorkflowNodeRun) bool {
+		return r.Status == store.WorkflowStatusFailed
+	})
+	// Let the failure's sweep pass first: it leaves A to its executing turn, so only the refused
+	// park can end A's session.
+	f.exec.noStart(t, "the failed run started another session")
+	f.exec.finish(a, completed("晚了"))
+	f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "a").Status == store.WorkflowStatusCancelled
+	})
+	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
+	if ends() == 0 {
+		t.Fatal("the refused park left A's session open")
+	}
+	if _, err := f.host.ResumeRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	if resumed := f.exec.awaitStarts(t, 2); resumed["a"] == "" || resumed["c"] == "" {
+		t.Fatalf("resumed %v, want A and C", resumed)
+	}
+}
