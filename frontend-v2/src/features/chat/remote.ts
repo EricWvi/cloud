@@ -1,10 +1,13 @@
 import { statusOf } from '@/lib/api-client'
 import {
   type CreateProject,
+  type Project as ApiProject,
+  deleteApiV2TenantsTidProjectsPidRepositoryToken,
   getApiV2TenantsTidProjects,
   getApiV2TenantsTidProjectsPid,
   postApiV2TenantsTidProjects,
   postApiV2TenantsTidProjectsPidSync,
+  putApiV2TenantsTidProjectsPidRepositoryToken,
 } from '@/lib/projects-api/generated'
 import { isAxiosError } from 'axios'
 import {
@@ -26,11 +29,14 @@ import {
 export interface RemoteProject {
   id: string
   name: string
+  /** The user who created the project; only they and an owner may change its token. */
+  ownerUserId?: string
   syncAt?: string
   syncError?: string
   syncForcePushed?: boolean
   syncRunning?: boolean
   repositoryTokenConfigured?: boolean
+  repositoryTokenSetAt?: string
 }
 
 /** Everything the chat page loads once it knows the tenant. */
@@ -48,13 +54,28 @@ export interface RemoteState {
  */
 export type Failure = { kind: 'running' } | { kind: 'ended' } | { kind: 'unavailable' } | { kind: 'error'; message: string }
 
+/** The chat page's view of one project: identity plus the sync and token state it renders. */
+function projectView(p: ApiProject): RemoteProject {
+  return {
+    id: p.id,
+    name: p.name,
+    ownerUserId: p.ownerUserId,
+    syncAt: p.syncAt,
+    syncError: p.syncError,
+    syncForcePushed: p.syncForcePushed,
+    syncRunning: p.syncRunning,
+    repositoryTokenConfigured: p.repositoryTokenConfigured,
+    repositoryTokenSetAt: p.repositoryTokenSetAt,
+  }
+}
+
 /** Reads every page of the tenant's projects. */
 async function allProjects(tid: string): Promise<RemoteProject[]> {
   const all: RemoteProject[] = []
   let after: string | undefined
   do {
     const page = await getApiV2TenantsTidProjects(tid, { limit: 100, after })
-    all.push(...page.items.map((p) => ({ id: p.id, name: p.name, syncAt: p.syncAt, syncError: p.syncError, syncForcePushed: p.syncForcePushed, syncRunning: p.syncRunning, repositoryTokenConfigured: p.repositoryTokenConfigured })))
+    all.push(...page.items.map(projectView))
     after = page.nextCursor || undefined
   } while (after)
   return all
@@ -96,6 +117,16 @@ export function syncFailureOf(error: unknown): string {
   if (status === 400 && body?.code === 'project_token_unavailable') return '同步失败：项目令牌不可用，请重新设置。'
   if (status === 404) return '项目不存在。'
   return '同步失败，请重试。'
+}
+
+/** Why setting or clearing a project token failed, as the dialog says it. */
+export function tokenFailureOf(error: unknown): string {
+  const status = statusOf(error)
+  const body = isAxiosError(error) ? (error.response?.data as { code?: string } | undefined) : undefined
+  if (status === 403 && body?.code === 'forbidden') return '只有团队 owner 或项目创建者能更换或清除令牌。'
+  if (status === 400 && body?.code === 'invalid_project_token') return '令牌不合法，请检查后重试。'
+  if (status === 404) return '项目不存在。'
+  return '令牌操作失败，请重试。'
 }
 
 /** Whether a request's outcome is unknown and must be retried with the same idempotency key. */
@@ -156,12 +187,22 @@ export const remote = {
   /** Pulls the project's bound branch once and returns the advanced project record. */
   syncProject: async (tid: string, pid: string): Promise<RemoteProject> => {
     const p = await postApiV2TenantsTidProjectsPidSync(tid, pid)
-    return { id: p.id, name: p.name, syncAt: p.syncAt, syncError: p.syncError, syncForcePushed: p.syncForcePushed, syncRunning: p.syncRunning, repositoryTokenConfigured: p.repositoryTokenConfigured }
+    return projectView(p)
   },
   /** Reads one project, so a failed sync can still refresh the reason the server recorded. */
   project: async (tid: string, pid: string): Promise<RemoteProject> => {
     const p = await getApiV2TenantsTidProjectsPid(tid, pid)
-    return { id: p.id, name: p.name, syncAt: p.syncAt, syncError: p.syncError, syncForcePushed: p.syncForcePushed, syncRunning: p.syncRunning, repositoryTokenConfigured: p.repositoryTokenConfigured }
+    return projectView(p)
+  },
+  /** Replaces the private-repository token; the API never returns its plaintext. */
+  setRepositoryToken: async (tid: string, pid: string, token: string): Promise<RemoteProject> => {
+    const p = await putApiV2TenantsTidProjectsPidRepositoryToken(tid, pid, { token })
+    return projectView(p)
+  },
+  /** Clears the private-repository token so later pulls are anonymous. */
+  clearRepositoryToken: async (tid: string, pid: string): Promise<RemoteProject> => {
+    const p = await deleteApiV2TenantsTidProjectsPidRepositoryToken(tid, pid)
+    return projectView(p)
   },
 
   /**

@@ -1,0 +1,601 @@
+package server_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/getkin/kin-openapi/routers/legacy"
+	"github.com/wanglongan587/cloud/v2-server/internal/execution/executiontest"
+	"github.com/wanglongan587/cloud/v2-server/internal/server"
+	"github.com/wanglongan587/cloud/v2-server/internal/store"
+	"github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
+	"github.com/wanglongan587/cloud/v2-server/internal/taskrun"
+	"github.com/wanglongan587/cloud/v2-server/internal/taskworkflow"
+	"github.com/wanglongan587/cloud/v2-server/internal/workflowhost"
+)
+
+type realWorkflowTaskPort struct{ host *workflowhost.Host }
+
+func (p realWorkflowTaskPort) Prepare(ctx context.Context, tenant, user, id string, input *string, values map[string]json.RawMessage) error {
+	_, err := p.host.UpdateRunInput(ctx, server.WorkflowRunScope{TenantID: tenant, UserID: user}, id, input, values)
+	return err
+}
+
+func (p realWorkflowTaskPort) Start(ctx context.Context, tenant, user, id string) error {
+	_, err := p.host.StartRun(ctx, server.WorkflowRunScope{TenantID: tenant, UserID: user}, id)
+	return err
+}
+
+func (p realWorkflowTaskPort) Cancel(ctx context.Context, tenant, user, id string) error {
+	_, err := p.host.CancelRun(ctx, server.WorkflowRunScope{TenantID: tenant, UserID: user}, id)
+	return err
+}
+
+func (p realWorkflowTaskPort) Subscribe(id string) (<-chan struct{}, func()) {
+	return p.host.Hub().Subscribe(id)
+}
+
+func commentWorkflowServer(t *testing.T, f *squadFixture) *taskworkflow.Host {
+	t.Helper()
+	exec := &executiontest.Stub{}
+	wfHost, err := workflowhost.NewHost(workflowhost.Config{Store: f.store, Execution: exec, Catalog: exec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(wfHost.Close)
+	twHost := taskworkflow.New(f.store, realWorkflowTaskPort{host: wfHost})
+	t.Cleanup(twHost.Close)
+	trHost := taskrun.New(f.store, exec, exec, nil)
+	t.Cleanup(trHost.Close)
+	f.srv.Close()
+	f.srv = httptest.NewServer(server.New(f.store, server.Options{
+		SessionTTL:        time.Hour,
+		WorkflowRuns:      wfHost,
+		WorkflowRunEvents: wfHost.Hub(),
+		TaskWorkflows:     twHost,
+		TaskRuns:          trHost,
+	}))
+	t.Cleanup(f.srv.Close)
+	return twHost
+}
+
+const commentWorkflowGraph = `{
+	"nodes":[
+		{"id":"start","data":{"kind":"start","inputVariables":[
+			{"name":"branch","valueType":"string","required":true},
+			{"name":"count","valueType":"number","required":false,"value":1},
+			{"name":"mode","valueType":"string","fieldType":"select","options":["fast","safe"],"required":false,"value":"fast"},
+			{"name":"maxNote","valueType":"string","maxLength":5,"required":false},
+			{"name":"tags","valueType":"array[string]","required":false},
+			{"name":"meta","valueType":"object","required":false},
+			{"name":"files","valueType":"array[file]","required":false}
+		]}},
+		{"id":"out","data":{"kind":"output","outputs":[
+			{"name":"branch","variableSelector":["start","branch"]},
+			{"name":"count","variableSelector":["start","count"]},
+			{"name":"mode","variableSelector":["start","mode"]},
+			{"name":"tags","variableSelector":["start","tags"]},
+			{"name":"meta","variableSelector":["start","meta"]},
+			{"name":"comment","variableSelector":["start","input"]}
+		]}}
+	],
+	"edges":[{"source":"start","target":"out"}]
+}`
+
+func TestTaskCommentWorkflowHTTP(t *testing.T) {
+	f := newSquadServer(t)
+	commentWorkflowServer(t, f)
+
+	ownerClient := f.taskClient()
+	ownerClient.login()
+	tid := f.tenant(t)
+	f.project(t)
+
+	// Add a workspace member who is NOT the task assignee.
+	memberToken := storetest.SignIn(t, f.store, "comment-member", "成员评论者", store.RoleOwner)
+	memberUser, err := f.store.SessionUser(f.ctx, memberToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(f.ctx, `UPDATE memberships SET role = 'member' WHERE tenant_id = $1 AND user_id = $2`, tid, memberUser.ID); err != nil {
+		t.Fatal(err)
+	}
+	memberClient := f.taskClient()
+	req, _ := http.NewRequest("GET", memberClient.base, nil)
+	memberClient.http.Jar.SetCookies(req.URL, []*http.Cookie{{Name: server.SessionCookie, Value: memberToken}})
+
+	wf, _, err := f.store.CreateWorkflow(f.ctx, tid, "发布检查", commentWorkflowGraph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.PublishWorkflow(f.ctx, tid, wf.ID, "v1", nil); err != nil {
+		t.Fatal(err)
+	}
+	draftWF, _, err := f.store.CreateWorkflow(f.ctx, tid, "未发布草稿", commentWorkflowGraph)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	base := "/api/v2/tenants/" + tid + "/tasks"
+	status, task := ownerClient.do("POST", base, map[string]any{"title": "评论运行工作流", "projectId": taskProjectID})
+	if status != 201 {
+		t.Fatalf("create task = %d %v", status, task)
+	}
+	taskID := task["id"].(string)
+	commentsPath := base + "/" + taskID + "/comments"
+	timelinePath := base + "/" + taskID + "/timeline"
+
+	// Per-field input validation errors must reject before recording a comment or workflow run.
+	invalidCases := []struct {
+		name     string
+		values   map[string]any
+		variable string
+		reason   string
+	}{
+		{"missing required", map[string]any{}, "branch", "required value is missing"},
+		{"blank required", map[string]any{"branch": ""}, "branch", "required value is missing"},
+		{"type mismatch", map[string]any{"branch": "main", "count": "not-a-number"}, "count", "type_mismatch"},
+		{"invalid option", map[string]any{"branch": "main", "mode": "turbo"}, "mode", "value is not one of the configured options"},
+		{"length exceeded", map[string]any{"branch": "main", "maxNote": "123456"}, "maxNote", "length_exceeded"},
+		{"malformed structured json", map[string]any{"branch": "main", "tags": "[unclosed"}, "tags", "type_mismatch"},
+		{"wrong structured json type", map[string]any{"branch": "main", "meta": "[1, 2]"}, "meta", "type_mismatch"},
+		{"undeclared field", map[string]any{"branch": "main", "extra": 1}, "extra", "undeclared"},
+	}
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, got := memberClient.doHeaders("POST", commentsPath, map[string]any{
+				"body":     "@发布检查 " + tc.name,
+				"mentions": []map[string]any{{"type": "workflow", "id": wf.ID}},
+				"workflow": map[string]any{"workflowId": wf.ID, "values": tc.values},
+			}, map[string]string{"Idempotency-Key": "invalid-" + tc.name})
+			params, _ := got["params"].(map[string]any)
+			if code != 400 || got["code"] != "workflow_run_input_invalid" || params["variable"] != tc.variable || params["reason"] != tc.reason {
+				t.Fatalf("%s: got %d %v", tc.name, code, got)
+			}
+		})
+	}
+
+	if status, got := memberClient.doHeaders("POST", commentsPath, map[string]any{
+		"body":     "conflict",
+		"toAgent":  true,
+		"workflow": map[string]any{"workflowId": wf.ID, "values": map[string]any{"branch": "main"}},
+	}, map[string]string{"Idempotency-Key": "both"}); status != 400 || got["code"] != "invalid_request" {
+		t.Fatalf("toAgent+workflow = %d %v", status, got)
+	}
+	if status, got := memberClient.doHeaders("POST", commentsPath, map[string]any{
+		"body":     "@未发布草稿",
+		"mentions": []map[string]any{{"type": "workflow", "id": draftWF.ID}},
+		"workflow": map[string]any{"workflowId": draftWF.ID, "values": map[string]any{"branch": "main"}},
+	}, map[string]string{"Idempotency-Key": "draft-wf"}); status != 400 || got["code"] != "invalid_mention" {
+		t.Fatalf("draft workflow mention = %d %v", status, got)
+	}
+	if status, got := memberClient.doHeaders("POST", commentsPath, map[string]any{
+		"body":     "run draft directly",
+		"workflow": map[string]any{"workflowId": draftWF.ID, "values": map[string]any{"branch": "main"}},
+	}, map[string]string{"Idempotency-Key": "draft-direct"}); status != 400 || got["code"] != "workflow_no_published_snapshot" {
+		t.Fatalf("draft workflow direct = %d %v", status, got)
+	}
+
+	var runCount int
+	if err := f.db.QueryRow(f.ctx, `SELECT COUNT(*) FROM v2_workflow_runs WHERE tenant_id = $1`, tid).Scan(&runCount); err != nil {
+		t.Fatal(err)
+	}
+	if runCount != 0 {
+		t.Fatalf("invalid submissions created %d workflow runs, want 0", runCount)
+	}
+
+	// Discover published workflow target and its FormDescriptor from #1175 endpoints.
+	origMemberRoutes := memberClient.routes
+	memberClient.routes = nil
+	if status, targetsBody := memberClient.do("GET", "/api/v1/tenants/"+tid+"/collaboration/targets", nil); status != 200 {
+		t.Fatalf("targets = %d %v", status, targetsBody)
+	} else {
+		items, _ := targetsBody["items"].([]any)
+		var foundTarget bool
+		for _, raw := range items {
+			item := raw.(map[string]any)
+			if item["type"] == "workflow" && item["id"] == wf.ID {
+				foundTarget = true
+			}
+		}
+		if !foundTarget {
+			t.Fatalf("published workflow missing from targets: %v", items)
+		}
+	}
+	if status, formBody := memberClient.do("GET", "/api/v1/tenants/"+tid+"/collaboration/forms/"+wf.ID, nil); status != 200 || formBody["formRef"] != wf.ID {
+		t.Fatalf("form = %d %v", status, formBody)
+	}
+	memberClient.routes = origMemberRoutes
+
+	// Non-assignee workspace member triggers @ workflow comment with valid inputs (including textarea JSON strings).
+	validKey := map[string]string{"Idempotency-Key": "comment-wf-1"}
+	validPayload := map[string]any{
+		"body":     "@发布检查 请检查 main 分支",
+		"mentions": []map[string]any{{"type": "workflow", "id": wf.ID}},
+		"workflow": map[string]any{
+			"workflowId": wf.ID,
+			"values": map[string]any{
+				"branch":  "main",
+				"count":   3,
+				"mode":    "safe",
+				"maxNote": "ok",
+				"tags":    `["ci","release"]`,
+				"meta":    `{"env":"prod"}`,
+				"files":   `["docs/spec.md"]`,
+			},
+		},
+	}
+	status, created := memberClient.doHeaders("POST", commentsPath, validPayload, validKey)
+	if status != 201 {
+		t.Fatalf("valid comment workflow = %d %v", status, created)
+	}
+	if created["authorId"] != memberUser.ID || created["runId"] != "" {
+		t.Fatalf("created author/runId = %v", created)
+	}
+	wfRun, _ := created["workflowRun"].(map[string]any)
+	if wfRun == nil || wfRun["workflowId"] != wf.ID || wfRun["workflowName"] != "发布检查" || wfRun["version"] != "v1" || wfRun["deleted"] != false {
+		t.Fatalf("workflowRun summary = %v", wfRun)
+	}
+	if s, _ := wfRun["status"].(string); s != "pending" && s != "running" && s != "succeeded" {
+		t.Fatalf("unexpected initial workflowRun status = %v", wfRun)
+	}
+	runID := wfRun["id"].(string)
+	settledRun := waitForCommentWorkflowStatus(t, memberClient, timelinePath, runID, "succeeded")
+	outText, _ := settledRun["output"].(string)
+	if !strings.Contains(outText, `"branch":"main"`) || !strings.Contains(outText, `"mode":"safe"`) || !strings.Contains(outText, `"ci"`) || !strings.Contains(outText, `"env":"prod"`) || !strings.Contains(outText, `@发布检查`) {
+		t.Fatalf("workflow output = %q", outText)
+	}
+
+	// Run starter must be the commenter, and task status must remain pending.
+	var starterID string
+	if err := f.db.QueryRow(f.ctx, `SELECT COALESCE(started_by::text, '') FROM v2_workflow_runs WHERE id = $1`, runID).Scan(&starterID); err != nil {
+		t.Fatal(err)
+	}
+	if starterID != memberUser.ID {
+		t.Fatalf("workflow started_by = %s, want commenter %s", starterID, memberUser.ID)
+	}
+	if status, reloadedTask := memberClient.do("GET", base+"/"+taskID, nil); status != 200 || reloadedTask["status"] != store.TaskPending || reloadedTask["activeRun"] != nil {
+		t.Fatalf("task mutated by comment workflow = %d %v", status, reloadedTask)
+	}
+
+	// Idempotent retry creates no extra workflow run or comment.
+	status, retried := memberClient.doHeaders("POST", commentsPath, validPayload, validKey)
+	if status != 201 || retried["id"] != created["id"] {
+		t.Fatalf("retry = %d %v, want %v", status, retried, created["id"])
+	}
+	retryRun, _ := retried["workflowRun"].(map[string]any)
+	if retryRun == nil || retryRun["id"] != runID {
+		t.Fatalf("retry workflowRun = %v, want %s", retryRun, runID)
+	}
+	if err := f.db.QueryRow(f.ctx, `SELECT COUNT(*) FROM v2_workflow_runs WHERE tenant_id = $1`, tid).Scan(&runCount); err != nil {
+		t.Fatal(err)
+	}
+	if runCount != 1 {
+		t.Fatalf("workflow run count after retry = %d, want 1", runCount)
+	}
+
+	// Timeline preserves the linked workflow run and final output across reloads.
+	status, tl := memberClient.do("GET", timelinePath, nil)
+	if status != 200 {
+		t.Fatalf("timeline = %d %v", status, tl)
+	}
+	comments, _ := tl["comments"].([]any)
+	if len(comments) != 1 {
+		t.Fatalf("timeline comments = %v", tl)
+	}
+	tlRun, _ := comments[0].(map[string]any)["workflowRun"].(map[string]any)
+	if tlRun == nil || tlRun["id"] != runID || tlRun["status"] != "succeeded" || tlRun["output"] != settledRun["output"] {
+		t.Fatalf("timeline workflowRun = %v", tlRun)
+	}
+
+	// Task workflow runs list also exposes the comment-started run under kind="mention".
+	doc, err := openapi3.NewLoader().LoadFromFile("../../task-workflows.openapi.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := doc.Validate(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	twRoutes, err := legacy.NewRouter(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origRoutes := memberClient.routes
+	memberClient.routes = twRoutes
+	status, wfList := memberClient.do("GET", base+"/"+taskID+"/workflow-runs", nil)
+	if status != 200 {
+		t.Fatalf("task workflow-runs = %d %v", status, wfList)
+	}
+	items, _ := wfList["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["kind"] != "mention" || items[0].(map[string]any)["workflowRunId"] != runID || items[0].(map[string]any)["startedBy"] != memberUser.ID {
+		t.Fatalf("task workflow-runs items = %v", items)
+	}
+	memberClient.routes = origRoutes
+
+	// Closing the task blocks new @ workflow starts (409 task_closed) while preserving retries of existing keys.
+	if status, closed := ownerClient.do("POST", base+"/"+taskID+"/status", map[string]any{"status": store.TaskCancelled, "version": task["version"]}); status != 200 {
+		t.Fatalf("close task = %d %v", status, closed)
+	}
+	if status, got := memberClient.doHeaders("POST", commentsPath, validPayload, map[string]string{"Idempotency-Key": "after-close"}); status != 409 || got["code"] != "task_closed" {
+		t.Fatalf("closed task comment workflow = %d %v", status, got)
+	}
+	if status, retriedClosed := memberClient.doHeaders("POST", commentsPath, validPayload, validKey); status != 201 || retriedClosed["id"] != created["id"] {
+		t.Fatalf("retry after close = %d %v", status, retriedClosed)
+	}
+
+	// Soft-deleting the workflow run keeps timeline readable with deleted=true.
+	if _, err := f.db.Exec(f.ctx, `UPDATE v2_workflow_runs SET deleted_at = now() WHERE id = $1`, runID); err != nil {
+		t.Fatal(err)
+	}
+	status, tlAfterDelete := memberClient.do("GET", timelinePath, nil)
+	if status != 200 {
+		t.Fatalf("timeline after soft-delete = %d %v", status, tlAfterDelete)
+	}
+	deletedRun := tlAfterDelete["comments"].([]any)[0].(map[string]any)["workflowRun"].(map[string]any)
+	if deletedRun["deleted"] != true {
+		t.Fatalf("deleted flag = %v", deletedRun)
+	}
+}
+
+func TestTaskCommentWorkflowIsolationAndAwaitingStatus(t *testing.T) {
+	f := newSquadServer(t)
+	commentWorkflowServer(t, f)
+
+	c := f.taskClient()
+	c.login()
+	tid := f.tenant(t)
+	f.project(t)
+
+	// Check 503 when only TaskRuns is absent vs only TaskWorkflows is absent.
+	noWorkflowHost := newSquadServerWith(t, server.Options{SessionTTL: time.Hour, TaskRuns: taskrun.New(f.store, &executiontest.Stub{}, &executiontest.Stub{}, nil)})
+	noWfClient := noWorkflowHost.taskClient()
+	noWfClient.login()
+	noWfTid := noWorkflowHost.tenant(t)
+	if status, got := noWfClient.doHeaders("POST", "/api/v2/tenants/"+noWfTid+"/tasks/00000000-0000-4000-8000-000000000001/comments", map[string]any{
+		"body":     "missing host",
+		"workflow": map[string]any{"workflowId": "00000000-0000-4000-8000-000000000002"},
+	}, map[string]string{"Idempotency-Key": "no-host"}); status != 503 || got["code"] != "workflow_run_host_unavailable" {
+		t.Fatalf("without TaskWorkflows = %d %v", status, got)
+	}
+
+	wf, _, err := f.store.CreateWorkflow(f.ctx, tid, "互动流程", `{"nodes":[{"id":"start","data":{"kind":"start","inputVariables":[{"name":"topic","valueType":"string","required":true},{"name":"items","valueType":"array[object]","value":[{"key":"k1","title":"待确认","description":"细节"}]}]}},{"id":"review","data":{"kind":"form","formConfig":{"title":"人工确认","submitLabel":"提交","reportSelector":["start","topic"],"itemsSelector":["start","items"],"fields":[]}}},{"id":"out","data":{"kind":"output","outputs":[{"name":"reply","variableSelector":["start","topic"]}]}}],"edges":[{"source":"start","target":"review"},{"source":"review","target":"out"}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.PublishWorkflow(f.ctx, tid, wf.ID, "v1", nil); err != nil {
+		t.Fatal(err)
+	}
+	status, task := c.do("POST", "/api/v2/tenants/"+tid+"/tasks", map[string]any{"title": "并存与状态派生", "projectId": taskProjectID})
+	if status != 201 {
+		t.Fatalf("create task = %d %v", status, task)
+	}
+	taskID := task["id"].(string)
+
+	// Concurrent identical idempotency key calls must settle onto the exact same run.
+	const workers = 4
+	results := make([]string, workers)
+	statuses := make([]int, workers)
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			cli := f.taskClient()
+			cli.login()
+			code, got := cli.doHeaders("POST", "/api/v2/tenants/"+tid+"/tasks/"+taskID+"/comments", map[string]any{
+				"body":     "@互动流程",
+				"mentions": []map[string]any{{"type": "workflow", "id": wf.ID}},
+				"workflow": map[string]any{"workflowId": wf.ID, "values": map[string]any{"topic": "spec"}},
+			}, map[string]string{"Idempotency-Key": "concurrent-same"})
+			statuses[idx] = code
+			if r, ok := got["workflowRun"].(map[string]any); ok {
+				results[idx], _ = r["id"].(string)
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i := range workers {
+		if statuses[i] != 201 || results[i] == "" || results[i] != results[0] {
+			t.Fatalf("concurrent[%d] status=%d run=%q (want %q)", i, statuses[i], results[i], results[0])
+		}
+	}
+
+	// Real form node parks the run naturally so TaskTimeline derives awaitingInput without altering task status.
+	runID := results[0]
+	timelinePath := "/api/v2/tenants/" + tid + "/tasks/" + taskID + "/timeline"
+	wfRun := waitForCommentWorkflowStatus(t, c, timelinePath, runID, "awaitingInput")
+	if wfRun["status"] != "awaitingInput" {
+		t.Fatalf("derived awaitingInput status = %v", wfRun["status"])
+	}
+
+	// Second comment @ workflow succeeds concurrently without "run_active" blocking.
+	status, second := c.doHeaders("POST", "/api/v2/tenants/"+tid+"/tasks/"+taskID+"/comments", map[string]any{
+		"body":     "@互动流程 第二次",
+		"workflow": map[string]any{"workflowId": wf.ID, "values": map[string]any{"topic": "second"}},
+	}, map[string]string{"Idempotency-Key": "second-key"})
+	if status != 201 || second["workflowRun"].(map[string]any)["id"] == runID {
+		t.Fatalf("second comment workflow = %d %v", status, second)
+	}
+	secondRunID := second["workflowRun"].(map[string]any)["id"].(string)
+	waitForCommentWorkflowStatus(t, c, timelinePath, secondRunID, "awaitingInput")
+}
+
+func waitForCommentWorkflowStatus(t *testing.T, client *taskClient, timelinePath, runID, want string) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		status, tl := client.do("GET", timelinePath, nil)
+		if status != 200 {
+			t.Fatalf("timeline = %d %v", status, tl)
+		}
+		for _, raw := range tl["comments"].([]any) {
+			if wr, _ := raw.(map[string]any)["workflowRun"].(map[string]any); wr != nil && wr["id"] == runID {
+				if wr["status"] == want {
+					return wr
+				}
+				if s, _ := wr["status"].(string); s == "failed" || s == "cancelled" || (want != "succeeded" && s == "succeeded") {
+					t.Fatalf("workflowRun %s ended in %q (want %q): %v", runID, s, want, wr)
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for comment workflow %s status=%s", runID, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestTaskCommentWorkflowCancelsOnStartFailure(t *testing.T) {
+	for _, prepare := range []bool{true, false} {
+		name := "start"
+		if prepare {
+			name = "prepare"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newSquadServer(t)
+			boom := errors.New("start boom")
+			failing := taskworkflow.New(f.store, failingStartRuns{err: boom, prepare: prepare})
+			t.Cleanup(failing.Close)
+			f.srv.Close()
+			f.srv = httptest.NewServer(server.New(f.store, server.Options{SessionTTL: time.Hour, TaskWorkflows: failing}))
+			t.Cleanup(f.srv.Close)
+
+			c := f.taskClient()
+			c.login()
+			tid := f.tenant(t)
+			f.project(t)
+			wf, _, err := f.store.CreateWorkflow(f.ctx, tid, "Failure", commentWorkflowGraph)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.store.PublishWorkflow(f.ctx, tid, wf.ID, "v1", nil); err != nil {
+				t.Fatal(err)
+			}
+			_, task := c.do("POST", "/api/v2/tenants/"+tid+"/tasks", map[string]any{"title": "StartFailure", "projectId": taskProjectID})
+			path := "/api/v2/tenants/" + tid + "/tasks/" + task["id"].(string) + "/comments"
+			payload := map[string]any{
+				"body":     "@Failure",
+				"workflow": map[string]any{"workflowId": wf.ID, "values": map[string]any{"branch": "main", "tags": []any{}, "meta": map[string]any{}}},
+			}
+			key := map[string]string{"Idempotency-Key": "fail-start"}
+			status, _ := c.doHeaders("POST", path, payload, key)
+			if status != 500 {
+				t.Fatalf("failing start status = %d, want 500", status)
+			}
+			for _, table := range []string{"v2_task_comments", "v2_workflow_runs", "v2_workflow_scopes", "v2_workflow_run_roots"} {
+				var count int
+				if err := f.db.QueryRow(f.ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
+					t.Fatal(err)
+				}
+				if count != 0 {
+					t.Fatalf("refused admission left %d rows in %s", count, table)
+				}
+			}
+			if status, timeline := c.do("GET", "/api/v2/tenants/"+tid+"/tasks/"+task["id"].(string)+"/timeline", nil); status != 200 || len(timeline["comments"].([]any)) != 0 {
+				t.Fatalf("refused admission timeline = %d %v", status, timeline)
+			}
+			// Restore the real host, then retry exactly the failed request and key.
+			commentWorkflowServer(t, f)
+			c = f.taskClient()
+			c.login()
+			status, created := c.doHeaders("POST", path, payload, key)
+			if status != 201 {
+				t.Fatalf("retry after refusal = %d %v", status, created)
+			}
+			runID := created["workflowRun"].(map[string]any)["id"].(string)
+			waitForCommentWorkflowStatus(t, c, "/api/v2/tenants/"+tid+"/tasks/"+task["id"].(string)+"/timeline", runID, "succeeded")
+			status, replay := c.doHeaders("POST", path, payload, key)
+			if status != 201 || replay["id"] != created["id"] || replay["workflowRun"].(map[string]any)["id"] != runID {
+				t.Fatalf("successful replay = %d %v", status, replay)
+			}
+			for _, table := range []string{"v2_task_comments", "v2_workflow_runs"} {
+				var count int
+				if err := f.db.QueryRow(f.ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
+					t.Fatal(err)
+				}
+				if count != 1 {
+					t.Fatalf("successful retry left %d rows in %s, want 1", count, table)
+				}
+			}
+		})
+	}
+}
+
+func TestTaskCommentWorkflowRetainsHistoryAfterExecutionStarted(t *testing.T) {
+	f := newSquadServer(t)
+	port := failingStartRuns{err: errors.New("private infrastructure detail"), start: func(ctx context.Context, tenant, runID string) error {
+		_, err := f.store.StartWorkflowRun(ctx, tenant, runID)
+		return err
+	}}
+	host := taskworkflow.New(f.store, port)
+	t.Cleanup(host.Close)
+	f.srv.Close()
+	f.srv = httptest.NewServer(server.New(f.store, server.Options{SessionTTL: time.Hour, TaskWorkflows: host}))
+	t.Cleanup(f.srv.Close)
+	c := f.taskClient()
+	c.login()
+	tid := f.tenant(t)
+	f.project(t)
+	wf, _, err := f.store.CreateWorkflow(f.ctx, tid, "Started failure", commentWorkflowGraph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.PublishWorkflow(f.ctx, tid, wf.ID, "v1", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, task := c.do("POST", "/api/v2/tenants/"+tid+"/tasks", map[string]any{"title": "StartedFailure", "projectId": taskProjectID})
+	path := "/api/v2/tenants/" + tid + "/tasks/" + task["id"].(string) + "/comments"
+	payload := map[string]any{"body": "@Started failure", "workflow": map[string]any{"workflowId": wf.ID, "values": map[string]any{"branch": "main"}}}
+	key := map[string]string{"Idempotency-Key": "already-started"}
+	if status, body := c.doHeaders("POST", path, payload, key); status != 500 {
+		t.Fatalf("failed start = %d %v", status, body)
+	}
+	status, replay := c.doHeaders("POST", path, payload, key)
+	if status != 201 {
+		t.Fatalf("replay = %d %v", status, replay)
+	}
+	run := replay["workflowRun"].(map[string]any)
+	if run["status"] != "cancelled" || run["error"] != "工作流启动失败，请重新发起。" {
+		t.Fatalf("failed start lost its safe reason: %v", run)
+	}
+	for _, table := range []string{"v2_task_comments", "v2_workflow_runs"} {
+		var count int
+		if err := f.db.QueryRow(f.ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("started admission left %d rows in %s, want 1", count, table)
+		}
+	}
+}
+
+type failingStartRuns struct {
+	err     error
+	prepare bool
+	start   func(context.Context, string, string) error
+}
+
+func (f failingStartRuns) Prepare(context.Context, string, string, string, *string, map[string]json.RawMessage) error {
+	if f.prepare {
+		return f.err
+	}
+	return nil
+}
+func (f failingStartRuns) Start(ctx context.Context, tenant, _ string, runID string) error {
+	if f.start != nil {
+		if err := f.start(ctx, tenant, runID); err != nil {
+			return err
+		}
+	}
+	return f.err
+}
+func (failingStartRuns) Cancel(context.Context, string, string, string) error { return nil }
+func (failingStartRuns) Subscribe(string) (<-chan struct{}, func())           { return nil, func() {} }

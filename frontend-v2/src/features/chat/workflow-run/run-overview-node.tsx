@@ -90,8 +90,10 @@ export const RunOverviewNode = memo(function RunOverviewNode({
   const artifactCount = artifactCountByNode[id] ?? 0;
   const retryWait =
     state.status === "retry_waiting" ? state.retryWait : undefined;
+  // A node queued for a session slot was dispatched but has not started: its row's start instant is
+  // not a running time.
   const startedLabel =
-    state.startedAt !== undefined
+    state.startedAt !== undefined && state.status !== "session_waiting"
       ? formatRunClock(state.startedAt, locale)
       : null;
   const finishedLabel =

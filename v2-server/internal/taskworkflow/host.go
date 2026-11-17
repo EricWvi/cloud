@@ -108,6 +108,110 @@ func (h *Host) Start(ctx context.Context, in store.NewTaskWorkflow, values map[s
 	return id, nil
 }
 
+// CommentWorkflowInput is a task comment that validates Start inputs and runs a workflow as the commenter.
+type CommentWorkflowInput struct {
+	TenantID   string
+	TaskID     string
+	AuthorID   string
+	CreateKey  string
+	Body       string
+	Mentions   []store.TaskMention
+	WorkflowID string
+	SnapshotID string
+	Input      *string
+	Values     map[string]json.RawMessage
+}
+
+// CommentWorkflow validates Start inputs against the published workflow snapshot, creates the run
+// and comment atomically as the commenter (without altering task status or handling locks), and
+// dispatches execution. Retries with the same key return the existing comment without re-running.
+func (h *Host) CommentWorkflow(ctx context.Context, in CommentWorkflowInput) (store.TaskComment, error) {
+	defer h.lock(in.TaskID)()
+	if existing, err := h.db.TaskCommentByKey(ctx, in.TenantID, in.TaskID, in.AuthorID, in.CreateKey); err == nil {
+		return existing, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return store.TaskComment{}, err
+	}
+	task, err := h.db.Task(ctx, in.TenantID, in.TaskID)
+	if err != nil {
+		return store.TaskComment{}, err
+	}
+	if task.Status == store.TaskDone || task.Status == store.TaskCancelled {
+		return store.TaskComment{}, store.ErrInvalidTransition
+	}
+	mentions, err := h.db.ResolveTaskMentions(ctx, in.TenantID, in.Mentions)
+	if err != nil {
+		return store.TaskComment{}, err
+	}
+	var snapshot store.WorkflowSnapshot
+	if in.SnapshotID == "" {
+		snapshot, err = h.db.PublishedWorkflowSnapshot(ctx, in.TenantID, in.WorkflowID)
+	} else {
+		snapshot, err = h.db.WorkflowSnapshot(ctx, in.TenantID, in.WorkflowID, in.SnapshotID)
+	}
+	if err != nil {
+		return store.TaskComment{}, err
+	}
+	if snapshot.Version == store.WorkflowDraftVersion {
+		return store.TaskComment{}, store.ErrWorkflowDraftSnapshot
+	}
+	startInput := in.Input
+	if startInput == nil {
+		if _, hasExplicitInput := in.Values["input"]; !hasExplicitInput {
+			body := in.Body
+			startInput = &body
+		}
+	}
+	decodedValues, err := workflow.DecodeFormStartValues(snapshot.Graph, in.Values)
+	if err != nil {
+		return store.TaskComment{}, preflightError(err)
+	}
+	if err := workflow.CheckStart(snapshot.Graph, startInput, decodedValues); err != nil {
+		return store.TaskComment{}, preflightError(err)
+	}
+	comment, fresh, err := h.db.CreateTaskWorkflowComment(ctx, store.NewTaskWorkflowComment{
+		TenantID:   in.TenantID,
+		TaskID:     in.TaskID,
+		AuthorID:   in.AuthorID,
+		CreateKey:  in.CreateKey,
+		Body:       in.Body,
+		Mentions:   mentions,
+		WorkflowID: in.WorkflowID,
+		SnapshotID: snapshot.ID,
+		Input:      startInput,
+	})
+	if err != nil || !fresh {
+		return comment, err
+	}
+	owned := context.WithoutCancel(ctx)
+	runID := comment.WorkflowRun.ID
+	if err := h.runs.Prepare(owned, in.TenantID, in.AuthorID, runID, startInput, decodedValues); err != nil {
+		return store.TaskComment{}, errors.Join(err, h.rejectCommentWorkflow(owned, in, runID, "工作流输入准备失败，请重新发起。"))
+	}
+	if err := h.runs.Start(owned, in.TenantID, in.AuthorID, runID); err != nil {
+		return store.TaskComment{}, errors.Join(err, h.rejectCommentWorkflow(owned, in, runID, "工作流启动失败，请重新发起。"))
+	}
+	if latest, err := h.db.TaskCommentByKey(owned, in.TenantID, in.TaskID, in.AuthorID, in.CreateKey); err == nil {
+		return latest, nil
+	}
+	return comment, nil
+}
+
+func (h *Host) rejectCommentWorkflow(ctx context.Context, in CommentWorkflowInput, runID, message string) error {
+	if discarded, err := h.db.DiscardUnstartedCommentWorkflow(ctx, in.TenantID, in.TaskID, in.AuthorID, in.CreateKey, runID); err != nil || discarded {
+		return err
+	}
+	// Execution may already have begun before Start reported an error. Keep its history and
+	// never mark it stopped unless the execution host confirms cancellation.
+	if err := h.runs.Cancel(ctx, in.TenantID, in.AuthorID, runID); err != nil && !errors.Is(err, store.ErrWorkflowRunState) && !errors.Is(err, store.ErrWorkflowRunNotFound) {
+		return err
+	}
+	if _, err := h.db.CancelWorkflowRun(ctx, in.TenantID, runID); err != nil && !errors.Is(err, store.ErrWorkflowRunState) {
+		return err
+	}
+	return h.db.RecordCommentWorkflowStartFailure(ctx, in.TenantID, runID, message)
+}
+
 // watch settles the run's outcome, woken by run events and a periodic tick, until it commits.
 func (h *Host) watch(tenant, id string, events <-chan struct{}, cancel func()) {
 	h.workers.Add(1)

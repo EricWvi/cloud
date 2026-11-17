@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/taskrun"
+	"github.com/wanglongan587/cloud/v2-server/internal/taskworkflow"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
 
@@ -216,9 +218,21 @@ type taskMentionRequest struct {
 	ID   string `json:"id"`
 }
 
+type taskCommentWorkflowRequest struct {
+	WorkflowID string                     `json:"workflowId"`
+	SnapshotID string                     `json:"snapshotId"`
+	Input      *string                    `json:"input"`
+	Values     map[string]json.RawMessage `json:"values"`
+}
+
 func (h *handler) createTaskComment(w http.ResponseWriter, r *http.Request, a access) {
-	host, scope, id, ok := h.taskRunScope(w, r, a)
-	if !ok {
+	if h.opts.TaskRuns == nil && h.opts.TaskWorkflows == nil {
+		fault(w, http.StatusServiceUnavailable, "execution_unavailable")
+		return
+	}
+	id := r.PathValue("taskid")
+	if !taskUUID.MatchString(id) {
+		fault(w, http.StatusNotFound, "not_found")
 		return
 	}
 	key, ok := idempotencyKey(w, r)
@@ -226,10 +240,11 @@ func (h *handler) createTaskComment(w http.ResponseWriter, r *http.Request, a ac
 		return
 	}
 	var in struct {
-		Body       string               `json:"body"`
-		Mentions   []taskMentionRequest `json:"mentions"`
-		ToAgent    bool                 `json:"toAgent"`
-		ExecutorID string               `json:"executorId"`
+		Body       string                      `json:"body"`
+		Mentions   []taskMentionRequest        `json:"mentions"`
+		ToAgent    bool                        `json:"toAgent"`
+		ExecutorID string                      `json:"executorId"`
+		Workflow   *taskCommentWorkflowRequest `json:"workflow"`
 	}
 	if !decodeStrict(w, r, &in) {
 		return
@@ -245,13 +260,58 @@ func (h *handler) createTaskComment(w http.ResponseWriter, r *http.Request, a ac
 	}
 	mentions := make([]store.TaskMention, 0, len(in.Mentions))
 	for _, m := range in.Mentions {
-		if (m.Type != "user" && m.Type != "agent") || !taskUUID.MatchString(m.ID) {
+		if (m.Type != "user" && m.Type != "agent" && m.Type != "workflow") || !taskUUID.MatchString(m.ID) {
 			fault(w, http.StatusBadRequest, "invalid_mention")
 			return
 		}
 		mentions = append(mentions, store.TaskMention{Type: m.Type, ID: m.ID})
 	}
-	comment, e := host.Comment(r.Context(), scope, id, key, taskrun.CommentInput{Body: body, Mentions: mentions, ToAgent: in.ToAgent, ExecutorID: in.ExecutorID})
+	if in.Workflow != nil {
+		if in.ToAgent || in.ExecutorID != "" || !taskUUID.MatchString(in.Workflow.WorkflowID) || (in.Workflow.SnapshotID != "" && !taskUUID.MatchString(in.Workflow.SnapshotID)) {
+			fault(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		if in.Workflow.Input != nil && utf8.RuneCountInString(*in.Workflow.Input) > maxCommentBody {
+			fault(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		if h.opts.TaskWorkflows == nil {
+			fault(w, http.StatusServiceUnavailable, "workflow_run_host_unavailable")
+			return
+		}
+		comment, e := h.opts.TaskWorkflows.CommentWorkflow(r.Context(), taskworkflow.CommentWorkflowInput{
+			TenantID:   a.TenantID,
+			TaskID:     id,
+			AuthorID:   a.UserID,
+			CreateKey:  key,
+			Body:       body,
+			Mentions:   mentions,
+			WorkflowID: in.Workflow.WorkflowID,
+			SnapshotID: in.Workflow.SnapshotID,
+			Input:      in.Workflow.Input,
+			Values:     in.Workflow.Values,
+		})
+		if e != nil {
+			switch {
+			case errors.Is(e, store.ErrInvalidMention):
+				fault(w, http.StatusBadRequest, "invalid_mention")
+			case errors.Is(e, store.ErrForbidden):
+				fault(w, http.StatusForbidden, "forbidden")
+			default:
+				taskWorkflowFault(w, e)
+			}
+			return
+		}
+		writeJSON(w, http.StatusCreated, comment)
+		return
+	}
+	if h.opts.TaskRuns == nil {
+		fault(w, http.StatusServiceUnavailable, "execution_unavailable")
+		return
+	}
+	comment, e := h.opts.TaskRuns.Comment(r.Context(), a.scope(), id, key, taskrun.CommentInput{
+		Body: body, Mentions: mentions, ToAgent: in.ToAgent, ExecutorID: in.ExecutorID,
+	})
 	if e != nil {
 		taskRunFault(w, "create task comment", e)
 		return

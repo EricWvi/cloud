@@ -310,9 +310,11 @@ function RunActInspectorPanel({
     data.kind === "agent" && state.status === "succeeded"
       ? state.output?.summary
       : undefined;
-  // A waiting retry has not started; showing a time range would suggest it is already running.
+  // A waiting retry or a node queued for a session slot has not started; showing a time range would
+  // suggest it is already running.
   const timingRange =
     state.status !== "retry_waiting" &&
+    state.status !== "session_waiting" &&
     (state.startedAt !== undefined || state.finishedAt !== undefined)
       ? [
           state.startedAt !== undefined
@@ -437,6 +439,11 @@ function RunActInspectorPanel({
         {state.status === "retry_waiting" && state.retryWait !== undefined && (
           <p className="mt-1 text-[11px] font-medium text-caution">
             <RunRetryWaitLabel wait={state.retryWait} />
+          </p>
+        )}
+        {state.status === "session_waiting" && state.sessionSlotWait !== undefined && (
+          <p className="mt-1 text-[11px] font-medium text-info/80" data-session-slot-wait>
+            {t("workflowRun.sessionSlotWaitHint", { limit: state.sessionSlotWait.limit })}
           </p>
         )}
         {state.snapshotId != null &&
