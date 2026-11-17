@@ -33,6 +33,7 @@ func (s *Store) MarkWorkflowNodeAwaitingSessionSlot(ctx context.Context, runID, 
 
 // ClearWorkflowNodeSessionSlotWait drops the marker MarkWorkflowNodeAwaitingSessionSlot left,
 // whatever the attempt's status: one cancelled while it waited must not keep reading as queued.
+// Binding the attempt's session drops it as well (see BindWorkflowNodeSession).
 func (s *Store) ClearWorkflowNodeSessionSlotWait(ctx context.Context, runID, nodeRunID string) error {
 	if _, err := s.pool.Exec(ctx, `
 		UPDATE v2_workflow_node_runs

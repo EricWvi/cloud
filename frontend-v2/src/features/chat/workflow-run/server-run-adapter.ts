@@ -118,10 +118,14 @@ function conversation(runId: string, node: WorkflowNodeRun, payload: Record<stri
 const awaitingRetry = (node: WorkflowNodeRun, payload: Record<string, unknown>): boolean =>
   node.status === 'running' && node.startedAt === null && record(payload.retry_wait) !== undefined
 
-/** Reads `payload.session_slot_wait`, the marker of a running attempt still queued for a session slot. */
+/**
+ * Reads `payload.session_slot_wait`, the marker of a running attempt still queued for a session
+ * slot. An attempt with a bound session is executing whatever the payload says: a marker the
+ * server failed to clear must not hide that.
+ */
 function sessionSlotWait(node: WorkflowNodeRun, payload: Record<string, unknown>): WorkflowNodeSessionSlotWait | undefined {
   const w = record(payload.session_slot_wait)
-  if (node.status !== 'running' || !w) return undefined
+  if (node.status !== 'running' || node.sessionId !== null || !w) return undefined
   return typeof w.since === 'number' && typeof w.limit === 'number' ? { since: w.since, limit: w.limit } : undefined
 }
 

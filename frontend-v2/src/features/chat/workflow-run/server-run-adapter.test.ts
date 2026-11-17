@@ -406,6 +406,13 @@ describe('attempts queued for a session slot', () => {
     expect(state.sessionSlotWait).toBeUndefined()
   })
 
+  it('shows an attempt with a bound session as running even if the marker was left behind', () => {
+    const state = toGraphWorkflowRun(detail({}, [queued({ sessionId: 'session-a' })]), definition).nodeStates.a!
+    expect(state.status).toBe('running')
+    expect(state.sessionSlotWait).toBeUndefined()
+    expect(state.sessionId).toBe('session-a')
+  })
+
   it.each(['failed', 'cancelled'] as const)('never shows a marker left under a %s run as waiting', (status) => {
     const state = toGraphWorkflowRun(detail({ status, finishedAt: 3_000 }, [queued()]), definition).nodeStates.a!
     expect(state.status).not.toBe('session_waiting')
