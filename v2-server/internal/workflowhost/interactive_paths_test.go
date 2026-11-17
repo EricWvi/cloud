@@ -386,12 +386,14 @@ func TestResumeBeforeTheSweepRestartsTheParkedNode(t *testing.T) {
 	if !f.exec.isClosed(a) {
 		t.Fatal("the resume kept the parked node's old session")
 	}
-	// C's stale dispatch is dropped; the resumed attempts start.
+	// C's stale dispatch is dropped; the resumed A and C start concurrently, in either order.
 	release()
-	again := f.exec.awaitStart(t)
-	if f.exec.request(again).Caller.NodeID != "a" || again == a {
-		t.Fatalf("after the resume session %s of node %s started, want a new session for A", again, f.exec.request(again).Caller.NodeID)
+	started := f.exec.awaitStarts(t, 2)
+	again := started["a"]
+	if again == "" || again == a || started["c"] == "" {
+		t.Fatalf("after the resume started %v, want a new session for A and one for C", started)
 	}
+	f.exec.noStart(t, "C's stale dispatch started a session after the resume")
 	f.exec.finish(again, completed("重来"))
 	_, nodes = f.await(t, runID, parked("a"))
 	row := node(nodes, "a")
