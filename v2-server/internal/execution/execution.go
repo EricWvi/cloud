@@ -142,7 +142,9 @@ type Result struct {
 	// false.
 	AgentLost bool `json:",omitempty"`
 	// NotStarted means the turn failed before its session's Agent ever started: the project,
-	// checkout, plugin or Skills could not be prepared. It comes with AgentLost on a session's
+	// checkout, plugin or Skills could not be prepared, or the turn was refused before anything
+	// was sent to Node (the Agent's configuration or model permit, or a session ended or a Node
+	// lost meanwhile). It comes with AgentLost on a session's
 	// first turn, and tells a caller that there was never a session to keep, as opposed to one
 	// that was lost while it worked.
 	NotStarted bool `json:",omitempty"`

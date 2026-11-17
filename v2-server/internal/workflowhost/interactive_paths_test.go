@@ -603,6 +603,8 @@ func TestFirstTurnWithoutASessionFailsTheInteractiveNode(t *testing.T) {
 	}{
 		"Node refused the session": {execution.Result{Status: execution.StatusFailed, FailureCode: execution.FailureCheckoutSessionLimit, AgentLost: true}, "Node refused the Agent session on the run's directory: checkout_session_limit"},
 		"preparation failed":       {execution.Result{Status: execution.StatusFailed, FailureCode: "agent_prepare_failed", AgentLost: true, NotStarted: true}, "the Agent session could not be set up: agent_prepare_failed"},
+		// The Agent's configuration or model permit was refused before anything reached Node.
+		"refused before Node": {execution.Result{Status: execution.StatusFailed, FailureCode: "agent_dispatch_failed", AgentLost: true, NotStarted: true}, "the Agent session could not be set up: agent_dispatch_failed"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)

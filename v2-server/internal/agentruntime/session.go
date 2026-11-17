@@ -192,9 +192,8 @@ func (a *agentSession) begin(turn string, emit Emit) (*activeTurn, bool, error) 
 	}
 	call := &activeTurn{id: turn, done: make(chan turnOutcome, 1)}
 	a.active, a.emit = call, emit
-	fresh := !a.started
-	a.started = true // A failed write can be ambiguous; End still addresses this execution.
-	return call, fresh, nil
+	// The first turn starts the Agent; submit marks the session started just before it sends.
+	return call, !a.started, nil
 }
 
 func (a *agentSession) submit(turn, text string, fresh bool) error {
@@ -209,6 +208,28 @@ func (a *agentSession) submit(turn, text string, fresh bool) error {
 		if err := a.project.services.Permit(a.execution, a.frozen.Executor.Model.ID); err != nil {
 			return execution.ErrUnavailable
 		}
+		// Nothing above reached Node, so a failure there leaves the session not started: its turn
+		// is reported NotStarted and End has no Agent to stop. From here on the write can be
+		// ambiguous, so the session counts as started and End addresses this execution.
+		//
+		// What begin checked may have changed since. An End that arrived meanwhile found nothing
+		// to stop, so no Agent may start after it: nothing would end it. (Whoever releases the
+		// session, End itself or the retirement of a dead Node, revokes the permit just taken.)
+		// A Node whose transport failed meanwhile cannot receive the start either, and the
+		// session must not count as started for a command that was never sent.
+		a.mu.Lock()
+		if a.ended || a.ending {
+			a.mu.Unlock()
+			return execution.ErrSessionEnded
+		}
+		select {
+		case <-a.project.dead:
+			a.mu.Unlock()
+			return execution.ErrUnavailable
+		default:
+		}
+		a.started = true
+		a.mu.Unlock()
 		spec := map[string]any{
 			"node_id": a.project.nodeID(), "agent_plugin_id": plugin.id, "agent_plugin_version": plugin.version,
 			"checkout_execution_id": a.checkout.id, "model_binding_id": a.frozen.Executor.Model.ID,
