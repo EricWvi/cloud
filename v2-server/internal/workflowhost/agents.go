@@ -462,6 +462,9 @@ func (h *Host) endTurn(st *runState, runID string, a *attemptState, endErr error
 func (st *runState) endSessionTurn(a *attemptState, endErr error) (cancelling, last bool, lingering string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	if endConfirmed(endErr) {
+		endErr = nil // a session already gone is ended
+	}
 	if endErr != nil && a.scope != "" {
 		if st.scopeCleanupErrors == nil {
 			st.scopeCleanupErrors = map[string]error{}

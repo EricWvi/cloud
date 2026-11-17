@@ -1,6 +1,11 @@
 package workflowhost
 
-import "time"
+import (
+	"errors"
+	"time"
+
+	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+)
 
 // endRetryLimit caps the wait between retries of an End the execution service did not confirm.
 const endRetryLimit = 30 * time.Second
@@ -25,6 +30,19 @@ func (st *runState) linger(session string) bool {
 // it or the host shuts down. Only then does the session give its slot back; the run's state is
 // kept until then (see forgetFinished).
 func (h *Host) retryEnd(st *runState, runID, session string, now bool) {
+	h.endUntilConfirmed(st, session, now, func() bool { return false }, func() {
+		st.mu.Lock()
+		delete(st.unended, session)
+		st.slotsMayHaveChanged()
+		st.mu.Unlock()
+		h.forgetFinished(runID, st)
+	})
+}
+
+// endUntilConfirmed calls End in the background with retryEnd's schedule until it is confirmed,
+// then runs confirmed. It stops early, without calling confirmed, when settled reports that
+// someone else confirmed the End meanwhile, or when the host shuts down.
+func (h *Host) endUntilConfirmed(st *runState, session string, now bool, settled func() bool, confirmed func()) {
 	h.workers.Add(1)
 	go func() {
 		defer h.workers.Done()
@@ -41,27 +59,53 @@ func (h *Host) retryEnd(st *runState, runID, session string, now bool) {
 				return
 			case <-timer.C:
 			}
-			if h.end(st.scope, session) == nil {
+			// The timer and the shutdown may be ready together; an End now would hold Close up
+			// for a whole stop timeout.
+			if h.ctx.Err() != nil || settled() {
+				return
+			}
+			if endConfirmed(h.end(st.scope, session)) {
 				break
 			}
 			delay = min(delay*2, endRetryLimit)
 			timer.Reset(delay)
 		}
-		st.mu.Lock()
-		delete(st.unended, session)
-		st.slotsMayHaveChanged()
-		st.mu.Unlock()
-		h.forgetFinished(runID, st)
+		confirmed()
 	}()
 }
 
-// endInteractive ends n's session and, once End is confirmed, gives its slot back. An unconfirmed
-// End leaves the node holding its slot: whoever stops tracking it hands the session to linger
-// (see dropInteractive).
+// endConfirmed reports whether an End's outcome proves Node no longer holds the session: it
+// succeeded, or the session is unknown or already ended.
+func endConfirmed(err error) bool {
+	return err == nil || errors.Is(err, execution.ErrNotFound) || errors.Is(err, execution.ErrSessionEnded)
+}
+
+// endInteractive ends n's session and, once End is confirmed, gives its slot back. Until then the
+// node keeps its slot and End is retried in the background: a stopped turn may leave nothing to
+// complete, so no completion would end it again. Whoever stops tracking the node meanwhile hands
+// the session to linger instead (see dropInteractive).
 func (h *Host) endInteractive(st *runState, n *interactiveNode) {
-	if h.end(st.scope, n.session) != nil {
+	if !endConfirmed(h.end(st.scope, n.session)) {
+		st.mu.Lock()
+		retrying := n.endRetrying
+		n.endRetrying = true
+		st.mu.Unlock()
+		if retrying {
+			return
+		}
+		settled := func() bool {
+			st.mu.Lock()
+			defer st.mu.Unlock()
+			return n.sessionGone || st.interactive[n.d.Node.ID] != n
+		}
+		h.endUntilConfirmed(st, n.session, false, settled, func() { h.sessionGone(st, n) })
 		return
 	}
+	h.sessionGone(st, n)
+}
+
+// sessionGone records that Node no longer holds n's session and gives its slot back.
+func (h *Host) sessionGone(st *runState, n *interactiveNode) {
 	st.mu.Lock()
 	n.sessionGone = true
 	st.slotsMayHaveChanged()

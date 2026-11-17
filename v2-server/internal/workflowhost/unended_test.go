@@ -179,3 +179,71 @@ func TestOrphanWithAnUnconfirmedEndKeepsItsSlotAcrossAResume(t *testing.T) {
 		t.Fatalf("resumed %v, want A and C", resumed)
 	}
 }
+
+// A stopped turn may leave nothing to complete, so no completion would end its session again: an
+// unconfirmed End is retried in the background, and the waiting sibling starts once it is
+// confirmed while the node is still parked.
+func TestARetryConfirmsTheEndOfAStoppedTurn(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.host.sessionLimit = 1
+	waiting, release := f.holdDispatchOf(t, "c")
+	runID := f.run(t, parallelInteractive, nil)
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	a := f.exec.awaitStart(t)
+	<-waiting
+	release()
+	f.exec.finish(a, completed("在"))
+	f.await(t, runID, parked("a"))
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "继续"); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.awaitAppend(t)
+	confirm := f.refuseEndOf(t, func() string { return a })
+	f.exec.onCancel = func(ref execution.Ref) error {
+		f.exec.finish(ref.SessionID, completed("停"))
+		return nil
+	}
+	if _, err := f.host.StopNodeTurn(ctx, f.scope, runID, "a"); err != nil {
+		t.Fatal(err)
+	}
+	f.await(t, runID, parked("a"))
+	f.exec.noStart(t, "C started while A's session may still be live")
+	confirm()
+	c := f.exec.awaitStart(t)
+	if f.exec.request(c).Caller.NodeID != "c" || !f.exec.isClosed(a) {
+		t.Fatalf("started %s (A closed = %v), want C after A's End", f.exec.request(c).Caller.NodeID, f.exec.isClosed(a))
+	}
+	if row := f.nodeRow(t, runID, "a"); row.Status != store.WorkflowStatusPending {
+		t.Fatalf("A = %s, want it still parked", row.Status)
+	}
+}
+
+// An End reporting the session unknown or already ended proves Node no longer holds it: the slot
+// is free at once, without a retry.
+func TestAnEndOfAGoneSessionFreesTheSlot(t *testing.T) {
+	for _, gone := range []error{execution.ErrNotFound, execution.ErrSessionEnded} {
+		t.Run(gone.Error(), func(t *testing.T) {
+			f := newFixture(t)
+			f.host.sessionLimit = 1
+			f.host.endRetry = time.Hour // a retry would never come in time
+			end := f.exec.EndFunc
+			f.exec.EndFunc = func(ctx context.Context, scope execution.Scope, id string) error {
+				_ = end(ctx, scope, id)
+				return gone
+			}
+			runID := f.run(t, parallelAgents, nil)
+			if _, err := f.host.StartRun(context.Background(), f.scope, runID); err != nil {
+				t.Fatal(err)
+			}
+			f.exec.finish(f.exec.awaitStart(t), completed("one"))
+			f.exec.finish(f.exec.awaitStart(t), completed("two"))
+			if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusSucceeded {
+				t.Fatalf("run %s", run.Status)
+			}
+			f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
+		})
+	}
+}

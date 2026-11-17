@@ -77,6 +77,8 @@ type interactiveNode struct {
 	// sessionGone means Node no longer holds the session: its End returned (or the session was
 	// already gone). Until then the node keeps its slot of the run's checkout (see sessionsInUse).
 	sessionGone bool
+	// endRetrying marks a background retry of an unconfirmed End (see endInteractive).
+	endRetrying bool
 	// stopping marks a turn the starter asked to stop, so its end also ends the session even if
 	// the turn completed before the stop reached it.
 	stopping bool
