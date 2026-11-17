@@ -5,7 +5,8 @@ import type { ReactNode } from 'react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { UserContext } from '@/app/auth/user'
-import type { CollaborationTarget, User } from '@/api/generated.schemas'
+import { AxiosError, AxiosHeaders } from 'axios'
+import type { CollaborationTarget, FormDescriptor, User } from '@/api/generated.schemas'
 import { type Conversation, emptyConversation } from '@/components/agent-thread/model/types'
 import * as workflowsApi from '@/lib/workflows/api/generated'
 import * as decompositionApi from './decomposition-api/generated'
@@ -17,6 +18,12 @@ import type { Task, TaskDecomposition, TaskRun, TaskTimeline } from './tasks-api
 import TaskPage from './task-page'
 
 const targets = vi.hoisted(() => ({ items: [] as CollaborationTarget[] }))
+const forms = vi.hoisted(() => ({
+  byRef: {} as Record<string, FormDescriptor>,
+  pending: false,
+  error: false,
+  refetch: vi.fn(),
+}))
 const session = vi.hoisted(() => ({ conversation: null as Conversation | null }))
 const workspace = vi.hoisted(() => ({ role: 'owner' }))
 vi.mock('@/api/me/me', () => ({ useGetApiV1MeTenants: () => ({ data: { items: [{ id: 'tenant', role: workspace.role }] }, isLoading: false, isError: false }) }))
@@ -25,7 +32,18 @@ vi.mock('@/api/spaces/spaces', () => ({
   useGetApiV1TenantsTidSpaces: () => ({ data: { items: [], nextCursor: '' }, isLoading: false, isError: false }),
   useGetApiV1TenantsTidSpacesSpaceIdPlugins: () => ({ data: { items: [] }, isLoading: false, isError: false }),
 }))
-vi.mock('@/api/tenants/tenants', () => ({ useGetApiV1TenantsTidCollaborationTargets: () => ({ data: targets }) }))
+vi.mock('@/api/tenants/tenants', () => ({
+  useGetApiV1TenantsTidCollaborationTargets: () => ({ data: targets }),
+  useGetApiV1TenantsTidCollaborationFormsFormRef: (_tid: string, formRef: string, _params?: unknown, options?: { query?: { enabled?: boolean } }) => {
+    const enabled = options?.query?.enabled ?? true
+    return {
+      data: enabled && !forms.pending && !forms.error ? forms.byRef[formRef] : undefined,
+      isPending: enabled && forms.pending,
+      isError: enabled && forms.error,
+      refetch: forms.refetch,
+    }
+  },
+}))
 vi.mock('@/lib/squads-api/generated', () => ({ listSquads: vi.fn().mockResolvedValue({ items: [], nextCursor: '' }) }))
 vi.mock('@/lib/projects-api/generated', () => ({ getApiV2TenantsTidProjects: vi.fn().mockResolvedValue({ items: [], nextCursor: '' }) }))
 // The live thread has its own tests; here a run shows the session its stream would fold.
@@ -80,6 +98,10 @@ beforeEach(() => {
     { type: 'agent', id: 'agent-1', displayName: 'Claude Code', description: 'official/ora-space.claude', interactionDescriptor: { mode: 'task', requiresTask: true, formRef: null } },
     { type: 'workflow', id: 'wf-1', displayName: '代码评审流程', description: '已发布工作流 · v1', interactionDescriptor: { mode: 'form', requiresTask: false, formRef: 'wf-1' } },
   ]
+  forms.byRef = {}
+  forms.pending = false
+  forms.error = false
+  forms.refetch = vi.fn()
   vi.mocked(api.getTask).mockResolvedValue(task())
   vi.mocked(api.getTaskTimeline).mockResolvedValue(empty)
   vi.mocked(api.listTasks).mockResolvedValue({ items: [], nextCursor: '' })
@@ -219,7 +241,7 @@ it('keeps another member to comments while someone else owns the run', async () 
   await userEvent.type(input, '@')
   const menu = await screen.findByRole('listbox', { name: '@ 对象' })
   expect(within(menu).getByRole('option', { name: /Claude Code/ })).toBeDisabled()
-  expect(within(menu).queryByRole('option', { name: /代码评审流程/ })).not.toBeInTheDocument()
+  expect(within(menu).getByRole('option', { name: /代码评审流程/ })).toBeEnabled()
   await userEvent.type(input, '鲍')
   await userEvent.click(within(await screen.findByRole('listbox', { name: '@ 对象' })).getByRole('option', { name: /鲍勃/ }))
   await userEvent.type(input, '看起来不错')
@@ -705,9 +727,197 @@ it('stops a handling admission that is still pending, settling the task back to 
 it.each([
  {kind:'decomposition',startedBy:'user-me'},
  {kind:'source',startedBy:'user-me'},
+ {kind:'mention',startedBy:'user-me'},
 ] as const)('does not offer task-tab cancellation for $kind',async record=>{
  vi.mocked(taskWorkflows.listTaskWorkflowRuns).mockResolvedValue({items:[handlingRun({...record,status:'running'})]})
  renderPage('?tab=workflows&workflow=wf-run-1')
  await screen.findByText(/运行视图/)
  expect(screen.queryByRole('button',{name:'停止'})).not.toBeInTheDocument()
+})
+
+function httpFault(status: number, code: string, params: Record<string, unknown> = {}) {
+  return new AxiosError(code, 'ERR_BAD_REQUEST', undefined, undefined, {
+    status,
+    statusText: 'Bad Request',
+    headers: new AxiosHeaders(),
+    config: { headers: new AxiosHeaders() },
+    data: { code, params, requestId: 'req-test' },
+  })
+}
+
+const workflowTarget: CollaborationTarget = {
+  type: 'workflow',
+  id: 'wf-check',
+  displayName: '发布检查',
+  description: '已发布工作流 · v1',
+  interactionDescriptor: { mode: 'form', requiresTask: false, formRef: 'wf-check' },
+}
+
+const workflowForm: FormDescriptor = {
+  formRef: 'wf-check',
+  title: '发布检查',
+  description: '已发布版本 v1',
+  fields: [
+    { key: 'branch', label: '目标分支', type: 'text', required: true, placeholder: 'main' },
+    { key: 'retries', label: '重试次数', type: 'number', required: false, defaultValue: 1 },
+    { key: 'mode', label: '模式', type: 'select', required: false, defaultValue: 'fast', options: [{ label: 'fast', value: 'fast' }, { label: 'safe', value: 'safe' }] },
+    { key: 'dryRun', label: '演练模式', type: 'boolean', required: false, defaultValue: false },
+  ],
+}
+
+it('validates @ workflow inputs per field, sends typed values, reuses idempotency key on retry, and renders timeline status & output', async () => {
+  const streams: { url: string; closed: boolean; listeners: Record<string, (() => void)[]> }[] = []
+  class FakeEventSource {
+    listeners: Record<string, (() => void)[]> = {}
+    closed = false
+    url: string
+    constructor(url: string) {
+      this.url = url
+      streams.push(this)
+    }
+    addEventListener(event: string, fn: () => void) {
+      ;(this.listeners[event] ??= []).push(fn)
+    }
+    close() {
+      this.closed = true
+    }
+  }
+  vi.stubGlobal('EventSource', FakeEventSource)
+  try {
+  targets.items.push(workflowTarget)
+  forms.byRef['wf-check'] = workflowForm
+
+  const timelineComments: TaskTimeline['comments'] = []
+  vi.mocked(api.getTaskTimeline).mockImplementation(async () => ({ runs: [], comments: [...timelineComments] }))
+
+  let attempt = 0
+  vi.mocked(api.createTaskComment).mockImplementation(async (_tid, _taskId, body) => {
+    attempt++
+    if (attempt === 1) throw new AxiosError('Network Error')
+    const created: TaskTimeline['comments'][number] = {
+      id: 'c-wf-1',
+      taskId: 'task-1',
+      authorId: 'user-me',
+      authorName: '演示用户',
+      body: body.body,
+      mentions: [{ type: 'workflow', id: 'wf-check', displayName: '发布检查' }],
+      runId: '',
+      workflowRun: {
+        id: 'wf-run-99',
+        workflowId: 'wf-check',
+        workflowName: '发布检查',
+        version: 'v1',
+        status: 'running',
+        output: null,
+        error: null,
+        deleted: false,
+        createdAt: '2026-10-30T03:00:00Z',
+      },
+      createdAt: '2026-10-30T03:00:00Z',
+    }
+    timelineComments.splice(0, timelineComments.length, created)
+    return created
+  })
+
+  renderPage('?tab=discussion')
+  const box = await screen.findByLabelText('评论或给 Agent 的消息')
+  await userEvent.type(box, '@')
+  await userEvent.click(await screen.findByRole('option', { name: /发布检查/ }))
+
+  expect(screen.getByRole('region', { name: '启动工作流：发布检查' })).toBeInTheDocument()
+  expect(screen.queryByRole('switch', { name: '发给 Agent' })).not.toBeInTheDocument()
+
+  // Invalid inputs (missing required branch + non-numeric retries) must report per field without calling API.
+  const retriesInput = screen.getByLabelText(/重试次数/)
+  await userEvent.clear(retriesInput)
+  await userEvent.type(retriesInput, 'abc')
+  await userEvent.click(screen.getByRole('button', { name: '发送并运行' }))
+
+  expect(api.createTaskComment).not.toHaveBeenCalled()
+  expect(screen.getByLabelText(/目标分支/)).toHaveAttribute('aria-invalid', 'true')
+  expect(screen.getByLabelText(/重试次数/)).toHaveAttribute('aria-invalid', 'true')
+  expect(screen.getAllByRole('alert').map(n => n.textContent)).toEqual(
+    expect.arrayContaining(['请填写此必填字段', '请输入有效的数字']),
+  )
+
+  // Fix inputs -> first call fails transiently, second click retries with exact same Idempotency-Key.
+  await userEvent.type(screen.getByLabelText(/目标分支/), 'release/v1')
+  await userEvent.clear(retriesInput)
+  await userEvent.type(retriesInput, '2')
+  await userEvent.selectOptions(screen.getByLabelText(/^模式/), 'safe')
+  await userEvent.click(screen.getByRole('checkbox', { name: /演练模式/ }))
+
+  await userEvent.click(screen.getByRole('button', { name: '发送并运行' }))
+  await waitFor(() => expect(api.createTaskComment).toHaveBeenCalledTimes(1))
+  const firstCallOptions = vi.mocked(api.createTaskComment).mock.calls[0][3] as { headers: Record<string, string> }
+
+  await userEvent.click(screen.getByRole('button', { name: '发送并运行' }))
+  await waitFor(() => expect(api.createTaskComment).toHaveBeenCalledTimes(2))
+  const secondCallOptions = vi.mocked(api.createTaskComment).mock.calls[1][3] as { headers: Record<string, string> }
+  expect(secondCallOptions.headers['Idempotency-Key']).toBe(firstCallOptions.headers['Idempotency-Key'])
+
+  expect(vi.mocked(api.createTaskComment).mock.calls[1][2]).toEqual({
+    body: '@发布检查',
+    mentions: [{ type: 'workflow', id: 'wf-check' }],
+    toAgent: false,
+    executorId: undefined,
+    workflow: {
+      workflowId: 'wf-check',
+      values: { branch: 'release/v1', retries: 2, mode: 'safe', dryRun: true },
+    },
+  })
+
+  // Timeline initially displays running workflow card, link, and subscribes to SSE invalidations.
+  expect(await screen.findByText('运行中', { selector: '.mc-comment-workflow .mc-status' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: '查看运行' })).toHaveAttribute('href', '/collaboration/tasks/task-1?tab=workflows&workflow=wf-run-99')
+  await waitFor(() => expect(streams.some(s => s.url === '/api/v2/tenants/tenant/workflow-runs/wf-run-99/events' && !s.closed)).toBe(true))
+
+  // Simulate run completion -> workflow_run_invalidated refreshes card with final output and closes stream.
+  timelineComments[0] = {
+    ...timelineComments[0],
+    workflowRun: {
+      ...timelineComments[0].workflowRun!,
+      status: 'succeeded',
+      output: '{"ok":true,"branch":"release/v1"}',
+    },
+  }
+  await act(async () => {
+    for (const fn of streams[0]?.listeners.workflow_run_invalidated ?? []) fn()
+  })
+  await waitFor(() => expect(screen.getByText('已完成', { selector: '.mc-comment-workflow .mc-status' })).toBeInTheDocument())
+  expect(screen.getByLabelText('工作流输出')).toHaveTextContent('"branch": "release/v1"')
+  await waitFor(() => expect(streams[0]?.closed).toBe(true))
+  } finally {
+    vi.unstubAllGlobals()
+  }
+})
+
+it('maps server workflow_run_input_invalid errors onto the matching field', async () => {
+  targets.items.push(workflowTarget)
+  forms.byRef['wf-check'] = workflowForm
+  vi.mocked(api.createTaskComment).mockRejectedValueOnce(httpFault(400, 'workflow_run_input_invalid', { variable: 'branch', reason: 'length_exceeded' }))
+
+  renderPage('?tab=discussion')
+  const box = await screen.findByLabelText('评论或给 Agent 的消息')
+  await userEvent.type(box, '@')
+  await userEvent.click(await screen.findByRole('option', { name: /发布检查/ }))
+  await userEvent.type(screen.getByLabelText(/目标分支/), 'too-long-branch')
+  await userEvent.click(screen.getByRole('button', { name: '发送并运行' }))
+
+  await waitFor(() => expect(screen.getByText('内容长度超出限制')).toBeInTheDocument())
+  expect(screen.getByLabelText(/目标分支/)).toHaveAttribute('aria-invalid', 'true')
+  // Composer retains input so user can fix without retyping.
+  expect(screen.getByLabelText('评论或给 Agent 的消息')).toHaveValue('@发布检查 ')
+})
+
+it('disables @ workflow options when the task is closed', async () => {
+  targets.items.push(workflowTarget)
+  vi.mocked(api.getTask).mockResolvedValue(task({ status: 'done' }))
+
+  renderPage('?tab=discussion')
+  const box = await screen.findByLabelText('评论或给 Agent 的消息')
+  await userEvent.type(box, '@')
+  const opt = await screen.findByRole('option', { name: /发布检查/ })
+  expect(opt).toBeDisabled()
+  expect(opt).toHaveTextContent('任务已结束，不能启动工作流')
 })

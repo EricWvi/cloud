@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -144,5 +145,76 @@ func TestBuildStartFormDropsMalformedAndCapsLengths(t *testing.T) {
 	empty := BuildStartForm("ref", "Empty", "", "not-json")
 	if empty.Fields == nil || len(empty.Fields) != 0 {
 		t.Fatalf("empty fields = %#v", empty.Fields)
+	}
+}
+
+func TestDecodeFormStartValuesAndCheckStart(t *testing.T) {
+	graph := `{
+		"nodes":[
+			{"id":"start","data":{"kind":"start","inputVariables":[
+				{"name":"meta","valueType":"object","required":true},
+				{"name":"items","valueType":"array[string]","required":false,"value":["seed"]},
+				{"name":"files","valueType":"array[file]","required":false}
+			]}},
+			{"id":"out","data":{"kind":"output"}}
+		],
+		"edges":[{"source":"start","target":"out"}]
+	}`
+	form := BuildStartForm("wf-1", "Struct", "", graph)
+	if len(form.Fields) != 3 || form.Fields[0].Type != "textarea" || form.Fields[1].Type != "textarea" || form.Fields[2].Type != "textarea" {
+		t.Fatalf("structured fields = %+v", form.Fields)
+	}
+
+	raw := map[string]json.RawMessage{
+		"meta":  json.RawMessage(`"{\"env\":\"prod\",\"count\":2}"`),
+		"items": json.RawMessage(`"[\"a\",\"b\"]"`),
+		"files": json.RawMessage(`"[\"src/main.go\"]"`),
+	}
+	decoded, err := DecodeFormStartValues(graph, raw)
+	if err != nil {
+		t.Fatalf("decode structured valid: %v", err)
+	}
+	if err := CheckStart(graph, nil, decoded); err != nil {
+		t.Fatalf("CheckStart(decoded): %v", err)
+	}
+
+	// Clearing an optional textarea resets its default via null without triggering type_mismatch.
+	cleared, err := DecodeFormStartValues(graph, map[string]json.RawMessage{
+		"meta":  json.RawMessage(`{"env":"prod"}`),
+		"items": json.RawMessage(`"  "`),
+	})
+	if err != nil {
+		t.Fatalf("decode optional clear: %v", err)
+	}
+	if err := CheckStart(graph, nil, cleared); err != nil {
+		t.Fatalf("CheckStart(cleared): %v", err)
+	}
+
+	// Bad JSON syntax or trailing garbage maps onto type_mismatch for the exact field.
+	for _, bad := range []string{`"{not json}"`, `"{\"a\":1} trailing"`} {
+		if _, err := DecodeFormStartValues(graph, map[string]json.RawMessage{"meta": json.RawMessage(bad)}); err == nil {
+			t.Fatalf("expected error for %s", bad)
+		} else {
+			var rej *InputRejection
+			if !errors.As(err, &rej) || rej.Variable != "meta" || rej.Reason != "type_mismatch" {
+				t.Fatalf("rejection for %s = %v", bad, err)
+			}
+		}
+	}
+
+	// Well-formed JSON of the wrong type is caught right after by CheckStart.
+	wrongDecoded, err := DecodeFormStartValues(graph, map[string]json.RawMessage{
+		"meta": json.RawMessage(`"[1,2]"`),
+	})
+	if err != nil {
+		t.Fatalf("decode wrong json type: %v", err)
+	}
+	if err := CheckStart(graph, nil, wrongDecoded); err == nil {
+		t.Fatal("expected CheckStart type_mismatch")
+	} else {
+		var rej *InputRejection
+		if !errors.As(err, &rej) || rej.Variable != "meta" || rej.Reason != "type_mismatch" {
+			t.Fatalf("CheckStart rejection = %v", err)
+		}
 	}
 }
