@@ -48,6 +48,7 @@ export type {
   WorkflowNodeAutoRetry,
   WorkflowNodeFileChange,
   WorkflowNodeRetryWait,
+  WorkflowNodeSessionSlotWait,
   WorkflowRunEvent,
   WorkflowRunEventEnvelope,
   WorkflowRunLiveSnapshot,

@@ -439,6 +439,11 @@ function RunActInspectorPanel({
             <RunRetryWaitLabel wait={state.retryWait} />
           </p>
         )}
+        {state.status === "session_waiting" && state.sessionSlotWait !== undefined && (
+          <p className="mt-1 text-[11px] font-medium text-info/80" data-session-slot-wait>
+            {t("workflowRun.sessionSlotWaitHint", { limit: state.sessionSlotWait.limit })}
+          </p>
+        )}
         {state.snapshotId != null &&
           runSnapshotId != null &&
           state.snapshotId !== runSnapshotId && (

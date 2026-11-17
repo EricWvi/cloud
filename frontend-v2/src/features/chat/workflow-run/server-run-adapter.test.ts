@@ -390,6 +390,34 @@ it('projects retry countdown, started replacements and real failed sessions from
   expect(started.failedAttempts?.every((a) => a.replacedBy === 'automatic_retry')).toBe(true)
 })
 
+describe('attempts queued for a session slot', () => {
+  const queued = (over: Partial<WorkflowNodeRun> = {}) => nodeRun({ id: 'a1', nodeId: 'a', nodeType: 'agent', status: 'running', finishedAt: null,
+    payload: JSON.stringify({ session_slot_wait: { since: 1500, limit: 8 } }), ...over })
+
+  it('shows a queued attempt as waiting for a slot, not as running', () => {
+    const state = toGraphWorkflowRun(detail({}, [queued()]), definition).nodeStates.a!
+    expect(state.status).toBe('session_waiting')
+    expect(state.sessionSlotWait).toEqual({ since: 1500, limit: 8 })
+  })
+
+  it('shows the attempt as running once it took its slot', () => {
+    const state = toGraphWorkflowRun(detail({}, [queued({ payload: '{}', sessionId: 'session-a' })]), definition).nodeStates.a!
+    expect(state.status).toBe('running')
+    expect(state.sessionSlotWait).toBeUndefined()
+  })
+
+  it.each(['failed', 'cancelled'] as const)('never shows a marker left under a %s run as waiting', (status) => {
+    const state = toGraphWorkflowRun(detail({ status, finishedAt: 3_000 }, [queued()]), definition).nodeStates.a!
+    expect(state.status).not.toBe('session_waiting')
+    expect(state.sessionSlotWait).toBeUndefined()
+  })
+
+  it('ignores the marker on a row that is no longer running', () => {
+    const state = toGraphWorkflowRun(detail({}, [queued({ status: 'cancelled', finishedAt: 2_000 })]), definition).nodeStates.a!
+    expect(state.status).toBe('cancelled')
+  })
+})
+
 describe('retry waits under a run that is no longer live', () => {
   const wait = { attempt: 2, max_attempt: 3, retry: 1, max_retries: 2, delay_ms: 10000, scheduled_at: 2000, due_at: 12000 }
   const history = [{ nodeRunId: 'a1', nodeId: 'a', scopeId: 'root:run', iteration: null, sessionId: 'real-session-1', attempt: 1,
