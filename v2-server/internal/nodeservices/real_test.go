@@ -68,7 +68,7 @@ func runRealAgent(t *testing.T, longAnswer string) {
 	ipc := node.Options{
 		ControllerID: "controller", ExpectedNodeID: "node",
 		HeartbeatInterval: time.Second, FrameTimeout: 10 * time.Second,
-		RequiredCapabilities: []string{"plugin_install", "agent_session", "session_mcp", "shared_checkout_sessions"},
+		RequiredCapabilities: []string{"plugin_install", "agent_session", "session_mcp", "shared_checkout_sessions", "session_mcp_lifecycle"},
 	}
 	opts := node.RuntimeOptions{Root: filepath.Join(root, "w"), Node: asset("ora-node"), Reaper: asset("ora-reaper"), IPC: ipc, StartupTimeout: 15 * time.Second, StopGrace: 2 * time.Second, Configure: func(p node.Paths) ([]byte, error) {
 		return s.NodeConfiguration(p, ipc, filepath.Join(assets, "bin", "deno"))
