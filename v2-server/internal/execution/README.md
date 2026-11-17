@@ -34,7 +34,7 @@ chat 的 ID 是 conversation，workflow 是 run，schedule 是 occurrence；容�
 - 模型直连的 Session.WorkspaceID 为空。
 
 接收执行只用单进程内的锁和一次数据库写入，持久记录建立后返回 Ref。
-`ErrWorkspaceBusy` 仅表示同一 session 或同一次 workflow run 的上一轮尚未结束；页面自己排队，公共层不另设队列。
+`ErrWorkspaceBusy` 仅表示同一 session 的上一轮尚未结束（对话等非 workflow 调用方按调用方计）；同一次 workflow run 的不同会话各自执行，互不排队。页面自己排队，公共层不另设队列。
 
 `Result.NotStarted` 标出首轮在 Agent 启动之前就失败（项目、checkout、插件或 Skill 没准备好），和 `AgentLost` 一起出现；`FailureCode` 为 `checkout_busy`、`checkout_session_limit`、`checkout_too_deep` 时是 Node 按 checkout 拒绝了这个会话（`CheckoutRefused`）。调用方据此区分“从来没有会话”和“会话中途丢了”。
 

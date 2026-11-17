@@ -369,9 +369,9 @@ func (e *Engine) fail(ctx context.Context, runID, nodeRunID string, f Failure) e
 }
 
 // Abandon reports whether a dispatched Agent attempt must not execute because its run already
-// ended, closing the attempt as cancelled. The execution bridge asks before every start: v2 runs a
-// run's Agents one at a time, so a sibling queued behind a node that failed the run has not begun,
-// and starting it could only produce a discarded late result.
+// ended, closing the attempt as cancelled. The execution bridge asks before every start: a sibling
+// still resolving its executor or waiting for a session slot when another node failed the run has
+// not begun, and starting it could only produce a discarded late result.
 func (e *Engine) Abandon(ctx context.Context, runID, nodeRunID string) (bool, error) {
 	defer e.gate(runID)()
 	abandoned, err := e.repo.AbandonNode(ctx, runID, nodeRunID)
