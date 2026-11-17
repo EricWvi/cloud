@@ -310,9 +310,11 @@ function RunActInspectorPanel({
     data.kind === "agent" && state.status === "succeeded"
       ? state.output?.summary
       : undefined;
-  // A waiting retry has not started; showing a time range would suggest it is already running.
+  // A waiting retry or a node queued for a session slot has not started; showing a time range would
+  // suggest it is already running.
   const timingRange =
     state.status !== "retry_waiting" &&
+    state.status !== "session_waiting" &&
     (state.startedAt !== undefined || state.finishedAt !== undefined)
       ? [
           state.startedAt !== undefined
