@@ -51,6 +51,15 @@ export function ProjectTokenDialog({
       setError(undefined)
     }
   }
+  // Closing forgets a half-typed token and any pending confirmation, so reopening never refills it.
+  const changeOpen = (next: boolean) => {
+    if (!next) {
+      setToken('')
+      setConfirmClear(false)
+      setError(undefined)
+    }
+    onOpenChange(next)
+  }
   const clear = async () => {
     setBusy(true)
     const failed = await clearRepositoryToken(project.id)
@@ -63,7 +72,7 @@ export function ProjectTokenDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={changeOpen}>
       <DialogContent className="sm:max-w-md" aria-describedby={undefined}>
         <DialogHeader>
           <DialogTitle>项目设置</DialogTitle>
