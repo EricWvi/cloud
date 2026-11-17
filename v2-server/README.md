@@ -413,6 +413,7 @@ HTTP 集成测试按此候选 OpenAPI 校验每一次响应，并覆盖创建、
 - 通过 `POST /api/v2/tenants/{tid}/tasks/{taskid}/comments` `@` 工作流提交时，对声明为 `object`、`array`、`array[...]`、`array[file]` 的文本输入在 `workflow.CheckStart` 前先按 JSON 解码（非法 JSON 返回 `400 workflow_run_input_invalid`、`reason: "type_mismatch"`）；直接传结构化 JSON 值也照常接受。
 - 普通评论与工作流评论共用 `(task_id, author_id, create_key)`：同一个 key 换内容仍返回原评论，不比较请求体；正式 Cloud 返回 `409 idempotency_conflict`。
 - 工作流评论在准备或启动被拒绝、且运行从未开始执行时，事务撤销评论、运行及初始 scope，释放 key；同 key 重试可重新启动。若 `Start` 已进入执行后才报错，则保留评论与运行，确认停止后标为已取消并记录安全的失败原因；同 key 重试返回这条记录，不重复执行。后一种情况与正式 Cloud 的失败请求不留记录约定不同，重新发起须使用新 key。
+- 已软删除运行的评论卡片只保留名称、版本和状态，时间线与同 key 重放均不返回其输出或错误，前端也不渲染这些内容。
 
 ### 项目仓库
 

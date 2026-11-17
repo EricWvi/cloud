@@ -8,7 +8,7 @@ type Entry = { at: string; comment: TaskComment } | { at: string; run: TaskRun; 
 
 function CommentWorkflowCard({ taskId, run }: { taskId: string; run: TaskCommentWorkflowRun }) {
   const status = WORKFLOW_STATUS_META[run.status] ?? { label: run.status, tone: 'pending' }
-  const output = run.output ? formatWorkflowOutput(run.output) : ''
+  const output = !run.deleted && run.output ? formatWorkflowOutput(run.output) : ''
   return <section className="mc-comment-workflow" aria-label={`工作流运行：${run.workflowName}`}>
     <div className="mc-comment-workflow-head">
       <Workflow size={13} aria-hidden="true" />
@@ -19,18 +19,18 @@ function CommentWorkflowCard({ taskId, run }: { taskId: string; run: TaskComment
         ? <small className="mc-comment-workflow-deleted">运行已删除</small>
         : <Link className="mc-link mc-comment-workflow-link" to={`/collaboration/tasks/${taskId}?tab=workflows&workflow=${run.id}`}>查看运行<ExternalLink size={11} aria-hidden="true" /></Link>}
     </div>
-    {run.status === 'succeeded' && (
+    {!run.deleted && run.status === 'succeeded' && (
       output
         ? <pre className="mc-comment-workflow-output" aria-label="工作流输出">{output}</pre>
         : <p className="mc-comment-workflow-note">已完成，无输出内容。</p>
     )}
-    {(run.status === 'failed' || run.status === 'cancelled' || run.status === 'interrupted') && run.error && (
+    {!run.deleted && (run.status === 'failed' || run.status === 'cancelled' || run.status === 'interrupted') && run.error && (
       <p className="mc-comment-workflow-error" role="status">{run.error}</p>
     )}
-    {(run.status === 'pending' || run.status === 'running') && (
+    {!run.deleted && (run.status === 'pending' || run.status === 'running') && (
       <p className="mc-comment-workflow-note">工作流正在运行，完成后将在此显示结果…</p>
     )}
-    {run.status === 'awaitingInput' && (
+    {!run.deleted && run.status === 'awaitingInput' && (
       <p className="mc-comment-workflow-note">工作流等待人工确认后继续。</p>
     )}
   </section>

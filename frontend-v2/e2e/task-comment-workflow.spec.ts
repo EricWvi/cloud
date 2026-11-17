@@ -238,5 +238,23 @@ test('comment @ workflow validates per field, runs as commenter, updates output 
   expect(await memberPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await memberPage.screenshot({ path: `${screenDir}/04-mobile-timeline.png`, fullPage: true })
 
+  // Soft deletion retains the comment card but must remove every readable run result.
+  const deletedRunId = firstBody.workflowRun.id as string
+  const deleted = await memberPage.request.delete(`${base}/workflow-runs/${deletedRunId}`)
+  expect(deleted.ok(), await deleted.text()).toBeTruthy()
+  await memberPage.reload()
+  const deletedCard = memberPage.getByRole('region', { name: `工作流运行：${quickName}` }).filter({ hasText: '运行已删除' })
+  await expect(deletedCard).toBeVisible()
+  await expect(deletedCard.getByLabel('工作流输出')).toHaveCount(0)
+  await expect(deletedCard.getByRole('link', { name: '查看运行' })).toHaveCount(0)
+  const deletedTimeline = await (await memberPage.request.get(`${base}/tasks/${taskId}/timeline`)).json()
+  const deletedSummary = deletedTimeline.comments.find((comment: { workflowRun?: { id: string } }) => comment.workflowRun?.id === deletedRunId).workflowRun
+  expect(deletedSummary).toMatchObject({ id: deletedRunId, deleted: true, output: null, error: null })
+  const replayDeleted = await memberPage.request.post(`${base}/tasks/${taskId}/comments`, { headers: idemHeaders, data: idemPayload })
+  expect(replayDeleted.status()).toBe(201)
+  expect((await replayDeleted.json()).workflowRun).toMatchObject({ id: deletedRunId, deleted: true, output: null, error: null })
+  expect((await memberPage.request.get(`${base}/workflow-runs/${deletedRunId}`)).status()).toBe(404)
+  await memberPage.screenshot({ path: `${screenDir}/05-deleted-run-hidden-output.png`, fullPage: true })
+
   await memberContext.close()
 })

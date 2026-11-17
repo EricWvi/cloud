@@ -163,7 +163,9 @@ const taskCommentSelect = `
 		COALESCE(c.workflow_run_id::text, ''), COALESCE(r.workflow_id::text, ''),
 		COALESCE(w.name, ''), COALESCE(s.version, ''),
 		CASE WHEN r.id IS NULL THEN '' ELSE ` + derivedRunStatus + ` END,
-		r.output, r.error, COALESCE(r.deleted_at IS NOT NULL, false), r.created_at
+		CASE WHEN r.deleted_at IS NULL THEN r.output END,
+		CASE WHEN r.deleted_at IS NULL THEN r.error END,
+		COALESCE(r.deleted_at IS NOT NULL, false), r.created_at
 	FROM v2_task_comments c
 	JOIN users u ON u.id = c.author_id
 	LEFT JOIN v2_workflow_runs r ON r.id = c.workflow_run_id AND r.tenant_id = c.tenant_id
