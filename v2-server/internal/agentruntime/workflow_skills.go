@@ -229,14 +229,16 @@ func workflowSkillError(err error) bool {
 }
 
 // liveSiblingSkills returns, in session order, the selections of the other sessions admitted to
-// the workspace's checkout that have not stopped.
+// the workspace's checkout that projected their Skills and have not stopped. Siblings admitted in
+// the same wave but still preparing are left out: each checks against the others when it takes
+// skillsMu, so two clashing selections refuse only the one projecting second.
 func (p *projectRuntime) liveSiblingSkills(workspace, session string) []execution.Skills {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	owners := p.owners[workspace]
 	var siblings []execution.Skills
 	for _, id := range slices.Sorted(maps.Keys(owners)) {
-		if id != session && owners[id] != nil {
+		if id != session && owners[id] != nil && p.projected[id] {
 			siblings = append(siblings, *owners[id])
 		}
 	}

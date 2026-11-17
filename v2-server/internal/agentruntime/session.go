@@ -152,6 +152,9 @@ func (d *Driver) session(ctx context.Context, scope execution.Scope, session exe
 					a.prepareErr = err
 					return
 				}
+				p.mu.Lock()
+				p.projected[session.ID] = true
+				p.mu.Unlock()
 			}
 			a.projection = nodehistory.NewProjection(p.reader, a.execution)
 			p.mu.Lock()
@@ -272,6 +275,7 @@ func (a *agentSession) markStopped() {
 			a.project.mu.Lock()
 			if owners := a.project.owners[a.frozen.WorkspaceID]; owners != nil {
 				delete(owners, a.frozen.ID)
+				delete(a.project.projected, a.frozen.ID)
 				if len(owners) == 0 {
 					delete(a.project.owners, a.frozen.WorkspaceID)
 				}
