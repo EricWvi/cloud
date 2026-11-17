@@ -247,3 +247,35 @@ func TestAnEndOfAGoneSessionFreesTheSlot(t *testing.T) {
 		})
 	}
 }
+
+// Shutting the host down does not wait for the next retry of a lingering End: the retry leaves at
+// once, and Node is left to end the session itself.
+func TestCloseDoesNotWaitForTheRetryOfALingeringEnd(t *testing.T) {
+	f := newFixture(t)
+	var last atomic.Value
+	last.Store("")
+	f.refuseEndOf(t, func() string { return last.Load().(string) })
+	f.host.endRetry = time.Hour
+	runID := f.run(t, parallelAgents, nil)
+	if _, err := f.host.StartRun(context.Background(), f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.finish(f.exec.awaitStart(t), completed("one"))
+	b := f.exec.awaitStart(t)
+	last.Store(b)
+	f.exec.finish(b, completed("two"))
+	if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusSucceeded {
+		t.Fatalf("run %s", run.Status)
+	}
+	f.awaitIdle(t, runID, "an attempt outlived the run")
+	if st := f.host.state(runID); st == nil {
+		t.Fatal("the run's state was dropped while B's End was unconfirmed")
+	}
+	closed := make(chan struct{})
+	go func() { f.host.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close waited for the retry of a lingering End")
+	}
+}
