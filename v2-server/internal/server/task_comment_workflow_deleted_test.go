@@ -1,6 +1,10 @@
 package server_test
 
-import "testing"
+import (
+	"encoding/json"
+	"net/http"
+	"testing"
+)
 
 func TestTaskCommentWorkflowDeletedRunHidesOutputAndError(t *testing.T) {
 	f := newSquadServer(t)
@@ -54,8 +58,17 @@ func TestTaskCommentWorkflowDeletedRunHidesOutputAndError(t *testing.T) {
 			t.Fatalf("%s exposed deleted run content: %v", read, run)
 		}
 	}
-	c.routes = nil
-	if code, body := c.do("GET", base+"/workflow-runs/"+runID, nil); code != 404 {
-		t.Fatalf("deleted run detail = %d %v", code, body)
+	// This endpoint belongs to the workflow contract, not the task client's router.
+	response, err := c.http.Get(c.base + base + "/workflow-runs/" + runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var body map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusNotFound || body["code"] != "workflow_run_not_found" {
+		t.Fatalf("deleted run detail = %d %v", response.StatusCode, body)
 	}
 }
