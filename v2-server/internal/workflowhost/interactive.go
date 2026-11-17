@@ -57,6 +57,10 @@ const (
 	blockerStructuredOutput = "structured_output"
 )
 
+// turnErrorNotDelivered is payload.interactive.last_turn_error for a message the starter sent
+// that never reached the node's session.
+const turnErrorNotDelivered = "not_delivered"
+
 // interactiveNode is one root-scope interactive Agent attempt with an open session. Fields other
 // than the immutable dispatch data are guarded by the owning runState.mu.
 type interactiveNode struct {
@@ -67,7 +71,8 @@ type interactiveNode struct {
 	session  string
 
 	phase interactivePhase
-	// turns counts the turns that settled; seq numbers the follow-up caller attempts.
+	// turns counts the turns that settled; seq numbers the follow-up caller attempts, that is
+	// the messages the starter sent (the summary's sent).
 	turns, seq int
 	// last is the latest settled turn; accepted the latest one that ended normally.
 	last, accepted *execution.Result
@@ -80,6 +85,10 @@ type interactiveNode struct {
 	// stopping marks a turn the starter asked to stop, so its end also ends the session even if
 	// the turn completed before the stop reached it.
 	stopping bool
+	// undelivered means the last message the starter sent was accepted (SendNodeTurn returned)
+	// and then refused by the execution service, so it never ran. The summary says so until the
+	// next message is claimed; nothing else records the lost message.
+	undelivered bool
 }
 
 // followUp is one human turn of an interactive node.
@@ -132,12 +141,17 @@ func (n *interactiveNode) blocker() (reason, detail, answer string, structured a
 // summary is payload.interactive, what the run page shows about a parked node. Callers hold st.mu.
 func (n *interactiveNode) summary() map[string]any {
 	reason, detail, _, _ := n.blocker()
-	s := map[string]any{"turns": n.turns, "session_ended": n.sessionEnded, "completable": reason == ""}
+	// sent numbers the starter's messages claimed so far; last_turn_error is about the latest
+	// one, so a page can tell whether a notice concerns a message it sent itself.
+	s := map[string]any{"turns": n.turns, "sent": n.seq, "session_ended": n.sessionEnded, "completable": reason == ""}
 	if reason != "" {
 		s["blocker"] = map[string]any{"reason": reason, "detail": detail}
 	}
 	if n.last != nil {
 		s["last_stop_reason"] = n.last.StopReason
+	}
+	if n.undelivered {
+		s["last_turn_error"] = turnErrorNotDelivered
 	}
 	if n.accepted != nil {
 		// Members who cannot read the starter's session still see what completing would accept.
@@ -313,13 +327,22 @@ func (h *Host) SendNodeTurn(ctx context.Context, scope server.WorkflowRunScope, 
 	n.phase = phaseTurn
 	n.seq++
 	caller := execution.Caller{Kind: execution.CallerWorkflow, ID: runID, NodeID: nodeID, AttemptID: n.d.NodeRunID + "/turn-" + strconv.Itoa(n.seq)}
+	// This message replaces the one that was not delivered, so the row stops saying so as it
+	// starts running; if this one is refused too, the park writes the notice again.
+	undelivered := n.undelivered
+	n.undelivered = false
+	keys := map[string]any{"interactive": n.summary()}
 	st.mu.Unlock()
 
 	moved, err := h.store.MoveWorkflowEngineNode(ctx, runID, n.d.NodeRunID, store.WorkflowStatusPending, store.WorkflowStatusRunning,
-		func(node []byte) ([]byte, error) { return node, nil })
+		func(node []byte) ([]byte, error) { return workflow.MergePayload(node, keys) })
 	if err != nil || !moved {
 		st.mu.Lock()
 		n.phase = phaseParked
+		// The row was not rewritten and no turn was registered: this message was never the
+		// starter's next one, so neither the notice nor the count moves.
+		n.undelivered = undelivered
+		n.seq--
 		st.mu.Unlock()
 		if err == nil {
 			err = server.ErrWorkflowNodeNotAwaitingInput
@@ -365,6 +388,11 @@ func (h *Host) runFollowUp(st *runState, a *attemptState, f followUp) {
 			h.finishCancel(st, n.d.RunID)
 			return
 		}
+		// Accepted and not run. The park is normally refused and closes the node; should the
+		// run be running again by then, the node waits on and says the message was lost.
+		st.mu.Lock()
+		n.undelivered = true
+		st.mu.Unlock()
 		h.park(st, n)
 		return
 	}
@@ -384,14 +412,16 @@ func (h *Host) runFollowUp(st *runState, a *attemptState, f followUp) {
 			return
 		}
 		// The turn never started. A session that ended underneath accepts no more turns; any other
-		// refusal leaves the node as it was, waiting for another attempt.
+		// refusal leaves the node waiting for another attempt. SendNodeTurn has already answered
+		// the starter, so the summary is the only place that can say the message was lost.
 		h.log.Warn("send interactive workflow turn", "run", n.d.RunID, "node_run", n.d.NodeRunID, "error", publicReason(err))
+		st.mu.Lock()
+		n.undelivered = true
 		if errors.Is(err, execution.ErrSessionEnded) {
-			st.mu.Lock()
 			n.sessionEnded, n.sessionGone = true, true
 			st.slotsMayHaveChanged()
-			st.mu.Unlock()
 		}
+		st.mu.Unlock()
 		h.park(st, n)
 		return
 	}
