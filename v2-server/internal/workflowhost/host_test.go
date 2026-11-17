@@ -803,10 +803,24 @@ func TestSiblingsBeyondTheSessionLimitWaitForASlot(t *testing.T) {
 	}
 	first := f.exec.awaitStart(t)
 	f.exec.noStart(t, "a sibling started over the session limit")
+	firstNode := f.exec.request(first).Caller.NodeID
+	waiting := "a"
+	if firstNode == "a" {
+		waiting = "b"
+	}
+	f.await(t, runID, func(_ store.WorkflowRun, nodes []store.WorkflowNodeRun) bool {
+		return slotWait(t, node(nodes, waiting)) != nil
+	})
+	if _, nodes := f.await(t, runID, always); slotWait(t, node(nodes, firstNode)) != nil {
+		t.Fatal("the executing node reads as waiting for a session slot")
+	}
 	f.exec.finish(first, completed("one"))
 	second := f.exec.awaitStart(t)
-	if f.exec.request(second).Caller.NodeID == f.exec.request(first).Caller.NodeID {
-		t.Fatal("the same node started twice")
+	if f.exec.request(second).Caller.NodeID != waiting {
+		t.Fatal("the waiting sibling did not start next")
+	}
+	if _, nodes := f.await(t, runID, always); slotWait(t, node(nodes, waiting)) != nil {
+		t.Fatal("a node that took its session slot still reads as waiting")
 	}
 	f.exec.finish(second, completed("two"))
 	if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusSucceeded {
@@ -824,7 +838,14 @@ func TestCancelDropsASiblingWaitingForASlot(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
 	}
-	f.exec.awaitStart(t)
+	first := f.exec.awaitStart(t)
+	waiting := "a"
+	if f.exec.request(first).Caller.NodeID == "a" {
+		waiting = "b"
+	}
+	f.await(t, runID, func(_ store.WorkflowRun, nodes []store.WorkflowNodeRun) bool {
+		return slotWait(t, node(nodes, waiting)) != nil
+	})
 	if _, err := f.host.CancelRun(ctx, f.scope, runID); err != nil {
 		t.Fatal(err)
 	}
@@ -832,5 +853,30 @@ func TestCancelDropsASiblingWaitingForASlot(t *testing.T) {
 		t.Fatalf("run %s", run.Status)
 	}
 	f.exec.noStart(t, "a waiting sibling started after the cancellation")
-	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
+	_, nodes := f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
+	for _, n := range nodes {
+		if slotWait(t, n) != nil {
+			t.Fatalf("cancelled node %s still reads as waiting for a session slot", n.NodeID)
+		}
+	}
+}
+
+// always ends an await at once, for reading the run's current rows.
+func always(store.WorkflowRun, []store.WorkflowNodeRun) bool { return true }
+
+// slotWait decodes the attempt's `session_slot_wait` marker, nil when it has none.
+func slotWait(t *testing.T, n store.WorkflowNodeRun) *store.WorkflowSessionSlotWait {
+	t.Helper()
+	var p struct {
+		Wait *store.WorkflowSessionSlotWait `json:"session_slot_wait"`
+	}
+	if len(n.Payload) != 0 {
+		if err := json.Unmarshal(n.Payload, &p); err != nil {
+			t.Fatalf("payload of %s: %v", n.NodeID, err)
+		}
+	}
+	if p.Wait != nil && (p.Wait.Since == 0 || p.Wait.Limit == 0) {
+		t.Fatalf("incomplete session slot wait on %s: %+v", n.NodeID, *p.Wait)
+	}
+	return p.Wait
 }
