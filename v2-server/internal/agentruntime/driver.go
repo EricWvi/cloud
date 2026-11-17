@@ -210,6 +210,9 @@ func (d *Driver) run(ctx context.Context, scope execution.Scope, session executi
 	call, fresh, err := a.begin(turn.Ref.TurnID, emit)
 	if err != nil {
 		a.commandMu.Unlock()
+		if errors.Is(err, execution.ErrNodeLost) {
+			return failed(execution.FailureNodeLost), err
+		}
 		return failed("agent_session_unavailable"), err
 	}
 	if fresh {
@@ -221,7 +224,15 @@ func (d *Driver) run(ctx context.Context, scope execution.Scope, session executi
 	err = a.submit(turn.Ref.TurnID, text, fresh)
 	a.commandMu.Unlock()
 	if err != nil {
-		a.fail("agent_dispatch_failed", err)
+		code := "agent_dispatch_failed"
+		select {
+		case <-a.project.dead:
+			// The Node died while the turn was being sent. Part of it may have arrived and run,
+			// so the turn counts as lost with its Node, not as one that never reached the Agent.
+			code = execution.FailureNodeLost
+		default:
+		}
+		a.fail(code, err)
 		a.requestEnd()
 	}
 	select {

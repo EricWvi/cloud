@@ -20,8 +20,10 @@ type recoveryAgent struct {
 	mu      sync.Mutex
 	runs    []execution.Session
 	prompts []string
-	// results, when not empty, answer the next turns in order instead of a completed one.
+	// results, when not empty, answer the next turns in order instead of a completed one; errs,
+	// when set at the same position, is returned with the result without publishing it.
 	results []execution.Result
+	errs    []error
 	ended   []string
 	// reattached is the checkout each workspace was reattached to: clone execution and path.
 	reattached map[string][2]string
@@ -36,7 +38,10 @@ func (a *recoveryAgent) Run(ctx context.Context, _ execution.Scope, session exec
 	var err error
 	if len(a.results) > 0 {
 		result, a.results = a.results[0], a.results[1:]
-		if result.NotStarted {
+		if len(a.errs) > 0 {
+			err, a.errs = a.errs[0], a.errs[1:]
+		}
+		if err == nil && result.NotStarted {
 			err = errors.New(result.FailureCode)
 		}
 	}
@@ -303,4 +308,122 @@ func TestRunOfANodeParkedOnAnEndedSessionKeepsItsCheckout(t *testing.T) {
 	if got := next.reattached[session.WorkspaceID]; got != [2]string{"c-old-incarnation", dir} {
 		t.Fatalf("reattached = %v, want the run's recorded checkout for its later sessions", next.reattached)
 	}
+}
+
+func TestHeldSessionContinuesOnANewAgentWhenItsNodeWasAlreadyGone(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	agent := &recoveryAgent{}
+	first, node := parkedSession(t, f, agent, t.TempDir())
+	ref, err := followUp(t, f, first.SessionID, node, 1, "再改一版") // the recovered Agent takes over
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitResult(t, f, ref)
+
+	// The Node dies while the node waits: the next message finds it gone before reaching the
+	// Agent, and a replacement Agent takes that same turn.
+	agent.mu.Lock()
+	agent.results = []execution.Result{{Status: execution.StatusFailed, FailureCode: execution.FailureNodeLost, AgentLost: true}}
+	agent.errs = []error{execution.ErrNodeLost}
+	runs := len(agent.runs)
+	agent.mu.Unlock()
+	ref, err = followUp(t, f, first.SessionID, node, 2, "定稿")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := awaitResult(t, f, ref); r.Status != execution.StatusCompleted || r.Answer != "答复：定稿" {
+		t.Fatalf("turn after the Node was lost = %+v, want the replacement Agent's answer", r)
+	}
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if len(agent.runs) != runs+2 || agent.runs[runs].Recovery != nil || agent.runs[runs+1].Recovery == nil || agent.prompts[runs+1] != "定稿" {
+		t.Fatalf("runs after the Node was lost = %+v, want the lost attempt then one recovered run of the same prompt", agent.runs[runs:])
+	}
+	if !strings.Contains(agent.runs[runs+1].Recovery.Handoff, "答复：起草方案") {
+		t.Fatalf("handoff = %q", agent.runs[runs+1].Recovery.Handoff)
+	}
+}
+
+func TestHeldSessionOutlivesANodeLostMidTurn(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	agent := &recoveryAgent{}
+	first, node := parkedSession(t, f, agent, t.TempDir())
+	ref, err := followUp(t, f, first.SessionID, node, 1, "再改一版")
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitResult(t, f, ref)
+
+	// The Node dies while the Agent works on a turn: the turn fails and is not replayed, the
+	// session stays open, and the next message starts a new Agent.
+	agent.mu.Lock()
+	agent.results = []execution.Result{{Status: execution.StatusFailed, FailureCode: execution.FailureNodeLost, AgentLost: true}}
+	agent.errs = []error{errors.New(execution.FailureNodeLost)}
+	agent.mu.Unlock()
+	ref, err = followUp(t, f, first.SessionID, node, 2, "做到一半")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := awaitResult(t, f, ref); r.Status != execution.StatusFailed || r.AgentLost || r.FailureCode != execution.FailureNodeLost {
+		t.Fatalf("turn lost with its Node = %+v, want a failed turn that keeps the session", r)
+	}
+	if session, err := f.db.ReadExecutionSession(f.ctx, f.scope, first.SessionID); err != nil || session.EndedAt != nil {
+		t.Fatalf("session = %+v %v, want it open", session, err)
+	}
+	agent.mu.Lock()
+	runs := len(agent.runs)
+	agent.mu.Unlock()
+	ref, err = followUp(t, f, first.SessionID, node, 3, "继续")
+	if err != nil {
+		t.Fatalf("message after the lost turn: %v", err)
+	}
+	if r := awaitResult(t, f, ref); r.Status != execution.StatusCompleted {
+		t.Fatalf("recovered turn = %+v", r)
+	}
+	run, prompt := agent.last()
+	agent.mu.Lock()
+	total := len(agent.runs)
+	agent.mu.Unlock()
+	if run.Recovery == nil || prompt != "继续" || total != runs+1 {
+		t.Fatalf("last run %+v %q, want one recovered run of the new message only", run.Recovery, prompt)
+	}
+}
+
+func TestFirstTurnLostWithItsNodeEndsTheSession(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	if err := f.service.Close(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	agent := &recoveryAgent{results: []execution.Result{{Status: execution.StatusFailed, FailureCode: execution.FailureNodeLost, AgentLost: true}}, errs: []error{execution.ErrNodeLost}}
+	var err error
+	if f.service, err = New(f.ctx, Config{Store: f.db, Models: f.models, Agent: agent}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.CreateProject(f.ctx, f.scope, store.Project{ID: "project", Name: "Demo", RepositoryURL: "https://example.com/demo.git", Commit: "fixed", MirrorPath: "/fake/unused"}); err != nil {
+		t.Fatal(err)
+	}
+	// Nothing of a first turn is recorded to hand to a new Agent, so its loss keeps the earlier
+	// rule: the session ends and the node fails as one that could not be set up.
+	ref, err := f.service.Start(f.ctx, f.scope, execution.StartRequest{Caller: execution.Caller{Kind: execution.CallerWorkflow, ID: "run", NodeID: "a", AttemptID: "attempt"},
+		Target: execution.Target{ProjectID: "project"}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("起草方案"), Lifetime: execution.LifetimeHeld})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := awaitResult(t, f, ref); r.FailureCode != execution.FailureNodeLost || !r.AgentLost {
+		t.Fatalf("first turn lost with its Node = %+v, want the session's Agent reported lost", r)
+	}
+	agent.mu.Lock()
+	runs := len(agent.runs)
+	agent.mu.Unlock()
+	if runs != 1 {
+		t.Fatalf("the first turn ran %d times, want once: it is never handed to a new Agent", runs)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if session, err := f.db.ReadExecutionSession(f.ctx, f.scope, ref.SessionID); err == nil && session.EndedAt != nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the session stayed open after its first turn was lost")
 }

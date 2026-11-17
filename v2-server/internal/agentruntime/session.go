@@ -130,6 +130,12 @@ func (d *Driver) session(ctx context.Context, scope execution.Scope, session exe
 		return nil, execution.ErrUnavailable
 	}
 	a := d.sessions[session.ID]
+	if a != nil && session.Recovery != nil && a.replaceable() {
+		// The session's Agent is lost (its Node died) and the caller brings it back: the new Agent
+		// is a new execution, prepared like a first start.
+		delete(d.sessions, session.ID)
+		a = nil
+	}
 	if a != nil && (a.scope != scope || a.frozen.WorkspaceID != session.WorkspaceID || a.frozen.Target.ProjectID != session.Target.ProjectID || *a.frozen.Executor != *session.Executor) {
 		d.mu.Unlock()
 		return nil, execution.ErrConflict
@@ -240,22 +246,43 @@ func (d *Driver) session(ctx context.Context, scope execution.Scope, session exe
 	}
 }
 
+// replaceable reports whether a prepared session can no longer take a turn because its Agent is
+// gone: it ended, broke, or its Node incarnation died. Callers hold the Driver's mu.
+func (a *agentSession) replaceable() bool {
+	select {
+	case <-a.ready:
+	default:
+		return false // still preparing; its outcome decides
+	}
+	if a.project != nil {
+		select {
+		case <-a.project.dead:
+			return true
+		default:
+		}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ended || a.broken
+}
+
 func (a *agentSession) begin(turn string, emit Emit) (*activeTurn, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.ended || a.ending {
 		return nil, false, execution.ErrSessionEnded
 	}
+	// Checked before broken: a Node's death also marks its sessions broken.
+	select {
+	case <-a.project.dead:
+		return nil, false, execution.ErrNodeLost
+	default:
+	}
 	if a.broken {
 		return nil, false, execution.ErrUnavailable
 	}
 	if a.active != nil {
 		return nil, false, execution.ErrWorkspaceBusy
-	}
-	select {
-	case <-a.project.dead:
-		return nil, false, execution.ErrUnavailable
-	default:
 	}
 	call := &activeTurn{id: turn, done: make(chan turnOutcome, 1)}
 	a.active, a.emit = call, emit
@@ -396,7 +423,7 @@ func (a *agentSession) fail(code string, err error) {
 	a.mu.Unlock()
 	if call != nil {
 		// Infrastructure strings are deliberately not exposed through Run.
-		if !errors.Is(err, execution.ErrStopUnconfirmed) {
+		if !errors.Is(err, execution.ErrStopUnconfirmed) && !errors.Is(err, execution.ErrNodeLost) {
 			err = errors.New(code)
 		}
 		a.complete(turnOutcome{call.id, failed(code), err})

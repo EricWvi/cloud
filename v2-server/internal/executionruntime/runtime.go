@@ -469,33 +469,50 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		}
 		var result execution.Result
 		var agentErr error
-		var recovered bool
+		var recovered, nodeLost bool
 		if session.Target != nil {
-			s.mu.Lock()
-			recovered = s.recovering[session.ID]
-			s.mu.Unlock()
-			var gone bool
-			if recovered {
-				session.Recovery, gone, agentErr = s.recovery(ctx, session, turn)
-			}
-			switch {
-			case gone:
-				// The checkout the Agent worked in no longer exists: nothing can continue it.
-				result = failedResult(ctx, agentErr)
-				result.FailureCode, result.NotStarted = execution.FailureWorkspaceMissing, true
-			case agentErr != nil:
-				result = failedResult(ctx, agentErr)
-				result.NotStarted = true
-			default:
-				result, agentErr = s.agent.Run(ctx, scope, session, turn, emit)
-				if agentErr != nil && result.Status == "" {
-					result = failedResult(ctx, agentErr)
-				}
-			}
-			if recovered && !result.NotStarted {
+			for attempt := 0; ; attempt++ {
 				s.mu.Lock()
-				delete(s.recovering, session.ID) // the new Agent now holds the conversation
+				recovered = s.recovering[session.ID]
 				s.mu.Unlock()
+				var gone bool
+				session.Recovery, agentErr = nil, nil
+				if recovered {
+					session.Recovery, gone, agentErr = s.recovery(ctx, session, turn)
+				}
+				switch {
+				case gone:
+					// The checkout the Agent worked in no longer exists: nothing can continue it.
+					result = failedResult(ctx, agentErr)
+					result.FailureCode, result.NotStarted = execution.FailureWorkspaceMissing, true
+				case agentErr != nil:
+					result = failedResult(ctx, agentErr)
+					result.NotStarted = true
+				default:
+					result, agentErr = s.agent.Run(ctx, scope, session, turn, emit)
+					if agentErr != nil && result.Status == "" {
+						result = failedResult(ctx, agentErr)
+					}
+				}
+				if recovered && !result.NotStarted {
+					s.mu.Lock()
+					delete(s.recovering, session.ID) // the new Agent now holds the conversation
+					s.mu.Unlock()
+				}
+				// A held session outlives its Node: like a restart, the Agent's loss leaves the
+				// conversation recorded, and a new Agent continues it on the same checkout.
+				nodeLost = held && result.FailureCode == execution.FailureNodeLost && !s.firstTurn(ctx, scope, turn)
+				if !nodeLost {
+					break
+				}
+				s.mu.Lock()
+				s.recovering[session.ID] = true
+				s.mu.Unlock()
+				if attempt > 0 || !errors.Is(agentErr, execution.ErrNodeLost) || ctx.Err() != nil {
+					break // the turn reached the lost Agent, or its replacement was lost too
+				}
+				// The Node was gone before this turn reached the Agent: nothing ran, so its
+				// replacement takes the turn now.
 			}
 		} else {
 			messages, err := s.messages(ctx, scope, turn)
@@ -513,7 +530,7 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		// A recovered session whose new Agent could not be started keeps waiting for another
 		// turn: nothing ran, and the conversation is still recorded. Only a missing checkout
 		// ends it.
-		retry := recovered && result.NotStarted && result.FailureCode != execution.FailureWorkspaceMissing
+		retry := nodeLost || (recovered && result.NotStarted && result.FailureCode != execution.FailureWorkspaceMissing)
 		// An Agent error means the session is gone; the driver marks the results it publishes
 		// itself, and this marks the ones only the runtime writes.
 		result.AgentLost = !retry && (result.AgentLost || agentErr != nil)
@@ -522,6 +539,13 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		// A held session survives a turn the Agent itself ended without completing: the driver
 		// reports no error then, and the Agent is still there to take the next turn.
 		broken := session.Target != nil && !retry && (agentErr != nil || (result.Status != execution.StatusCompleted && !held))
+		if nodeLost && err == nil {
+			// The session stays open for its next turn, but the lost Node's process tree is
+			// retired now, with the supervisor's proof, rather than when the project is next used.
+			// An unconfirmed stop needs nothing more here: stopAgent marks the Node for rebuild,
+			// and the project's next use retires it before starting a new incarnation.
+			_ = s.stopAgent(context.Background(), session.ID)
+		}
 		if err != nil || broken {
 			// An unstored result or a failed/cancelled physical Agent is never advertised as
 			// resumable, held or not. Keep admission occupied until stop is confirmed.
@@ -556,6 +580,14 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		close(w.done)
 		s.mu.Unlock()
 	}()
+}
+
+// firstTurn reports whether turn opened its session. A first turn lost with its Node is not kept
+// for a new Agent: nothing of it was recorded to hand over, so it fails as a session that could
+// not be set up. An unreadable answer counts as a first turn, the safe side.
+func (s *Service) firstTurn(ctx context.Context, scope execution.Scope, turn execution.Turn) bool {
+	page, err := s.db.ReadExecutionTurns(context.WithoutCancel(ctx), scope, turn.Ref.SessionID, "", 1)
+	return err != nil || len(page.Items) == 0 || page.Items[0].Ref == turn.Ref
 }
 
 // finish retries a short database outage and returns the result it tried to store. A result

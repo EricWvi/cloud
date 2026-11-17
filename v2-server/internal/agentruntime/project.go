@@ -108,7 +108,27 @@ func (d *Driver) nextID(prefix string) string {
 }
 
 func (d *Driver) dropProject(p *projectRuntime) {
+	// A workflow run's checkout outlives the Node incarnation that cloned it: Node resolves it
+	// from its clone execution in its own ledger, so the run's next session on a new incarnation
+	// starts on the same directory (see Reattach) instead of a fresh clone.
+	p.mu.Lock()
+	kept := map[string]Checkout{}
+	for workspace, entry := range p.checkouts {
+		select {
+		case <-entry.ready:
+			if entry.workflow && entry.err == nil && entry.path != "" {
+				kept[workspace] = Checkout{Path: entry.path, CloneExecution: entry.id}
+			}
+		default:
+		}
+	}
+	p.mu.Unlock()
 	d.mu.Lock()
+	for workspace, at := range kept {
+		if _, known := d.recorded[workspace]; !known {
+			d.recorded[workspace] = at
+		}
+	}
 	if d.projects[p.id] == p {
 		delete(d.projects, p.id)
 	}
@@ -579,7 +599,7 @@ func (p *projectRuntime) transportFailed() {
 	p.mu.Unlock()
 	p.deadOnce.Do(func() { close(p.dead) })
 	for _, a := range agents {
-		a.fail("agent_transport_closed", execution.ErrUnavailable)
+		a.fail(execution.FailureNodeLost, execution.ErrUnavailable)
 	}
 }
 

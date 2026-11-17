@@ -165,6 +165,15 @@ const (
 // continued, so the session ends.
 const FailureWorkspaceMissing = "workspace_missing"
 
+// FailureNodeLost is the failure code of a turn whose session lost its Node: the Node process
+// exited or its connection broke. A held workflow session survives it (its next turn starts a new
+// Agent, see Recovery); any other session ends.
+const FailureNodeLost = "agent_transport_closed"
+
+// ErrNodeLost is returned with FailureNodeLost when the Node was already gone before the turn
+// reached its Agent: nothing of the turn ran, so a replacement Agent can take it at once.
+var ErrNodeLost = errors.New("the session's Node was lost before the turn reached its Agent")
+
 // CheckoutRefused reports whether code is one of Node's checkout refusals.
 func CheckoutRefused(code string) bool {
 	return code == FailureCheckoutBusy || code == FailureCheckoutSessionLimit || code == FailureCheckoutTooDeep

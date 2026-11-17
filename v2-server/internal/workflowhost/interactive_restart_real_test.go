@@ -11,8 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -337,4 +339,71 @@ func TestRealSuccessorAfterARestartRunsInTheRunsCheckout(t *testing.T) {
 	r.f.host = r.current.host
 	r.awaitRun(rid, awaitingInput("a"))
 	r.completes(rid, before, checkout)
+}
+
+// TestRealInteractiveNodeOutlivesItsNode kills the project's Node while an interactive node
+// waits, without restarting the server: the node keeps waiting, the next message finds the Node
+// gone before reaching an Agent and runs at once on a new Agent in the original checkout, as after
+// a restart, and the successor still runs in that checkout on the new Node.
+func TestRealInteractiveNodeOutlivesItsNode(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+	defer cancel()
+	r := newRealInteractive(t, ctx)
+	rid, session, before, checkout, firstHistory := r.parked()
+
+	killed := 0
+	for _, pid := range nodeProcesses(t, r.root) {
+		if syscall.Kill(pid, syscall.SIGKILL) == nil {
+			killed++
+		}
+	}
+	if killed == 0 {
+		t.Fatal("no Node process to kill")
+	}
+	// The server notices the death when Node's control socket closes, which follows the process
+	// being reaped; wait for that, so the message below finds the Node already gone.
+	for len(nodeProcesses(t, r.root)) != 0 {
+		select {
+		case <-time.After(50 * time.Millisecond):
+		case <-ctx.Done():
+			t.Fatal("the killed Node never exited")
+		}
+	}
+	time.Sleep(time.Second)
+	if _, err := r.current.host.SendNodeTurn(ctx, r.f.scope, rid, "a", "Inspect README and save the fixture result again."); err != nil {
+		t.Fatalf("message after the Node died: %v", err)
+	}
+	_, nodes := r.awaitRun(rid, r.turnsOf(2))
+	if p := interactivePayload(t, node(nodes, "a")); p["last_stop_reason"] != "end_turn" {
+		page, _ := r.current.service.ReadTurns(ctx, r.scope, session, "", 100)
+		for _, turn := range page.Items {
+			if turn.Result != nil {
+				t.Logf("turn %s: %+v", turn.Caller.AttemptID, *turn.Result)
+			}
+		}
+		t.Fatalf("after the Node died the message ended as %v, want it run at once by a new Agent", p)
+	}
+	r.recovered(rid, session, checkout, firstHistory, 2)
+	r.completes(rid, before, checkout)
+}
+
+// nodeProcesses lists the project Node processes under root: Node runs from its copy "nb" there
+// (the reaper, "rb", is left to clean up after it, as when Node crashes).
+func nodeProcesses(t *testing.T, root string) []int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pids []int
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		if exe, err := os.Readlink(filepath.Join("/proc", entry.Name(), "exe")); err == nil && strings.HasPrefix(exe, root+string(filepath.Separator)) && filepath.Base(exe) == "nb" {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }
