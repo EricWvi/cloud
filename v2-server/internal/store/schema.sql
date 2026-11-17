@@ -660,6 +660,9 @@ CREATE TABLE IF NOT EXISTS v2_workspaces (
 	base_commit text NOT NULL,
 	created_at  timestamptz NOT NULL DEFAULT now()
 );
+-- The Node clone execution that produced the checkout, so a restarted server can start a session
+-- on it again (Node resolves checkouts from its own ledger across its restarts).
+ALTER TABLE v2_workspaces ADD COLUMN IF NOT EXISTS clone_execution text NOT NULL DEFAULT '';
 
 ALTER TABLE v2_workflow_runs ADD COLUMN IF NOT EXISTS started_by uuid REFERENCES users(id);
 CREATE TABLE IF NOT EXISTS v2_workflow_forms (

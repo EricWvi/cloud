@@ -452,8 +452,20 @@ func (p *projectRuntime) checkoutPath(ctx context.Context, workspace string, con
 }
 
 func (p *projectRuntime) prepareCheckout(ctx context.Context, scope execution.Scope, workspace string, config Project, caller execution.CallerKind, timing *preparation) (*checkout, error) {
+	var recorded Checkout
+	if caller == execution.CallerWorkflow {
+		p.driver.mu.Lock()
+		recorded = p.driver.recorded[workspace]
+		p.driver.mu.Unlock()
+	}
 	p.mu.Lock()
 	entry := p.checkouts[workspace]
+	if entry == nil && recorded.CloneExecution != "" {
+		// An earlier process prepared this run's checkout (see Driver.Reattach): start on it.
+		entry = &checkout{workflow: true, id: recorded.CloneExecution, path: recorded.Path, ready: make(chan struct{})}
+		close(entry.ready)
+		p.checkouts[workspace] = entry
+	}
 	if entry == nil {
 		entry = &checkout{workflow: caller == execution.CallerWorkflow, id: p.driver.nextID("c") + "-" + digest(workspace), ready: make(chan struct{})}
 		p.checkouts[workspace] = entry
@@ -486,7 +498,7 @@ func (p *projectRuntime) prepareCheckout(ctx context.Context, scope execution.Sc
 				}
 			}
 			if record := p.driver.opts.RecordWorkspace; record != nil {
-				if err := record(ctx, workspace, Checkout{Path: path, BaseCommit: config.Commit}); err != nil {
+				if err := record(ctx, workspace, Checkout{Path: path, BaseCommit: config.Commit, CloneExecution: entry.id}); err != nil {
 					entry.err = err
 					return
 				}

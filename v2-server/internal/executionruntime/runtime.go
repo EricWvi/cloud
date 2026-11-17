@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
+	"os"
 	"reflect"
 	"slices"
 	"sort"
@@ -30,6 +32,9 @@ type AgentDriver interface {
 	// Rebuild marks the Node serving a session for replacement after End could not confirm
 	// its stop. The project's next session, or a later End, stops the old process tree first.
 	Rebuild(string)
+	// Reattach makes a workflow workspace's checkout, recorded by an earlier process, the one its
+	// sessions start on, so a restarted server continues a run in its own directory.
+	Reattach(workspaceID, cloneExecution, path string)
 	Close(context.Context) error
 }
 
@@ -93,8 +98,12 @@ type Service struct {
 	workers    map[string]*worker
 	groups     map[string]string
 	workspaces map[string]string
-	// held lists the live LifetimeHeld sessions this process started.
-	held              map[string]bool
+	// held lists the live LifetimeHeld sessions: those this process started, and those recovery
+	// kept from the previous process.
+	held map[string]bool
+	// recovering lists the held sessions recovery kept whose Agent was lost with the previous
+	// process and has not been started again; their next turn starts it (see recovery).
+	recovering        map[string]bool
 	ending            map[string]bool
 	unsaved           map[string]pending
 	stops             map[string]*stopCall
@@ -126,13 +135,52 @@ func New(ctx context.Context, cfg Config) (*Service, error) {
 		}
 		models[id] = choice
 	}
-	if err := cfg.Store.RecoverExecutions(ctx); err != nil {
+	kept, err := cfg.Store.RecoverExecutions(ctx)
+	if err != nil {
 		return nil, err
 	}
 	owned, cancel := context.WithCancel(ctx)
-	return &Service{db: cfg.Store, models: models, agent: cfg.Agent, ctx: owned, cancel: cancel, finishTurn: cfg.Store.FinishExecutionTurn,
+	s := &Service{db: cfg.Store, models: models, agent: cfg.Agent, ctx: owned, cancel: cancel, finishTurn: cfg.Store.FinishExecutionTurn,
 		finishRetryDelays: defaultFinishRetryDelays, concludeInterval: defaultConcludeInterval, stopTimeout: defaultStopTimeout,
-		workers: map[string]*worker{}, groups: map[string]string{}, workspaces: map[string]string{}, held: map[string]bool{}, ending: map[string]bool{}, unsaved: map[string]pending{}, stops: map[string]*stopCall{}}, nil
+		workers: map[string]*worker{}, groups: map[string]string{}, workspaces: map[string]string{}, held: map[string]bool{}, recovering: map[string]bool{}, ending: map[string]bool{}, unsaved: map[string]pending{}, stops: map[string]*stopCall{}}
+	for _, r := range kept {
+		// The kept session is still held; its Agent went with the old process, so its next turn
+		// starts a new one (see recovery).
+		s.held[r.Session.ID] = true
+		s.recovering[r.Session.ID] = true
+	}
+	// Every parked node's run keeps its directory, also when the node's own session ended before
+	// the restart and it can only be completed: the run's later sessions, a successor of a node
+	// completed right after the restart included, share the workspace (which only this process's
+	// map remembers) and start on the recorded checkout with its edits.
+	parked, err := cfg.Store.ParkedWorkflowSessions(ctx)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	for _, r := range parked {
+		if r.Caller.Kind != execution.CallerWorkflow {
+			continue
+		}
+		s.workspaces[groupKey(r.Scope, r.Caller)+"/"+r.Session.Target.ProjectID] = r.Session.WorkspaceID
+		if s.agent == nil {
+			continue
+		}
+		at, err := cfg.Store.ExecutionWorkspace(ctx, r.Session.WorkspaceID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue // the recovered session's turn reports it (see recovery)
+		}
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		// A checkout that is gone is left out, and the recovered session's turn reports it; any
+		// other doubt reattaches, so the recovered Agent never lands in a fresh clone.
+		if _, err := os.Stat(at.Path); !errors.Is(err, fs.ErrNotExist) {
+			s.agent.Reattach(r.Session.WorkspaceID, at.CloneExecution, at.Path)
+		}
+	}
+	return s, nil
 }
 
 // Start validates the project and freezes a binding before recording the first Agent turn.
@@ -421,10 +469,33 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		}
 		var result execution.Result
 		var agentErr error
+		var recovered bool
 		if session.Target != nil {
-			result, agentErr = s.agent.Run(ctx, scope, session, turn, emit)
-			if agentErr != nil && result.Status == "" {
+			s.mu.Lock()
+			recovered = s.recovering[session.ID]
+			s.mu.Unlock()
+			var gone bool
+			if recovered {
+				session.Recovery, gone, agentErr = s.recovery(ctx, session, turn)
+			}
+			switch {
+			case gone:
+				// The checkout the Agent worked in no longer exists: nothing can continue it.
 				result = failedResult(ctx, agentErr)
+				result.FailureCode, result.NotStarted = execution.FailureWorkspaceMissing, true
+			case agentErr != nil:
+				result = failedResult(ctx, agentErr)
+				result.NotStarted = true
+			default:
+				result, agentErr = s.agent.Run(ctx, scope, session, turn, emit)
+				if agentErr != nil && result.Status == "" {
+					result = failedResult(ctx, agentErr)
+				}
+			}
+			if recovered && !result.NotStarted {
+				s.mu.Lock()
+				delete(s.recovering, session.ID) // the new Agent now holds the conversation
+				s.mu.Unlock()
 			}
 		} else {
 			messages, err := s.messages(ctx, scope, turn)
@@ -439,14 +510,18 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		if result.Status == "" {
 			result = failedResult(ctx, execution.ErrUnavailable)
 		}
+		// A recovered session whose new Agent could not be started keeps waiting for another
+		// turn: nothing ran, and the conversation is still recorded. Only a missing checkout
+		// ends it.
+		retry := recovered && result.NotStarted && result.FailureCode != execution.FailureWorkspaceMissing
 		// An Agent error means the session is gone; the driver marks the results it publishes
 		// itself, and this marks the ones only the runtime writes.
-		result.AgentLost = result.AgentLost || agentErr != nil
+		result.AgentLost = !retry && (result.AgentLost || agentErr != nil)
 		result, err := s.finish(scope, turn.Ref, result)
 		// Failures stay with this session: nothing here stops admission for other sessions.
 		// A held session survives a turn the Agent itself ended without completing: the driver
 		// reports no error then, and the Agent is still there to take the next turn.
-		broken := session.Target != nil && (agentErr != nil || (result.Status != execution.StatusCompleted && !held))
+		broken := session.Target != nil && !retry && (agentErr != nil || (result.Status != execution.StatusCompleted && !held))
 		if err != nil || broken {
 			// An unstored result or a failed/cancelled physical Agent is never advertised as
 			// resumable, held or not. Keep admission occupied until stop is confirmed.
@@ -532,6 +607,7 @@ func (s *Service) conclude(ctx context.Context, scope execution.Scope, sid strin
 	}
 	s.mu.Lock()
 	delete(s.held, sid)
+	delete(s.recovering, sid)
 	s.mu.Unlock()
 	return nil
 }

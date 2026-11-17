@@ -151,7 +151,7 @@ func TestExecutionReopenRecoveryAndPagination(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if err := f.s.RecoverExecutions(ctx); err != nil {
+		if _, err := f.s.RecoverExecutions(ctx); err != nil {
 			t.Fatal(err)
 		}
 	}

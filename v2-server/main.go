@@ -172,7 +172,7 @@ func run(addr, dbURL string, cleanup, fixture, testFixtures bool) (resultErr err
 			}
 			return skills, nil
 		}, RecordWorkspace: func(c context.Context, id string, at agentruntime.Checkout) error {
-			return db.RecordWorkspace(c, id, store.WorkspaceLocation{Path: at.Path, BaseCommit: at.BaseCommit})
+			return db.RecordWorkspace(c, id, store.WorkspaceLocation{Path: at.Path, BaseCommit: at.BaseCommit, CloneExecution: at.CloneExecution})
 		}})
 		if e != nil {
 			return e

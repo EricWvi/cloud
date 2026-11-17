@@ -51,9 +51,12 @@ type Options struct {
 }
 
 // Checkout is a workspace's directory on this host and the commit it was cloned at.
+// CloneExecution is the Node clone execution behind it: Node resolves a session's checkout from
+// that ID in its own ledger, also after Node restarted, so a recovered session can start on it.
 type Checkout struct {
-	Path       string
-	BaseCommit string
+	Path           string
+	BaseCommit     string
+	CloneExecution string
 }
 
 // Emit retains an event before its source Node envelope can be acknowledged. It must honor ctx.
@@ -62,12 +65,16 @@ type Emit func(context.Context, execution.Event) error
 
 // Driver owns one Node per project and one physical Agent execution per logical session.
 type Driver struct {
-	opts           Options
-	boot           string
-	mu             sync.Mutex
-	closed         bool
-	projects       map[string]*projectRuntime
-	sessions       map[string]*agentSession
+	opts     Options
+	boot     string
+	mu       sync.Mutex
+	closed   bool
+	projects map[string]*projectRuntime
+	sessions map[string]*agentSession
+	// recorded are workflow checkouts an earlier Node incarnation prepared, by workspace (see
+	// Reattach): Node resolves them from their clone execution in its own ledger, so a later
+	// session of the workspace starts on the same directory instead of a fresh clone.
+	recorded       map[string]Checkout
 	serial         atomic.Uint64
 	controlTimeout time.Duration
 	startProject   func(*projectRuntime) error
@@ -109,7 +116,21 @@ func New(opts Options) (*Driver, error) {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, execution.ErrUnavailable
 	}
-	return &Driver{opts: opts, boot: hex.EncodeToString(nonce[:]), projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, controlTimeout: 2 * time.Minute}, nil
+	return &Driver{opts: opts, boot: hex.EncodeToString(nonce[:]), projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, recorded: map[string]Checkout{}, controlTimeout: 2 * time.Minute}, nil
+}
+
+// Reattach makes a workflow workspace's checkout, prepared by an earlier process, the one its
+// sessions start on: Node resolves it from its clone execution in its own ledger, also on a new
+// Node incarnation, so its files and uncommitted edits stay and nothing is cloned again. Callers
+// reattach before any session of the workspace starts; a checkout this process already prepared
+// for the workspace wins.
+func (d *Driver) Reattach(workspaceID, cloneExecution, path string) {
+	if workspaceID == "" || cloneExecution == "" || path == "" {
+		return
+	}
+	d.mu.Lock()
+	d.recorded[workspaceID] = Checkout{Path: path, CloneExecution: cloneExecution}
+	d.mu.Unlock()
 }
 
 // Run executes the admitted turn. Normal Append reuses its original live Agent conversation. A

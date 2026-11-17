@@ -8,6 +8,9 @@
 
 `New` 只在调用方已完成 Node 停止恢复后构造，并先结束旧的持久会话、结算未完成轮次为 interrupted。
 同一数据库和数据目录只能有一个服务实例。它不重建旧 worker、不重放 prompt，也不恢复旧 Agent 上下文。
+唯一的例外是停在等待输入的交互式工作流节点的 held 会话（`store.RecoverExecutions` 的判定：节点行 `pending`、有 `interactive` 摘要、运行仍在 `running`、会话没有未结束的轮次）：它保持打开，仍是 held，工作流 run 共用目录的映射也从它恢复，记下的 checkout 还在时交给 driver 的 `Reattach`（会话已经结束、只能完成的停住节点也算），所以这个 run 之后的每个会话（包括直接完成节点后启动的后继）都在原目录上开始；是否真的合法由工作流执行桥在启动时判定，不合法的由执行桥 End。
+这种会话的下一轮（`recovery.go`）在原目录上新起一个 Agent，并把最近一次历史快照渲染成交接记录（每轮的用户消息、回答，工具调用只有名称和结果，没有输入输出和推理；和这轮消息合起来不超过 Node 的 64 KB，放不下时先去掉最早的轮次）随 `execution.Session.Recovery` 交给 driver。新 Agent 是新的 provider 会话，第一轮没有提示缓存。
+这一轮记录的提示只有用户输入的原文。新 Agent 没能启动（driver 报 `NotStarted`：项目、checkout、插件没准备好）时这一轮失败，会话保持打开、仍待恢复，下一轮再试；Node 按 checkout 拒绝了新会话（例如名额已满）时和普通会话一样，会话结束；目录已不存在或没有记下 clone 执行 ID 时结果为 `workspace_missing`（`AgentLost`），会话结束。
 `main` 持有数据目录锁，先构造项目 driver，再构造本服务，最后开放 HTTP。
 
 Start/StartModel/Append 以当前租户授权（`TenantAccess`，store 在记录会话或轮次的事务内再查一次）和 Caller attempt 接收，记录原始 prompt 后启动服务自有 worker。

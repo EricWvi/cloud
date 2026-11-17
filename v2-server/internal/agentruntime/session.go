@@ -62,6 +62,65 @@ type agentSession struct {
 	previewAt     time.Time // when the last preview flush ran
 	previewSent   []byte    // the pending set the page last received
 	timing        *preparation
+	// recovered continues a held session whose Agent the previous server process lost: the new
+	// Agent starts with the handoff block (see execution.Recovery).
+	recovered *recoveredHistory
+}
+
+// recoveredHistory joins a recovered session's new Node history to the one the page showed
+// before: the old settled records come first, the new ones follow at positions after them, and
+// the handoff block, which the new Agent was sent as its first user block, is never shown.
+type recoveredHistory struct {
+	handoff string
+	base    []execution.HistoryRecord
+	offset  uint32
+}
+
+func newRecoveredHistory(r *execution.Recovery) *recoveredHistory {
+	h := &recoveredHistory{handoff: r.Handoff, base: append([]execution.HistoryRecord(nil), r.History...)}
+	for _, record := range h.base {
+		if record.Sequence >= h.offset {
+			h.offset = record.Sequence + 1
+		}
+	}
+	return h
+}
+
+// join maps a snapshot of the new Node history onto the page's conversation. A full snapshot
+// carries the earlier records; a preview carries only pending records, which the page places
+// among the records it has.
+func (h *recoveredHistory) join(snapshot *execution.HistorySnapshot, full bool) *execution.HistorySnapshot {
+	if h == nil {
+		return snapshot
+	}
+	joined := &execution.HistorySnapshot{Incomplete: snapshot.Incomplete}
+	if full {
+		joined.Records = append(joined.Records, h.base...)
+	}
+	for _, record := range snapshot.Records {
+		if isHandoff(record.Data, h.handoff) {
+			continue
+		}
+		record.Sequence += h.offset
+		joined.Records = append(joined.Records, record)
+	}
+	return joined
+}
+
+// isHandoff reports whether a Node history record is the user block carrying exactly the handoff.
+// Node records each block of a user turn as its own user_message_chunk, so the handoff, sent as a
+// separate block, is one record with that exact text.
+func isHandoff(data []byte, handoff string) bool {
+	var line struct {
+		Type   string `json:"type"`
+		Update struct {
+			Kind    string `json:"sessionUpdate"`
+			Content struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"update"`
+	}
+	return json.Unmarshal(data, &line) == nil && line.Type == "update" && line.Update.Kind == "user_message_chunk" && line.Update.Content.Text == handoff
 }
 
 func (d *Driver) session(ctx context.Context, scope execution.Scope, session execution.Session, config Project, caller execution.CallerKind, timing *preparation) (*agentSession, error) {
@@ -78,7 +137,12 @@ func (d *Driver) session(ctx context.Context, scope execution.Scope, session exe
 	if a == nil {
 		target, executor := *session.Target, *session.Executor
 		session.Target, session.Executor = &target, &executor
+		recovery := session.Recovery
+		session.Recovery = nil // frozen sessions compare by value; recovery is per start
 		a = &agentSession{observeRequests: caller == execution.CallerTask || caller == execution.CallerChat, frozen: session, scope: scope, execution: d.nextID("a") + "-" + digest(session.ID), ready: make(chan struct{}), stopped: make(chan struct{})}
+		if recovery != nil {
+			a.recovered = newRecoveredHistory(recovery)
+		}
 		d.sessions[session.ID] = a
 		go func() {
 			defer func() {
@@ -201,6 +265,10 @@ func (a *agentSession) begin(turn string, emit Emit) (*activeTurn, bool, error) 
 
 func (a *agentSession) submit(turn, text string, fresh bool) error {
 	content := []any{map[string]string{"type": "text", "text": text}}
+	if fresh && a.recovered != nil {
+		// The recorded conversation goes first, as its own block, so the page can leave it out.
+		content = append([]any{map[string]string{"type": "text", "text": a.recovered.handoff}}, content...)
+	}
 	if fresh {
 		// Run has already checked that the executor names a known plugin and binding.
 		plugin, _ := findPlugin(a.frozen.Executor.AgentID, a.frozen.Executor.PluginVersion)
@@ -443,12 +511,14 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 		}
 		return &turnOutcome{call.id, result, errors.New(result.FailureCode)}, true
 	}
-	snapshot := historyOf(observation.Snapshot)
+	own := historyOf(observation.Snapshot)
+	snapshot := a.recovered.join(own, !observation.Preview)
 	a.mu.Lock()
 	timing := a.timing
 	a.mu.Unlock()
 	if timing != nil {
-		timing.observeHistory(snapshot)
+		// The first output this Agent produced, not the conversation it continues.
+		timing.observeHistory(own)
 	}
 	if observation.Preview {
 		a.queuePreview(snapshot)

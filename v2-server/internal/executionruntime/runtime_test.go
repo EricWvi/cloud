@@ -609,8 +609,9 @@ func (a *orchestrationAgent) End(_ context.Context, sid string) error {
 	}
 	return nil
 }
-func (a *orchestrationAgent) Rebuild(string)              {}
-func (a *orchestrationAgent) Close(context.Context) error { return nil }
+func (a *orchestrationAgent) Rebuild(string)                  {}
+func (a *orchestrationAgent) Reattach(string, string, string) {}
+func (a *orchestrationAgent) Close(context.Context) error     { return nil }
 
 func nextAgentCall(t *testing.T, f *runtimeFixture, a *orchestrationAgent) *agentCall {
 	t.Helper()

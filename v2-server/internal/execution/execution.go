@@ -160,6 +160,11 @@ const (
 	FailureCheckoutTooDeep      = "checkout_too_deep"
 )
 
+// FailureWorkspaceMissing is the failure code of a recovered session's turn whose checkout no
+// longer exists (or was never recorded with its clone execution): its lost Agent cannot be
+// continued, so the session ends.
+const FailureWorkspaceMissing = "workspace_missing"
+
 // CheckoutRefused reports whether code is one of Node's checkout refusals.
 func CheckoutRefused(code string) bool {
 	return code == FailureCheckoutBusy || code == FailureCheckoutSessionLimit || code == FailureCheckoutTooDeep
@@ -191,6 +196,23 @@ type Session struct {
 	WorkspaceID string
 	CreatedAt   time.Time
 	EndedAt     *time.Time
+	// Recovery is set, never persisted, on the first turn a held session takes after a server
+	// restart lost its Agent: the driver starts a new Agent on the same checkout (reattached
+	// beforehand, see executionruntime) and hands it the recorded conversation instead of starting
+	// from nothing.
+	Recovery *Recovery `json:"-"`
+}
+
+// Recovery is what a driver needs to bring a held session back after its Agent was lost with the
+// server process. The new Agent is a new provider session: it learns the conversation from
+// Handoff, which lists tool calls by name and outcome only, and has no prompt cache.
+type Recovery struct {
+	// Handoff is sent ahead of the turn's prompt as its own block. It is context for the Agent
+	// only: the turn records the prompt alone, and the page never shows the block.
+	Handoff string
+	// History is the settled conversation the page showed before the restart; the new Agent's
+	// history is published after it, so the page keeps one continuous conversation.
+	History []HistoryRecord
 }
 
 // TurnPage lists accepted turns in stable creation order. NextCursor is empty at the current
