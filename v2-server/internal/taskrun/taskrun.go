@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/executionwait"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 )
 
@@ -70,9 +71,10 @@ type Host struct {
 	catalog execution.Catalog
 	log     *slog.Logger
 
-	ctx     context.Context
-	stop    context.CancelFunc
-	workers sync.WaitGroup
+	ctx         context.Context
+	stop        context.CancelFunc
+	workers     sync.WaitGroup
+	resultRetry executionwait.Policy
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
@@ -493,7 +495,9 @@ func (h *Host) end(ctx context.Context, run store.TaskRun, reason string) error 
 			if e != nil {
 				return e
 			}
-			h.settle(ctx, run, run.LastTurnID, result)
+			if err := h.settle(ctx, run, run.LastTurnID, result, false); err != nil {
+				return err
+			}
 		}
 		return h.exec.End(ctx, owner, run.SessionID)
 	}()
@@ -510,12 +514,17 @@ func (h *Host) watch(scope execution.Scope, run store.TaskRun, ref execution.Ref
 		defer h.workers.Done()
 		result, e := h.await(scope, ref)
 		if e != nil {
-			if h.ctx.Err() == nil {
-				h.log.Warn("observe task turn", "run", run.ID, "turn", ref.TurnID, "error", e)
+			if h.ctx.Err() != nil {
+				return // the next process interrupts this run
 			}
-			return
+			h.log.Warn("observe task turn", "run", run.ID, "turn", ref.TurnID, "error", e)
+			// This is the task observer's failure, not a replacement for the runtime's
+			// immutable result. A new Start ends this old session before replacing it.
+			result = execution.Result{Status: execution.StatusFailed, FailureCode: "execution_result_unavailable"}
 		}
-		h.settle(h.ctx, run, ref.TurnID, result)
+		// settle takes the task lock per bounded storage attempt instead of across retry
+		// sleeps, so an outage does not block Start/Comment/Stop callers on the mutex.
+		_ = h.settle(h.ctx, run, ref.TurnID, result, true)
 	}()
 }
 
@@ -545,40 +554,100 @@ func (h *Host) recorded(scope execution.Scope, ref execution.Ref, cause error) (
 	if h.ctx.Err() != nil {
 		return execution.Result{}, h.ctx.Err()
 	}
-	for cursor := ""; ; {
-		page, e := h.exec.ReadTurns(h.ctx, scope, ref.SessionID, cursor, 100)
-		if e != nil {
-			return execution.Result{}, errors.Join(cause, e)
-		}
-		for _, t := range page.Items {
-			if t.Ref.TurnID == ref.TurnID && t.Result != nil {
-				return *t.Result, nil
+	var result execution.Result
+	err := h.resultRetry.Read(h.ctx, func(ctx context.Context) error {
+		// Restart pagination after a failed read; a partial scan never proves absence.
+		for cursor := ""; ; {
+			page, e := h.exec.ReadTurns(ctx, scope, ref.SessionID, cursor, 100)
+			if e != nil {
+				return e
 			}
+			for _, t := range page.Items {
+				if t.Ref.TurnID == ref.TurnID && t.Result != nil {
+					result = *t.Result
+					return nil
+				}
+			}
+			if page.NextCursor == "" {
+				return execution.ErrUnavailable
+			}
+			cursor = page.NextCursor
 		}
-		if page.NextCursor == "" {
-			return execution.Result{}, cause
-		}
-		cursor = page.NextCursor
+	})
+	if err != nil {
+		return execution.Result{}, errors.Join(cause, err)
 	}
+	return result, nil
 }
 
 // settle records a turn's result once and moves the task: a completed or failed turn hands it to
-// 待验收, a cancelled or interrupted one returns it to 待处理.
-func (h *Host) settle(ctx context.Context, run store.TaskRun, turnID string, r execution.Result) {
-	ctx = context.WithoutCancel(ctx)
-	settled, e := h.store.SettleTaskTurn(ctx, run.ID, turnID, string(r.Status), r.FailureCode)
-	if e != nil {
-		h.log.Warn("settle task turn", "run", run.ID, "turn", turnID, "error", e)
-		return
-	}
-	if !settled {
-		return
-	}
+// 待验收, a cancelled or interrupted one returns it to 待处理. When lockAttempt is true, each
+// storage attempt takes the task lock briefly and releases it before any retry sleep.
+func (h *Host) settle(ctx context.Context, run store.TaskRun, turnID string, r execution.Result, lockAttempt bool) error {
+	owned, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(h.ctx, cancel)
+	defer stop()
 	to := store.TaskReview
 	if r.Status == execution.StatusCancelled || r.Status == execution.StatusInterrupted {
 		to = store.TaskPending
 	}
-	h.moveTask(ctx, run.TenantID, run.TaskID, store.TaskRunning, to)
+	stillOwns := func(read context.Context) (bool, error) {
+		latest, err := h.store.TaskRun(read, run.TenantID, run.TaskID, run.ID)
+		if err != nil {
+			return false, err
+		}
+		return latest.Live() && !latest.TurnActive() && latest.LastTurnID == turnID &&
+			latest.LastResult == string(r.Status) && latest.FailureCode == r.FailureCode, nil
+	}
+	// Keep the outcome (including an exhausted read budget) until it is stored.
+	// Shutdown cancels these retries; startup recovery remains the durable fallback.
+	// Remember the successful turn write across a failed task-status move.
+	turnStored := false
+	writeUncertain := false
+	err := h.resultRetry.Store(owned, func(write context.Context) error {
+		if lockAttempt {
+			unlock := h.lock(run.TaskID)
+			defer unlock()
+		}
+		if !turnStored {
+			settled, err := h.store.SettleTaskTurn(write, run.ID, turnID, string(r.Status), r.FailureCode)
+			if err != nil {
+				writeUncertain = true
+				return err
+			}
+			if !settled {
+				if !writeUncertain {
+					return nil // another observer, stop or newer turn owns it
+				}
+				// The write may have committed before its connection failed. Recover
+				// only this exact outcome; never move the task for an ended/newer turn.
+				ok, err := stillOwns(write)
+				if err != nil || !ok {
+					return err
+				}
+			}
+			turnStored = true
+		} else if lockAttempt {
+			// The task lock was released across the retry pause, so verify a newer turn or
+			// stop did not replace this turn before moving the task.
+			ok, err := stillOwns(write)
+			if err != nil || !ok {
+				return err
+			}
+		}
+		_, err := h.store.TransitionTaskStatus(write, run.TenantID, run.TaskID, store.TaskRunning, to)
+		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrInvalidTransition) || errors.Is(err, store.ErrRunActive) {
+			return nil // a person or another operation already moved the task
+		}
+		return err
+	}, func(err error) bool {
+		return errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict)
+	})
+	if err != nil && h.ctx.Err() == nil {
+		h.log.Warn("settle task turn", "run", run.ID, "turn", turnID, "error", err)
+	}
+	return err
 }
 
 // moveTask applies a run's status move. A task a person already moved elsewhere stays where it is.

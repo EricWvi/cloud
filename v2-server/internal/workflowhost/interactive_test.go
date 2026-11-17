@@ -7,8 +7,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/executionwait"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
@@ -595,6 +597,7 @@ func TestLostFollowUpKeepsTheEarlierAnswer(t *testing.T) {
 // lost Agent: the host ends the session itself and the node parks for completion.
 func TestUnreadableTurnEndsTheSessionAndParks(t *testing.T) {
 	f := newFixture(t)
+	f.host.resultRetry = executionwait.Policy{Budget: 50 * time.Millisecond, Interval: 10 * time.Millisecond}
 	ctx := context.Background()
 	runID, a := f.startParked(t, interactiveChain, "初稿一")
 	f.exec.SubscribeFunc = func(context.Context, execution.Scope, string, uint64) (execution.Stream, error) {

@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/executionwait"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
@@ -137,15 +138,35 @@ func (h *Host) recordInjectedFailure(tenant, runID, nodeRunID, text string) {
 }
 
 func (h *Host) fail(d workflow.AgentDispatch, f workflow.Failure) {
-	if err := h.engine.FailNode(h.ctx, d.RunID, d.NodeRunID, f); err != nil {
+	if err := h.resultRetry.Store(h.ctx, func(ctx context.Context) error {
+		return h.engine.FailNode(ctx, d.RunID, d.NodeRunID, f)
+	}, permanentOutcomeError); err != nil && h.ctx.Err() == nil {
 		h.log.Error("record workflow node failure", "run", d.RunID, "node_run", d.NodeRunID, "error", err)
 	}
 }
 
 func (h *Host) complete(d workflow.AgentDispatch, c workflow.Completion) {
-	if err := h.engine.CompleteNode(h.ctx, d.RunID, d.NodeRunID, c); err != nil {
+	reschedule := false
+	if err := h.resultRetry.Store(h.ctx, func(ctx context.Context) error {
+		if err := h.engine.CompleteNode(ctx, d.RunID, d.NodeRunID, c); err != nil {
+			reschedule = true
+			return err
+		}
+		// CompleteNode may have stored the result before a scheduling read failed.
+		// Its duplicate callback is a no-op, so explicitly resume that scheduling pass.
+		if reschedule {
+			return h.engine.Resume(ctx, d.RunID)
+		}
+		return nil
+	}, permanentOutcomeError); err != nil && h.ctx.Err() == nil {
 		h.log.Error("record workflow node completion", "run", d.RunID, "node_run", d.NodeRunID, "error", err)
 	}
+}
+
+func permanentOutcomeError(err error) bool {
+	return errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrWorkflowRunState) ||
+		errors.Is(err, store.ErrWorkflowNodeRunState) || errors.Is(err, store.ErrWorkflowScopeState) ||
+		errors.Is(err, store.ErrConflict) || errors.Is(err, execution.ErrInvalidRequest)
 }
 
 // finishCancel closes a run whose cancellation was requested once its turn is known to have
@@ -584,11 +605,22 @@ func (h *Host) recordedResult(scope execution.Scope, caller execution.Caller, ca
 	if h.ctx.Err() != nil {
 		return execution.Result{}, h.ctx.Err()
 	}
-	turn, err := h.exec.ReadAttempt(h.ctx, scope, caller)
-	if err == nil && turn.Result != nil {
-		return *turn.Result, nil
+	var result execution.Result
+	err := h.resultRetry.Read(h.ctx, func(ctx context.Context) error {
+		turn, err := h.exec.ReadAttempt(ctx, scope, caller)
+		if err != nil {
+			return err
+		}
+		if turn.Result == nil {
+			return execution.ErrUnavailable // the runtime may still be backfilling it
+		}
+		result = *turn.Result
+		return nil
+	})
+	if err != nil {
+		return execution.Result{}, errors.Join(cause, err)
 	}
-	return execution.Result{}, cause
+	return result, nil
 }
 
 // end stops the node's session, as desktop's stop_session after the turn; the transcript stays
@@ -727,6 +759,9 @@ func (h *Host) resolveExecutor(scope execution.Scope, cfg workflow.AgentConfig) 
 
 // publicReason names an execution error by its stable sentinel, never infrastructure detail.
 func publicReason(err error) string {
+	if errors.Is(err, executionwait.ErrExhausted) {
+		return "execution result could not be read before the retry deadline; resume the run to retry"
+	}
 	for _, known := range []error{
 		execution.ErrUnavailable, execution.ErrNotFound, execution.ErrInvalidRequest, execution.ErrWorkspaceBusy,
 		execution.ErrConflict, execution.ErrUnsupported, execution.ErrStopUnconfirmed, execution.ErrSessionEnded,
