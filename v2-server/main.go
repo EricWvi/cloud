@@ -459,7 +459,7 @@ func lockDirectory(root string) (*os.File, error) {
 func prepareDemo(ctx context.Context, db *store.Store, projects *projectrepos.Service, email string) (execution.Scope, store.Project, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	user, e := db.UserByEmail(ctx, email)
+	user, e := db.DemoMemberByEmail(ctx, email)
 	if e != nil {
 		return execution.Scope{}, store.Project{}, e
 	}

@@ -282,3 +282,26 @@ func stringify(v map[string]any) string {
 	return b.String()
 }
 
+// A removed member keeps the account: with email login the address still signs in, and the page
+// then asks for an invitation instead of refusing the login.
+func TestRemovedMemberStillSignsInByEmail(t *testing.T) {
+	f := newInviteFixture(t, server.Options{})
+	status, invited := f.call("POST", "/api/v2/tenants/"+f.tenant+"/members", f.owner, map[string]string{"email": "alice@demo.test"})
+	if status != 201 {
+		t.Fatalf("invite = %d %v", status, invited)
+	}
+	if status, _ := f.call("DELETE", "/api/v2/tenants/"+f.tenant+"/members/"+invited["userId"].(string), f.owner, nil); status != 204 {
+		t.Fatalf("remove = %d", status)
+	}
+	res, body := rawCall(t, "POST", f.srv.URL+"/auth/login", "", nil, map[string]string{"provider": "email", "email": "alice@demo.test"})
+	if res.StatusCode != 200 {
+		t.Fatalf("login after removal = %d %v", res.StatusCode, body)
+	}
+	if f.tenantsOf(sessionCookie(t, res)) != 0 {
+		t.Fatal("removed member still sees the workspace")
+	}
+	// An address without an account is still refused.
+	if res, body := rawCall(t, "POST", f.srv.URL+"/auth/login", "", nil, map[string]string{"provider": "email", "email": "nobody@demo.test"}); res.StatusCode != 403 || body["code"] != "email_not_invited" {
+		t.Fatalf("unknown address = %d %v", res.StatusCode, body)
+	}
+}
