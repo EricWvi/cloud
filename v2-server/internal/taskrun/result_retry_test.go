@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -218,11 +219,17 @@ func TestTaskSettlementRecoversAmbiguousWriteWithoutMovingANewerTurn(t *testing.
 }
 
 type stubTaskStream struct {
-	next func(context.Context) (execution.Event, error)
+	next  func(context.Context) (execution.Event, error)
+	close func() error
 }
 
 func (s stubTaskStream) Next(ctx context.Context) (execution.Event, error) { return s.next(ctx) }
-func (s stubTaskStream) Close() error                                      { return nil }
+func (s stubTaskStream) Close() error {
+	if s.close != nil {
+		return s.close()
+	}
+	return nil
+}
 
 func TestTaskAwaitHealthyLongTurnPastBudgetAfterSubscribeOrStreamFailure(t *testing.T) {
 	for _, subscribing := range []bool{false, true} {
@@ -284,6 +291,176 @@ func TestTaskAwaitHealthyLongTurnPastBudgetAfterSubscribeOrStreamFailure(t *test
 				}
 				if !subscribing && cursors[1] != 5 {
 					t.Fatalf("re-subscribe cursor=%d, want 5", cursors[1])
+				}
+			})
+		})
+	}
+}
+
+func TestTaskAwaitPacesRepeatedResubscribeFailures(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const interval = 50 * time.Millisecond
+		const runningFor = 2 * time.Second
+		const maxSubscribes = int(runningFor/interval) + 2
+		start := time.Now()
+		ref := execution.Ref{SessionID: "session", TurnID: "turn"}
+		want := execution.Result{Status: execution.StatusCompleted, Answer: "backfilled answer"}
+		subscribes := 0
+		port := &executiontest.Stub{
+			SubscribeFunc: func(context.Context, execution.Scope, string, uint64) (execution.Stream, error) {
+				subscribes++
+				if subscribes > maxSubscribes {
+					t.Fatalf("more than %d subscriptions after %s: resubscribe loop spun", maxSubscribes, time.Since(start))
+				}
+				return stubTaskStream{next: func(context.Context) (execution.Event, error) {
+					return execution.Event{}, execution.ErrNotFound
+				}}, nil
+			},
+			ReadTurnsFunc: func(context.Context, execution.Scope, string, string, int) (execution.TurnPage, error) {
+				turn := execution.Turn{Ref: ref}
+				if time.Since(start) >= runningFor {
+					turn.Result = &want
+				}
+				return execution.TurnPage{Items: []execution.Turn{turn}}, nil
+			},
+		}
+		h := &Host{ctx: t.Context(), exec: port, resultRetry: executionwait.Policy{Budget: 4 * interval, Interval: interval}}
+		got, err := h.await(execution.Scope{}, ref)
+		if err != nil || !reflect.DeepEqual(got, want) || time.Since(start) != runningFor {
+			t.Fatalf("result=%+v err=%v elapsed=%s, want backfill at %s", got, err, time.Since(start), runningFor)
+		}
+	})
+}
+
+func TestTaskAwaitRecoversImmediatelyAfterResubscribedStreamAdvancesCursor(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const interval = 50 * time.Millisecond
+		start := time.Now()
+		ref := execution.Ref{SessionID: "session", TurnID: "turn"}
+		want := execution.Result{Status: execution.StatusCompleted}
+		var cursors []uint64
+		var readTimes []time.Duration
+		port := &executiontest.Stub{
+			SubscribeFunc: func(_ context.Context, _ execution.Scope, _ string, after uint64) (execution.Stream, error) {
+				cursors = append(cursors, after)
+				sendEvent := len(cursors) > 1
+				return stubTaskStream{next: func(context.Context) (execution.Event, error) {
+					if sendEvent {
+						sendEvent = false
+						return execution.Event{Sequence: 5, Ref: ref, Kind: execution.EventTextDelta}, nil
+					}
+					return execution.Event{}, execution.ErrNotFound
+				}}, nil
+			},
+			ReadTurnsFunc: func(context.Context, execution.Scope, string, string, int) (execution.TurnPage, error) {
+				readTimes = append(readTimes, time.Since(start))
+				turn := execution.Turn{Ref: ref}
+				if len(readTimes) == 3 {
+					turn.Result = &want
+				}
+				return execution.TurnPage{Items: []execution.Turn{turn}}, nil
+			},
+		}
+		h := &Host{ctx: t.Context(), exec: port, resultRetry: executionwait.Policy{Interval: interval}}
+		got, err := h.await(execution.Scope{}, ref)
+		if err != nil || !reflect.DeepEqual(got, want) || !reflect.DeepEqual(cursors, []uint64{0, 0, 5}) || !reflect.DeepEqual(readTimes, []time.Duration{0, 0, interval}) {
+			t.Fatalf("result=%+v err=%v cursors=%v read times=%v, want immediate recovery after progress and a pause after replay", got, err, cursors, readTimes)
+		}
+	})
+}
+
+func TestTaskAwaitReturnsStreamAndContextErrorsWhenResubscribePauseIsCanceled(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const interval = 50 * time.Millisecond
+		start := time.Now()
+		ctx, cancel := context.WithTimeout(t.Context(), interval/2)
+		defer cancel()
+		reads := 0
+		port := &executiontest.Stub{
+			SubscribeFunc: func(context.Context, execution.Scope, string, uint64) (execution.Stream, error) {
+				return stubTaskStream{next: func(context.Context) (execution.Event, error) {
+					return execution.Event{}, execution.ErrNotFound
+				}}, nil
+			},
+			ReadTurnsFunc: func(context.Context, execution.Scope, string, string, int) (execution.TurnPage, error) {
+				reads++
+				if reads > 1 {
+					t.Fatal("read again instead of pausing after a stalled resubscription")
+				}
+				return execution.TurnPage{Items: []execution.Turn{{}}}, nil
+			},
+		}
+		h := &Host{ctx: ctx, exec: port, resultRetry: executionwait.Policy{Interval: interval}}
+		_, err := h.await(execution.Scope{}, execution.Ref{})
+		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, execution.ErrNotFound) || time.Since(start) != interval/2 {
+			t.Fatalf("err=%v elapsed=%s, want joined stream and context errors at %s", err, time.Since(start), interval/2)
+		}
+	})
+}
+
+func TestTaskRecoverTurnClosesResubscribedStreamOnCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		closes := 0
+		port := &executiontest.Stub{
+			SubscribeFunc: func(context.Context, execution.Scope, string, uint64) (execution.Stream, error) {
+				cancel()
+				return stubTaskStream{close: func() error { closes++; return nil }}, nil
+			},
+			ReadTurnsFunc: func(context.Context, execution.Scope, string, string, int) (execution.TurnPage, error) {
+				return execution.TurnPage{Items: []execution.Turn{{}}}, nil
+			},
+		}
+		h := &Host{ctx: ctx, exec: port}
+		_, stream, got, err := h.recoverTurn(execution.Scope{}, execution.Ref{}, 0, execution.ErrUnavailable)
+		if !errors.Is(err, context.Canceled) || stream != nil || got || closes != 1 {
+			t.Fatalf("err=%v stream=%v got=%t closes=%d, want cancellation and one close without returning the stream", err, stream, got, closes)
+		}
+	})
+}
+
+func TestTaskAwaitDoesNotResubscribeWhileWaitingForBackfill(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		cause error
+		ended bool
+	}{
+		{name: "session_ended", cause: io.EOF},
+		{name: "turn_ended", cause: execution.ErrUnavailable, ended: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				const interval = 50 * time.Millisecond
+				start := time.Now()
+				ref := execution.Ref{SessionID: "session", TurnID: "turn"}
+				want := execution.Result{Status: execution.StatusCompleted, Answer: "backfilled answer"}
+				subscribes := 0
+				port := &executiontest.Stub{
+					SubscribeFunc: func(context.Context, execution.Scope, string, uint64) (execution.Stream, error) {
+						subscribes++
+						if subscribes != 1 {
+							t.Fatal("resubscribed instead of polling for the backfill")
+						}
+						return stubTaskStream{next: func(context.Context) (execution.Event, error) {
+							return execution.Event{}, test.cause
+						}}, nil
+					},
+					ReadTurnsFunc: func(context.Context, execution.Scope, string, string, int) (execution.TurnPage, error) {
+						turn := execution.Turn{Ref: ref}
+						if test.ended {
+							turn.EndedAt = &start
+						}
+						if time.Since(start) >= 2*interval {
+							turn.Result = &want
+						}
+						return execution.TurnPage{Items: []execution.Turn{turn}}, nil
+					},
+				}
+				h := &Host{ctx: t.Context(), exec: port, resultRetry: executionwait.Policy{Interval: interval}}
+				got, err := h.await(execution.Scope{}, ref)
+				if err != nil || !reflect.DeepEqual(got, want) || subscribes != 1 || time.Since(start) != 2*interval {
+					t.Fatalf("result=%+v err=%v subscribes=%d elapsed=%s, want backfill after two polls and one subscription", got, err, subscribes, time.Since(start))
 				}
 			})
 		})
