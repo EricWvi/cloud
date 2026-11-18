@@ -28,8 +28,8 @@ func (r repository) ResumeState(ctx context.Context, runID string) (workflow.Res
 	return resumeState(st), err
 }
 
-func (r repository) ResumeRun(ctx context.Context, runID string, plan func(workflow.ResumeState) ([]string, error), clear func([]byte, []string) ([]byte, error)) error {
-	return r.s.ResumeWorkflowEngineRun(ctx, runID, func(st store.WorkflowResumeState) ([]string, error) {
+func (r repository) ResumeRun(ctx context.Context, runID, actor string, plan func(workflow.ResumeState) ([]string, error), clear func([]byte, []string) ([]byte, error)) error {
+	return r.s.ResumeWorkflowEngineRun(ctx, runID, actor, func(st store.WorkflowResumeState) ([]string, error) {
 		return plan(resumeState(st))
 	}, clear)
 }
@@ -61,8 +61,10 @@ func (h *Host) PreviewRunResume(ctx context.Context, scope server.WorkflowRunSco
 // ResumeRun resumes a failed or cancelled run of the caller's tenant from its failed nodes, as
 // desktop's resume_from_failure with the keep-files mode: the workspace is left as it is. The
 // permission is the cancellation's. The resumed Agents execute under the run's persisted starter,
-// who owns every earlier session of the run, so the run's sessions keep one owner; a run without a
-// recorded starter executes under the caller.
+// who owns every earlier session of the run, so the run's sessions keep one owner; when the run
+// has no recorded starter yet, an active tenant member who already owns a bound node session is
+// preferred, otherwise the caller is used, and the starter is persisted only inside the resume
+// transaction if the resume commits.
 func (h *Host) ResumeRun(ctx context.Context, scope server.WorkflowRunScope, runID string) (store.WorkflowRun, error) {
 	run, err := h.store.WorkflowRun(ctx, scope.TenantID, runID)
 	if err != nil {
@@ -77,15 +79,12 @@ func (h *Host) ResumeRun(ctx context.Context, scope server.WorkflowRunScope, run
 		return store.WorkflowRun{}, &server.WorkflowRunNotResumable{Reason: workflow.ResumeRefusedSettling, RunningNodeIDs: []string{}}
 	}
 	defer unlock()
-	owner, err := h.store.WorkflowStarter(ctx, runID)
+	owner, err := h.store.WorkflowResumeStarter(ctx, runID)
 	if err != nil {
 		return store.WorkflowRun{}, fmt.Errorf("read workflow run starter: %w", err)
 	}
 	if owner == "" {
 		owner = scope.UserID
-		if err := h.store.EnsureWorkflowStarter(ctx, runID, owner); err != nil {
-			return store.WorkflowRun{}, fmt.Errorf("persist workflow run starter: %w", err)
-		}
 	}
 	// A run that a sibling failed may still have interactive nodes parked in this process, their
 	// rows pending and their sessions open. Close them before planning, so the resume restarts
@@ -108,7 +107,7 @@ func (h *Host) ResumeRun(ctx context.Context, scope server.WorkflowRunScope, run
 		h.resuming(runID)
 	}
 	// Like a start, the resumed run outlives the request.
-	err = h.engine.ResumeFromFailure(context.WithoutCancel(ctx), runID)
+	err = h.engine.ResumeFromFailure(context.WithoutCancel(ctx), runID, owner)
 	st.started()
 	h.forgetFinished(runID, st)
 	if err != nil {
