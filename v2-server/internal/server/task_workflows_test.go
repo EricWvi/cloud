@@ -145,10 +145,12 @@ func TestTaskWorkflowChoiceErrorsHTTP(t *testing.T) {
 	if err := doc.Validate(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	c.routes, err = legacy.NewRouter(doc)
+	original := c.routes
+	routes, err := legacy.NewRouter(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.routes = routes
 	for _, tc := range []struct {
 		name, wid, snapshot, code string
 		status                    int
@@ -198,5 +200,34 @@ func TestTaskWorkflowChoiceErrorsHTTP(t *testing.T) {
 	status, got = c.doHeaders("POST", path, map[string]any{"workflowId": w.ID}, map[string]string{"Idempotency-Key": "conflict"})
 	if status != 409 || got["code"] != "version_conflict" {
 		t.Fatalf("conflict=%d %v", status, got)
+	}
+
+	commentWorkflowServer(t, f)
+	c = f.taskClient()
+	c.login()
+	c.routes = routes
+	roleGraph := `{"nodes":[{"id":"start","data":{"kind":"start"}},{"id":"a","data":{"kind":"agent","agentConfig":{"prompt":"Review","roleId":"reviewer"}}}],"edges":[{"source":"start","target":"a"}]}`
+	roleWF, _, err := f.store.CreateWorkflow(f.ctx, tid, "Needs role", roleGraph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.PublishWorkflow(f.ctx, tid, roleWF.ID, "v1", nil); err != nil {
+		t.Fatal(err)
+	}
+	status, got = c.doHeaders("POST", path, map[string]any{"workflowId": roleWF.ID}, map[string]string{"Idempotency-Key": "missing-role"})
+	if status != 400 || got["code"] != "workflow_role_not_found" {
+		t.Fatalf("missing role = %d %v, want 400 workflow_role_not_found", status, got)
+	}
+	c.routes = original
+	status, gotTask := c.do("GET", base+"/"+task["id"].(string), nil)
+	if status != 200 || gotTask["status"] != store.TaskPending {
+		t.Fatalf("missing role moved task status: %d %v", status, gotTask)
+	}
+	c.routes = routes
+	if _, err := f.store.CreateRole(f.ctx, tid, task["createdBy"].(string), store.RoleInput{Name: "reviewer", Description: "Reviewer", Content: "# Reviewer"}); err != nil {
+		t.Fatal(err)
+	}
+	if status, started := c.doHeaders("POST", path, map[string]any{"workflowId": roleWF.ID}, map[string]string{"Idempotency-Key": "role-ready"}); status != 201 || started["workflowRunId"] == "" {
+		t.Fatalf("start after creating role = %d %v", status, started)
 	}
 }

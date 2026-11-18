@@ -330,7 +330,8 @@ func (h *Host) List(ctx context.Context, tenant, taskID string) ([]store.TaskWor
 
 // Recover runs before workflow interruption. Completed runs keep their outcome; all still-live
 // handling runs are cancelled and marked interrupted, including parked forms and pending starts.
-// Previous-process sessions have already been ended by execution recovery at this point.
+// Comment-initiated runs left pending before execution ever began are discarded so same-key retries
+// can start cleanly. Previous-process sessions have already been ended by execution recovery at this point.
 func (h *Host) Recover(ctx context.Context) error {
 	items, err := h.db.LiveTaskWorkflows(ctx)
 	if err != nil {
@@ -346,6 +347,15 @@ func (h *Host) Recover(ctx context.Context) error {
 			return err
 		}
 		if err := h.db.SettleTaskWorkflow(ctx, item.Tenant, item.RunID, "interrupted", "Server restarted; start a new run."); err != nil {
+			return err
+		}
+	}
+	pendingComments, err := h.db.PendingCommentWorkflows(ctx)
+	if err != nil {
+		return err
+	}
+	for _, comment := range pendingComments {
+		if _, err := h.db.DiscardUnstartedCommentWorkflow(ctx, comment.TenantID, comment.TaskID, comment.AuthorID, comment.CreateKey, comment.RunID); err != nil {
 			return err
 		}
 	}
