@@ -45,6 +45,12 @@ func TestPublicURL(t *testing.T) {
 		"https://ora.example.com":      "https://ora.example.com",
 		"https://ora.example.com/ora/": "https://ora.example.com/ora",
 		"http://127.0.0.1:8090":        "http://127.0.0.1:8090",
+		// Stored the way browsers write Origin: lowercase host, no default port.
+		"https://Ora.Example.COM:443/": "https://ora.example.com",
+		"http://Ora.Example.com:80":    "http://ora.example.com",
+		"https://ora.example.com:8443": "https://ora.example.com:8443",
+		"http://[::1]:80/":             "http://[::1]",
+		"http://[::1]:8090":            "http://[::1]:8090",
 	} {
 		got, err := parsePublicURL(value)
 		if err != nil || (got == nil) != (want == "") || (got != nil && got.String() != want) {

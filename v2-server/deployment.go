@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"slices"
@@ -67,6 +68,15 @@ func parsePublicURL(value string) (*url.URL, error) {
 		u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
 		return nil, fmt.Errorf("V2_PUBLIC_URL %q must be an absolute http or https URL without query or fragment", value)
 	}
+	// Browsers send Origin with a lowercase host and without the scheme's default port, and
+	// Origin is compared as a string, so the stored address takes that form too.
+	host := strings.ToLower(u.Hostname())
+	if port := u.Port(); port != "" && !(u.Scheme == "https" && port == "443") && !(u.Scheme == "http" && port == "80") {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	u.Host = host
 	u.Path = strings.TrimSuffix(u.Path, "/")
 	return u, nil
 }
