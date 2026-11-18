@@ -6,10 +6,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -23,9 +23,6 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/taskrun"
 	"github.com/wanglongan587/cloud/v2-server/internal/taskworkflow"
 )
-
-// SessionCookie is the Gateway's development cookie name, so the frontend sees the same session.
-const SessionCookie = "ora_session"
 
 // Store is what the handlers need from the database.
 type Store interface {
@@ -77,6 +74,12 @@ type Options struct {
 	RefreshOfficial func(context.Context) error
 	// SessionTTL is how long a login lasts.
 	SessionTTL time.Duration
+	// LoginProviders are the login methods V2_LOGIN offers, in display order; empty means email.
+	LoginProviders []string
+	// PublicURL is the address browsers use for this server (V2_PUBLIC_URL). When set, it is the
+	// only origin cookie-authenticated writes accept, and an https address makes the session cookie
+	// Secure with the __Host- prefix. Nil compares Origin with the request's Host instead.
+	PublicURL *url.URL
 	// Projects prepares fixed repository mirrors; nil leaves project operations unavailable.
 	Projects *projectrepos.Service
 	// Execution is the shared backend for page-owned conversations and runs.
@@ -285,91 +288,6 @@ func (h *handler) health(w http.ResponseWriter, r *http.Request) {
 		"status":       "ok",
 		"dependencies": map[string]string{"objectStore": "unconfigured", "gitServer": "unconfigured"},
 	})
-}
-
-// providers matches the Gateway: v2-server offers only the email login.
-func (h *handler) providers(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"providers": []string{LoginProviderEmail}, "default": LoginProviderEmail})
-}
-
-// LoginProviderEmail is the only login provider: the address alone identifies the account.
-const LoginProviderEmail = "email"
-
-// login is the Gateway's POST /auth/login with the provider round trip skipped: the email login
-// signs in at once and sends the browser straight back to returnTo. Only an address the startup
-// preset lists or an owner already invited may sign in; an unknown one is rejected, never created.
-func (h *handler) login(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Provider string `json:"provider"`
-		Email    string `json:"email"`
-		ReturnTo string `json:"returnTo"`
-	}
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
-	dec.DisallowUnknownFields()
-	if e := dec.Decode(&in); e != nil {
-		fault(w, http.StatusBadRequest, "invalid_json")
-		return
-	}
-	if in.Provider != "" && in.Provider != LoginProviderEmail {
-		fault(w, http.StatusBadRequest, "unknown_provider")
-		return
-	}
-	email, e := store.NormalizeEmail(in.Email)
-	if e != nil {
-		fault(w, http.StatusBadRequest, "invalid_email")
-		return
-	}
-	u, e := h.store.UserByEmail(r.Context(), email)
-	if errors.Is(e, store.ErrNotFound) {
-		fault(w, http.StatusForbidden, "email_not_invited")
-		return
-	}
-	if e != nil {
-		internal(w, "find login account", e)
-		return
-	}
-	token, e := h.store.StartSession(r.Context(), u.ID, h.opts.SessionTTL)
-	if e != nil {
-		internal(w, "login", e)
-		return
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name: SessionCookie, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode,
-		MaxAge: int(h.opts.SessionTTL / time.Second),
-	})
-	writeJSON(w, http.StatusOK, map[string]string{"authorizationUrl": localPath(in.ReturnTo)})
-}
-
-func (h *handler) logout(w http.ResponseWriter, r *http.Request) {
-	if c, e := r.Cookie(SessionCookie); e == nil {
-		if e := h.store.Logout(r.Context(), c.Value); e != nil {
-			internal(w, "logout", e)
-			return
-		}
-	}
-	http.SetCookie(w, &http.Cookie{Name: SessionCookie, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1})
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// authed resolves the session cookie to a user, answering 401 like Cloud when there is none.
-func (h *handler) authed(next func(http.ResponseWriter, *http.Request, store.User)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		c, e := r.Cookie(SessionCookie)
-		if e != nil {
-			fault(w, http.StatusUnauthorized, "unauthenticated")
-			return
-		}
-		u, e := h.store.SessionUser(r.Context(), c.Value)
-		if errors.Is(e, store.ErrNotFound) {
-			fault(w, http.StatusUnauthorized, "unauthenticated")
-			return
-		}
-		if e != nil {
-			internal(w, "session", e)
-			return
-		}
-		next(w, r, u)
-	}
 }
 
 func (h *handler) me(w http.ResponseWriter, _ *http.Request, u store.User) {

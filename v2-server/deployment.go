@@ -4,7 +4,13 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"net/url"
 	"os"
+	"slices"
+	"strings"
+
+	"github.com/wanglongan587/cloud/v2-server/internal/server"
 )
 
 // envDefault preserves an explicit empty value, which disables optional integrations.
@@ -15,17 +21,52 @@ func envDefault(key, fallback string) string {
 	return fallback
 }
 
-// validateLogin fails before database or filesystem effects when the build does not provide IDaaS.
-func validateLogin(login string, fixtures bool) error {
-	switch login {
-	case "email":
-		return nil
-	case "idaas":
-		if fixtures {
-			return errors.New("IDaaS deployment forbids cleanup and fixture flags")
-		}
-		return errors.New("this build does not provide IDaaS login; deployment startup is unavailable and must not fall back to email")
-	default:
-		return errors.New("V2_LOGIN must be explicitly set to email (development) or idaas (deployment)")
+// loginMethods is the parsed V2_LOGIN: the login methods this process offers, in the order the
+// login page shows them.
+type loginMethods []string
+
+// has reports whether the method is offered.
+func (m loginMethods) has(method string) bool { return slices.Contains(m, method) }
+
+// parseLogin reads V2_LOGIN, a comma-separated list of login methods. Unset or empty means email, so
+// a development checkout starts without configuration; a deployment names its methods explicitly.
+// An unknown, repeated or empty entry fails before any database or filesystem effect.
+func parseLogin(value string, fixtures bool) (loginMethods, error) {
+	if strings.TrimSpace(value) == "" {
+		value = server.LoginProviderEmail
 	}
+	var methods loginMethods
+	for _, entry := range strings.Split(value, ",") {
+		method := strings.TrimSpace(entry)
+		switch {
+		case method == "":
+			return nil, fmt.Errorf("V2_LOGIN %q has an empty entry", value)
+		case !slices.Contains(server.LoginProviders, method):
+			return nil, fmt.Errorf("V2_LOGIN lists unknown login method %q; this build provides %s", method, strings.Join(server.LoginProviders, ", "))
+		case methods.has(method):
+			return nil, fmt.Errorf("V2_LOGIN lists %q twice", method)
+		}
+		methods = append(methods, method)
+	}
+	// Fixtures seed and drive the development accounts, which exist only where email login does.
+	if fixtures && !methods.has(server.LoginProviderEmail) {
+		return nil, errors.New("fixture flags require the email login in V2_LOGIN")
+	}
+	return methods, nil
+}
+
+// parsePublicURL reads V2_PUBLIC_URL, the address browsers use for this server. Empty leaves it
+// unset. It must be an absolute http or https URL without query or fragment; a path prefix is kept
+// for addresses derived from it later.
+func parsePublicURL(value string) (*url.URL, error) {
+	if value == "" {
+		return nil, nil
+	}
+	u, e := url.Parse(value)
+	if e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil ||
+		u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		return nil, fmt.Errorf("V2_PUBLIC_URL %q must be an absolute http or https URL without query or fragment", value)
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/")
+	return u, nil
 }

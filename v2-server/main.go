@@ -63,9 +63,17 @@ func run(addr, dbURL string, cleanup, fixture, testFixtures bool) error {
 }
 
 func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, listen func(*http.Server) error) (resultErr error) {
-	login := os.Getenv("V2_LOGIN")
-	if e := validateLogin(login, fixture || testFixtures || cleanup); e != nil {
+	login, e := parseLogin(os.Getenv("V2_LOGIN"), fixture || testFixtures)
+	if e != nil {
 		return e
+	}
+	publicURL, e := parsePublicURL(os.Getenv("V2_PUBLIC_URL"))
+	if e != nil {
+		return e
+	}
+	slog.Info("login methods", "V2_LOGIN", strings.Join(login, ","))
+	if login.has(server.LoginProviderEmail) && publicURL != nil && publicURL.Scheme == "https" {
+		slog.Warn("email login is on at an https address: knowing a member's address is enough to sign in as them; a deployment sets V2_LOGIN without email")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -112,7 +120,7 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	}
 	db.DisableOfficialMarket(envDefault("V2_PLUGIN_MARKETPLACE_URL", "https://github.com/ora-space/marketplace") == "")
 	var preset store.Preset
-	if login == "email" {
+	if login.has(server.LoginProviderEmail) {
 		preset, e = store.LoadPreset(envOr("V2_USERS_FILE", "users.json"))
 		if e != nil {
 			db.Close()
@@ -240,7 +248,7 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	}
 	var scope execution.Scope
 	var demo store.Project
-	if login == "email" {
+	if login.has(server.LoginProviderEmail) {
 		scope, demo, e = prepareDemo(ctx, db, projects, bootstrap)
 		if e != nil {
 			return e
@@ -317,12 +325,14 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	}); e != nil {
 		return e
 	}
-	if login == "email" && driver != nil {
+	if login.has(server.LoginProviderEmail) && driver != nil {
 		go driver.WarmDemo(ctx, demo.ID, agentruntime.Project{MirrorPath: demo.MirrorPath, Commit: demo.Commit, SnapshotRef: demo.SnapshotRef})
 	}
 	options := withWorkflowDomain(server.Options{
 		RefreshOfficial:    refreshOfficial,
 		SessionTTL:         7 * 24 * time.Hour,
+		LoginProviders:     login,
+		PublicURL:          publicURL,
 		Projects:           projects,
 		Execution:          runtime,
 		Catalog:            runtime,

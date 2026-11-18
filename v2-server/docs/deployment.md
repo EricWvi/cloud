@@ -39,7 +39,7 @@ PostgreSQL、IDaaS、模型和内部 Git/S3 服务。Git 和系统库须预先�
 在进程管理器的受保护配置中设置以下变量，不将密钥写入包或命令日志：
 
 - `V2_LOGIN=idaas`：唯一部署登录方式；当前构建不提供此能力，启动会明确拒绝。
-  启用 IDaaS 后，前端从 `/auth/providers` 识别部署模式，只隐藏只写浏览器的「模型连接」页；角色目录由服务端提供，设置页「角色」与工作流角色字段照常显示。
+  `/auth/providers` 不含 `email` 时，前端按部署模式处理，只隐藏只写浏览器的「模型连接」页；角色目录由服务端提供，设置页「角色」与工作流角色字段照常显示。
 - `V2_PUBLIC_URL`：部署公开 HTTPS 地址，只写根地址、不带路径（见「HTTPS 入口」）；
   `V2_IDAAS_BASE_URL`、`V2_IDAAS_CLIENT_ID`、`V2_IDAAS_CLIENT_SECRET` 是 A6 规定的部署配置；
   当前构建尚不支持 IDaaS 登录。

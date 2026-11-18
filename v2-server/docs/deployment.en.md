@@ -46,7 +46,7 @@ version before migrations cannot be upgraded and startup refuses it; drop and re
 Keep configuration and secrets in protected process-manager configuration, outside the archive:
 
 - `V2_LOGIN=idaas`: the only deployment login. This build does not provide it and refuses startup.
-  Once IDaaS is enabled, the frontend reads `/auth/providers` to detect deployment mode and hides
+  When `/auth/providers` does not list `email`, the frontend treats the install as a deployment and hides
   only the browser-only model-connections page; the workspace roles page and workflow role fields remain available.
 - `V2_PUBLIC_URL`: public HTTPS address, the root only, without a path (see "HTTPS ingress");
   configure `V2_IDAAS_BASE_URL`, `V2_IDAAS_CLIENT_ID` and `V2_IDAAS_CLIENT_SECRET` as specified by A6.

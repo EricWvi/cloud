@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -159,7 +160,7 @@ func TestLoginSessionLogout(t *testing.T) {
 	if status, body := c.do("GET", "/api/v1/me", nil); status != 401 || body["code"] != "unauthenticated" {
 		t.Fatalf("me before login = %d %v", status, body)
 	}
-	if status, body := c.do("GET", "/auth/providers", nil); status != 200 || body["default"] != "email" {
+	if status, body := c.do("GET", "/auth/providers", nil); status != 200 || fmt.Sprint(body["providers"]) != "[email]" {
 		t.Fatalf("providers = %d %v", status, body)
 	}
 	status, body := c.do("POST", "/auth/login", map[string]string{"provider": "email", "email": demoEmail, "returnTo": "/workflows?x=1"})

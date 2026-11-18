@@ -16,14 +16,15 @@ Cloud v2 的**临时**单体后端：一个进程、一个 PostgreSQL 库，实�
 
 ```sh
 docker compose -p cloud up -d --wait   # 在仓库根目录
-V2_LOGIN=email go run .                # 开发模式，监听 127.0.0.1:8090
+go run .                               # 开发模式（邮箱登录），监听 127.0.0.1:8090
 ```
 
 收到 SIGTERM 或中断信号时，进程会取消 HTTP 请求上下文，让保持打开的对话 SSE 关闭观察并等待其读取协程退出，再结束 HTTP、公共执行服务和数据库。关闭浏览器或单条 SSE 只停止对应观察者，不取消执行 worker；进程退出时的执行停止与完整终态保存仍由公共执行服务负责。
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `V2_LOGIN` | 必填 | `email` 仅开发；`idaas` 为部署模式，当前构建不提供 IDaaS 登录并拒绝启动 |
+| `V2_LOGIN` | `email` | 开放的登录方式，逗号分隔，登录页按这个顺序显示；未设置或为空即 `email`。本构建只提供 `email`（只凭邮箱登录，仅用于开发和演示）；写了未知、重复或空的项在任何数据操作前拒绝启动。`-fixture-check`、`-test-fixtures` 要求开了 `email` |
+| `V2_PUBLIC_URL` | 未设置 | 浏览器访问本服务的地址（`http`/`https`，可带路径前缀，不带查询串）。设置后，带会话 Cookie 的写请求只接受这个 origin；未设置时 `Origin` 须与请求的 Host 相同。是 `https` 时会话 Cookie 改名为 `__Host-ora_session` 并加 `Secure`。开了 `email` 又是 `https` 时启动日志会警告 |
 | `V2_FRONTEND_DIR` | 未设置 | 前端构建目录；未设置保留 API-only |
 | `V2_ADDR` | `127.0.0.1:8090` | 监听地址 |
 | `V2_DATABASE_URL` | `postgres://ora:ora-local@127.0.0.1:55432/ora_v2?sslmode=disable` | PostgreSQL |
@@ -109,9 +110,11 @@ seed 在 [`demo/`](demo/README.md)：`env.go` 是上表和重置、准备本地 
 | 路由 | 来源 | 说明 |
 |---|---|---|
 | `GET /healthz` | 契约 | 数据库可达即 `ok` |
-| `GET /auth/providers` | Gateway | 只有 `email` |
-| `POST /auth/login` | Gateway | 邮箱登录：`email` 必须是预置文件或 owner 邀请过的账号，否则 `403 email_not_invited`，不会自动建用户；成功后设置 `ora_session` Cookie，`authorizationUrl` 即 `returnTo`（只接受站内路径）。只凭邮箱就能登录等于谁都能冒充谁，**仅用于演示环境** |
-| `POST /auth/logout` | Gateway | 吊销会话，`204` |
+| `GET /auth/providers` | Gateway | `{"providers": [...]}`：`V2_LOGIN` 开放的登录方式，按配置顺序 |
+| `POST /auth/login` | Gateway | 邮箱登录：`email` 必须是预置文件或 owner 邀请过的账号，否则 `403 email_not_invited`，不会自动建用户；成功后设置会话 Cookie（`ora_session`，`V2_PUBLIC_URL` 为 https 时 `__Host-ora_session`），`authorizationUrl` 即 `returnTo`（只接受站内路径）。`V2_LOGIN` 没开的方式返回 `400 unknown_provider`；`Origin` 是别的站点时 `403 origin_mismatch`。只凭邮箱就能登录等于谁都能冒充谁，**仅用于演示环境** |
+| `POST /auth/logout` | Gateway | 吊销会话，`204`；`Origin` 是别的站点时 `403 origin_mismatch` |
+
+所有带会话 Cookie 的非 GET/HEAD/OPTIONS 请求先核对 `Origin`（规则见 `V2_PUBLIC_URL`），不符返回 `403 origin_mismatch`；没有 `Origin` 的请求不是页面发出的，照常处理。账号被停用或删除后，它的会话在下一个请求就失效（`401 unauthenticated`）。
 | `GET /api/v1/me` | 契约 | 当前用户；无会话 `401 unauthenticated`。契约禁止额外字段，当前用户的角色从 `GET /api/v1/me/tenants` 的 `role` 读取 |
 | `GET /api/v1/me/tenants` | 契约 | 当前用户所在租户，一页返回全部，`nextCursor` 为空 |
 | `GET /api/v1/tenants/{tid}/members` | 契约 | 当前用户所在工作区成员，一页返回全部，按显示名排序；非成员与非法租户 id 都是 `404 not_found` |
@@ -933,8 +936,7 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 ## 内网部署
 
 首次部署构建和长期安装/升级步骤见 [部署说明](docs/deployment.md)（[English](docs/deployment.en.md)）。
-直接开发启动须显式设置 `V2_LOGIN=email`；demo/开发 task 已设置。部署选择 `V2_LOGIN=idaas`，
-当前构建不提供 IDaaS 登录，在任何数据操作前明确拒绝启动，不得回落 email。`V2_FRONTEND_DIR` 指向前端构建目录，空值保留 API-only。
+开发启动不设 `V2_LOGIN` 即为邮箱登录。本构建还不提供 IDaaS 登录，部署所需的 `V2_LOGIN` 取值在任何数据操作前拒绝启动，不会回落 email。`V2_FRONTEND_DIR` 指向前端构建目录，空值保留 API-only。
 `V2_PLUGIN_MARKETPLACE_URL` 未设置保留开发默认，显式空字符串关闭官方同步和目录，保留自定义源；`V2_MARKET_CREDENTIAL_KEY` 同步保护自定义市场 S3/Git 凭据、租户 MCP 设置与私有项目仓库令牌。
 
 部署边界依据：[Cloud 单进程（A1）](https://github.com/ora-space/specs/blob/main/decisions/cloud/lifecycle/0-single-process-cloud-on-enterprise-intranet.md) 和[登录与会话（A6）](https://github.com/ora-space/specs/blob/main/decisions/cloud/login/0-idaas-or-email-login-with-shared-web-and-desktop-sessions.md)。
