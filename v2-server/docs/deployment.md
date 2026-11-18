@@ -77,7 +77,7 @@ PostgreSQL、IDaaS、模型和内部 Git/S3 服务。Git 和系统库须预先�
 
 ## 第一个管理员
 
-部署库里没有任何账号。在 Cloud 所在机器上，用与服务相同的环境变量运行（必须带上 `V2_LOGIN=huawei-idaas`：这条命令没有开发默认值，第一次运行会决定库的类型）：
+部署库里没有任何账号。在 Cloud 所在机器上，用与服务相同的环境变量运行（必须带上 `V2_LOGIN=huawei-idaas`：第一次运行会决定库的类型）：
 
 ```sh
 ./bin/cloud admin-invite -team <团队名>

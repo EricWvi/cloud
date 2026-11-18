@@ -95,7 +95,7 @@ would receive demo data and passwordless login). To change, create a new databas
 
 ## First administrator
 
-A deployment database has no accounts. On the Cloud host, with the same environment as the service, run (`V2_LOGIN=huawei-idaas` is required: this command has no development default, and its first run fixes the database profile):
+A deployment database has no accounts. On the Cloud host, with the same environment as the service, run (`V2_LOGIN=huawei-idaas` is required: its first run fixes the database profile):
 
 ```sh
 ./bin/cloud admin-invite -team <team name>
