@@ -201,7 +201,11 @@ func (d *Driver) session(ctx context.Context, scope execution.Scope, session exe
 				owners = map[string]*execution.Skills{}
 				p.owners[session.WorkspaceID] = owners
 			}
+			// A replaced session (see replaceable) may still be stopping under the same ID: the
+			// entries are this one's from now on, and only their holder removes them.
 			owners[session.ID] = session.Skills
+			p.holders[session.ID] = a
+			delete(p.projected, session.ID)
 			p.mu.Unlock()
 			// Run has checked the executor names a known plugin; its install overlaps the clone.
 			plugin, _ := findPlugin(session.Executor.AgentID, session.Executor.PluginVersion)
@@ -393,9 +397,11 @@ func (a *agentSession) markStopped() {
 				a.project.services.End(a.execution)
 			}
 			a.project.mu.Lock()
-			if owners := a.project.owners[a.frozen.WorkspaceID]; owners != nil {
+			// A session replaced under the same ID leaves its successor's entries alone.
+			if owners := a.project.owners[a.frozen.WorkspaceID]; owners != nil && a.project.holders[a.frozen.ID] == a {
 				delete(owners, a.frozen.ID)
 				delete(a.project.projected, a.frozen.ID)
+				delete(a.project.holders, a.frozen.ID)
 				if len(owners) == 0 {
 					delete(a.project.owners, a.frozen.WorkspaceID)
 				}

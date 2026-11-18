@@ -97,7 +97,11 @@ type projectRuntime struct {
 	// projected marks the admitted workflow sessions whose Skills are on the checkout: only they
 	// count as live siblings for the next projection (see liveSiblingSkills). A sibling admitted
 	// but still preparing, or refused, has put nothing there.
-	projected    map[string]bool
+	projected map[string]bool
+	// holders is the session that registered a session ID's owners and projected entries: a
+	// session replaced under the same ID (see agentSession.replaceable) may stop after its
+	// successor registered, and must not remove the successor's entries.
+	holders      map[string]*agentSession
 	acknowledged map[string]uint64
 }
 
@@ -173,7 +177,7 @@ func (d *Driver) project(ctx context.Context, id string, config Project) (*proje
 			lifetime, cancel := context.WithCancel(context.Background())
 			p = &projectRuntime{driver: d, id: id, root: filepath.Join(d.opts.Root, digest(id)[:16]), configuration: config,
 				ready: make(chan struct{}), ctx: lifetime, cancel: cancel, loopDone: make(chan struct{}), dead: make(chan struct{}),
-				controls: map[string]*controlWait{}, agents: map[string]*agentSession{}, checkouts: map[string]*checkout{}, installs: map[string]*installation{}, owners: map[string]map[string]*execution.Skills{}, projected: map[string]bool{}, acknowledged: map[string]uint64{}}
+				controls: map[string]*controlWait{}, agents: map[string]*agentSession{}, checkouts: map[string]*checkout{}, installs: map[string]*installation{}, owners: map[string]map[string]*execution.Skills{}, holders: map[string]*agentSession{}, projected: map[string]bool{}, acknowledged: map[string]uint64{}}
 			d.projects[id] = p
 			go p.initialize()
 		}

@@ -9,6 +9,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/node"
@@ -162,4 +163,61 @@ func commandUsesCheckout(t *testing.T, command node.Message, clone string) bool 
 		t.Fatalf("start without a checkout: %v", err)
 	}
 	return payload.Spec.Checkout == clone
+}
+
+// A session that broke on a live Node and is brought back (Recovery) runs as a new execution under
+// the same session ID. When the broken execution stops afterwards, the checkout's bookkeeping of
+// that ID belongs to its successor and stays: the new session is still an owner, so its Skills
+// still count among the live siblings'.
+func TestDriverIPCReplacedSessionLeavesItsSuccessorsOwnership(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	session := h.session("held", "run-workspace")
+	done := runWorkflowTurn(h, ctx, session, "first")
+	f := receiveIPC(t, h.created)
+	old := nextIPCCommand(t, f, "start_agent_session")
+	f.finishTurn(t, old, "first", "ready")
+	if got := receiveIPC(t, done); got.err != nil {
+		t.Fatalf("first turn: %+v", got)
+	}
+	// Node rejects a command of the execution: it is broken, though not yet stopped.
+	f.seq[old.ExecutionID]++
+	sequence := f.seq[old.ExecutionID]
+	f.in <- node.Message{Type: "session_command_rejected", Version: 1, OperationID: old.OperationID, ExecutionID: old.ExecutionID, Sequence: &sequence, Payload: []byte(`{}`)}
+	h.driver.mu.Lock()
+	broken := h.driver.sessions[session.ID]
+	h.driver.mu.Unlock()
+	for !broken.replaceable() {
+		select {
+		case <-ctx.Done():
+			t.Fatal("the rejected execution never broke")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	recovered := session
+	recovered.Recovery = &execution.Recovery{Handoff: "<ora_previous_conversation>…</ora_previous_conversation>"}
+	done = runWorkflowTurn(h, ctx, recovered, "second")
+	next := nextIPCCommand(t, f, "start_agent_session")
+	if next.ExecutionID == old.ExecutionID {
+		t.Fatal("the broken execution was not replaced")
+	}
+	f.finishTurn(t, next, "second", "again")
+	if got := receiveIPC(t, done); got.err != nil {
+		t.Fatalf("recovered turn: %+v", got)
+	}
+	f.terminal(old)
+	receiveIPC(t, broken.stopped)
+
+	p := broken.project
+	p.mu.Lock()
+	_, owner := p.owners[session.WorkspaceID][session.ID]
+	holder := p.holders[session.ID]
+	p.mu.Unlock()
+	h.driver.mu.Lock()
+	current := h.driver.sessions[session.ID]
+	h.driver.mu.Unlock()
+	if !owner || holder != current || holder == broken {
+		t.Fatalf("after the replaced execution stopped: owner=%v holder is successor=%v", owner, holder == current)
+	}
 }
