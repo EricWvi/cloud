@@ -32,7 +32,7 @@ V2_LOGIN=email go run .                # 开发模式，监听 127.0.0.1:8090
 | `V2_PLUGIN_MARKETPLACE_URL` | `https://github.com/ora-space/marketplace` | 未设置使用开发默认，显式空字符串关闭官方源；插件市场 Git HTTPS 地址；禁止携带凭据、query 或 fragment。离线测试直接构造 Syncer 使用本地仓库 |
 | `V2_PLUGIN_MARKETPLACE_BRANCH` | `main` | 市场同步分支；启动时浅克隆并拉取，之后按间隔快进工作副本 |
 | `V2_PLUGIN_MARKETPLACE_INTERVAL` | `5m` | 市场刷新间隔；必须为正 duration。失败时保留上一版 PostgreSQL 快照 |
-| `V2_MARKET_SOCKS_PROXY` | 未设置 | 自定义来源启用代理时使用的部署级 SOCKS5 地址；Git 与 Skill 包下载都使用，客户端只把已校验的公网 IP 交给代理。设置了合法的 `socks5://` 地址时，安装官方市场的 Skill 和工作流包、以及向项目 Node 下发官方 Skill 时的下载也走它；未设置或不合法时官方包直连 |
+| `V2_MARKET_SOCKS_PROXY` | 未设置 | 自定义来源启用代理时使用的部署级 SOCKS5 地址；Git 与 Skill 包下载都使用，客户端只把已校验的公网 IP 交给代理。设置了合法的 `socks5://` 地址时，安装官方市场的 Skill、工作流和 MCP 包、以及向项目 Node 下发官方 Skill 时的下载也走它；未设置或不合法时官方包直连 |
 | `V2_MARKET_CREDENTIAL_KEY` | 未设置 | 来源凭据、租户 MCP 设置与私有项目仓库令牌的 AES-256-GCM 密钥（Base64 编码的 32 字节）；保存 MCP 设置、启用 S3 来源、自定义来源 Git 认证或私有项目仓库令牌时必须持久提供 |
 | `V2_NODE_ASSETS_DIR` | 未设置 | `task v2:node:prepare` 生成的固定 Node、reaper、Deno、OpenCode 和 Claude Code 资源；未设置时只启用纯模型路径 |
 | `V2_MODEL_BASE_URL` / `V2_MODEL_API_KEY` / `V2_MODEL_NAME` | 未设置 | 可选的一组 HTTPS OpenAI 兼容 provider；必须同时设置，OpenCode 与纯模型共用，清单只公开模型名称与版本 |
@@ -145,6 +145,9 @@ seed 在 [`demo/`](demo/README.md)：`env.go` 是上表和重置、准备本地 
 `.opencode/skills/<name>/SKILL.md` 和 `.claude/skills/<name>/SKILL.md`。项目已有同名目录时保留
 项目内容；市场 Skill 与用户技能同名时**市场优先**：该用户技能不写入、会话照常启动，只在日志
 里带名字记录跳过，设置页会把这只用户技能标记出来提示改名；已经启动的会话保留启动时的副本。
+市场优先只适用于对话和任务这类 Agent 会话。工作流节点不物化空间里的市场 Skill 和用户技能目录，
+只投影节点显式选择的 Skill：单独选了同名的用户技能时，生效的就是这只用户技能；同一节点同时选了它和同名的市场
+Skill，或者同运行里在跑的兄弟用着同名的另一份，启动方以 `workflow_skill_name_conflict` 失败。
 设置页拿到的同名名单来自服务端：安装 Skill 包时会下载并校验 `.orax`，把其中
 `assets/<name>/SKILL.md` 的技能名记录到目录条目（`packMembers`），与运行时的物化名完全一致，
 不依赖 README 解析；单技能包即使标题与技能名不同也按技能名匹配。名单按包的 SHA-256 记录，通过空间选择冻结的安装包解析，所以别的空间安装同一插件的其他版本、或者一次安装失败，都不会改变已安装选择的名单；在记录名单之前安装的 Skill 没有名单，设置页对它退回按 README 标题匹配，重新安装后改用技能名。
