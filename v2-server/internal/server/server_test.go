@@ -32,6 +32,14 @@ import (
 // openStore gives the test its own PostgreSQL schema on TEST_DATABASE_URL, dropped afterwards.
 func openStore(t *testing.T) *store.Store {
 	t.Helper()
+	s, _ := openStoreSQL(t)
+	return s
+}
+
+// openStoreSQL is openStore plus a connection on the same schema, for tests that change rows the
+// store offers no write for.
+func openStoreSQL(t *testing.T) (*store.Store, *pgx.Conn) {
+	t.Helper()
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("TEST_DATABASE_URL is not set")
@@ -59,7 +67,10 @@ func openStore(t *testing.T) *store.Store {
 		t.Fatal(e)
 	}
 	t.Cleanup(s.Close)
-	return s
+	if _, e := admin.Exec(ctx, "SET search_path TO "+schema+",public"); e != nil {
+		t.Fatal(e)
+	}
+	return s, admin
 }
 
 // contract is Cloud's api/openapi.json; every response from a route it describes must match it.
