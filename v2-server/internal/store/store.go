@@ -4,17 +4,14 @@ package store
 import (
 	"context"
 	"crypto/sha256"
-	_ "embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-//go:embed schema.sql
-var schema string
 
 // ErrNotFound reports a missing or expired row.
 var ErrNotFound = errors.New("not found")
@@ -23,6 +20,7 @@ var ErrNotFound = errors.New("not found")
 type Store struct {
 	pool             *pgxpool.Pool
 	officialDisabled bool
+	migrated         []AppliedMigration
 }
 
 // DisableOfficialMarket configures catalog visibility before the store is shared with workers.
@@ -32,7 +30,7 @@ func (s *Store) DisableOfficialMarket(disabled bool) { s.officialDisabled = disa
 // OfficialMarketEnabled reports deployment configuration independently of saved catalog entries.
 func (s *Store) OfficialMarketEnabled() bool { return !s.officialDisabled }
 
-// Open connects to url, creating its database when missing, and applies the schema.
+// Open connects to url, creating its database when missing, and applies pending migrations.
 func Open(ctx context.Context, url string) (*Store, error) {
 	config, e := pgxpool.ParseConfig(url)
 	if e != nil {
@@ -44,18 +42,34 @@ func Open(ctx context.Context, url string) (*Store, error) {
 	return OpenConfig(ctx, config)
 }
 
-// OpenConfig connects with a parsed config and applies the schema; tests use it to pick a schema.
+// OpenConfig connects with a parsed config and applies pending migrations to the connection's
+// current schema; tests use it to pick a schema. It refuses a database whose migration history
+// does not match this binary, and one created before versioned migrations existed.
 func OpenConfig(ctx context.Context, config *pgxpool.Config) (*Store, error) {
+	migrations, e := embeddedMigrations()
+	if e != nil {
+		return nil, e
+	}
+	return openWith(ctx, config, migrations)
+}
+
+// openWith is OpenConfig with an explicit migration set, so tests can exercise invalid histories.
+func openWith(ctx context.Context, config *pgxpool.Config, migrations fs.FS) (*Store, error) {
 	pool, e := pgxpool.NewWithConfig(ctx, config)
 	if e != nil {
 		return nil, fmt.Errorf("connect: %w", e)
 	}
-	if _, e := pool.Exec(ctx, schema); e != nil {
+	applied, e := migrate(ctx, pool, migrations)
+	if e != nil {
 		pool.Close()
-		return nil, fmt.Errorf("apply schema: %w", e)
+		return nil, fmt.Errorf("migrate database: %w", e)
 	}
-	return &Store{pool: pool}, nil
+	return &Store{pool: pool, migrated: applied}, nil
 }
+
+// AppliedMigrations lists the migrations this Open applied, oldest first; it is empty when the
+// database was already current.
+func (s *Store) AppliedMigrations() []AppliedMigration { return s.migrated }
 
 // ensureDatabase creates the target database through the server's default database, so a fresh
 // local PostgreSQL works without manual setup.

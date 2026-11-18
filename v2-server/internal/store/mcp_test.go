@@ -9,12 +9,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"sync"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
@@ -44,7 +42,7 @@ func mcpPackage(t *testing.T, version string) (store.PluginPackageSource, []byte
 	return store.PluginPackageSource{Entry: store.PluginCatalogEntry{ID: "official/example.search", Kind: "mcp", Version: version, Title: "Search"}, Digest: hex.EncodeToString(sum[:])}, data
 }
 
-func TestTenantMCPRevisionSurvivesRemovalAndMigration(t *testing.T) {
+func TestTenantMCPRevisionSurvivesRemoval(t *testing.T) {
 	t.Setenv("V2_MARKET_CREDENTIAL_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)))
 	f := newSquadFixture(t)
 	owner := f.login(t, "mcp-owner", "owner")
@@ -59,29 +57,16 @@ func TestTenantMCPRevisionSurvivesRemovalAndMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Simulate a row written before the durable allocator existed, including a
-	// revision beyond int32. Applying the startup schema must retain its fence.
+	// A revision beyond int32, as the durable allocator would have handed out, must keep fencing
+	// stale editors across removal and reinstallation.
 	const legacyRevision int64 = 1 << 32
 	if _, err := f.db.Exec(f.ctx, `UPDATE v2_tenant_mcps SET revision=$1 WHERE tenant_id=$2 AND plugin_id=$3`, legacyRevision, f.tenant, old.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.db.Exec(f.ctx, `DROP TABLE v2_tenant_mcp_revisions`); err != nil {
+	if _, err := f.db.Exec(f.ctx, `UPDATE v2_tenant_mcp_revisions SET revision=$1 WHERE tenant_id=$2 AND plugin_id=$3`, legacyRevision, f.tenant, old.ID); err != nil {
 		t.Fatal(err)
 	}
-	config, err := pgxpool.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var schema string
-	if err := f.db.QueryRow(f.ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
-		t.Fatal(err)
-	}
-	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
-	migrated, err := store.OpenConfig(f.ctx, config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer migrated.Close()
+	migrated := f.store
 	if err := migrated.RemoveTenantMCP(f.ctx, a, space, old.ID, legacyRevision); err != nil {
 		t.Fatal(err)
 	}

@@ -4,8 +4,8 @@
 
 Basis: [Single-process Cloud (A1)](https://github.com/ora-space/specs/blob/main/decisions/cloud/lifecycle/0-single-process-cloud-on-enterprise-intranet.md) D2/D5/D6 and [Login and sessions (A6)](https://github.com/ora-space/specs/blob/main/decisions/cloud/login/0-idaas-or-email-login-with-shared-web-and-desktop-sessions.md).
 This build does not provide IDaaS login. `V2_LOGIN=idaas` refuses startup before touching data;
-it is not a deployable release and must not fall back to email. The current version does not
-yet provide versioned migrations. Production deployment
+it is not a deployable release and must not fall back to email. Database migrations run
+automatically at startup. Production deployment
 requires a version supporting the required capabilities and a verified HTTPS entrypoint.
 
 ## Build online
@@ -39,8 +39,9 @@ the target host beforehand; operating system dependencies are not bundled.
 
 Use a dedicated non-root account. Agents run as the Cloud account without isolation; the first
 release is suitable only for mutually trusted members. Provision a dedicated PostgreSQL database
-and identity without demo credentials. This version applies schema directly at startup and has
-no versioned migrations; it cannot be used for production version upgrades that must preserve data.
+and identity without demo credentials. Pending versioned migrations run automatically at startup, so
+the database identity needs permission to create tables in that database. A database created by a
+version before migrations cannot be upgraded and startup refuses it; drop and recreate it.
 
 Keep configuration and secrets in protected process-manager configuration, outside the archive:
 
@@ -157,8 +158,8 @@ Before deployment, confirm and record with the enterprise network or gateway own
 
 ## First intranet acceptance
 
-Run the complete procedure only with a target version that provides IDaaS login and versioned migrations,
-following that version's administrator bootstrap and migration instructions. This build is for deployment
+Run the complete procedure only with a target version that provides IDaaS login,
+following that version's administrator bootstrap instructions. This build is for deployment
 preflight only and cannot go live. Email login or model fixtures cannot substitute for onsite acceptance.
 
 1. Prepare dedicated PostgreSQL and a persistent volume, a registered IDaaS application, an administrator
@@ -226,8 +227,11 @@ or use consistent snapshots, and test restoration. Agent changes exist only in l
 and are not pushed to Git; a database-only backup is insufficient.
 
 Stop this instance and confirm its Nodes exited. Back up, unpack a new version into a separate
-program directory and verify checksums. This version has no versioned migrations; when migration
-is required, use a target version that supports it and follow that version's migration instructions. Replace
+program directory and verify checksums. The new version runs migrations automatically at startup, so
+back up before upgrading; a failed migration stops startup at the last completed one, and the
+error lists the migrations this start already applied. A database created by a version before
+migrations must be dropped and recreated; startup refuses it, as it
+refuses a database with migrations newer than the binary or an applied migration that changed. Replace
 programs and resources while retaining database, data directory, keys and host configuration. Do
 not reset demos, seed again or overwrite new resources with the old package. Unfinished executions
 become interrupted on restart and do not resume automatically. After migration, rollback requires

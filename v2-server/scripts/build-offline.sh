@@ -22,4 +22,4 @@ chmod 755 "$stage/cloud/start.sh"
 cp "$root/v2-server/docs/deployment.md" "$root/v2-server/docs/deployment.en.md" "$stage/cloud/docs/"
 (cd "$stage/cloud" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 tar -czf "$V2_OFFLINE_OUTPUT" -C "$stage" cloud
-echo 'Offline package built. This build does not provide IDaaS login or versioned migrations; HTTPS is required for deployment; see docs/deployment.md.'
+echo 'Offline package built. This build does not provide IDaaS login; HTTPS is required for deployment; see docs/deployment.md.'
