@@ -125,8 +125,9 @@ describe('RunNodeSessionActions', () => {
     calls.completeNode.mockRejectedValueOnce(new ContractError('workflow_node_incomplete', { blockers: [{ kind: 'file_missing', path: 'plan.md' }] }))
     view({})
     fireEvent.click(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.complete'] }))
-    await waitFor(() => expect(toastError).toHaveBeenCalledWith('缺少交付文件：plan.md'))
     expect(await screen.findByText('缺少交付文件：plan.md')).toBeTruthy()
+    // Shown inline only: a toast would cover the action it offers.
+    expect(toastError).not.toHaveBeenCalled()
     expect(screen.getByText(zh['workflowRun.v2.interactive.filesHint'])).toBeTruthy()
     expect(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.completeAnyway'] })).toBeTruthy()
   })

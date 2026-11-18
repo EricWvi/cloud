@@ -100,10 +100,14 @@ export function RunNodeSessionActions({ target }: { target: InteractiveNodeTarge
       await action()
       return true
     } catch (error) {
-      if (error instanceof ContractError && error.code === 'workflow_node_incomplete') {
-        setRefused({ turns: session?.turns ?? 0, blockers: refusedBlockers(error) })
+      const blockers = error instanceof ContractError && error.code === 'workflow_node_incomplete' ? refusedBlockers(error) : []
+      if (blockers.length > 0) {
+        // Listed under the conversation instead: a toast would only repeat them, over the
+        // "仍然完成" they offer.
+        setRefused({ turns: session?.turns ?? 0, blockers })
+      } else {
+        toast.error(refusal(error, t))
       }
-      toast.error(refusal(error, t))
       return false
     } finally {
       setBusy(false)
