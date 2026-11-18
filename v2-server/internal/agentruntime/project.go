@@ -29,9 +29,12 @@ type controlWait struct {
 
 type checkout struct {
 	workflow bool
-	id, path string
-	ready    chan struct{}
-	err      error
+	// reattached marks a checkout an earlier Node incarnation or process prepared (see
+	// Driver.Reattach): only such a clone execution can be unknown to the Node starting on it.
+	reattached bool
+	id, path   string
+	ready      chan struct{}
+	err        error
 }
 
 // installation is one plugin's install on this Node incarnation, shared by its sessions.
@@ -133,6 +136,29 @@ func (d *Driver) dropProject(p *projectRuntime) {
 		delete(d.projects, p.id)
 	}
 	d.mu.Unlock()
+}
+
+// forgetCheckout drops a reattached checkout Node refused as unknown (its ledger lost the clone
+// execution), here and in the record, so the workspace's next session clones again instead of
+// failing on it too. Entries for another clone execution are left alone.
+func (p *projectRuntime) forgetCheckout(workspace string, entry *checkout) {
+	p.mu.Lock()
+	if p.checkouts[workspace] == entry {
+		delete(p.checkouts, workspace)
+	}
+	p.mu.Unlock()
+	p.driver.mu.Lock()
+	if p.driver.recorded[workspace].CloneExecution == entry.id {
+		delete(p.driver.recorded, workspace)
+	}
+	p.driver.mu.Unlock()
+	if forget := p.driver.opts.ForgetCheckout; forget != nil {
+		ctx, cancel := context.WithTimeout(p.ctx, 10*time.Second)
+		defer cancel()
+		// A record left behind only reattaches the same unknown checkout after a later restart,
+		// whose first session is refused and forgets it again.
+		_ = forget(ctx, workspace, entry.id)
+	}
 }
 
 func (d *Driver) project(ctx context.Context, id string, config Project) (*projectRuntime, error) {
@@ -482,7 +508,7 @@ func (p *projectRuntime) prepareCheckout(ctx context.Context, scope execution.Sc
 	entry := p.checkouts[workspace]
 	if entry == nil && recorded.CloneExecution != "" {
 		// An earlier process prepared this run's checkout (see Driver.Reattach): start on it.
-		entry = &checkout{workflow: true, id: recorded.CloneExecution, path: recorded.Path, ready: make(chan struct{})}
+		entry = &checkout{workflow: true, reattached: true, id: recorded.CloneExecution, path: recorded.Path, ready: make(chan struct{})}
 		close(entry.ready)
 		p.checkouts[workspace] = entry
 	}

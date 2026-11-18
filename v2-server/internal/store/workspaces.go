@@ -32,6 +32,17 @@ func (s *Store) RecordWorkspace(ctx context.Context, id string, at WorkspaceLoca
 	return nil
 }
 
+// ForgetCloneExecution clears the clone execution recorded for a workspace's checkout once Node no
+// longer knows it, so a restart does not reattach it again; the workspace's next checkout records a
+// new one. A checkout recorded since (another clone execution) is left alone.
+func (s *Store) ForgetCloneExecution(ctx context.Context, id, cloneExecution string) error {
+	_, e := s.pool.Exec(ctx, `UPDATE v2_workspaces SET clone_execution = '' WHERE id = $1 AND clone_execution = $2`, id, cloneExecution)
+	if e != nil {
+		return fmt.Errorf("forget clone execution: %w", e)
+	}
+	return nil
+}
+
 // ChatWorkspace returns the checkout of the person's conversation. ErrNotFound covers both a
 // conversation that is not theirs and one whose checkout is not ready yet; callers that must tell
 // the two apart look the conversation up first.

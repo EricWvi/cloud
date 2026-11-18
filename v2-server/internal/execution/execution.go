@@ -160,9 +160,10 @@ const (
 	FailureCheckoutTooDeep      = "checkout_too_deep"
 )
 
-// FailureWorkspaceMissing is the failure code of a recovered session's turn whose checkout no
-// longer exists (or was never recorded with its clone execution): its lost Agent cannot be
-// continued, so the session ends.
+// FailureWorkspaceMissing is the failure code of a turn whose checkout, prepared by an earlier Node
+// incarnation or process, no longer exists: its directory is gone, it was never recorded with its
+// clone execution, or Node no longer knows that clone execution. Nothing can continue the session
+// there, so it ends.
 const FailureWorkspaceMissing = "workspace_missing"
 
 // FailureNodeLost is the failure code of a turn whose session lost its Node: the Node process

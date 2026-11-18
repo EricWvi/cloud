@@ -17,6 +17,10 @@ import (
 
 var errEventStore = errors.New("agent_event_write_failed")
 
+// nodeCheckoutUnavailable is the detail Node ends a session with when it does not know the
+// session's checkout_execution_id (apps/ora-node/src/session/driver.rs).
+const nodeCheckoutUnavailable = "checkout_unavailable"
+
 // previewInterval bounds how often Node previews become retained history_preview events. Node
 // sends up to ten a second; every retained event is stored and replayed when a page loads.
 var previewInterval = 250 * time.Millisecond
@@ -490,6 +494,12 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 				// Node refused only this session at admission; the checkout's other sessions and
 				// the control connection are untouched. Its stable code says why.
 				result = failed(ended.Result.Detail)
+			}
+			if ended.Result.Reason == "agent_failed" && ended.Result.Detail == nodeCheckoutUnavailable && a.checkout != nil && a.checkout.reattached {
+				// Node no longer knows the clone execution an earlier incarnation prepared (its
+				// ledger was lost): the checkout is gone for Node even if its directory is not.
+				result = failed(execution.FailureWorkspaceMissing)
+				a.project.forgetCheckout(a.frozen.WorkspaceID, a.checkout)
 			}
 			if ended.Result.Reason == "agent_failed" && execution.IsMCPFailureCode(ended.Result.Detail) {
 				result = failed(ended.Result.Detail)

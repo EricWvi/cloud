@@ -48,6 +48,9 @@ type Options struct {
 	// RecordWorkspace remembers where a workspace's checkout is, once it is ready and before the
 	// Agent starts, so pages can read its files later. Nil records nothing.
 	RecordWorkspace func(ctx context.Context, workspaceID string, checkout Checkout) error
+	// ForgetCheckout drops the record of a reattached checkout whose clone execution Node no
+	// longer knows, so a later process does not reattach it again. Nil forgets nothing.
+	ForgetCheckout func(ctx context.Context, workspaceID, cloneExecution string) error
 }
 
 // Checkout is a workspace's directory on this host and the commit it was cloned at.

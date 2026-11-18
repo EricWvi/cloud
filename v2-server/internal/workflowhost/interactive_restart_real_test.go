@@ -137,6 +137,7 @@ func newRealInteractive(t *testing.T, ctx context.Context) *realInteractive {
 			RecordWorkspace: func(c context.Context, id string, at agentruntime.Checkout) error {
 				return db.RecordWorkspace(c, id, store.WorkspaceLocation{Path: at.Path, BaseCommit: at.BaseCommit, CloneExecution: at.CloneExecution})
 			},
+			ForgetCheckout: db.ForgetCloneExecution,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -385,6 +386,78 @@ func TestRealInteractiveNodeOutlivesItsNode(t *testing.T) {
 	}
 	r.recovered(rid, session, checkout, firstHistory, 2)
 	r.completes(rid, before, checkout)
+}
+
+// TestRealUnknownCheckoutAfterARestartFailsTheNodeAndIsForgotten loses the Node's ledger while
+// an interactive node waits, keeping the checkout's directory, and restarts the server: Node no
+// longer knows the recorded clone execution, so the follow-up fails the node as a checkout that is
+// gone, the record is cleared, and resuming the run clones again, its successor included.
+func TestRealUnknownCheckoutAfterARestartFailsTheNodeAndIsForgotten(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+	defer cancel()
+	r := newRealInteractive(t, ctx)
+	rid, session, before, checkout, _ := r.parked()
+	r.current.close(t)
+	ledgers, err := filepath.Glob(filepath.Join(r.root, "n", "*", "w", "n"))
+	if err != nil || len(ledgers) != 1 {
+		t.Fatalf("Node homes = %v %v, want the project's one", ledgers, err)
+	}
+	if err := os.RemoveAll(ledgers[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(checkout.Path); err != nil {
+		t.Fatalf("the checkout's directory must stay: %v", err)
+	}
+	r.current = r.start()
+	r.f.host = r.current.host
+	r.awaitRun(rid, awaitingInput("a"))
+	if _, err := r.current.host.SendNodeTurn(ctx, r.f.scope, rid, "a", "Inspect README and save the fixture result again."); err != nil {
+		t.Fatalf("follow-up after the restart: %v", err)
+	}
+	run, nodes := r.awaitRun(rid, terminal)
+	if run.Status != store.WorkflowStatusFailed || errorKind(t, node(nodes, "a")) != "interactive_session" {
+		t.Fatalf("run %s node %+v, want A failed as interactive_session", run.Status, node(nodes, "a"))
+	}
+	if ended, err := r.current.service.ReadSession(ctx, r.scope, session); err != nil || ended.EndedAt == nil {
+		t.Fatalf("A's session = %+v %v, want it ended", ended, err)
+	}
+	if at, err := r.db.ExecutionWorkspace(ctx, before.WorkspaceID); err != nil || at.CloneExecution != "" {
+		t.Fatalf("workspace record = %+v %v, want its unknown clone execution cleared", at, err)
+	}
+
+	if _, err := r.current.host.ResumeRun(ctx, r.f.scope, rid); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	_, nodes = r.awaitRun(rid, func(_ store.WorkflowRun, rows []store.WorkflowNodeRun) bool {
+		row := lastAttempt(rows, "a")
+		return row.Status == store.WorkflowStatusPending && row.SessionID != nil && *row.SessionID != session && interactivePayload(t, row)["turns"] == float64(1)
+	})
+	resumed, err := r.current.service.ReadSession(ctx, r.scope, *lastAttempt(nodes, "a").SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := r.db.ExecutionWorkspace(ctx, resumed.WorkspaceID)
+	if err != nil || fresh.CloneExecution == "" || fresh.CloneExecution == checkout.CloneExecution || fresh.Path == checkout.Path {
+		t.Fatalf("resumed checkout = %+v %v, want a fresh clone (was %+v)", fresh, err, checkout)
+	}
+	if _, err := r.current.host.CompleteNode(ctx, r.f.scope, rid, "a", false, "human"); err != nil {
+		t.Fatalf("complete the resumed node: %v", err)
+	}
+	run, nodes = r.awaitRun(rid, terminal)
+	if run.Status != store.WorkflowStatusSucceeded {
+		t.Fatalf("run after the resume = %+v nodes = %+v", run, nodes)
+	}
+}
+
+// lastAttempt is the node's latest attempt row.
+func lastAttempt(nodes []store.WorkflowNodeRun, id string) store.WorkflowNodeRun {
+	var last store.WorkflowNodeRun
+	for _, n := range nodes {
+		if n.NodeID == id {
+			last = n
+		}
+	}
+	return last
 }
 
 // nodeProcesses lists the project Node processes under root: Node runs from its copy "nb" there

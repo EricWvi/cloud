@@ -203,15 +203,15 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 		return
 	}
 	if err == nil && result.FailureCode == execution.FailureWorkspaceMissing {
-		// The node's session outlived a restart, but the directory its Agent worked in is gone:
-		// nothing can continue the conversation or produce what it was asked for.
+		// The node's session outlived a restart, but the checkout its Agent worked in is gone (or
+		// unknown to Node): nothing can continue the conversation or produce what it was asked for.
 		if st.interactive[n.d.Node.ID] == n {
 			delete(st.interactive, n.d.Node.ID)
 			st.slotsMayHaveChanged()
 		}
 		st.mu.Unlock()
 		h.end(st.scope, n.session) // the execution service has ended it; idempotent
-		h.fail(n.d, workflow.Failure{Kind: workflow.FailureInteractiveSession, Message: "the run's directory no longer exists, so the node's conversation cannot continue"})
+		h.fail(n.d, workflow.Failure{Kind: workflow.FailureInteractiveSession, Message: "the run's checkout no longer exists, so the node's conversation cannot continue"})
 		return
 	}
 	if err == nil {
