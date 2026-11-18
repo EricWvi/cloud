@@ -127,13 +127,17 @@ describe('toGraphWorkflowRun', () => {
 
   it('reads a parked interactive node\'s session summary, its answer so far and the starter', () => {
     const payload = JSON.stringify({
-      task: '起草：支付', interactive: { turns: 2, session_ended: true, completable: false, blocker: { reason: 'no_completed_turn', detail: '没有回答' }, answer: '初稿' },
+      task: '起草：支付', interactive: { turns: 2, session_ended: true, completable: false, answer: '初稿', answer_source: 'last_completed_turn',
+        completion: { blockers: [{ kind: 'turn_stopped' }, { kind: 'structured_invalid', params: { message: 'missing approved' } }, { nokind: true }], parkKind: 'abnormal', turnOrigin: 'human', stopCause: 'user_stopped' } },
     })
     const run = toGraphWorkflowRun({ ...detail({ status: 'awaitingInput' }, [nodeRun({ id: 'nr-a', nodeId: 'a', nodeType: 'agent', status: 'pending', sessionId: 's', finishedAt: null, payload })]), startedBy: 'user-1' }, definition)
     const a = run.nodeStates.a!
     expect(run.startedBy).toBe('user-1')
     expect(a.status).toBe('awaiting_input')
-    expect(a.interactiveSession).toEqual({ turns: 2, sessionEnded: true, completable: false, blocker: { reason: 'no_completed_turn', detail: '没有回答' }, answer: '初稿' })
+    expect(a.interactiveSession).toEqual({
+      turns: 2, sessionEnded: true, completable: false, answer: '初稿', answerSource: 'last_completed_turn',
+      blockers: [{ kind: 'turn_stopped' }, { kind: 'structured_invalid', message: 'missing approved' }], parkKind: 'abnormal', turnOrigin: 'human', stopCause: 'user_stopped',
+    })
     expect(a.conversation?.map((item) => item.kind === 'message' && [item.role, item.markdown])).toEqual([['user', '起草：支付'], ['assistant', '初稿']])
     expect(run.nodeStates.start!.interactiveSession).toBeUndefined()
   })
@@ -142,8 +146,8 @@ describe('toGraphWorkflowRun', () => {
     const summary = { turns: 1, session_ended: false, completable: true, answer: '初稿' }
     const parked = (interactive: Record<string, unknown>) =>
       toGraphWorkflowRun(detail({ status: 'awaitingInput' }, [nodeRun({ id: 'nr-a', nodeId: 'a', nodeType: 'agent', status: 'pending', sessionId: 's', finishedAt: null, payload: JSON.stringify({ interactive }) })]), definition).nodeStates.a!.interactiveSession
-    expect(parked({ ...summary, sent: 2, last_turn_error: 'not_delivered' })).toEqual({ turns: 1, sent: 2, sessionEnded: false, completable: true, answer: '初稿', lastTurnError: 'not_delivered' })
-    expect(parked(summary)).toEqual({ turns: 1, sessionEnded: false, completable: true, answer: '初稿' })
+    expect(parked({ ...summary, sent: 2, last_turn_error: 'not_delivered' })).toEqual({ turns: 1, sent: 2, sessionEnded: false, completable: true, blockers: [], answer: '初稿', lastTurnError: 'not_delivered' })
+    expect(parked(summary)).toEqual({ turns: 1, sessionEnded: false, completable: true, blockers: [], answer: '初稿' })
   })
 
   it('reads a failure detail written with the engine\'s snake_case keys', () => {

@@ -81,7 +81,7 @@ describe('RunNodeSessionChat on an interactive node', () => {
                 conversation={[]}
                 status="awaiting_input"
                 session={{ runId: 'run-1', nodeRunId }}
-                interactive={{ runId: 'run-1', nodeId: 'a', status: 'awaiting_input', session: { turns: 1, sessionEnded: false, completable: true } }}
+                interactive={{ runId: 'run-1', nodeId: 'a', status: 'awaiting_input', session: { turns: 1, sessionEnded: false, completable: true, blockers: [] } }}
               />
             </RunStarterContext.Provider>
           </TooltipProvider>

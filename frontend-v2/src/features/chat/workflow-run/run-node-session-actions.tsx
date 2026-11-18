@@ -3,11 +3,23 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ContractError } from '@/lib/workflows/contracts'
 import { localizeContractError } from '@/lib/workflows/host/contract-error'
-import { Button, Textarea, toast } from '@/lib/workflows/host/ui'
-import type { GraphWorkflowNodeStatus, WorkflowNodeInteractiveSession } from '@/lib/workflows/runtime'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  Button,
+  Textarea,
+  toast,
+} from '@/lib/workflows/host/ui'
+import type { GraphWorkflowNodeStatus, WorkflowNodeInteractiveBlocker, WorkflowNodeInteractiveSession } from '@/lib/workflows/runtime'
 import { useIsRunStarter } from './run-starter'
 import { useRunTenant } from './run-tenant'
-import { completeNode, runKeys, sendNodeTurn, stopNodeTurn } from './server-runs'
+import { completeNode, runKeys, sendNodeTurn, stopNodeTurn, type NodeCompletion } from './server-runs'
 import { workflowRunTranslations } from './translations'
 
 /** The longest message v2-server accepts for one turn. */
@@ -23,15 +35,12 @@ export interface InteractiveNodeTarget {
 
 const runErrorKeys: Readonly<Record<string, string>> = workflowRunTranslations['zh-CN']
 
-/**
- * Refusals in the run's own words: the interactive codes live in the run view's strings, which
- * the shared contract-error helper does not read.
- */
+/** Refusals in the run's own words: the interactive codes live in the run view's strings. */
 function refusal(error: unknown, t: (key: string, options?: Record<string, unknown>) => string): string {
   if (error instanceof ContractError) {
-    if (error.code === 'workflow_node_incomplete' && typeof error.params.reason === 'string') {
-      const key = `workflowRun.v2.interactive.blocker.${error.params.reason}`
-      if (key in runErrorKeys) return t(key)
+    if (error.code === 'workflow_node_incomplete') {
+      const blockers = refusedBlockers(error)
+      if (blockers.length > 0) return blockers.map((b) => blockerText(b, t)).join(' ')
     }
     const key = `errors.${error.code}`
     if (key in runErrorKeys) return t(key)
@@ -39,14 +48,31 @@ function refusal(error: unknown, t: (key: string, options?: Record<string, unkno
   return localizeContractError(error, t as never)
 }
 
+/** The blockers a 409 workflow_node_incomplete lists in params.blockers. */
+function refusedBlockers(error: ContractError): WorkflowNodeInteractiveBlocker[] {
+  const list = Array.isArray(error.params.blockers) ? error.params.blockers : []
+  return list.flatMap((item) => {
+    if (typeof item !== 'object' || item === null) return []
+    const b = item as Record<string, unknown>
+    if (typeof b.kind !== 'string' || b.kind === '') return []
+    return [{ kind: b.kind, ...(typeof b.path === 'string' && b.path !== '' ? { path: b.path } : {}) }]
+  })
+}
+
+/** One blocker in words; an unknown kind falls back to its code. */
+function blockerText(blocker: WorkflowNodeInteractiveBlocker, t: (key: string, options?: Record<string, unknown>) => string): string {
+  const key = `workflowRun.v2.interactive.blocker.${blocker.kind}`
+  return key in runErrorKeys ? t(key, { path: blocker.path ?? '' }) : blocker.kind
+}
+
 /**
- * The starter's controls for an interactive Agent node, below its session: a composer and "完成"
- * while the node waits for input, "停止本轮" while it runs a turn. v2 implements desktop's legacy
- * end_turn completion only, so the starter confirms completion and the note says so; stopping a
- * turn ends the node's session (the pinned Node has no other way to stop), so the note warns that
- * the conversation cannot continue after it. A message v2 accepted and then could not deliver is
- * reported above the composer; the view that sent it, while it still has the text, offers to put
- * it back. Everyone else reads the transcript.
+ * The starter's controls for an interactive Agent node, below its session: a composer while the
+ * node waits for input and its session is open, "停止本轮" while it runs a turn, and the completion
+ * actions of desktop's step card for the end_turn policy (first-turn ADR D5): "完成" for a turn
+ * that ended normally, "确认并完成" for the workflow's own opening turn, "仍然完成" behind a
+ * confirmation for any other blocker, including the deliverables a refused completion named. A
+ * message v2 accepted and then could not deliver is reported above the composer; the view that
+ * sent it, while it still has the text, offers to put it back. Everyone else reads the transcript.
  */
 export function RunNodeSessionActions({ target }: { target: InteractiveNodeTarget }) {
   const { t } = useTranslation()
@@ -58,6 +84,10 @@ export function RunNodeSessionActions({ target }: { target: InteractiveNodeTarge
   // so that exactly that message can be put back in the composer if v2 reports it undelivered.
   const [lastSent, setLastSent] = useState<{ text: string; number: number }>()
   const [busy, setBusy] = useState(false)
+  // Deliverables are checked only when completing, so a refusal names them; it stays shown until
+  // the node settles another turn.
+  const [refused, setRefused] = useState<{ turns: number; blockers: WorkflowNodeInteractiveBlocker[] }>()
+  const [confirmingForce, setConfirmingForce] = useState(false)
   const { runId, nodeId, status, session } = target
 
   if (!starter) {
@@ -70,6 +100,9 @@ export function RunNodeSessionActions({ target }: { target: InteractiveNodeTarge
       await action()
       return true
     } catch (error) {
+      if (error instanceof ContractError && error.code === 'workflow_node_incomplete') {
+        setRefused({ turns: session?.turns ?? 0, blockers: refusedBlockers(error) })
+      }
       toast.error(refusal(error, t))
       return false
     } finally {
@@ -77,6 +110,7 @@ export function RunNodeSessionActions({ target }: { target: InteractiveNodeTarge
       void queryClient.invalidateQueries({ queryKey: runKeys.run(tenantId, runId) })
     }
   }
+  const complete = (completion: NodeCompletion) => act(() => completeNode(tenantId, runId, nodeId, completion))
 
   const awaiting = status === 'awaiting_input'
   const ended = session?.sessionEnded === true
@@ -100,11 +134,18 @@ export function RunNodeSessionActions({ target }: { target: InteractiveNodeTarge
   const undelivered = awaiting && !behind && session?.lastTurnError === 'not_delivered'
   // Only the message the notice is about goes back into the composer.
   const restorable = undelivered && !ended && lastSent !== undefined && lastSent.number === session?.sent && draft === ''
-  const blocker = session?.blocker
-  // Once the session has ended nobody can ask the Agent for another answer, so a blocker that
-  // would otherwise say "keep talking" says what is left instead.
-  const blockerKey = blocker !== undefined && ended && blocker.reason === 'structured_output' ? 'structured_output_ended' : blocker?.reason
-  const blockerText = blocker === undefined ? undefined : t(`workflowRun.v2.interactive.blocker.${blockerKey}`, { defaultValue: blocker.detail })
+  const blockers = session?.blockers ?? []
+  const unconfirmed = blockers.some((b) => b.kind === 'turn_unconfirmed')
+  // What a refused completion named that the snapshot does not carry (the deliverables).
+  const extra = refused !== undefined && refused.turns === (session?.turns ?? 0)
+    ? refused.blockers.filter((b) => !blockers.some((own) => own.kind === b.kind && own.path === b.path))
+    : []
+  const shown = [...blockers.filter((b) => b.kind !== 'turn_unconfirmed'), ...extra.filter((b) => b.kind !== 'turn_unconfirmed')]
+  // Force covers every blocker but the opening turn's confirmation, which it never stands in for.
+  const forcible = awaiting && !unconfirmed && shown.length > 0
+  const ready = awaiting && blockers.length === 0 && session?.completable === true
+  const filesOnly = shown.length > 0 && shown.every((b) => b.kind === 'file_missing' || b.kind === 'file_unchanged')
+  const source = session?.answerSource ?? 'none'
 
   return (
     <div className="flex w-full flex-col gap-2 border-t pt-2" data-interactive-actions="">
@@ -142,30 +183,68 @@ export function RunNodeSessionActions({ target }: { target: InteractiveNodeTarge
           </Button>
         </div>
       )}
-      {awaiting && ended && (
-        <p className="text-xs text-muted-foreground">
-          {t(session?.completable === true ? 'workflowRun.v2.interactive.sessionEnded' : 'workflowRun.v2.interactive.sessionEndedBlocked')}
-        </p>
+      {awaiting && ended && <p className="text-xs text-muted-foreground">{t('workflowRun.v2.interactive.sessionEnded')}</p>}
+      {awaiting && unconfirmed && shown.length === 0 && (
+        <p className="text-xs text-muted-foreground" data-interactive-confirm-hint="">{t('workflowRun.v2.interactive.confirmHint')}</p>
       )}
-      {awaiting && blockerText !== undefined && <p className="text-xs text-warning">{blockerText}</p>}
+      {awaiting && shown.length > 0 && (
+        <div className="flex flex-col gap-0.5 text-xs text-warning" data-interactive-blockers="">
+          {shown.map((b) => (
+            <p key={`${b.kind}:${b.path ?? ''}`}>{blockerText(b, t)}</p>
+          ))}
+          <p className="text-muted-foreground">
+            {t(filesOnly ? 'workflowRun.v2.interactive.filesHint' : ended ? 'workflowRun.v2.interactive.blockedEndedHint' : 'workflowRun.v2.interactive.blockedHint')}
+          </p>
+        </div>
+      )}
       <div className="flex items-center justify-end gap-2">
         {status === 'running' && (
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void act(() => stopNodeTurn(tenantId, runId, nodeId))}>
             {t('workflowRun.v2.interactive.stop')}
           </Button>
         )}
-        {awaiting && (
-          <Button
-            type="button"
-            size="sm"
-            variant={session?.completable === true ? 'default' : 'outline'}
-            disabled={busy || session?.completable !== true}
-            onClick={() => void act(() => completeNode(tenantId, runId, nodeId))}
-          >
+        {forcible && (
+          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setConfirmingForce(true)}>
+            {t('workflowRun.v2.interactive.completeAnyway')}
+          </Button>
+        )}
+        {awaiting && unconfirmed && (
+          <Button type="button" size="sm" disabled={busy} onClick={() => void complete({ confirmInitialTurn: true })}>
+            {t('workflowRun.v2.interactive.confirmComplete')}
+          </Button>
+        )}
+        {awaiting && !unconfirmed && !forcible && (
+          <Button type="button" size="sm" variant={ready ? 'default' : 'outline'} disabled={busy || !ready} onClick={() => void complete({})}>
             {t('workflowRun.v2.interactive.complete')}
           </Button>
         )}
       </div>
+      <AlertDialog open={confirmingForce} onOpenChange={(open) => { if (!open) setConfirmingForce(false) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('workflowRun.v2.interactive.forceTitle')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('workflowRun.v2.interactive.forceBody', {
+                blockers: shown.map((b) => blockerText(b, t)).join(' '),
+                source: t(`workflowRun.v2.interactive.forceSource.${source}`, { defaultValue: source }),
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>{t('workflowRun.v2.interactive.forceCancel')}</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={busy}
+              onClick={() => {
+                setConfirmingForce(false)
+                void complete({ force: true })
+              }}
+            >
+              {t('workflowRun.v2.interactive.forceConfirm')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
