@@ -478,6 +478,56 @@ export const workflowEditorTranslations = {
       "持续等待时，不会因长时间未收到 Agent 进展而取消当前执行，可手动停止。实际执行错误仍按失败自动重试设置处理。",
     "settings.workflow.field.interactiveDescription":
       "开启后节点首轮结束会停在等待人工输入，可在节点内持续对话。",
+    "settings.workflow.field.completionSignal": "完成判定",
+    "settings.workflow.completionSignal.end_turn": "回合正常结束即可",
+    "settings.workflow.completionSignal.agent": "智能体显式上报完成",
+    "settings.workflow.completionSignal.hint":
+      "选择“智能体显式上报完成”时，回合正常结束后仍需要智能体调用完成工具或由你确认，才会推进工作流。v2 暂不支持完成工具，按“回合正常结束即可”执行。",
+    "settings.workflow.field.autoAcceptAgentCompletion": "自动接受智能体完成",
+    "settings.workflow.autoAcceptAgentCompletion.hint":
+      "回合正常结算且智能体已上报完成时，无需人工确认直接推进；异常停靠和首轮不会自动接受。",
+    "settings.workflow.field.completionFiles": "完成时检查的文件",
+    "settings.workflow.completion.hint":
+      "点击完成时检查运行 workspace：声明的文件缺失或未变更会阻止完成，补齐或修改后可再次点击完成。路径须是 workspace 内的相对路径，可使用 *、**、?。",
+    "settings.workflow.completion.empty": "尚未声明文件；完成时不做文件检查。",
+    "settings.workflow.completion.path": "文件 {{index}} 路径",
+    "settings.workflow.completion.pathPlaceholder": "例如 reports/*.md",
+    "settings.workflow.completion.mustChange": "文件 {{index}} 必须变更",
+    "settings.workflow.completion.mustChangeLabel": "必须变更",
+    "settings.workflow.completion.remove": "移除文件 {{index}}",
+    "settings.workflow.completion.add": "添加文件",
+    "settings.workflow.completion.count": "{{count}} / {{max}} 个文件",
+    "settings.workflow.completion.pathIssue.empty": "请填写文件路径。",
+    "settings.workflow.completion.pathIssue.tooLong":
+      "路径不能超过 {{max}} 个 UTF-8 字节。",
+    "settings.workflow.completion.pathIssue.controlCharacter":
+      "路径不能包含控制字符。",
+    "settings.workflow.completion.pathIssue.backslash":
+      "请使用 / 作为分隔符，路径不能包含反斜杠。",
+    "settings.workflow.completion.pathIssue.unsupportedGlobCharacter":
+      "路径只能使用 *、** 和 ? 作为通配符。",
+    "settings.workflow.completion.pathIssue.negation": "不支持取反（!）写法。",
+    "settings.workflow.completion.pathIssue.absolute":
+      "路径必须是 workspace 内的相对路径。",
+    "settings.workflow.completion.pathIssue.emptySegment":
+      "路径不能包含空段或 . 段。",
+    "settings.workflow.completion.pathIssue.parentTraversal":
+      "路径不能包含 .. 段。",
+    "settings.workflow.completion.pathIssue.drivePrefix":
+      "路径不能包含 Windows 盘符。",
+    "settings.workflow.completion.pathIssue.reservedName":
+      "路径不能使用 Windows 保留设备名。",
+    "settings.workflow.completion.pathIssue.invalidGlobstar":
+      "** 通配符必须单独占一段路径。",
+    "settings.workflow.completion.pathIssue.segmentTooLong":
+      "单段路径不能超过 255 个字节或 UTF-16 编码单元。",
+    "settings.workflow.completion.pathIssue.tooDeep":
+      "路径不能超过 32 层目录。",
+
+    "settings.workflow.unapplied.completionSignal":
+      "已保存，v2 暂不支持智能体完成工具，运行时按“回合正常结束即可”判定。",
+    "settings.workflow.unapplied.autoAcceptAgentCompletion":
+      "已保存，v2 暂不自动接受完成，仍由发起人确认。",
     "settings.workflow.unapplied.badge": "暂不生效",
     "settings.workflow.unapplied.mcp":
       "已保存，运行时暂不连接已启用的 MCP，节点照常执行。",
@@ -485,7 +535,7 @@ export const workflowEditorTranslations = {
       "已保存，运行时节点暂不等待人工输入，首轮结束即完成。",
     "settings.workflow.interactivePartial.badge": "简化版",
     "settings.workflow.interactivePartial.note":
-      "当前按 end_turn 完成：首轮结束后等待发起这次运行的人继续对话，由发起人点「完成」推进到下一步；Agent 完成信号和确认门禁暂未支持。",
+      "首轮结束后等待发起这次运行的人继续对话：首轮要点「确认并完成」，之后的回合正常结束即可「完成」；没有正常结束时可以继续对话或「仍然完成」。Agent 完成信号暂未支持。",
     "settings.workflow.unapplied.retry":
       "已保存，运行失败时暂不自动重试。",
     "settings.workflow.unapplied.other":
@@ -1092,6 +1142,60 @@ export const workflowEditorTranslations = {
       "Keep waiting prevents cancellation when the agent has not reported progress for a long time. You can stop it manually. Execution errors still follow the retry-on-failure setting.",
     "settings.workflow.field.interactiveDescription":
       "When enabled the node pauses for human input after its first turn, so you can keep conversing inside the node.",
+    "settings.workflow.field.completionSignal": "Completion rule",
+    "settings.workflow.completionSignal.end_turn": "A normally ended turn",
+    "settings.workflow.completionSignal.agent":
+      "The agent reports completion explicitly",
+    "settings.workflow.completionSignal.hint":
+      "With explicit reporting, a normally ended turn still needs the agent's completion tool call or your confirmation before the workflow advances. v2 has no completion tool yet and runs it as a normally ended turn.",
+    "settings.workflow.field.autoAcceptAgentCompletion":
+      "Accept the agent's completion automatically",
+    "settings.workflow.autoAcceptAgentCompletion.hint":
+      "Advance without human confirmation once the turn settled normally and the agent reported completion. Abnormal parks and the first turn are never auto-accepted.",
+    "settings.workflow.field.completionFiles": "Files checked on completion",
+    "settings.workflow.completion.hint":
+      "Files are checked when you click complete: a missing file or an unchanged `mustChange` file blocks completion, and you can fix the workspace and retry. Paths are workspace-relative and may use *, **, and ?.",
+    "settings.workflow.completion.empty":
+      "No files declared; completion does no file check.",
+    "settings.workflow.completion.path": "File {{index}} path",
+    "settings.workflow.completion.pathPlaceholder": "e.g. reports/*.md",
+    "settings.workflow.completion.mustChange": "File {{index}} must change",
+    "settings.workflow.completion.mustChangeLabel": "Must change",
+    "settings.workflow.completion.remove": "Remove file {{index}}",
+    "settings.workflow.completion.add": "Add file",
+    "settings.workflow.completion.count": "{{count}} / {{max}} files",
+    "settings.workflow.completion.pathIssue.empty": "Enter a file path.",
+    "settings.workflow.completion.pathIssue.tooLong":
+      "The path must not exceed {{max}} UTF-8 bytes.",
+    "settings.workflow.completion.pathIssue.controlCharacter":
+      "The path must not contain control characters.",
+    "settings.workflow.completion.pathIssue.backslash":
+      "Use / as the separator and do not include a backslash.",
+    "settings.workflow.completion.pathIssue.unsupportedGlobCharacter":
+      "Only *, **, and ? are supported as wildcards.",
+    "settings.workflow.completion.pathIssue.negation":
+      "Glob negation (!) is not supported.",
+    "settings.workflow.completion.pathIssue.absolute":
+      "The path must be relative to the workspace.",
+    "settings.workflow.completion.pathIssue.emptySegment":
+      "The path must not contain an empty or . segment.",
+    "settings.workflow.completion.pathIssue.parentTraversal":
+      "The path must not contain a .. segment.",
+    "settings.workflow.completion.pathIssue.drivePrefix":
+      "The path must not contain a Windows drive prefix.",
+    "settings.workflow.completion.pathIssue.reservedName":
+      "The path must not use a Windows reserved device name.",
+    "settings.workflow.completion.pathIssue.invalidGlobstar":
+      "The ** wildcard must be a complete path segment.",
+    "settings.workflow.completion.pathIssue.segmentTooLong":
+      "Each path segment must not exceed 255 bytes or UTF-16 units.",
+    "settings.workflow.completion.pathIssue.tooDeep":
+      "The path must not nest deeper than 32 directories.",
+
+    "settings.workflow.unapplied.completionSignal":
+      "Saved; v2 has no agent completion tool yet and judges a normally ended turn instead.",
+    "settings.workflow.unapplied.autoAcceptAgentCompletion":
+      "Saved; v2 does not accept completions automatically yet, the starter still confirms.",
     "settings.workflow.unapplied.badge": "Not applied yet",
     "settings.workflow.unapplied.mcp":
       "Saved, but runs do not connect the enabled MCPs yet; the node still runs.",
@@ -1099,7 +1203,7 @@ export const workflowEditorTranslations = {
       "Saved, but runs do not wait for human input yet; the node finishes after its first turn.",
     "settings.workflow.interactivePartial.badge": "Simplified",
     "settings.workflow.interactivePartial.note":
-      "Completes on end_turn for now: after its first turn the node waits for the person who started the run to keep talking, and that person completes it to move on. The agent completion signal and confirmation gates are not supported yet.",
+      "After its first turn the node waits for the person who started the run to keep talking: the first turn needs \"Confirm and complete\", later turns that ended normally just \"Complete\"; a turn that did not end normally can be continued or completed anyway. The agent completion signal is not supported yet.",
     "settings.workflow.unapplied.retry":
       "Saved, but failed runs are not retried automatically yet.",
     "settings.workflow.unapplied.other":
