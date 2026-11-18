@@ -9,7 +9,7 @@ import { codeOf } from '@/lib/api-client'
 import { subtleScrollbar } from '@/lib/scrollbar'
 import { cn } from '@/lib/utils'
 import type { WorkspaceChange, WorkspaceChanges, WorkspaceEntry } from '@/lib/workspace-api/generated'
-import { type DeliveryNotice, deliveryNotice, patchFailureText, savePatch } from './delivery'
+import { type DeliveryNotice, deliveryNotice, emptyDeliveryText, patchFailureText, savePatch } from './delivery'
 import { parsePatch } from './patch'
 import { languageOf, relativePath, type WorkspaceReader, type WorkspaceSource, workspaceReader } from './source'
 
@@ -115,6 +115,7 @@ export function WorkspacePanel({
           />
         ) : tab === 'changes' ? (
           <ChangesList
+            kind={source.kind}
             reader={reader}
             query={changes}
             expanded={expanded}
@@ -201,6 +202,7 @@ const statusMark: Record<WorkspaceChange['status'], { letter: string; label: str
 
 /** Every changed file as an accordion row; expanding one shows its diff, and several can be open. */
 function ChangesList({
+  kind,
   reader,
   query,
   expanded,
@@ -209,6 +211,7 @@ function ChangesList({
   onRevealed,
   onOpenFile,
 }: {
+  kind: WorkspaceSource['kind']
   reader: WorkspaceReader
   query: UseQueryResult<WorkspaceChanges>
   expanded: string[]
@@ -229,13 +232,13 @@ function ChangesList({
   if (query.isPending) return <Message>正在读取变更…</Message>
   if (query.isError) return <Failure error={query.error} onRetry={() => void query.refetch()} />
   const { truncated } = query.data
-  const notice = deliveryNotice(query.data.deliveryState)
+  const notice = deliveryNotice(query.data.deliveryState, kind)
   const bar = notice && <DeliveryBar key={notice.view?.id ?? ''} reader={reader} notice={notice} />
   if (query.data.files.length === 0) {
     return (
       <>
         {bar}
-        <Message>{notice?.view?.status === 'empty' ? '本轮没有改动。' : '还没有文件改动。'}</Message>
+        <Message>{notice?.view?.status === 'empty' ? emptyDeliveryText(!!notice.inProgress) : '还没有文件改动。'}</Message>
       </>
     )
   }
@@ -303,7 +306,7 @@ function DeliveryBar({ reader, notice }: { reader: WorkspaceReader; notice: Deli
     try {
       const blob = await reader.patch(view.id)
       if (blob instanceof Blob && blob.size > 0) savePatch(blob, view.id)
-      else setError('本轮没有改动。')
+      else setError(emptyDeliveryText(!!inProgress))
     } catch (e) {
       setError(await patchFailureText(e))
     } finally {
@@ -315,10 +318,7 @@ function DeliveryBar({ reader, notice }: { reader: WorkspaceReader; notice: Deli
       {failure && (
         <p role="alert" className="flex items-start gap-1.5 rounded-md bg-destructive/10 px-2 py-1.5 text-destructive">
           <TriangleAlertIcon className="mt-px size-3.5 shrink-0" />
-          <span>
-            本轮交付失败：{failure.reason ?? '原因未知'}
-            {view && <span className="text-muted-foreground">。下面是上一次成功的交付。</span>}
-          </span>
+          <span>{failure.text}</span>
         </p>
       )}
       {inProgress && (

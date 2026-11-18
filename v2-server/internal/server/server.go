@@ -250,6 +250,9 @@ type handler struct {
 	// verdicts judges and caches the decomposition picker's verdict per immutable published
 	// snapshot, shared by every request this handler serves.
 	verdicts *decompositionVerdicts
+	// patchSlots bounds how many delivery patches are built at once: each holds its whole patch,
+	// up to the cap, in memory plus a Git process.
+	patchSlots chan struct{}
 }
 
 // newHandler makes omitted dependencies safe without inferring one interface from another.
@@ -265,7 +268,7 @@ func newHandler(s Store, o Options) *handler {
 	if lifetime == nil {
 		lifetime = context.Background()
 	}
-	h := &handler{store: s, opts: o, verdicts: newDecompositionVerdicts(lifetime)}
+	h := &handler{store: s, opts: o, verdicts: newDecompositionVerdicts(lifetime), patchSlots: make(chan struct{}, maxConcurrentPatches)}
 	if cs, ok := s.(chat.Store); ok {
 		h.chats = chat.New(cs, o.Execution, o.Catalog, chat.Options{})
 	}

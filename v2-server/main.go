@@ -98,9 +98,9 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	if e != nil {
 		return e
 	}
-	maxPatch, e := strconv.Atoi(envOr("V2_DELIVERY_MAX_PATCH_BYTES", strconv.Itoa(server.DefaultMaxPatchBytes)))
-	if e != nil || maxPatch <= 0 {
-		return errors.New("V2_DELIVERY_MAX_PATCH_BYTES must be a positive integer")
+	maxPatch, e := deliveryPatchLimit(envOr("V2_DELIVERY_MAX_PATCH_BYTES", strconv.Itoa(server.DefaultMaxPatchBytes)))
+	if e != nil {
+		return e
 	}
 
 	db, e := store.Open(ctx, dbURL)
@@ -555,6 +555,16 @@ func fixtureMarkers(root string) (map[string]string, error) {
 		return nil
 	})
 	return markers, err
+}
+
+// deliveryPatchLimit parses V2_DELIVERY_MAX_PATCH_BYTES: a positive byte count no larger than
+// server.MaxPatchBytesCeiling, since every concurrent download may hold that much in memory.
+func deliveryPatchLimit(value string) (int, error) {
+	n, e := strconv.Atoi(value)
+	if e != nil || n <= 0 || n > server.MaxPatchBytesCeiling {
+		return 0, fmt.Errorf("V2_DELIVERY_MAX_PATCH_BYTES must be a positive integer of at most %d", server.MaxPatchBytesCeiling)
+	}
+	return n, nil
 }
 
 func envOr(key, fallback string) string {

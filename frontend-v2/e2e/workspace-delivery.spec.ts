@@ -29,7 +29,9 @@ test('workspace: a chat turn is delivered, its change is shown and its patch dow
   await expect(panel.getByText(/本轮进行中/)).toHaveCount(0)
 
   await list.getByText('ora-v2-result.txt').click()
-  await expect(panel.getByRole('region', { name: 'ora-v2-result.txt 的改动' }).getByText('v2 fixture tool executed')).toBeVisible()
+  // toBeVisible() also accepts a line the opening accordion still clips; wait until it is fully painted.
+  const added = panel.getByRole('region', { name: 'ora-v2-result.txt 的改动' }).getByText('v2 fixture tool executed')
+  await expect(added).toBeInViewport({ ratio: 1 })
 
   const download = page.waitForEvent('download')
   await panel.getByRole('button', { name: '下载 patch' }).click()

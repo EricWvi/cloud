@@ -29,7 +29,7 @@ V2_LOGIN=email go run .                # 开发模式，监听 127.0.0.1:8090
 | `V2_DATABASE_URL` | `postgres://ora:ora-local@127.0.0.1:55432/ora_v2?sslmode=disable` | PostgreSQL |
 | `V2_DATA_DIR` | `$HOME/.ora-v2` | 仓库 mirror、marketplace checkout、Node 与对话目录；同一目录只允许一个进程持有，使用短路径以满足 Unix socket 长度限制；用 release 构建的 Node 时，它和各级父目录都不能组可写或其他人可写（不能放在 `/tmp` 下），否则启动时报错退出 |
 | `V2_DELIVERY_MAX_OBJECT_BYTES` | `67108864`（64 MiB） | 每轮交付上限，分别检查变更和未跟踪文件的大小总数，以及相对起点新增的 Git 对象的未压缩字节总数，须为正整数；超限记录「改动过大」 |
-| `V2_DELIVERY_MAX_PATCH_BYTES` | `16777216`（16 MiB） | 在线下载一次交付的完整 patch 的字节上限，须为正整数；超限返回 413 `patch_too_large`，交付本身保留 |
+| `V2_DELIVERY_MAX_PATCH_BYTES` | `16777216`（16 MiB） | 在线下载一次交付的完整 patch 的字节上限，须为不超过 `268435456`（256 MiB）的正整数，否则启动时报错退出；超限返回 413 `patch_too_large`，交付本身保留 |
 | `V2_USERS_FILE` | `users.json` | 启动时预置的账号文件（相对进程工作目录）：`users` 里的 `email`、可选的 `displayName`、`role`（`owner` / `member`）；`retired` 里列出要从成员页移除的旧预置 `email`。`users` 幂等写入，已存在的账号只更新名字和角色；不在 `users` 里的账号默认保留，只有 `retired` 中的地址会在首次启动时软删除。文件缺失、没有 owner、邮箱重复或 `users` 与 `retired` 重叠时拒绝启动 |
 | `V2_PLUGIN_MARKETPLACE_URL` | `https://github.com/ora-space/marketplace` | 未设置使用开发默认，显式空字符串关闭官方源；插件市场 Git HTTPS 地址；禁止携带凭据、query 或 fragment。离线测试直接构造 Syncer 使用本地仓库 |
 | `V2_PLUGIN_MARKETPLACE_BRANCH` | `main` | 市场同步分支；启动时浅克隆并拉取，之后按间隔快进工作副本 |
@@ -659,7 +659,7 @@ HTTP 集成测试按 `chat.openapi.json` 验证 JSON 响应，向注入点传入
 - **变更视图**：`deliveryState.mode` 为 `delivery` 时，`viewDelivery` 是正在显示的成功交付（`empty` 也算，它取代之前的交付，文件列表为空），`latestDelivery` 是最近一次结果（含失败），`latestFailedDelivery` 是最近一次失败，`reasonCode`、`reason` 说明原因；`inProgress` 表示这个来源有一轮正在执行或正在交付，此时仍显示上一次交付。还没有成功交付时文件列表为空，`baseCommit` 取记录的起点。只要来源有一轮登记过交付，变更和 diff 就不再读工作副本，第一轮还在执行或第一次交付失败时也一样。
 - **旧会话**：本功能上线前的会话没有登记过交付，`mode` 为 `working_directory`，照旧读工作副本：相对克隆时 commit 的变更文件，含未跟踪且未忽略的文件；工作副本被删后返回 410 `workspace_removed`。不为它们补交付记录。
 - **固定某次交付的 diff**：`deliveryId` 格式不对返回 400 `invalid_delivery_id`，找不到返回 404 `delivery_not_found`，是失败的交付返回 409 `delivery_failed`（`params.reasonCode`、`params.reason`）；`viewDelivery` 是这次交付，其余字段反映来源当前状态。
-- **patch 下载**：200 为 `application/octet-stream`，`Content-Disposition: attachment; filename="delivery-<id>.patch"`；`empty` 交付返回 204；失败的交付 409 `delivery_failed`；超过 `V2_DELIVERY_MAX_PATCH_BYTES` 返回 413 `patch_too_large`（`params.message` 为「改动过大，无法在线下载」，`params.maxBytes` 为上限），交付保留；镜像或交付 ref 读不到返回 503 `workspace_unavailable`。patch 先在上限内完整生成再发送，出错时不会有部分内容。交付只能下载 patch，没有 `git fetch` 入口，也没有任何写入交付或 ref 的路由。
+- **patch 下载**：200 为 `application/octet-stream`，`Content-Disposition: attachment; filename="delivery-<id>.patch"`；`empty` 交付返回 204；失败的交付 409 `delivery_failed`；超过 `V2_DELIVERY_MAX_PATCH_BYTES` 返回 413 `patch_too_large`（`params.message` 为「改动过大，无法在线下载」，`params.maxBytes` 为上限），交付保留；镜像或交付 ref 读不到返回 503 `workspace_unavailable`。patch 先在上限内完整生成再发送，出错时不会有部分内容。整个进程同时最多生成 4 份 patch，更多的下载排队等待，调用方断开时放弃等待；因此 patch 占用的内存约为 4 份上限（缓冲扩容时最多约两倍）。交付只能下载 patch，没有 `git fetch` 入口，也没有任何写入交付或 ref 的路由。
 - **缓存**：变更、diff 和 patch 的响应带 `Cache-Control: private, no-store`。
 - **位置落库**：Agent 运行时在工作副本克隆并物化技能后、Agent 启动前，把 `WorkspaceID → 目录、克隆时 commit` 写进 `v2_workspaces`，所以会话结束、服务重启后仍能浏览。还没克隆好时浏览（以及旧会话的变更）返回 404 `workspace_not_ready`；目录已被 `-cleanup` 删除时浏览返回 410 `workspace_removed`，变更、diff 和 patch 照常读交付。
 - **路径**：只接受相对路径，解析符号链接后必须仍在工作副本内，`.git` 不可见；越界返回 400 `invalid_path`。目录列表跳过指向工作副本外的符号链接。

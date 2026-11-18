@@ -15,6 +15,14 @@ import (
 // DefaultMaxPatchBytes bounds a downloadable delivery patch when Options.MaxPatchBytes is unset.
 const DefaultMaxPatchBytes = 16 << 20
 
+// MaxPatchBytesCeiling is the largest patch cap a deployment may configure; a larger
+// Options.MaxPatchBytes is lowered to it.
+const MaxPatchBytesCeiling = 256 << 20
+
+// maxConcurrentPatches is how many patches the process builds at once. Further downloads wait for
+// a slot for as long as their request lives, so memory stays within this many caps.
+const maxConcurrentPatches = 4
+
 // DeliveryReader reads retained turn deliveries from a project mirror. *workspacefs.DeliveryFS
 // implements it; each method verifies the snapshot's ref and parent before reading.
 type DeliveryReader interface {
@@ -281,6 +289,14 @@ func (h *handler) workspacePatch(find resolveSource) func(http.ResponseWriter, *
 		limit := h.opts.MaxPatchBytes
 		if limit <= 0 {
 			limit = DefaultMaxPatchBytes
+		}
+		limit = min(limit, MaxPatchBytesCeiling)
+		select {
+		case h.patchSlots <- struct{}{}:
+			defer func() { <-h.patchSlots }()
+		case <-r.Context().Done():
+			// The caller left while waiting; nobody reads an answer.
+			return
 		}
 		patch, e := h.opts.Deliveries.DeliveryPatch(r.Context(), snapshotOf(&rec), limit)
 		switch {

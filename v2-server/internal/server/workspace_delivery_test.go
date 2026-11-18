@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,9 +78,14 @@ func (f *deliveryFixture) scope() execution.Scope {
 
 // serve starts another server over the same store and mirror with its own patch cap.
 func (f *deliveryFixture) serve(maxPatch int) string {
-	srv := httptest.NewServer(server.New(f.s, server.Options{SessionTTL: time.Hour, TaskRuns: f.tasks, Deliveries: f.fs, MaxPatchBytes: maxPatch}))
+	return f.serveWith(f.fs, maxPatch).URL
+}
+
+// serveWith starts a server reading deliveries through reader, for fault and gate injection.
+func (f *deliveryFixture) serveWith(reader server.DeliveryReader, maxPatch int) *httptest.Server {
+	srv := httptest.NewServer(server.New(f.s, server.Options{SessionTTL: time.Hour, TaskRuns: f.tasks, Deliveries: reader, MaxPatchBytes: maxPatch}))
 	f.t.Cleanup(srv.Close)
-	return srv.URL
+	return srv
 }
 
 func (f *deliveryFixture) client(base, token string) *http.Client {
@@ -415,6 +421,12 @@ func TestDeliveryWorkspaceContractAndAuthorization(t *testing.T) {
 	if failed := state(t, res.body)["latestFailedDelivery"].(map[string]any); failed["reasonCode"] != "changes_too_large" || failed["reason"] != "改动过大" || failed["deliveryCommit"] != nil {
 		t.Fatalf("latestFailedDelivery = %v", failed)
 	}
+	// An unpinned diff while the latest outcome failed reads the latest good delivery.
+	res = task.get(f.ownerHTTP, "/diff?path=README.md")
+	if res.status != 200 || !strings.Contains(res.body["patch"].(string), "+first turn") {
+		t.Fatalf("default diff after a failed delivery = %d %v", res.status, res.body)
+	}
+	expectState(t, "default diff after a failure", res.body, "delivery", false, d1.ID, d2.ID, d2.ID)
 	for _, path := range []string{"/deliveries/" + d2.ID + "/patch", "/diff?path=README.md&deliveryId=" + d2.ID} {
 		res := task.get(f.ownerHTTP, path)
 		if params, _ := res.body["params"].(map[string]any); res.status != 409 || res.body["code"] != "delivery_failed" ||
@@ -739,5 +751,114 @@ func TestEndedDeliveryWorkDoesNotShowLiveChanges(t *testing.T) {
 	state := res.body["deliveryState"].(map[string]any)
 	if state["inProgress"] != false || state["mode"] != "delivery" || len(res.body["files"].([]any)) != 0 {
 		t.Fatalf("ended work used live checkout or appeared active: %s", res.raw)
+	}
+}
+
+// A delivery whose ref no longer matches its record is unreadable: every delivery read answers 503
+// workspace_unavailable, and no Git diagnostic, mirror path, ref or commit reaches the client.
+func TestBrokenDeliveryRefAnswersWorkspaceUnavailable(t *testing.T) {
+	f := newDeliveryFixture(t)
+	task := f.taskSource("损坏的 ref")
+	ref := task.start()
+	f.write(task.root, "README.md", "# Ora demo\n\nbroken\n")
+	d := task.finish(ref, false)
+	name := "refs/ora/deliveries/" + f.project.ID + "/" + d.ID
+	f.git("", "--git-dir="+f.project.MirrorPath, "update-ref", name, f.project.Commit)
+	for _, path := range []string{"/changes", "/diff?path=README.md", "/diff?path=README.md&deliveryId=" + d.ID, "/deliveries/" + d.ID + "/patch"} {
+		res := task.get(f.ownerHTTP, path)
+		params, _ := res.body["params"].(map[string]any)
+		if res.status != 503 || res.body["code"] != "workspace_unavailable" || params == nil || len(params) != 0 {
+			t.Fatalf("%s with a broken ref = %d %s, want 503 workspace_unavailable with empty params", path, res.status, res.raw)
+		}
+		for _, leak := range []string{f.project.MirrorPath, "refs/ora", d.DeliveryCommit, f.project.Commit, "git", "fatal"} {
+			if strings.Contains(string(res.raw), leak) {
+				t.Fatalf("%s leaks %q: %s", path, leak, res.raw)
+			}
+		}
+		if res.header.Get("Content-Disposition") != "" {
+			t.Fatalf("%s: Content-Disposition on a refused read: %v", path, res.header)
+		}
+		noStoreHeader(t, path, res)
+	}
+}
+
+// gatedPatches holds every patch build until released and records how many ran at once.
+type gatedPatches struct {
+	server.DeliveryReader
+	entered chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	active  int
+	peak    int
+}
+
+func (g *gatedPatches) DeliveryPatch(ctx context.Context, snap workspacefs.DeliverySnapshot, maxBytes int) ([]byte, error) {
+	g.mu.Lock()
+	g.active++
+	g.peak = max(g.peak, g.active)
+	g.mu.Unlock()
+	defer func() { g.mu.Lock(); g.active--; g.mu.Unlock() }()
+	g.entered <- struct{}{}
+	<-g.release
+	return g.DeliveryReader.DeliveryPatch(ctx, snap, maxBytes)
+}
+
+// Concurrent downloads build at most four patches at once; the others wait and then succeed, and a
+// waiting request whose caller leaves never starts a build.
+func TestConcurrentPatchBuildsAreBounded(t *testing.T) {
+	f := newDeliveryFixture(t)
+	task := f.taskSource("并发下载")
+	ref := task.start()
+	f.write(task.root, "README.md", "# Ora demo\n\nconcurrent\n")
+	d := task.finish(ref, false)
+	gate := &gatedPatches{DeliveryReader: f.fs, entered: make(chan struct{}, 16), release: make(chan struct{})}
+	srv := f.serveWith(gate, server.DefaultMaxPatchBytes)
+	// Registered after the server, so it runs first: a failed assertion must not leave builds
+	// parked while the server's cleanup waits for them.
+	var released sync.Once
+	release := func() { released.Do(func() { close(gate.release) }) }
+	t.Cleanup(release)
+	base := srv.URL
+	client := f.client(base, f.ownerToken)
+	url := base + task.prefix + "/deliveries/" + d.ID + "/patch"
+	const downloads = 6
+	results := make(chan int, downloads)
+	for range downloads {
+		go func() {
+			res, err := client.Get(url)
+			if err != nil {
+				results <- -1
+				return
+			}
+			res.Body.Close()
+			results <- res.StatusCode
+		}()
+	}
+	for range 4 {
+		<-gate.entered
+	}
+	// Four builds hold every slot. A fifth caller that gives up while waiting never starts one.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if res, err := client.Do(req); err == nil {
+		res.Body.Close()
+		t.Fatalf("a download past the bound answered %d before a slot freed", res.StatusCode)
+	}
+	select {
+	case <-gate.entered:
+		t.Fatal("a fifth patch build started while four were running")
+	default:
+	}
+	release()
+	for range downloads {
+		if status := <-results; status != http.StatusOK {
+			t.Fatalf("a waiting download answered %d, want 200", status)
+		}
+	}
+	// Close waits for every handler, the abandoned one included, so the count below is final.
+	srv.Close()
+	if gate.peak != 4 || len(gate.entered) != downloads-4 {
+		t.Fatalf("peak concurrent patch builds = %d and %d more builds after the first four, want 4 and %d", gate.peak, len(gate.entered), downloads-4)
 	}
 }
