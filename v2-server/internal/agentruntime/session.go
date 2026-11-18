@@ -32,8 +32,9 @@ type turnOutcome struct {
 }
 
 type activeTurn struct {
-	id   string
-	done chan turnOutcome
+	id        string
+	commandID string
+	done      chan turnOutcome
 	// guard limits the Agent's re-sends of model calls cut off at a limit during this turn.
 	guard retryGuard
 }
@@ -293,6 +294,9 @@ func (a *agentSession) begin(turn string, emit Emit) (*activeTurn, bool, error) 
 		return nil, false, execution.ErrWorkspaceBusy
 	}
 	call := &activeTurn{id: turn, done: make(chan turnOutcome, 1)}
+	if a.started {
+		call.commandID = "turn-" + digest(turn)
+	}
 	a.active, a.emit = call, emit
 	// The first turn starts the Agent; submit marks the session started just before it sends.
 	return call, !a.started, nil
@@ -468,6 +472,28 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 		a.fail("agent_identity_mismatch", execution.ErrUnavailable)
 		a.requestEnd()
 		return nil, false
+	}
+	if message.Type == "session_turn_failed" {
+		var failure struct {
+			TurnID    string  `json:"turn_id"`
+			CommandID *string `json:"command_id"`
+			Code      string  `json:"code"`
+		}
+		if json.Unmarshal(message.Payload, &failure) != nil || message.Sequence == nil || *message.Sequence == 0 ||
+			call == nil || call.id != failure.TurnID || failure.Code != "mcp_refresh_wait_timeout" ||
+			(failure.CommandID == nil && call.commandID != "") ||
+			(failure.CommandID != nil && (*failure.CommandID == "" || *failure.CommandID != call.commandID)) {
+			a.fail("agent_turn_failure_invalid", execution.ErrUnavailable)
+			a.requestEnd()
+			return nil, false
+		}
+		result := failed(failure.Code)
+		if broken || publicationFailed || a.publish(execution.Event{Ref: execution.Ref{TurnID: call.id}, Kind: execution.EventTurnEnded, Result: &result}) != nil {
+			a.fail("agent_event_write_failed", errEventStore)
+			a.requestEnd()
+			return nil, false
+		}
+		return &turnOutcome{call.id, result, nil}, true
 	}
 	if message.Type == "agent_session_ended" {
 		var ended struct {
