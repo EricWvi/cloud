@@ -117,6 +117,7 @@ export function taskRunMessageFor(error: unknown): string {
     case 'workflow_no_published_snapshot': return '所选工作流还没有发布版本，请先发布后再运行。'
     case 'workflow_snapshot_not_found': return '所选工作流版本不存在，请重新选择。'
     case 'workflow_draft_snapshot': return '草稿版本不能直接运行，请选择已发布的工作流。'
+    case 'workflow_role_not_found': return '工作流引用的角色在工作区角色目录里不存在，请先在设置的角色页新建同名角色再启动。'
     case 'workflow_run_start_failed': return '工作流图定义不可执行，请检查工作流配置。'
     case 'workflow_run_host_unavailable': return '工作流执行服务不可用，请稍后重试。'
     case 'execution_unavailable': return '执行服务暂时不可用，请稍后重试。'
