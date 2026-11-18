@@ -69,7 +69,7 @@ func TestReadAndPendingStoreRespectHostCancellation(t *testing.T) {
 				}
 				var err error
 				if storing {
-					err = (Policy{}).Store(ctx, op, func(error) bool { return false })
+					err = (Policy{}).Store(ctx, op)
 				} else {
 					err = (Policy{}).Read(ctx, op)
 				}
@@ -91,7 +91,7 @@ func TestStoreRetainsOutcomePastReadBudget(t *testing.T) {
 				return &pgconn.PgError{Code: "57P01"}
 			}
 			return nil
-		}, func(error) bool { return false })
+		})
 		if err != nil || calls != 4 {
 			t.Fatalf("calls=%d err=%v", calls, err)
 		}
@@ -101,9 +101,7 @@ func TestStoreRetainsOutcomePastReadBudget(t *testing.T) {
 func TestStoreDoesNotRetryInvalidData(t *testing.T) {
 	for _, want := range []error{errors.New("bad payload"), &pgconn.PgError{Code: "23514"}, execution.ErrNotFound} {
 		calls := 0
-		err := (Policy{}).Store(t.Context(), func(context.Context) error { calls++; return want }, func(err error) bool {
-			return errors.Is(err, execution.ErrNotFound)
-		})
+		err := (Policy{}).Store(t.Context(), func(context.Context) error { calls++; return want })
 		if !errors.Is(err, want) || calls != 1 {
 			t.Fatalf("want=%v calls=%d err=%v", want, calls, err)
 		}

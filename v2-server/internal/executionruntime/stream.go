@@ -13,18 +13,26 @@ import (
 // Subscribe reads directly from the durable cursor. A short poll avoids a replay/live handoff
 // race without another in-memory event log; closing this observer never cancels a worker.
 func (s *Service) Subscribe(ctx context.Context, scope execution.Scope, sid string, after uint64) (execution.Stream, error) {
-	latest, err := s.db.ReadExecutionCursor(ctx, scope, sid)
-	if err != nil {
-		if s.observerReadFailed != nil {
-			s.observerReadFailed()
+	var latest uint64
+	err := s.readRetry.Read(ctx, func(read context.Context) error {
+		var err error
+		latest, err = s.db.ReadExecutionCursor(read, scope, sid)
+		if err != nil {
+			if s.observerReadFailed != nil {
+				s.observerReadFailed()
+			}
+			return publicError(err)
 		}
-		return nil, publicError(err)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	if after > latest {
 		return nil, execution.ErrInvalidRequest
 	}
 	owned, cancel := context.WithCancel(ctx)
-	return &stream{s: s, scope: scope, sid: sid, cursor: after, ctx: owned, cancel: cancel}, nil
+	return &stream{s: s, scope: scope, sid: sid, cursor: after, ctx: owned, cancel: cancel, retry: s.readRetry}, nil
 }
 
 type stream struct {

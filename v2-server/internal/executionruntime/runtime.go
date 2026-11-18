@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/executionwait"
 	"github.com/wanglongan587/cloud/v2-server/internal/modelturn"
 	"github.com/wanglongan587/cloud/v2-server/internal/nodeservices"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
@@ -113,6 +114,7 @@ type Service struct {
 	finishRetryDelays []time.Duration
 	concludeInterval  time.Duration
 	stopTimeout       time.Duration
+	readRetry         executionwait.Policy
 	finishTurn        func(context.Context, execution.Scope, execution.Ref, execution.Result) (execution.Result, error)
 	// observerReadFailed, when set by a test before admission, observes actual
 	// failed SQL reads so an outage need not be paced by sleeps.

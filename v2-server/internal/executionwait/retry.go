@@ -26,7 +26,8 @@ type Policy struct {
 	QueryTimeout time.Duration
 }
 
-func (p Policy) defaults() Policy {
+// Defaults fills zero fields with the package defaults.
+func (p Policy) Defaults() Policy {
 	if p.Budget <= 0 {
 		p.Budget = time.Minute
 	}
@@ -39,6 +40,11 @@ func (p Policy) defaults() Policy {
 	return p
 }
 
+// Pause sleeps for p's poll interval unless ctx is cancelled first.
+func (p Policy) Pause(ctx context.Context) error {
+	return pause(ctx, p.Defaults().Interval)
+}
+
 // Transient classifies public execution reads. Hidden resources, invalid cursors
 // and other definite refusals must not be retried as database outages.
 func Transient(err error) bool {
@@ -48,7 +54,7 @@ func Transient(err error) bool {
 // Read retries a read, including an as-yet-unwritten result represented by
 // ErrUnavailable. Every query shares the same budget and respects cancellation.
 func (p Policy) Read(ctx context.Context, read func(context.Context) error) error {
-	p = p.defaults()
+	p = p.Defaults()
 	budget, cancel := context.WithTimeout(ctx, p.Budget)
 	defer cancel()
 	for {
@@ -85,10 +91,9 @@ func (p Policy) Read(ctx context.Context, read func(context.Context) error) erro
 // Store retains an already-decided business outcome until storage recovers or
 // its owning host closes. The read decision is never retried here: once its
 // budget expires, a late execution result cannot turn that failure into success.
-// Permanent domain errors return immediately. Callers supply that classification
-// because persistence errors are not the execution port's public errors.
-func (p Policy) Store(ctx context.Context, write func(context.Context) error, permanent func(error) bool) error {
-	p = p.defaults()
+// Non-transient domain/validation errors do not satisfy storageTransient and return immediately.
+func (p Policy) Store(ctx context.Context, write func(context.Context) error) error {
+	p = p.Defaults()
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -96,7 +101,7 @@ func (p Policy) Store(ctx context.Context, write func(context.Context) error, pe
 		query, stop := context.WithTimeout(ctx, p.QueryTimeout)
 		err := write(query)
 		stop()
-		if err == nil || permanent(err) || !storageTransient(err) {
+		if err == nil || !storageTransient(err) {
 			return err
 		}
 		if err := pause(ctx, p.Interval); err != nil {

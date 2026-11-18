@@ -273,6 +273,54 @@ func TestObserversRecoverWhenPostgresReadsAndWritesFailTogether(t *testing.T) {
 	}
 }
 
+func TestSubscribeRetriesTransientCursorReadOutage(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	if err := f.service.Close(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.db.Close()
+	cut := &connectionCut{dial: f.config.ConnConfig.DialFunc}
+	defer cut.restore()
+	cfg := f.config.Copy()
+	cfg.ConnConfig.DialFunc = cut.connect
+	var err error
+	f.db, err = store.OpenConfig(f.ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &outageAgent{started: make(chan execution.Turn, 1), finish: make(chan struct{})}
+	f.service, err = New(f.ctx, Config{Store: f.db, Models: f.models, Agent: agent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.service.readRetry.Interval = 20 * time.Millisecond
+	var reads atomic.Int32
+	f.service.observerReadFailed = func() {
+		if reads.Add(1) == 2 {
+			cut.restore()
+		}
+	}
+	project, err := f.db.CreateProject(f.ctx, f.scope, store.Project{ID: "sub-outage-project", Name: "SubOutage", RepositoryURL: "https://example.test/repo.git", Commit: "fixed", MirrorPath: "/unused"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := f.service.Start(f.ctx, f.scope, execution.StartRequest{Caller: execution.Caller{Kind: execution.CallerWorkflow, ID: "run", NodeID: "a", AttemptID: "attempt"}, Target: execution.Target{ProjectID: project.ID}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("hello")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-agent.started
+	cut.cut()
+	stream, err := f.service.Subscribe(f.ctx, f.scope, ref.SessionID, 0)
+	if err != nil {
+		t.Fatalf("Subscribe did not recover after transient outage: %v", err)
+	}
+	_ = stream.Close()
+	close(agent.finish)
+	if reads.Load() < 2 {
+		t.Fatalf("expected at least 2 failed cursor reads before recovery, got %d", reads.Load())
+	}
+}
+
 func outageAwait(t *testing.T, ctx context.Context, ready func() bool) {
 	t.Helper()
 	for !ready() {
