@@ -54,6 +54,13 @@ jobs:
       - if: hashFiles('v2-server/go.mod') != ''
         working-directory: v2-server
         run: go vet ./...
+      # The recording seeds in demo/ run only through their own command; the server never links them.
+      - name: Server does not link the demo seeds
+        if: hashFiles('v2-server/go.mod') != ''
+        working-directory: v2-server
+        run: |
+          demo=$(go list -deps . | grep -E '/v2-server/demo(/|$)' || true)
+          test -z "$demo" || { echo "the v2-server binary imports $demo"; exit 1; }
       - if: hashFiles('v2-server/go.mod') != ''
         working-directory: v2-server
         run: go test -race -count=1 ./...
