@@ -525,7 +525,9 @@ func TestTaskEndBoundsSettleAndStillEndsSessionOnOutage(t *testing.T) {
 		}
 		h := New(db, port, port, nil)
 		defer h.Close()
-		h.resultRetry = executionwait.Policy{Budget: 60 * time.Millisecond, Interval: 10 * time.Millisecond}
+		// The budget is not a multiple of the interval: a retry timer firing at the same virtual
+		// instant as the deadline may run first and start one write under a cancelled context.
+		h.resultRetry = executionwait.Policy{Budget: 65 * time.Millisecond, Interval: 10 * time.Millisecond}
 
 		reqCtx, cancelReq := context.WithCancel(t.Context())
 		cancelReq() // even if caller disconnects after Cancel, bounded settle runs under WithoutCancel
