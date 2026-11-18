@@ -70,6 +70,12 @@ func excludeFromGit(root *os.Root, paths []string) error {
 		return nil
 	}
 	// One append per call: concurrent writers each add whole lines.
+	//
+	// This write follows checkout-controlled pointers (.git as a gitfile or symlink, and
+	// commondir), which the Agent can rewrite to name any directory it likes. That is acceptable
+	// only while the Agent and Cloud run as the same OS user (A1 D2), so it gains nothing it
+	// could not do itself. Revisit before Agents are sandboxed: never follow checkout-controlled
+	// pointers for writes then.
 	return layout.Append(add.String())
 }
 

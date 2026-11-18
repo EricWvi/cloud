@@ -245,7 +245,7 @@ func (s *DeliveryFS) Deliver(ctx context.Context, req DeliveryRequest) (Snapshot
 	if _, err := g.value(ctx, "init", "--bare", "--template=", "--object-format="+format); err != nil {
 		return Snapshot{}, err
 	}
-	exclude, err := copyDeliveryExclude(root, scratch)
+	exclude, withoutGit, err := copyDeliveryExclude(root, scratch)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -269,6 +269,11 @@ func (s *DeliveryFS) Deliver(ctx context.Context, req DeliveryRequest) (Snapshot
 	}
 	for _, rules := range exclude {
 		if err := removeMaterializedPaths(ctx, g, base, rules); err != nil {
+			return Snapshot{}, err
+		}
+	}
+	if withoutGit {
+		if err := requireNoMaterializedChanges(ctx, g, base); err != nil {
 			return Snapshot{}, err
 		}
 	}
@@ -349,20 +354,59 @@ func checkDeliveryFileBytes(ctx context.Context, g deliveryGit, root string, rem
 	}
 }
 
-func copyDeliveryExclude(root, scratch string) ([][]byte, error) {
+// copyDeliveryExclude copies the checkout's local excludes into the scratch repository and returns
+// them, one entry per exclude file. withoutGit reports a checkout whose .git is gone (the Agent
+// removed it): delivery needs no Agent repository, so it proceeds with no local rules.
+func copyDeliveryExclude(root, scratch string) (rules [][]byte, withoutGit bool, err error) {
 	layout, err := gitexclude.Resolve(root)
-	if err != nil {
-		return nil, err
+	if errors.Is(err, os.ErrNotExist) {
+		if _, statErr := os.Stat(root); errors.Is(statErr, os.ErrNotExist) {
+			return nil, false, ErrGone
+		}
+		// Only an absent .git entry means "no rules"; a pointer whose target is missing is
+		// broken metadata and still fails.
+		if _, lstatErr := os.Lstat(filepath.Join(root, ".git")); errors.Is(lstatErr, os.ErrNotExist) {
+			withoutGit, err = true, nil
+		}
 	}
-	rules, err := layout.Excludes()
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	if !withoutGit {
+		if rules, err = layout.Excludes(); err != nil {
+			return nil, false, err
+		}
 	}
 	dir := filepath.Join(scratch, "info")
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return rules, os.WriteFile(filepath.Join(dir, "exclude"), bytes.Join(rules, []byte{'\n'}), 0600)
+	return rules, withoutGit, os.WriteFile(filepath.Join(dir, "exclude"), bytes.Join(rules, []byte{'\n'}), 0600)
+}
+
+// materializedRoots are where Ora writes skills into a checkout (see agentruntime).
+var materializedRoots = []string{".opencode/skills", ".claude/skills"}
+
+// ErrMaterializedUnknown fails a delivery that cannot tell skills Ora materialized from the
+// Agent's own files: the record of Ora's paths lives in the checkout's Git exclude, which is gone.
+var ErrMaterializedUnknown = errors.New("checkout has no Git directory and changes where Ora materializes skills")
+
+// requireNoMaterializedChanges fails closed when, without the exclude that records Ora's paths,
+// anything under a skill directory differs from the base: it could be a materialized (possibly
+// private) skill. A checkout without such changes delivers normally.
+func requireNoMaterializedChanges(ctx context.Context, git deliveryGit, base string) error {
+	args := []string{"diff", "--cached", "--name-only", "--no-renames", "-z", base, "--"}
+	for _, dir := range materializedRoots {
+		args = append(args, ":(literal)"+dir)
+	}
+	changed, err := git.run(ctx, nil, MaxDiffBytes, args...)
+	if err != nil {
+		return err
+	}
+	if len(changed) > 0 {
+		return ErrMaterializedUnknown
+	}
+	return nil
 }
 
 const materializedExcludeHeader = "# Skills Ora materialized for the Agent; not part of the project."

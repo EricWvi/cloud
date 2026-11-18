@@ -22,7 +22,10 @@ type Layout struct {
 }
 
 // Resolve reads Git directory pointers without invoking Git or loading repository configuration.
-// A missing .git returns os.ErrNotExist. Broken metadata returns an error distinct from absence.
+// .git may be a directory, a gitfile pointer, or a symlink to a directory; a symlink is resolved
+// like a gitfile pointer. A missing .git returns os.ErrNotExist (check the entry itself with Lstat
+// to tell absence from a pointer whose target is missing). Broken metadata returns an error
+// distinct from absence.
 func Resolve(checkout string) (Layout, error) {
 	checkout, err := directory(checkout)
 	if err != nil {
@@ -35,6 +38,13 @@ func Resolve(checkout string) (Layout, error) {
 	}
 	switch {
 	case info.IsDir():
+	case info.Mode()&os.ModeSymlink != 0:
+		// Git accepts a .git symlink to a repository directory. Like a gitfile pointer, its target
+		// may lie anywhere, but must be a directory; reads below it keep their containment checks.
+		gitdir, err = directory(gitdir)
+		if err != nil {
+			return Layout{}, fmt.Errorf("resolve .git symlink: %w", err)
+		}
 	case info.Mode().IsRegular():
 		raw, err := readRegular(checkout, ".git", maxPointerBytes)
 		if err != nil {

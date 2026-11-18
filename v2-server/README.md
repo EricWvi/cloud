@@ -634,7 +634,7 @@ HTTP 集成测试按 `chat.openapi.json` 验证 JSON 响应，向注入点传入
 
 交付在项目镜像里新建 `refs/ora/deliveries/<projectId>/<deliveryId>`（两个 ID 都是 UUID）。提交的唯一父提交是工作区登记的起点，包含 Git 纳入的工作区内容，忽略规则和 Ora 物化的技能目录照常排除。交付提交使用固定的 Ora 身份。同步只更新该项目绑定分支的快照，已创建的交付 ref 不会重写或删除。
 
-先写 Git ref，再写 PostgreSQL 记录。起点和结果的树相同记为 `empty`，无 ref；大小超限或其他失败记为 `failed` 并保留原因。崩溃时写到镜像但未落库的 ref 不会从交付读接口发现。启动先结束未完成的执行，再补交付，之后才恢复工作流调度和接收请求。已清理的目录记录 `workspace_removed`；`-cleanup` 保留镜像与交付历史。
+先写 Git ref，再写 PostgreSQL 记录。起点和结果的树相同记为 `empty`，无 ref；大小超限或其他失败记为 `failed` 并保留原因。崩溃时写到镜像但未落库的 ref 不会从交付读接口发现。启动先结束未完成的执行，再补交付，之后才恢复工作流调度和接收请求。Agent 删掉 `.git` 的目录照常交付，但技能目录（`.opencode/skills`、`.claude/skills`）下有改动时记为 `delivery_unavailable`，因为已无法区分哪些是 Ora 物化的技能；`.git` 是指向仓库目录的符号链接时按 gitfile 指针处理。已清理的目录记录 `workspace_removed`；`-cleanup` 保留镜像与交付历史。
 
 变更视图、单文件 diff 和 patch 下载从镜像读取交付，路由见下节。
 
