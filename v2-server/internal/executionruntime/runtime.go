@@ -494,7 +494,7 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 				if event.Result == nil {
 					return execution.ErrInvalidRequest
 				}
-				if s.delivery != nil {
+				if session.Target != nil {
 					_, err := s.stageDelivery(write, w, *event.Result)
 					return err
 				}
@@ -592,6 +592,13 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 			}
 		}
 		if !finalized {
+			if session.Target != nil {
+				// Run has returned. A Stop retry must not end a session after the
+				// terminal has been handed to the ordinary persistence path.
+				w.terminalMu.Lock()
+				w.staged = true
+				w.terminalMu.Unlock()
+			}
 			result, err = s.finish(scope, turn.Ref, result)
 		}
 		// Failures stay with this session: nothing here stops admission for other sessions.
@@ -821,45 +828,45 @@ func (s *Service) Cancel(ctx context.Context, scope execution.Scope, ref executi
 		}
 		s.mu.Lock()
 		w := s.workers[ref.TurnID]
-		if s.delivery != nil && w != nil {
-			// A stage may have committed after the read. Wait for it outside the global
-			// mutex, then read the public terminal again before deciding to stop.
-			s.mu.Unlock()
-			w.terminalMu.Lock()
-			s.mu.Lock()
-			staged = staged || w.staged
-		}
-		turn, err = s.readTurn(ctx, scope, ref)
-		if err == nil && turn.Result == nil && !staged {
-			s.ending[ref.SessionID] = true
-			if w != nil {
-				w.cancel()
-			}
-		}
 		s.mu.Unlock()
-		if s.delivery != nil && w != nil {
+		var stopping bool
+		if w != nil {
+			// Wait for a racing stage without holding the service mutex. A worker
+			// that has already left must never cause a newer turn to be stopped.
+			w.terminalMu.Lock()
+			staged = staged || w.staged
+			if !staged {
+				s.mu.Lock()
+				stopping = s.workers[ref.TurnID] == w
+				if stopping {
+					s.ending[ref.SessionID] = true
+					w.cancel()
+				}
+				s.mu.Unlock()
+			}
 			w.terminalMu.Unlock()
 		}
-		if err != nil {
-			return execution.Result{}, err
-		}
-		if turn.Result != nil {
-			return *turn.Result, nil
-		}
-		if staged && w != nil {
-			select {
-			case <-ctx.Done():
-				return execution.Result{}, ctx.Err()
-			case <-w.done:
+		if !stopping {
+			if staged && w != nil {
+				select {
+				case <-ctx.Done():
+					return execution.Result{}, ctx.Err()
+				case <-w.done:
+				}
 			}
 			turn, err := s.readTurn(ctx, scope, ref)
 			if err != nil {
 				return execution.Result{}, err
 			}
-			if turn.Result == nil {
+			if turn.Result != nil {
+				return *turn.Result, nil
+			}
+			s.mu.Lock()
+			pending, unsaved := s.unsaved[ref.SessionID]
+			s.mu.Unlock()
+			if !unsaved || pending.ref != ref {
 				return execution.Result{}, execution.ErrStopUnconfirmed
 			}
-			return *turn.Result, nil
 		}
 		if err := s.End(ctx, scope, ref.SessionID); err != nil {
 			return execution.Result{}, err

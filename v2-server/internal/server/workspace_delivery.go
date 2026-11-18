@@ -89,7 +89,7 @@ func snapshotOf(r *store.DeliveryRecord) workspacefs.DeliverySnapshot {
 // legacy reports whether a source predates deliveries: no turn was ever enrolled and none was
 // delivered. Once one is, the working directory is never read for changes again, even while the
 // first delivery is pending or after it failed.
-func legacy(v store.DeliveryView) bool { return v.Latest == nil && !v.InProgress }
+func legacy(v store.DeliveryView) bool { return v.Latest == nil && !v.HasWork }
 
 // deliveryView reads the source's delivery state from one database snapshot. It writes the
 // response itself and returns false on failure.

@@ -721,3 +721,23 @@ func TestDeliveryEndpointsAreReadOnly(t *testing.T) {
 		t.Fatalf("delivery routes changed state:\nrefs %s\nwant %s\nrows %+v\nwant %+v", gotRefs, refs, gotRows, rows)
 	}
 }
+
+func TestEndedDeliveryWorkDoesNotShowLiveChanges(t *testing.T) {
+	f := newDeliveryFixture(t)
+	chat := f.chatSource("未落库的交付")
+	ref := chat.start()
+	f.write(chat.root, "only-live.txt", "live checkout change\n")
+	if _, err := f.s.FinishExecutionTurn(f.ctx, f.scope(), ref, execution.Result{
+		Status: execution.StatusFailed, FailureCode: execution.FailureDeliveryUnavailable,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res := chat.get(f.ownerHTTP, "/changes")
+	if res.status != http.StatusOK {
+		t.Fatalf("changes: %d %s", res.status, res.raw)
+	}
+	state := res.body["deliveryState"].(map[string]any)
+	if state["inProgress"] != false || state["mode"] != "delivery" || len(res.body["files"].([]any)) != 0 {
+		t.Fatalf("ended work used live checkout or appeared active: %s", res.raw)
+	}
+}

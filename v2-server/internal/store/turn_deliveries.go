@@ -52,6 +52,7 @@ type DeliveryRecord struct {
 type DeliveryView struct {
 	Latest, Good, Failed *DeliveryRecord
 	InProgress           bool
+	HasWork              bool // An ended turn may retain its work for boot without being active.
 }
 
 // DeliveryWork captures trusted admission identity, terminal result, and the current checkout.
@@ -274,15 +275,17 @@ func (s *Store) WorkspaceDeliveryView(ctx context.Context, scope execution.Scope
 	err = s.pool.QueryRow(ctx, `WITH src AS (`+sourceSQL+`), outcomes AS (
 		SELECT `+lookup("")+` AS latest,`+lookup("AND d.status IN ('delivered','empty')")+` AS good,`+
 		lookup("AND d.status='failed'")+` AS failed,
-		EXISTS (SELECT 1 FROM v2_turn_delivery_work w WHERE w.tenant_id=$1 AND w.source_kind=$4 AND w.source_id=src.id) AS active
+		EXISTS (SELECT 1 FROM v2_turn_delivery_work w WHERE w.tenant_id=$1 AND w.source_kind=$4 AND w.source_id=src.id) AS has_work,
+		EXISTS (SELECT 1 FROM v2_turn_delivery_work w JOIN v2_execution_turns t ON t.id=w.turn_id
+			WHERE w.tenant_id=$1 AND w.source_kind=$4 AND w.source_id=src.id AND t.ended_at IS NULL) AS active
 		FROM src)
-		SELECT o.latest,o.good,o.failed,o.active,COALESCE(l.data->>'MirrorPath',''),
+		SELECT o.latest,o.good,o.failed,o.active,o.has_work,COALESCE(l.data->>'MirrorPath',''),
 			COALESCE(g.data->>'MirrorPath',''),COALESCE(f.data->>'MirrorPath','')
 		FROM outcomes o
 		LEFT JOIN v2_projects l ON l.id=o.latest->>'project_id' AND l.tenant_id=$1
 		LEFT JOIN v2_projects g ON g.id=o.good->>'project_id' AND g.tenant_id=$1
 		LEFT JOIN v2_projects f ON f.id=o.failed->>'project_id' AND f.tenant_id=$1`, args...).Scan(
-		&latest, &good, &failed, &view.InProgress, &latestMirror, &goodMirror, &failedMirror)
+		&latest, &good, &failed, &view.InProgress, &view.HasWork, &latestMirror, &goodMirror, &failedMirror)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return view, ErrNotFound
 	}

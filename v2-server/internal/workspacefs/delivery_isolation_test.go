@@ -141,15 +141,17 @@ func TestDeliveryExcludeSymlinkOutside(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap, err := deliver(t, f, req)
-	if err != nil || snap.Commit == "" {
-		t.Fatalf("exclude symlink prevented delivery: %+v, %v", snap, err)
+	if err == nil || snap.Commit != "" {
+		t.Fatalf("escaping exclude symlink did not fail closed: %+v, %v", snap, err)
+	}
+	if refs := deliveryGit(t, req.MirrorPath, "for-each-ref", "refs/ora/deliveries"); refs != "" {
+		t.Fatalf("escaping exclude published a delivery: %s", refs)
 	}
 }
 
-func TestDeliveryGitFileCheckout(t *testing.T) {
+func TestDeliveryGitFileExcludesMaterializedSkill(t *testing.T) {
 	f, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
 	root := req.Workspace.Root
-	// Convert the checkout into a separate-git-dir layout (.git is a file).
 	gitdir := filepath.Join(t.TempDir(), "gitdir")
 	if err := os.Rename(filepath.Join(root, ".git"), gitdir); err != nil {
 		t.Fatal(err)
@@ -157,9 +159,38 @@ func TestDeliveryGitFileCheckout(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: "+gitdir+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// What the materializer would have recorded had .git been a directory:
+	deliveryWrite(t, gitdir, "info/exclude", "# Skills Ora materialized for the Agent; not part of the project.\n/.agents/skills/private\n")
+	deliveryWrite(t, root, ".agents/skills/private/SKILL.md", "private user skill")
 	snap, err := deliver(t, f, req)
-	if err != nil || snap.Commit == "" {
-		t.Fatalf("gitfile prevented delivery: %+v, %v", snap, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := deliveryGit(t, req.MirrorPath, "ls-tree", "-r", "--name-only", snap.Commit)
+	if strings.Contains(tree, ".agents/skills/private/SKILL.md") {
+		t.Errorf("materialized skill delivered for a gitfile checkout:\n%s", tree)
+	}
+}
+
+func TestDeliverySymlinkedExcludeKeepsMaterializedSkillPrivate(t *testing.T) {
+	f, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
+	root := req.Workspace.Root
+	deliveryWrite(t, root, ".git/ora-exclude", "# Skills Ora materialized for the Agent; not part of the project.\n/.agents/skills/private\n")
+	_ = os.Remove(filepath.Join(root, ".git/info/exclude"))
+	if err := os.MkdirAll(filepath.Join(root, ".git/info"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../ora-exclude", filepath.Join(root, ".git/info/exclude")); err != nil {
+		t.Fatal(err)
+	}
+	deliveryWrite(t, root, ".agents/skills/private/SKILL.md", "private user skill")
+	snap, err := deliver(t, f, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := deliveryGit(t, req.MirrorPath, "ls-tree", "-r", "--name-only", snap.Commit)
+	if strings.Contains(tree, ".agents/skills/private/SKILL.md") {
+		t.Errorf("materialized skill delivered through a symlinked exclude:\n%s", tree)
 	}
 }
 
@@ -191,6 +222,19 @@ func TestDeliveryRejectsSparseFileBeforeWritingObjects(t *testing.T) {
 		t.Fatalf("create sparse input: %v, close: %v", err, closeErr)
 	}
 
+	assertDeliveryPreflightRejectsBeforeGitAdd(t, req, 4096)
+}
+
+func TestDeliveryRejectsAggregateInputBeforeWritingObjects(t *testing.T) {
+	_, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
+	for i := range 8 {
+		deliveryWrite(t, req.Workspace.Root, fmt.Sprintf("input-%d", i), strings.Repeat(string(rune('a'+i)), 1024))
+	}
+	assertDeliveryPreflightRejectsBeforeGitAdd(t, req, 4096)
+}
+
+func assertDeliveryPreflightRejectsBeforeGitAdd(t *testing.T, req workspacefs.DeliveryRequest, limit int64) {
+	t.Helper()
 	git, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
@@ -203,16 +247,17 @@ func TestDeliveryRejectsSparseFileBeforeWritingObjects(t *testing.T) {
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	scratch := t.TempDir()
-	fs, err := workspacefs.NewDeliveryFS(scratch, 4096)
+	fs, err := workspacefs.NewDeliveryFS(scratch, limit)
 	if err != nil {
 		t.Fatal(err)
 	}
 	before := deliveryGit(t, req.MirrorPath, "count-objects", "-v")
-	if _, err := deliver(t, fs, req); !errors.Is(err, workspacefs.ErrDeliveryTooLarge) {
-		t.Fatalf("oversized sparse file: %v", err)
+	_, err = deliver(t, fs, req)
+	if _, statErr := os.Lstat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("git add ran before rejecting oversized input: %v", statErr)
 	}
-	if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("git add ran before rejecting oversized input: %v", err)
+	if !errors.Is(err, workspacefs.ErrDeliveryTooLarge) {
+		t.Fatalf("oversized input: %v", err)
 	}
 	if entries, err := os.ReadDir(scratch); err != nil || len(entries) != 0 {
 		t.Fatalf("scratch retained objects: %v, %v", entries, err)
@@ -234,5 +279,33 @@ func TestDeliveryKeepsLogicalObjectLimitAfterPreflight(t *testing.T) {
 	}
 	if after := deliveryGit(t, req.MirrorPath, "count-objects", "-v"); after != before {
 		t.Fatalf("mirror objects changed: before %q, after %q", before, after)
+	}
+}
+
+func TestDeliveryLinkedWorktreeUsesBothExcludeFiles(t *testing.T) {
+	f, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
+	main := req.Workspace.Root
+	root := filepath.Join(t.TempDir(), "linked")
+	deliveryGit(t, main, "worktree", "add", "--detach", root, req.Workspace.BaseCommit)
+	gitdir := deliveryGit(t, root, "rev-parse", "--absolute-git-dir")
+	req.Workspace.Root = root
+
+	const header = "# Skills Ora materialized for the Agent; not part of the project.\n"
+	deliveryWrite(t, gitdir, "info/exclude", header+"/.agents/skills/local\n")
+	deliveryWrite(t, main, ".git/info/exclude", header+"/.agents/skills/shared\n/ignored-by-common\n")
+	deliveryWrite(t, root, ".agents/skills/local/SKILL.md", "local private skill")
+	deliveryWrite(t, root, ".agents/skills/shared/SKILL.md", "shared private skill")
+	deliveryWrite(t, root, "ignored-by-common", "project exclude")
+	// Git's higher-priority .gitignore can re-include these paths; the Ora rules still win.
+	deliveryWrite(t, root, ".gitignore", "!/.agents/skills/local\n!/.agents/skills/shared\n")
+	deliveryWrite(t, root, "normal-change", "deliver me")
+
+	snap, err := deliver(t, f, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := deliveryGit(t, req.MirrorPath, "ls-tree", "-r", "--name-only", snap.Commit)
+	if strings.Contains(tree, "SKILL.md") || strings.Contains(tree, "ignored-by-common") || !strings.Contains(tree, "normal-change") {
+		t.Fatalf("linked checkout excludes were not applied: %s", tree)
 	}
 }

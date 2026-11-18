@@ -2,6 +2,7 @@ package workspacefs
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/wanglongan587/cloud/v2-server/internal/gitexclude"
 )
 
 // DefaultDeliveryObjectBytes is the logical object budget for one snapshot.
@@ -264,8 +267,10 @@ func (s *DeliveryFS) Deliver(ctx context.Context, req DeliveryRequest) (Snapshot
 	if _, err := g.value(ctx, "add", "-A", "--", "."); err != nil {
 		return Snapshot{}, err
 	}
-	if err := removeMaterializedPaths(ctx, g, base, exclude); err != nil {
-		return Snapshot{}, err
+	for _, rules := range exclude {
+		if err := removeMaterializedPaths(ctx, g, base, rules); err != nil {
+			return Snapshot{}, err
+		}
 	}
 	tree, err := g.value(ctx, "write-tree")
 	if err != nil || tree == baseTree {
@@ -344,46 +349,20 @@ func checkDeliveryFileBytes(ctx context.Context, g deliveryGit, root string, rem
 	}
 }
 
-func copyDeliveryExclude(root, scratch string) ([]byte, error) {
-	at, err := os.OpenRoot(root)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, ErrGone
-	}
+func copyDeliveryExclude(root, scratch string) ([][]byte, error) {
+	layout, err := gitexclude.Resolve(root)
 	if err != nil {
 		return nil, err
 	}
-	defer at.Close()
-	const exclude = ".git/info/exclude"
-	info, err := at.Lstat(exclude)
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
-		return nil, nil
-	}
+	rules, err := layout.Excludes()
 	if err != nil {
 		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, nil
-	}
-	if info.Size() > MaxDiffBytes {
-		return nil, errors.New("invalid workspace excludes")
-	}
-	file, err := at.Open(exclude)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	raw, err := io.ReadAll(io.LimitReader(file, MaxDiffBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) > MaxDiffBytes {
-		return nil, errors.New("workspace excludes too large")
 	}
 	dir := filepath.Join(scratch, "info")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
-	return raw, os.WriteFile(filepath.Join(dir, "exclude"), raw, 0600)
+	return rules, os.WriteFile(filepath.Join(dir, "exclude"), bytes.Join(rules, []byte{'\n'}), 0600)
 }
 
 const materializedExcludeHeader = "# Skills Ora materialized for the Agent; not part of the project."

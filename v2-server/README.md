@@ -638,6 +638,8 @@ HTTP 集成测试按 `chat.openapi.json` 验证 JSON 响应，向注入点传入
 
 变更视图、单文件 diff 和 patch 下载从镜像读取交付，路由见下节。
 
+如果交付失败记录也无法落库，轮次仍以 `delivery_unavailable` 结束，页面不再显示进行中。未落库的交付留待启动重试，当时工作目录可能已包含后续改动。
+
 ### Agent 工作区查看
 
 对话页、任务运行页和工作流运行页的右侧面板只读查看 Agent 的工作副本和它的回合交付，使用独立候选契约 [`workspace.openapi.json`](workspace.openapi.json)。浏览文件读工作副本：正式 Cloud 中 Node 运行在沙盒里，服务端读不到工作副本，届时要改为经 Node 读取；这里因为 v2-server 与 Node 同机，直接读本机目录。变更和 patch 读项目镜像里的交付（见上节）。读取逻辑在 [`internal/workspacefs`](internal/workspacefs)。

@@ -257,6 +257,9 @@ func TestDeliveryFinalizationErrorDoesNotStrandTask(t *testing.T) {
 			result, _ := observeTurn(t, f, ref, 0)
 			view := readDeliveryView(t, f, store.DeliverySource{Kind: execution.CallerTask, ID: run.ID, TaskID: task.ID})
 			if failRecord {
+				if view.InProgress || !view.HasWork || view.Latest != nil {
+					t.Fatalf("ended turn still looks active or lost its recovery work: %+v", view)
+				}
 				if result.Status != execution.StatusFailed || result.FailureCode != execution.FailureDeliveryUnavailable {
 					t.Fatalf("ordinary terminal fallback: %+v", result)
 				}
@@ -441,9 +444,74 @@ func TestBootDeliveryContinuesAfterPersistentItemFailure(t *testing.T) {
 	first := readDeliveryView(t, f, sources[0])
 	second := readDeliveryView(t, f, sources[1])
 	third := readDeliveryView(t, f, sources[2])
-	if !first.InProgress || first.Latest != nil || second.Failed == nil ||
+	if first.InProgress || !first.HasWork || first.Latest != nil || second.Failed == nil ||
 		second.Failed.ReasonCode != execution.FailureDeliveryUnavailable || third.Failed == nil ||
 		third.Failed.ReasonCode != "workspace_not_ready" || attempts != [3]int{6, 4, 1} {
 		t.Fatalf("recovery did not isolate item failures: first %+v, second %+v, third %+v, attempts %v", first, second, third, attempts)
+	}
+}
+
+// Cancel's unlocked pre-read observes "not staged"; the Agent's terminal is staged before Cancel
+// takes the worker's terminal lock. Cancel must still treat the turn as staged.
+func TestCancelStageRaceAfterPreRead(t *testing.T) {
+	f, barrier, agent, project, at := newBlockedDeliveryRuntime(t)
+	_, ref, call := startBlockedChat(t, f, agent, project, at)
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	f.service.readDeliveryWork = func(read context.Context, r execution.Ref) (store.DeliveryWork, error) {
+		work, err := f.db.DeliveryWork(read, r)
+		if read != ctx || err != nil || work.Result != nil {
+			return work, err
+		}
+		// Stale read returned to Cancel; now let the Agent stage its terminal.
+		call.unblock()
+		for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			if w, e := f.db.DeliveryWork(f.ctx, r); e == nil && w.Result != nil {
+				return work, nil
+			}
+		}
+		t.Error("terminal never staged")
+		return work, nil
+	}
+	done := make(chan error, 1)
+	var got execution.Result
+	go func() {
+		r, err := f.service.Cancel(ctx, f.scope, ref)
+		got = r
+		done <- err
+	}()
+	waitDeliveryRequest(t, f, barrier.at)
+	barrier.allow <- struct{}{}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	session, err := f.service.ReadSession(f.ctx, f.scope, ref.SessionID)
+	if err != nil || session.EndedAt != nil || got.Status != execution.StatusCompleted {
+		t.Fatalf("stage that won after Cancel's pre-read ended the session: ended=%v result=%+v err=%v", session.EndedAt, got, err)
+	}
+}
+
+func TestDeliveryEscapingExcludeIsUnavailable(t *testing.T) {
+	f, barrier, agent, project, at := newBlockedDeliveryRuntime(t)
+	outside := filepath.Join(t.TempDir(), "exclude")
+	if err := os.WriteFile(outside, []byte("*.tmp\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(at.Path, ".git", "info", "exclude")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, path); err != nil {
+		t.Fatal(err)
+	}
+	src, ref, call := startBlockedChat(t, f, agent, project, at)
+	call.unblock()
+	req := waitDeliveryRequest(t, f, barrier.at)
+	barrier.allow <- struct{}{}
+	observeTurn(t, f, ref, 0)
+	got := readDeliveryView(t, f, src)
+	if got.Failed == nil || got.Failed.ReasonCode != execution.FailureDeliveryUnavailable ||
+		runtimeDeliveryGit(t, req.MirrorPath, "for-each-ref", "refs/ora/deliveries") != "" {
+		t.Fatalf("escaping exclude did not produce delivery_unavailable without a ref: %+v", got)
 	}
 }

@@ -49,7 +49,11 @@ func retryDeliveryWrite(ctx context.Context, maxAttempts int, run func(context.C
 func (s *Service) stageDelivery(ctx context.Context, w *worker, result execution.Result) (execution.Result, error) {
 	w.terminalMu.Lock()
 	defer w.terminalMu.Unlock()
-	actual, err := s.db.StageDeliveryTerminal(ctx, w.scope, w.ref, result)
+	stage := s.db.StageDeliveryTerminal
+	if s.delivery == nil {
+		stage = s.db.FinishExecutionTurn
+	}
+	actual, err := stage(ctx, w.scope, w.ref, result)
 	if err == nil {
 		w.staged = true
 	}
