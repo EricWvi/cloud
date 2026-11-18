@@ -109,6 +109,11 @@ type Options struct {
 	// DownloadPluginPackage stages a workflow package before import. Nil uses the public
 	// marketplace downloader.
 	DownloadPluginPackage PluginPackageDownloader
+	// Deliveries reads retained turn deliveries for the change view and patch download; nil
+	// answers 503 workspace_unavailable wherever a delivery would be read.
+	Deliveries DeliveryReader
+	// MaxPatchBytes caps a downloadable delivery patch; zero or less uses DefaultMaxPatchBytes.
+	MaxPatchBytes int
 	// Context is the server's lifetime: work the handler runs beyond any one request, such as a
 	// decomposition verdict other requests share, stops when it ends. Nil uses
 	// context.Background(), for tests and callers whose handler lives as long as the process.

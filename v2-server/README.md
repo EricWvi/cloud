@@ -29,6 +29,7 @@ V2_LOGIN=email go run .                # 开发模式，监听 127.0.0.1:8090
 | `V2_DATABASE_URL` | `postgres://ora:ora-local@127.0.0.1:55432/ora_v2?sslmode=disable` | PostgreSQL |
 | `V2_DATA_DIR` | `$HOME/.ora-v2` | 仓库 mirror、marketplace checkout、Node 与对话目录；同一目录只允许一个进程持有，使用短路径以满足 Unix socket 长度限制；用 release 构建的 Node 时，它和各级父目录都不能组可写或其他人可写（不能放在 `/tmp` 下），否则启动时报错退出 |
 | `V2_DELIVERY_MAX_OBJECT_BYTES` | `67108864`（64 MiB） | 每轮交付相对起点新增的 Git 对象的未压缩字节总数，须为正整数；超限记录「改动过大」 |
+| `V2_DELIVERY_MAX_PATCH_BYTES` | `16777216`（16 MiB） | 在线下载一次交付的完整 patch 的字节上限，须为正整数；超限返回 413 `patch_too_large`，交付本身保留 |
 | `V2_USERS_FILE` | `users.json` | 启动时预置的账号文件（相对进程工作目录）：`users` 里的 `email`、可选的 `displayName`、`role`（`owner` / `member`）；`retired` 里列出要从成员页移除的旧预置 `email`。`users` 幂等写入，已存在的账号只更新名字和角色；不在 `users` 里的账号默认保留，只有 `retired` 中的地址会在首次启动时软删除。文件缺失、没有 owner、邮箱重复或 `users` 与 `retired` 重叠时拒绝启动 |
 | `V2_PLUGIN_MARKETPLACE_URL` | `https://github.com/ora-space/marketplace` | 未设置使用开发默认，显式空字符串关闭官方源；插件市场 Git HTTPS 地址；禁止携带凭据、query 或 fragment。离线测试直接构造 Syncer 使用本地仓库 |
 | `V2_PLUGIN_MARKETPLACE_BRANCH` | `main` | 市场同步分支；启动时浅克隆并拉取，之后按间隔快进工作副本 |
@@ -635,27 +636,34 @@ HTTP 集成测试按 `chat.openapi.json` 验证 JSON 响应，向注入点传入
 
 先写 Git ref，再写 PostgreSQL 记录。起点和结果的树相同记为 `empty`，无 ref；大小超限或其他失败记为 `failed` 并保留原因。崩溃时写到镜像但未落库的 ref 不会从交付读接口发现。启动先结束未完成的执行，再补交付，之后才恢复工作流调度和接收请求。已清理的目录记录 `workspace_removed`；`-cleanup` 保留镜像与交付历史。
 
-本模块提供从镜像读取交付记录的变更、单文件 diff 与含二进制内容的完整 patch 的后端能力。下节列出现有工作区 HTTP 路由。
+变更视图、单文件 diff 和 patch 下载从镜像读取交付，路由见下节。
 
 ### Agent 工作区查看
 
-对话页和工作流运行页的右侧面板只读查看 Agent 的工作副本，使用独立候选契约 [`workspace.openapi.json`](workspace.openapi.json)。正式 Cloud 中 Node 运行在沙盒里，服务端读不到工作副本，届时要改为经 Node 读取；这里因为 v2-server 与 Node 同机，直接读本机目录。读取逻辑在 [`internal/workspacefs`](internal/workspacefs)。
+对话页、任务运行页和工作流运行页的右侧面板只读查看 Agent 的工作副本和它的回合交付，使用独立候选契约 [`workspace.openapi.json`](workspace.openapi.json)。浏览文件读工作副本：正式 Cloud 中 Node 运行在沙盒里，服务端读不到工作副本，届时要改为经 Node 读取；这里因为 v2-server 与 Node 同机，直接读本机目录。变更和 patch 读项目镜像里的交付（见上节）。读取逻辑在 [`internal/workspacefs`](internal/workspacefs)。
 
 | 路由 | 行为 |
 |---|---|
 | `GET …/chat/conversations/{cid}/workspace/entries?path=` | 对话工作副本的一层目录，目录在前；`path` 省略为根 |
 | `GET …/chat/conversations/{cid}/workspace/file?path=` | 一个文本文件的内容 |
-| `GET …/chat/conversations/{cid}/workspace/changes` | 相对克隆时 commit 的变更文件，含未跟踪且未忽略的文件，带增删行数 |
-| `GET …/chat/conversations/{cid}/workspace/diff?path=` | 一个文件相对克隆时 commit 的 unified diff；未变更时为空 |
-| `GET …/workflow-runs/{rid}/workspace/{entries,file,changes,diff}` | 同上，读取该运行各 Agent 节点共用的工作副本 |
+| `GET …/chat/conversations/{cid}/workspace/changes` | 最近一次 `delivered` 或 `empty` 交付相对起点的变更文件，带增删行数，并带 `deliveryState` |
+| `GET …/chat/conversations/{cid}/workspace/diff?path=&deliveryId=` | 一个文件在该交付里相对起点的 unified diff；未变更时为空。`deliveryId` 可选，固定读同一来源的某次成功交付 |
+| `GET …/chat/conversations/{cid}/workspace/deliveries/{deliveryId}/patch` | 下载一次交付相对起点的完整 patch（含新文件和二进制，`git apply` 可直接应用） |
+| `GET …/workflow-runs/{rid}/workspace/{entries,file,changes,diff,deliveries/{deliveryId}/patch}` | 同上，读取该运行各 Agent 节点共用的工作副本和该运行的交付 |
+| `GET …/tasks/{taskid}/runs/{rid}/workspace/{entries,file,changes,diff,deliveries/{deliveryId}/patch}` | 同上，读取这次任务运行的工作副本和交付 |
 
-`…` 是 `/api/v2/tenants/{tid}`。对话只能读本人的（他人的按 404 `not_found`），运行与运行详情一样对租户成员可见。
+`…` 是 `/api/v2/tenants/{tid}`。对话只能读本人的（他人的按 404 `not_found`，和不存在的对话相同），运行与运行详情一样对租户成员可见。交付的读取权限与此相同；来源被删除后（删除对话、删除工作流运行），它的交付不再可读，交付 ref 留在镜像里。交付 ID 只在当前来源内查找，别的来源的 ID 返回 404 `delivery_not_found`。
 
-- **位置落库**：Agent 运行时在工作副本克隆并物化技能后、Agent 启动前，把 `WorkspaceID → 目录、克隆时 commit` 写进 `v2_workspaces`，所以会话结束、服务重启后仍能查看。还没克隆好时返回 404 `workspace_not_ready`；目录已被 `-cleanup` 删除时返回 410 `workspace_removed`。
+- **变更视图**：`deliveryState.mode` 为 `delivery` 时，`viewDelivery` 是正在显示的成功交付（`empty` 也算，它取代之前的交付，文件列表为空），`latestDelivery` 是最近一次结果（含失败），`latestFailedDelivery` 是最近一次失败，`reasonCode`、`reason` 说明原因；`inProgress` 表示这个来源有一轮正在执行或正在交付，此时仍显示上一次交付。还没有成功交付时文件列表为空，`baseCommit` 取记录的起点。只要来源有一轮登记过交付，变更和 diff 就不再读工作副本，第一轮还在执行或第一次交付失败时也一样。
+- **旧会话**：本功能上线前的会话没有登记过交付，`mode` 为 `working_directory`，照旧读工作副本：相对克隆时 commit 的变更文件，含未跟踪且未忽略的文件；工作副本被删后返回 410 `workspace_removed`。不为它们补交付记录。
+- **固定某次交付的 diff**：`deliveryId` 格式不对返回 400 `invalid_delivery_id`，找不到返回 404 `delivery_not_found`，是失败的交付返回 409 `delivery_failed`（`params.reasonCode`、`params.reason`）；`viewDelivery` 是这次交付，其余字段反映来源当前状态。
+- **patch 下载**：200 为 `application/octet-stream`，`Content-Disposition: attachment; filename="delivery-<id>.patch"`；`empty` 交付返回 204；失败的交付 409 `delivery_failed`；超过 `V2_DELIVERY_MAX_PATCH_BYTES` 返回 413 `patch_too_large`（`params.message` 为「改动过大，无法在线下载」，`params.maxBytes` 为上限），交付保留；镜像或交付 ref 读不到返回 503 `workspace_unavailable`。patch 先在上限内完整生成再发送，出错时不会有部分内容。交付只能下载 patch，没有 `git fetch` 入口，也没有任何写入交付或 ref 的路由。
+- **缓存**：变更、diff 和 patch 的响应带 `Cache-Control: private, no-store`。
+- **位置落库**：Agent 运行时在工作副本克隆并物化技能后、Agent 启动前，把 `WorkspaceID → 目录、克隆时 commit` 写进 `v2_workspaces`，所以会话结束、服务重启后仍能浏览。还没克隆好时浏览（以及旧会话的变更）返回 404 `workspace_not_ready`；目录已被 `-cleanup` 删除时浏览返回 410 `workspace_removed`，变更、diff 和 patch 照常读交付。
 - **路径**：只接受相对路径，解析符号链接后必须仍在工作副本内，`.git` 不可见；越界返回 400 `invalid_path`。目录列表跳过指向工作副本外的符号链接。
 - **上限**：文件 2 MiB、diff 输出 4 MiB（413 `too_large`），含 NUL 或非 UTF-8 的文件返回 422 `binary_file`；目录最多 5000 项、变更最多 2000 个文件，超出时 `truncated`。
-- **不改 Agent 的 Git 状态**：变更和 diff 在 index 的临时副本里把未跟踪文件标为 intent-to-add 后计算，Agent 的 index 不变。git 调用关闭 hooks、fsmonitor、外部 diff 和 textconv。v2 的 Agent 本来就以同一用户在本机执行命令，这些读取不增加它的权限。
-- **简化**：不检测重命名（显示为删除加新增）；不做文件监听，页面在工具调用完成和一轮结束时刷新；工作流只到运行级，不区分节点各自改了哪些文件。Ora 物化进工作副本的技能不算变更，见「用户技能」。
+- **不改 Agent 的 Git 状态**：旧会话的变更和 diff 在 index 的临时副本里把未跟踪文件标为 intent-to-add 后计算，Agent 的 index 不变。git 调用关闭 hooks、fsmonitor、外部 diff 和 textconv。v2 的 Agent 本来就以同一用户在本机执行命令，这些读取不增加它的权限。
+- **简化**：不检测重命名（显示为删除加新增）；不做文件监听，页面在工具调用完成和一轮结束时刷新；工作流只到运行级，不区分节点各自改了哪些文件。没有交付历史列表，只能读最近的结果，或按已知 ID 固定 diff、下载 patch。Ora 物化进工作副本的技能不算变更，见「用户技能」。
 
 ## 进程内 Agent 执行接口
 

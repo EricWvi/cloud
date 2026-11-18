@@ -90,6 +90,10 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	if e != nil {
 		return e
 	}
+	maxPatch, e := strconv.Atoi(envOr("V2_DELIVERY_MAX_PATCH_BYTES", strconv.Itoa(server.DefaultMaxPatchBytes)))
+	if e != nil || maxPatch <= 0 {
+		return errors.New("V2_DELIVERY_MAX_PATCH_BYTES must be a positive integer")
+	}
 
 	db, e := store.Open(ctx, dbURL)
 	if e != nil {
@@ -314,6 +318,8 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 		TaskRuns:           taskRuns,
 		TaskDecompositions: decompositions,
 		TaskWorkflows:      taskWorkflows,
+		Deliveries:         delivery,
+		MaxPatchBytes:      maxPatch,
 		// The signal context ends with the process, before the database pool is closed.
 		Context: ctx,
 	}, workflowRuns)
