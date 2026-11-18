@@ -15,6 +15,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/idaas"
 	"github.com/wanglongan587/cloud/v2-server/internal/login"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
+	"github.com/wanglongan587/cloud/v2-server/internal/store"
 )
 
 // envDefault preserves an explicit empty value, which disables optional integrations.
@@ -123,4 +124,13 @@ func loginRedirects(methods loginMethods, publicURL *url.URL, getenv func(string
 	}
 	redirects[server.LoginProviderHuaweiIDaaS] = client
 	return redirects, nil
+}
+
+// databaseProfile is what a start with these login methods makes of the database: email login
+// brings the development accounts and demo data, so only it may start a development database.
+func databaseProfile(methods loginMethods) string {
+	if methods.has(server.LoginProviderEmail) {
+		return store.ProfileDevelopment
+	}
+	return store.ProfileDeployment
 }

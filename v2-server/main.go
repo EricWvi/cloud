@@ -135,6 +135,10 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	for _, m := range db.AppliedMigrations() {
 		slog.Info("applied database migration", "version", m.Version, "name", m.Name)
 	}
+	if e := db.ClaimProfile(ctx, databaseProfile(login)); e != nil {
+		db.Close()
+		return e
+	}
 	db.DisableOfficialMarket(envDefault("V2_PLUGIN_MARKETPLACE_URL", "https://github.com/ora-space/marketplace") == "")
 	var preset store.Preset
 	if login.has(server.LoginProviderEmail) {

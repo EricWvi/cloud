@@ -23,7 +23,7 @@ V2_LOGIN=email go run .                # 开发模式，监听 127.0.0.1:8090
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `V2_LOGIN` | 必填 | 开放的登录方式，逗号分隔，登录页按这个顺序显示；不设或为空拒绝启动（没有默认值，忘了配置的部署不会开出无密码的邮箱登录），开发写 `email`，`task v2:demo` 等入口已设好。可选 `email`（只凭邮箱登录，仅用于开发和演示）与 `huawei-idaas`（华为 IDaaS，配置见[部署说明](docs/deployment.md)）；写了未知、重复或空的项在任何数据操作前拒绝启动。`-fixture-check`、`-test-fixtures` 要求开了 `email` |
+| `V2_LOGIN` | 必填 | 开放的登录方式，逗号分隔，登录页按这个顺序显示；不设或为空拒绝启动（没有默认值，忘了配置的部署不会开出无密码的邮箱登录），开发写 `email`，`task v2:demo` 等入口已设好。可选 `email`（只凭邮箱登录，仅用于开发和演示）与 `huawei-idaas`（华为 IDaaS，配置见[部署说明](docs/deployment.md)）；写了未知、重复或空的项在任何数据操作前拒绝启动。`-fixture-check`、`-test-fixtures` 要求开了 `email`。开了 `email` 的启动只能用于开发库，没开的只能用于部署库：库在第一次启动时记下类型，之后换方式启动会被拒绝 |
 | `V2_PUBLIC_URL` | 未设置 | 浏览器访问本服务的地址（`http`/`https`，只能是根地址，不带路径、查询串）。设置后，带会话 Cookie 的写请求只接受这个 origin；未设置时 `Origin` 须与请求的 Host 相同。是 `https` 时会话 Cookie 改名为 `__Host-ora_session` 并加 `Secure`。在会改写 Host 的反向代理后面必须设置它，否则 `Origin` 与 Host 对不上，所有写请求都会 `403`。开了 `email` 又是 `https` 时启动日志会警告 |
 | `V2_FRONTEND_DIR` | 未设置 | 前端构建目录；未设置保留 API-only |
 | `V2_ADDR` | `127.0.0.1:8090` | 监听地址 |

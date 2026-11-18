@@ -45,7 +45,7 @@ version before migrations cannot be upgraded and startup refuses it; drop and re
 
 Keep configuration and secrets in protected process-manager configuration, outside the archive:
 
-- `V2_LOGIN=huawei-idaas`: a deployment lists only this, never `email` (email login has no password, so knowing a member's address is enough to sign in as them).
+- `V2_LOGIN=huawei-idaas`: a deployment lists only this, never `email` (email login has no password, so knowing a member's address is enough to sign in as them; it also marks a development database, see "Database profile" below).
   When `/auth/providers` does not list `email`, the frontend treats the install as a deployment and hides
   only the browser-only model-connections page; the workspace roles page and workflow role fields remain available.
 - `V2_PUBLIC_URL`: the public HTTPS address browsers use, the root only, without a path (see "HTTPS ingress"); a path is refused at startup. The IDaaS callback is fixed at
@@ -87,6 +87,11 @@ The launcher resolves `V2_FRONTEND_DIR` and `V2_NODE_ASSETS_DIR` relative to its
 contents and executes the server. The fixture flags require email login and a deployment start refuses them. `-cleanup` is allowed: stop the service, then run
 `start.sh -cleanup` with the same configuration; it removes only registered, confirmed-stopped Node and conversation directories
 and keeps repository mirrors and database history. A deployment start skips development presets, demo preparation and demo warming.
+
+**Database profile**: on its first start (or first `admin-invite`) a database records whether it is a development database (email
+login on) or a deployment database (off). A later start of the other kind is refused: a development database cannot start without
+email (its demo team and preset accounts would appear in the deployment), and a deployment database cannot start with email (it
+would receive demo data and passwordless login). To change, create a new database.
 
 ## First administrator
 
