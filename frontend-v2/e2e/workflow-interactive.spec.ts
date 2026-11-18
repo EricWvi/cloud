@@ -34,6 +34,19 @@ const siblings = JSON.stringify({
   ],
 })
 
+/** Start → 起草 and Start → 规划, both interactive: two parallel nodes wait for input at once. */
+const parallelPair = JSON.stringify({
+  nodes: [
+    { id: 'start', type: 'workflow', position: { x: 0, y: 0 }, data: { kind: 'start', title: '开始' } },
+    { id: 'draft', type: 'workflow', position: { x: 320, y: 0 }, data: { kind: 'agent', title: '起草', agentConfig: { executor: { agentCli: 'official/ora-space.opencode', modelId: 'fixture' }, prompt: '根据需求起草方案：{{#start.input#}}', interactive: true } } },
+    { id: 'plan', type: 'workflow', position: { x: 320, y: 200 }, data: { kind: 'agent', title: '规划', agentConfig: { executor: { agentCli: 'official/ora-space.opencode', modelId: 'fixture' }, prompt: '根据需求排出开发计划：{{#start.input#}}', interactive: true } } },
+  ],
+  edges: [
+    { id: 'e1', source: 'start', target: 'draft' },
+    { id: 'e2', source: 'start', target: 'plan' },
+  ],
+})
+
 /** Publishes graph, creates a run of it in Demo from the chat entry and starts it. */
 async function startRun(page: Page, graph: string, label: string) {
   await page.goto('/chat')
@@ -154,6 +167,59 @@ test('interactive Agent: a sibling running its Agent leaves the parked session o
   await pane.getByRole('button', { name: '完成', exact: true }).click()
   await expect(row('成功')).toBeVisible({ timeout: 60_000 })
   expect((await draftRow()).draft!.status).toBe('succeeded')
+})
+
+test('parallel nodes: the run view switches between their sessions, and each keeps its own conversation', async ({ page }, testInfo) => {
+  test.skip(!realAgents, 'prepared Node assets are required for a real Agent session')
+  test.setTimeout(300_000)
+  const { tenantId, pane, runId: readRunId } = await startRun(page, parallelPair, '并行会话')
+
+  // Both nodes run their first turn concurrently and park; the theater shows them side by side.
+  await expect(pane.locator('[data-path-node="draft"]')).toContainText('等待输入', { timeout: 150_000 })
+  await expect(pane.locator('[data-path-node="plan"]')).toContainText('等待输入', { timeout: 150_000 })
+  const carousel = pane.getByRole('group', { name: '切换并行节点' })
+  await expect(carousel).toBeVisible()
+  await expect(pane.getByText(/2 个节点并行/)).toBeVisible()
+  await screenshot(page, testInfo.outputPath('6-parallel-acts.png'))
+
+  const openSession = async (title: string) => {
+    await pane.getByRole('button', { name: `聚焦到 ${title}` }).click()
+    await expect(pane.getByRole('button', { name: `聚焦到 ${title}` })).toHaveAttribute('aria-pressed', 'true')
+    await pane.getByRole('button', { name: '查看节点会话' }).click()
+  }
+  const back = async () => {
+    await pane.getByRole('button', { name: '返回阶段摘要' }).click()
+    await expect(carousel).toBeVisible()
+  }
+
+  // 起草's session shows its own task, and a reply goes to that session only.
+  await openSession('起草')
+  await expect(pane.getByText(/根据需求起草方案/).first()).toBeVisible()
+  await expect(pane.getByText(/根据需求排出开发计划/)).toHaveCount(0)
+  const composer = pane.getByRole('textbox', { name: '回复 Agent' })
+  await composer.fill('只回复起草这一步')
+  await composer.press('Enter')
+  await expect(pane.getByText('只回复起草这一步').first()).toBeVisible({ timeout: 30_000 })
+  await back()
+
+  // Switching to 规划 shows its session, without 起草's task or reply.
+  await openSession('规划')
+  await expect(pane.getByText(/根据需求排出开发计划/).first()).toBeVisible()
+  await expect(pane.getByText(/根据需求起草方案/)).toHaveCount(0)
+  await expect(pane.getByText('只回复起草这一步')).toHaveCount(0)
+  await screenshot(page, testInfo.outputPath('7-switched-session.png'))
+  await back()
+
+  const runId = await readRunId()
+  const turns = async () => {
+    const detail = (await (await page.request.get(`/api/v2/tenants/${tenantId}/workflow-runs/${runId}`)).json()) as { nodes: { nodeId: string; sessionId: string | null; payload: string | null }[] }
+    const of = (id: string) => detail.nodes.find((n) => n.nodeId === id)!
+    return { draft: of('draft'), plan: of('plan') }
+  }
+  await expect.poll(async () => JSON.parse((await turns()).draft.payload!).interactive.turns, { timeout: 150_000 }).toBe(2)
+  const { draft, plan } = await turns()
+  expect(draft.sessionId).not.toBe(plan.sessionId)
+  expect(JSON.parse(plan.payload!).interactive.turns).toBe(1)
 })
 
 test('the Agent inspector marks interactive mode as the end_turn version', async ({ page }, testInfo) => {

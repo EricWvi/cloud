@@ -78,7 +78,7 @@ func (h *Host) forgetFinished(runID string, st *runState) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	st.mu.Lock()
-	idle := st.dispatched == 0 && st.starters == 0 && len(st.attempts) == 0 && len(st.interactive) == 0
+	idle := st.dispatched == 0 && st.starters == 0 && len(st.attempts) == 0 && len(st.interactive) == 0 && len(st.unended) == 0
 	st.mu.Unlock()
 	if idle && h.runs[runID] == st {
 		delete(h.runs, runID)
@@ -225,7 +225,8 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 	// bound elsewhere) must not leave the new session running unowned.
 	if _, err := h.store.BindWorkflowNodeSession(h.ctx, st.scope.TenantID, d.RunID, d.NodeRunID, ref.SessionID); err != nil {
 		endErr := h.end(st.scope, ref.SessionID)
-		if cancelling, last := st.endTurn(a, endErr); cancelling {
+		cancelling, last := h.endTurn(st, d.RunID, a, endErr)
+		if cancelling {
 			if last {
 				h.finishCancel(st, d.RunID)
 			}
@@ -259,7 +260,7 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 	}
 	result, err := h.awaitTurn(st.scope, ref, caller)
 	endErr := h.end(st.scope, ref.SessionID)
-	if cancelling, last := st.endTurn(a, endErr); cancelling {
+	if cancelling, last := h.endTurn(st, d.RunID, a, endErr); cancelling {
 		if last {
 			h.finishCancel(st, d.RunID)
 		}
@@ -384,8 +385,8 @@ func (h *Host) clearSessionSlotWait(d workflow.AgentDispatch) {
 
 // sessionsInUse counts the run's unfinished sessions: every turn starting a new session, from just
 // before its Start until its attempt is forgotten (an automatic attempt after its session's End
-// returned), and every tracked interactive node whose session's End has not returned, counted once while
-// its first turn is also such a turn. Callers hold mu.
+// was confirmed), every tracked interactive node whose session's End was not confirmed, counted once
+// while its first turn is also such a turn, and every lingering session (see linger). Callers hold mu.
 func (st *runState) sessionsInUse() int {
 	used := 0
 	starting := map[string]bool{}
@@ -400,7 +401,7 @@ func (st *runState) sessionsInUse() int {
 			used++
 		}
 	}
-	return used
+	return used + len(st.unended)
 }
 
 // slotsMayHaveChanged wakes the attempts waiting in beginSession. Callers hold mu.
@@ -442,16 +443,39 @@ func (st *runState) endStart(a *attemptState, ref execution.Ref, err error) (can
 // this was the cancelled run's last turn. Only that last one closes the run: a sibling whose stop
 // is not confirmed yet keeps the run open until its own turn ends.
 func (st *runState) endTurn(a *attemptState, endErr error) (cancelling, last bool) {
+	cancelling, last, _ = st.endSessionTurn(a, endErr)
+	return cancelling, last
+}
+
+// endTurn is runState.endTurn for a turn that started a new session and then had it ended: when
+// that End was not confirmed, the session keeps its slot in the same critical section that forgets
+// the turn, and is ended again in the background (see linger).
+func (h *Host) endTurn(st *runState, runID string, a *attemptState, endErr error) (cancelling, last bool) {
+	cancelling, last, session := st.endSessionTurn(a, endErr)
+	if session != "" {
+		h.retryEnd(st, runID, session)
+	}
+	return cancelling, last
+}
+
+// endSessionTurn implements both endTurns and returns the session that must linger, if any.
+func (st *runState) endSessionTurn(a *attemptState, endErr error) (cancelling, last bool, lingering string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	if endConfirmed(endErr) {
+		endErr = nil // a session already gone is ended
+	}
 	if endErr != nil && a.scope != "" {
 		if st.scopeCleanupErrors == nil {
 			st.scopeCleanupErrors = map[string]error{}
 		}
 		st.scopeCleanupErrors[a.scope] = endErr
 	}
+	if endErr != nil && a.session && a.ref != nil && st.linger(a.ref.SessionID) {
+		lingering = a.ref.SessionID
+	}
 	st.forget(a)
-	return st.cancelling, st.lastCancelled()
+	return st.cancelling, st.lastCancelled(), lingering
 }
 
 // startResolved wakes whoever waits for any of the run's Starts to return (see stopTurns).

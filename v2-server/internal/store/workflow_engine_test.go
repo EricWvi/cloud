@@ -225,7 +225,7 @@ func TestWorkflowEngineFailureFailsTheRunOnce(t *testing.T) {
 
 	raw := "半截回答"
 	var attempt int
-	advanced, err := s.FailWorkflowEngineNode(ctx, run.ID, wave[0].ID, "第一次失败", &raw, func(n int, node, runPayload []byte) ([]byte, error) {
+	advanced, _, err := s.FailWorkflowEngineNode(ctx, run.ID, wave[0].ID, "第一次失败", &raw, func(n int, node, runPayload []byte) ([]byte, error) {
 		attempt = n
 		return []byte(`{"error_detail":{"kind":"session"}}`), nil
 	})
@@ -248,13 +248,13 @@ func TestWorkflowEngineFailureFailsTheRunOnce(t *testing.T) {
 
 	// A late duplicate is ignored; a sibling that fails afterwards records its own row but cannot
 	// overwrite the run's terminal error.
-	if again, err := s.FailWorkflowEngineNode(ctx, run.ID, wave[0].ID, "重复", nil, func(int, []byte, []byte) ([]byte, error) {
+	if again, _, err := s.FailWorkflowEngineNode(ctx, run.ID, wave[0].ID, "重复", nil, func(int, []byte, []byte) ([]byte, error) {
 		t.Fatal("detail built for a finished attempt")
 		return nil, nil
 	}); err != nil || again {
 		t.Fatalf("duplicate fail = %v %v", again, err)
 	}
-	if _, err := s.FailWorkflowEngineNode(ctx, run.ID, wave[1].ID, "兄弟失败", nil, func(int, []byte, []byte) ([]byte, error) {
+	if _, _, err := s.FailWorkflowEngineNode(ctx, run.ID, wave[1].ID, "兄弟失败", nil, func(int, []byte, []byte) ([]byte, error) {
 		return []byte(`{}`), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -576,7 +576,7 @@ func TestCloseOrphanedWorkflowNodeLeavesFinishedAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.FailWorkflowEngineNode(ctx, run.ID, wave[1].ID, "兄弟失败", nil, func(int, []byte, []byte) ([]byte, error) { return []byte(`{}`), nil }); err != nil {
+	if _, _, err := s.FailWorkflowEngineNode(ctx, run.ID, wave[1].ID, "兄弟失败", nil, func(int, []byte, []byte) ([]byte, error) { return []byte(`{}`), nil }); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []string{nodes[0].ID, wave[1].ID} {
@@ -621,7 +621,7 @@ func TestWorkflowEngineAbandonClosesOnlyUnstartedAttemptsOfEndedRuns(t *testing.
 	if _, err := s.BindWorkflowNodeSession(ctx, tenant, run.ID, wave[2].ID, "session-c"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.FailWorkflowEngineNode(ctx, run.ID, wave[0].ID, "失败", nil, func(int, []byte, []byte) ([]byte, error) {
+	if _, _, err := s.FailWorkflowEngineNode(ctx, run.ID, wave[0].ID, "失败", nil, func(int, []byte, []byte) ([]byte, error) {
 		return []byte(`{}`), nil
 	}); err != nil {
 		t.Fatal(err)

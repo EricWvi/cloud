@@ -1061,6 +1061,72 @@ func TestDriverIPCConcurrentWorkflowStartsKeepEachOthersSkills(t *testing.T) {
 	}
 }
 
+// Two sessions of one wave select different Skills under one name. Whichever projects first keeps
+// its Skill; only the other is refused, never both: a sibling that is admitted but has not
+// projected anything yet does not count against the session projecting.
+func TestDriverIPCClashingSkillsOfOneWaveRefuseOnlyOneSession(t *testing.T) {
+	h := newIPCHarness(t, func(f *fakeNodeIPC, m node.Message) bool {
+		if m.Type == "clone_repository" {
+			_ = os.MkdirAll(filepath.Join(f.project.root, "w", "r", m.ExecutionID), 0700)
+		}
+		return false
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	run := func(session execution.Session, turn string) <-chan ipcRunOutcome {
+		done := make(chan ipcRunOutcome, 1)
+		go func() {
+			result, err := h.driver.Run(ctx, h.scope, session, execution.Turn{
+				Ref: execution.Ref{SessionID: session.ID, TurnID: turn}, Prompt: execution.TextPrompt("prompt"),
+				Caller: execution.Caller{Kind: execution.CallerWorkflow, ID: "run", AttemptID: turn},
+			}, discardIPCEvent)
+			done <- ipcRunOutcome{result, err}
+		}()
+		return done
+	}
+	review := func(content string) *execution.Skills {
+		return &execution.Skills{Documents: []execution.SkillDocument{{Name: "review", Description: "review", Content: content}}}
+	}
+	var f *fakeNodeIPC
+	for i := range 20 {
+		ws := fmt.Sprintf("clash-workspace-%d", i)
+		a, b := h.session(fmt.Sprintf("ca-%d", i), ws), h.session(fmt.Sprintf("cb-%d", i), ws)
+		a.Skills, b.Skills = review("A-REVIEW"), review("B-REVIEW")
+		doneA, doneB := run(a, fmt.Sprintf("cta-%d", i)), run(b, fmt.Sprintf("ctb-%d", i))
+		if f == nil {
+			f = receiveIPC(t, h.created)
+		}
+		var refused *ipcRunOutcome
+		var pending <-chan ipcRunOutcome
+		select {
+		case got := <-doneA:
+			refused, pending = &got, doneB
+		case got := <-doneB:
+			refused, pending = &got, doneA
+		case <-time.After(30 * time.Second):
+			t.Fatalf("round %d: neither session was refused", i)
+		}
+		if refused.result.FailureCode != "workflow_skill_name_conflict" {
+			t.Fatalf("round %d: first outcome %+v, want workflow_skill_name_conflict", i, refused)
+		}
+		start := nextIPCCommand(t, f, "start_agent_session")
+		var payload struct {
+			Spec struct {
+				Turn struct {
+					ID string `json:"turn_id"`
+				} `json:"initial_turn"`
+			} `json:"spec"`
+		}
+		if err := json.Unmarshal(start.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		f.finishTurn(t, start, payload.Spec.Turn.ID, "kept")
+		if got := receiveIPC(t, pending); got.err != nil {
+			t.Fatalf("round %d: the session that projected first failed too: %+v", i, got)
+		}
+	}
+}
+
 // Node refuses the session over a checkout's limit by ending only that execution, with a stable
 // detail and the control connection open. The turn fails with that code as a lost Agent, and the
 // run's other session on the checkout keeps working.

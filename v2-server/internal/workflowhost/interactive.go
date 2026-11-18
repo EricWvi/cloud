@@ -82,6 +82,8 @@ type interactiveNode struct {
 	// sessionGone means Node no longer holds the session: its End returned (or the session was
 	// already gone). Until then the node keeps its slot of the run's checkout (see sessionsInUse).
 	sessionGone bool
+	// endRetrying marks a background retry of an unconfirmed End (see endInteractive).
+	endRetrying bool
 	// stopping marks a turn the starter asked to stop, so its end also ends the session even if
 	// the turn completed before the stop reached it.
 	stopping bool
@@ -186,12 +188,13 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 	// A turn the starter stopped is never a setup failure, even when the stop caught the session
 	// still being prepared: it parks like any stopped turn.
 	if err == nil && n.turns == 0 && !n.stopping && result.AgentLost && (result.NotStarted || execution.CheckoutRefused(result.FailureCode)) {
-		if st.interactive[n.d.Node.ID] == n {
-			delete(st.interactive, n.d.Node.ID)
-			st.slotsMayHaveChanged()
-		}
+		// Nothing is running, so End is idempotent; until it is confirmed the session keeps
+		// its slot.
+		lingering := st.dropInteractive(n)
 		st.mu.Unlock()
-		h.end(st.scope, n.session) // nothing is running; idempotent
+		if lingering {
+			h.endLingering(st, n.d.RunID, n.session)
+		}
 		message := "the Agent session could not be set up: " + result.FailureCode
 		if execution.CheckoutRefused(result.FailureCode) {
 			message = "Node refused the Agent session on the run's directory: " + result.FailureCode
@@ -214,13 +217,10 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 	st.mu.Unlock()
 	if ended {
 		// A stop or a lost Agent has already ended the session; ending again is idempotent and
-		// covers a turn whose result could not be read. Unconfirmed is logged by end. Like an
-		// automatic attempt, the slot frees only once End returned.
-		h.end(st.scope, n.session)
-		st.mu.Lock()
-		n.sessionGone = true
-		st.slotsMayHaveChanged()
-		st.mu.Unlock()
+		// covers a turn whose result could not be read. Like an automatic attempt, the slot frees
+		// only once End is confirmed; until then the node keeps it, and completing the node or
+		// the run's end ends the session again.
+		h.endInteractive(st, n)
 	}
 	if err != nil {
 		h.log.Warn("lost an interactive workflow turn", "run", n.d.RunID, "node_run", n.d.NodeRunID, "error", publicReason(err))
@@ -257,13 +257,8 @@ func (h *Host) park(st *runState, n *interactiveNode) {
 	}
 	if !moved {
 		// Only a run that stopped running refuses the park of its own running attempt.
-		h.end(st.scope, n.session)
-		st.mu.Lock()
-		if st.interactive[n.d.Node.ID] == n {
-			delete(st.interactive, n.d.Node.ID)
-			st.slotsMayHaveChanged()
-		}
-		st.mu.Unlock()
+		h.endInteractive(st, n)
+		h.forgetInteractive(st, n)
 		h.closeOrphan(n)
 		h.hub.Publish(n.d.RunID)
 		return
@@ -559,6 +554,9 @@ func (h *Host) CompleteNode(ctx context.Context, scope server.WorkflowRunScope, 
 		stopCtx, cancel := context.WithTimeout(ctx, h.stopTimeout)
 		err := h.exec.End(stopCtx, st.scope, n.session)
 		cancel()
+		if endConfirmed(err) {
+			err = nil
+		}
 		// Confirmed or not, the execution service takes no further turn for a session it was
 		// asked to end, so the node stops offering the conversation either way: a message sent
 		// now would be accepted and then lost.
@@ -634,14 +632,10 @@ func (h *Host) runStopped(ctx context.Context, runID string) bool {
 }
 
 // closeLost forgets a node whose run stopped running without settling it, closes its row and
-// drops the run's state once nothing else of it is in flight. Its session is already ended.
+// drops the run's state once nothing else of it is in flight. Its session was ended, or lingers
+// until a retry confirms the End (see linger).
 func (h *Host) closeLost(st *runState, n *interactiveNode) {
-	st.mu.Lock()
-	if st.interactive[n.d.Node.ID] == n {
-		delete(st.interactive, n.d.Node.ID)
-		st.slotsMayHaveChanged()
-	}
-	st.mu.Unlock()
+	h.forgetInteractive(st, n) // its completion already tried to end the session
 	h.closeOrphan(n)
 	h.hub.Publish(n.d.RunID)
 	h.forgetFinished(n.d.RunID, st)
@@ -685,7 +679,7 @@ func (h *Host) endParked(ctx context.Context, st *runState) error {
 	}
 	st.mu.Unlock()
 	for _, id := range sessions {
-		if err := h.exec.End(ctx, st.scope, id); err != nil {
+		if err := h.exec.End(ctx, st.scope, id); !endConfirmed(err) {
 			return err
 		}
 	}
@@ -721,13 +715,11 @@ func (h *Host) releaseOrphans(st *runState, runID string) {
 		if !h.closeOrphan(n) {
 			continue // the run was resumed meanwhile; the attempt is no longer an orphan
 		}
-		st.mu.Lock()
-		if st.interactive[n.d.Node.ID] == n {
-			delete(st.interactive, n.d.Node.ID)
-			st.slotsMayHaveChanged()
-		}
-		st.mu.Unlock()
-		h.end(st.scope, n.session)
+		// End first and only then give the slot back, as park does: a resume releases the
+		// orphans before it admits its fan-out, which must not be refused by Node at the
+		// checkout's session limit while Node still holds this session.
+		h.endInteractive(st, n)
+		h.forgetInteractive(st, n)
 		h.hub.Publish(runID)
 	}
 }

@@ -29,11 +29,13 @@ type workflowSkillState struct {
 // until the next node starts.
 //
 // siblings are the selections of the run's other sessions that are still live in this checkout
-// (an interactive node waiting for its starter). Their skills stay projected, because those
-// Agents read the same directory on their next turn; where a sibling's skill has the name of one
-// in selection, the starting session's version is the one projected. A skill is dropped by the
-// first projection after its session ended, so a live sibling's later turns can still see the
-// skills of a node that started and ended in between.
+// (a sibling Agent executing beside it, or an interactive node waiting for its starter). Their
+// skills stay projected, because those Agents read the same directory while they run. A skill a
+// sibling projects under the same name is shared when it is the same package version or the same
+// document; anything else under that name refuses the starting session with
+// workflow_skill_name_conflict instead of replacing the file a live Agent may be reading. A skill
+// is dropped by the first projection after its session ended, so a live sibling's later turns can
+// still see the skills of a node that started and ended in between.
 //
 // The caller holds skillsMu, and reads siblings with liveSiblingSkills inside that section.
 func (p *projectRuntime) applyWorkflowSkills(checkout, workspace string, selection execution.Skills, siblings []execution.Skills) error {
@@ -53,7 +55,10 @@ func (p *projectRuntime) applyWorkflowSkills(checkout, workspace string, selecti
 		return err
 	}
 	next := workflowSkillState{Documents: slices.Clone(selection.Documents)}
-	names := map[string]bool{}
+	// names maps each projected skill name to what it projects (see skillIdentity); own marks the
+	// names the starting session selected.
+	names := map[string]string{}
+	own := map[string]bool{}
 	for _, plugin := range selection.Plugins {
 		found := false
 		for _, link := range installed {
@@ -61,10 +66,10 @@ func (p *projectRuntime) applyWorkflowSkills(checkout, workspace string, selecti
 				continue
 			}
 			found = true
-			if names[link.Name] {
+			if _, taken := names[link.Name]; taken {
 				return errors.New("workflow_skill_name_conflict")
 			}
-			names[link.Name] = true
+			names[link.Name], own[link.Name] = linkIdentity(link), true
 			if data, err := os.ReadFile(filepath.Join(p.assetPath(link), "SKILL.md")); err != nil || len(data) == 0 {
 				return errors.New("workflow_skill_package_unavailable")
 			}
@@ -78,25 +83,47 @@ func (p *projectRuntime) applyWorkflowSkills(checkout, workspace string, selecti
 		if _, err := skilldoc.Validate(skilldoc.Document{Name: doc.Name, Description: doc.Description, Content: doc.Content}); err != nil {
 			return errors.New("workflow_skill_invalid")
 		}
-		if names[doc.Name] {
+		if _, taken := names[doc.Name]; taken {
 			return errors.New("workflow_skill_name_conflict")
 		}
-		names[doc.Name] = true
+		names[doc.Name], own[doc.Name] = documentIdentity(doc), true
 	}
-	// Siblings were validated when they started; one whose package has since gone or whose name
-	// is taken is left out rather than failing the session that is starting.
+	// claim adds a sibling's skill under name. The same skill is shared. A different one under a
+	// name the starting session selected refuses it; one clashing only with another sibling's
+	// (whose package has gone since, or which started before this rule) is left out, as each
+	// sibling was checked against the others when it started.
+	claim := func(name, identity string) (bool, error) {
+		held, taken := names[name]
+		switch {
+		case !taken:
+			names[name] = identity
+			return true, nil
+		case held != identity && own[name]:
+			return false, errors.New("workflow_skill_name_conflict")
+		}
+		return false, nil
+	}
 	for _, sibling := range siblings {
 		for _, plugin := range sibling.Plugins {
 			for _, link := range installed {
-				if link.ID == plugin.ID && link.Version == plugin.Version && !names[link.Name] {
-					names[link.Name] = true
+				if link.ID != plugin.ID || link.Version != plugin.Version {
+					continue
+				}
+				added, err := claim(link.Name, linkIdentity(link))
+				if err != nil {
+					return err
+				}
+				if added {
 					next.Links = append(next.Links, link)
 				}
 			}
 		}
 		for _, doc := range sibling.Documents {
-			if !names[doc.Name] {
-				names[doc.Name] = true
+			added, err := claim(doc.Name, documentIdentity(doc))
+			if err != nil {
+				return err
+			}
+			if added {
 				next.Documents = append(next.Documents, doc)
 			}
 		}
@@ -185,6 +212,14 @@ func (p *projectRuntime) applyWorkflowSkills(checkout, workspace string, selecti
 	return writeSkillIndex(statePath, next)
 }
 
+// linkIdentity and documentIdentity tell two skills of the same name apart: a package version, or
+// a document's rendered SKILL.md.
+func linkIdentity(link skillLink) string { return "package:" + link.ID + "@" + link.Version }
+
+func documentIdentity(doc execution.SkillDocument) string {
+	return "document:" + renderWorkflowSkill(doc)
+}
+
 func renderWorkflowSkill(doc execution.SkillDocument) string {
 	return skilldoc.Render(skilldoc.Document{Name: doc.Name, Description: doc.Description, Content: doc.Content})
 }
@@ -194,14 +229,16 @@ func workflowSkillError(err error) bool {
 }
 
 // liveSiblingSkills returns, in session order, the selections of the other sessions admitted to
-// the workspace's checkout that have not stopped.
+// the workspace's checkout that projected their Skills and have not stopped. Siblings admitted in
+// the same wave but still preparing are left out: each checks against the others when it takes
+// skillsMu, so two clashing selections refuse only the one projecting second.
 func (p *projectRuntime) liveSiblingSkills(workspace, session string) []execution.Skills {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	owners := p.owners[workspace]
 	var siblings []execution.Skills
 	for _, id := range slices.Sorted(maps.Keys(owners)) {
-		if id != session && owners[id] != nil {
+		if id != session && owners[id] != nil && p.projected[id] {
 			siblings = append(siblings, *owners[id])
 		}
 	}

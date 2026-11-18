@@ -581,13 +581,15 @@ func TestRetryWaitAbandonedWhenAContainerFailsTheRun(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
 		t.Fatal(err)
 	}
-	first := f.exec.awaitStart(t)
-	if f.exec.request(first).Caller.NodeID != "a" {
-		t.Fatalf("expected the root Agent first, got %s", f.exec.request(first).Caller.NodeID)
+	// The root Agent and the Iteration's member start in one wave and execute concurrently, in
+	// either order.
+	started := f.exec.awaitStarts(t, 2)
+	first, worker := started["a"], started["worker"]
+	if first == "" || worker == "" {
+		t.Fatalf("started %v, want the root Agent and the Iteration's worker", started)
 	}
 	f.exec.finish(first, execution.Result{Status: execution.StatusFailed, FailureCode: "execution_failed"})
 	row, _ := waiting(t, f, id)
-	worker := f.exec.awaitStart(t)
 	refused := completed("refused")
 	refused.StopReason = "refusal"
 	f.exec.finish(worker, refused)

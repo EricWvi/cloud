@@ -299,12 +299,14 @@ func without(items []string, drop string) []string {
 // current_nodes to the late node's anchor (scoped_node.rs:225-230). v2 does neither, because the
 // waits were already settled when the run left running, and the anchor must keep naming the node
 // that actually failed the run, which the run page and its error read; only the attempt changes.
+//
+// closedScope names the Loop round the failure closed, if any. Its other attempts are cancelled
+// here, but those executing still hold sessions that the caller must stop.
 func (s *Store) FailWorkflowEngineNode(
 	ctx context.Context, runID, nodeRunID, message string, output *string,
 	detail func(attempt int, node, run []byte) ([]byte, error),
-) (bool, error) {
-	advanced := false
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+) (advanced bool, closedScope string, err error) {
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		r, err := lockEngineRun(ctx, tx, runID)
 		if err != nil {
 			return err
@@ -358,6 +360,7 @@ func (s *Store) FailWorkflowEngineNode(
 			if _, err := tx.Exec(ctx, `UPDATE v2_workflow_node_runs SET status='cancelled', error=COALESCE(error,'{"reason":"sibling_failed"}'), finished_at=now(), updated_at=now() WHERE scope_id=$1 AND status IN ('pending','running') AND deleted_at IS NULL`, node.ScopeID); err != nil {
 				return err
 			}
+			closedScope = node.ScopeID
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE v2_workflow_runs SET status = 'failed', error = $2, finished_at = now(), updated_at = now()
@@ -366,7 +369,10 @@ func (s *Store) FailWorkflowEngineNode(
 		}
 		return writeCurrentNodes(ctx, tx, runID, []string{anchor})
 	})
-	return advanced, err
+	if err != nil {
+		return false, "", err
+	}
+	return advanced, closedScope, nil
 }
 
 // AbandonWorkflowEngineNode settles a dispatched attempt whose run ended before the attempt began

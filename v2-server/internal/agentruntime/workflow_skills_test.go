@@ -109,9 +109,8 @@ func TestWorkflowSkillsSelectOnlyRequestedInstalledPackage(t *testing.T) {
 }
 
 // A session that is still live in the run's checkout (an interactive node waiting for its
-// starter) keeps its skills projected when the run's next node starts with its own. The starting
-// node's version wins a shared name, and a sibling's skill goes with the first projection after
-// its session ended.
+// starter) keeps its skills projected when the run's next node starts with its own. A skill both
+// select is shared, and a sibling's skill goes with the first projection after its session ended.
 func TestWorkflowSkillsKeepLiveSiblingSkills(t *testing.T) {
 	p := &projectRuntime{root: t.TempDir()}
 	checkout := t.TempDir()
@@ -130,7 +129,7 @@ func TestWorkflowSkillsKeepLiveSiblingSkills(t *testing.T) {
 		{Name: "draft", Description: "draft", Content: "PARKED-DRAFT"}, {Name: "shared", Description: "shared", Content: "PARKED-SHARED"},
 	}}
 	next := execution.Skills{Documents: []execution.SkillDocument{
-		{Name: "review", Description: "review", Content: "NEXT-REVIEW"}, {Name: "shared", Description: "shared", Content: "NEXT-SHARED"},
+		{Name: "review", Description: "review", Content: "NEXT-REVIEW"}, {Name: "shared", Description: "shared", Content: "PARKED-SHARED"},
 	}}
 	if err := p.applyWorkflowSkills(checkout, "run", parked, nil); err != nil {
 		t.Fatal(err)
@@ -138,7 +137,7 @@ func TestWorkflowSkillsKeepLiveSiblingSkills(t *testing.T) {
 	if err := p.applyWorkflowSkills(checkout, "run", next, []execution.Skills{parked}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(read("draft"), "PARKED-DRAFT") || !strings.Contains(read("review"), "NEXT-REVIEW") || !strings.Contains(read("shared"), "NEXT-SHARED") {
+	if !strings.Contains(read("draft"), "PARKED-DRAFT") || !strings.Contains(read("review"), "NEXT-REVIEW") || !strings.Contains(read("shared"), "PARKED-SHARED") {
 		t.Fatalf("draft = %q, review = %q, shared = %q", read("draft"), read("review"), read("shared"))
 	}
 	if len(next.Documents) != 2 {
@@ -152,5 +151,65 @@ func TestWorkflowSkillsKeepLiveSiblingSkills(t *testing.T) {
 		if read(name) != "" {
 			t.Fatalf("skill %s outlived its sessions", name)
 		}
+	}
+}
+
+// A starting session whose skill has the name of a different skill a live sibling projects is
+// refused, and the sibling's file stays as it was: the sibling's Agent may be reading it. The same
+// goes for a package and a document of one name.
+func TestWorkflowSkillsRefuseADifferentSkillUnderALiveSiblingsName(t *testing.T) {
+	p := &projectRuntime{root: t.TempDir()}
+	checkout := t.TempDir()
+	parked := execution.Skills{Documents: []execution.SkillDocument{{Name: "shared", Description: "shared", Content: "PARKED-SHARED"}}}
+	if err := p.applyWorkflowSkills(checkout, "run", parked, nil); err != nil {
+		t.Fatal(err)
+	}
+	next := execution.Skills{Documents: []execution.SkillDocument{{Name: "shared", Description: "shared", Content: "NEXT-SHARED"}}}
+	err := p.applyWorkflowSkills(checkout, "run", next, []execution.Skills{parked})
+	if err == nil || err.Error() != "workflow_skill_name_conflict" {
+		t.Fatalf("err = %v, want workflow_skill_name_conflict", err)
+	}
+	data, err := os.ReadFile(filepath.Join(checkout, ".opencode/skills/shared/SKILL.md"))
+	if err != nil || !strings.Contains(string(data), "PARKED-SHARED") {
+		t.Fatalf("the sibling's skill = %q, %v", data, err)
+	}
+	// A sibling's skills that clash only with each other do not refuse an unrelated start.
+	other := execution.Skills{Documents: []execution.SkillDocument{{Name: "shared", Description: "shared", Content: "OTHER-SHARED"}}}
+	if err := p.applyWorkflowSkills(checkout, "run", execution.Skills{}, []execution.Skills{parked, other}); err != nil {
+		t.Fatalf("siblings clashing among themselves refused the start: %v", err)
+	}
+}
+
+// Two versions of one package are different Skills: a starting session that selected another
+// version of the package a live sibling projects is refused, and the sibling's link stays.
+func TestWorkflowSkillsRefuseAnotherVersionOfALiveSiblingsPackage(t *testing.T) {
+	p := &projectRuntime{root: t.TempDir()}
+	checkout := t.TempDir()
+	links := []skillLink{{"official/one", "1.0.0", "one"}, {"official/one", "2.0.0", "one"}}
+	for _, l := range links {
+		if err := os.MkdirAll(p.assetPath(l), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(p.assetPath(l), "SKILL.md"), []byte(l.Version), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeSkillIndex(p.linksPath(), links); err != nil {
+		t.Fatal(err)
+	}
+	parked := execution.Skills{Plugins: []execution.SkillPlugin{{ID: "official/one", Version: "1.0.0"}}}
+	if err := p.applyWorkflowSkills(checkout, "run", parked, nil); err != nil {
+		t.Fatal(err)
+	}
+	next := execution.Skills{Plugins: []execution.SkillPlugin{{ID: "official/one", Version: "2.0.0"}}}
+	if err := p.applyWorkflowSkills(checkout, "run", next, []execution.Skills{parked}); err == nil || err.Error() != "workflow_skill_name_conflict" {
+		t.Fatalf("err = %v, want workflow_skill_name_conflict", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(checkout, ".opencode/skills/one/SKILL.md")); err != nil || string(data) != "1.0.0" {
+		t.Fatalf("the sibling's package = %q, %v", data, err)
+	}
+	// The same version is shared.
+	if err := p.applyWorkflowSkills(checkout, "run", parked, []execution.Skills{parked}); err != nil {
+		t.Fatalf("the same version was refused: %v", err)
 	}
 }

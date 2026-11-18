@@ -56,7 +56,8 @@ type Repository interface {
 	CompleteNode(ctx context.Context, runID, nodeRunID string, output *string, keys map[string]any, fold func(payload []byte, node NodeRun) ([]byte, error)) (bool, error)
 	// FailNode records failure with the detail built for its attempt number. Iteration members
 	// leave propagation to the owner; other failures fail the running run and enclosing Loop.
-	FailNode(ctx context.Context, runID, nodeRunID, message string, output *string, detail func(attempt int, payload []byte) map[string]any) (bool, error)
+	// closedScope names the Loop round such a failure closed, whose other attempts it cancelled.
+	FailNode(ctx context.Context, runID, nodeRunID, message string, output *string, detail func(attempt int, payload []byte) map[string]any) (advanced bool, closedScope string, err error)
 	// AbandonNode closes a running attempt that has no session yet as cancelled when its run is no
 	// longer running, without moving the run's failure anchor. false means the run is running and
 	// the attempt must execute.
@@ -354,7 +355,7 @@ func (e *Engine) fail(ctx context.Context, runID, nodeRunID string, f Failure) e
 	if e.retry(ctx, runID, nodeRunID, f) {
 		return nil
 	}
-	advanced, err := e.repo.FailNode(ctx, runID, nodeRunID, f.Message, f.Output, func(attempt int, payload []byte) map[string]any {
+	advanced, closedScope, err := e.repo.FailNode(ctx, runID, nodeRunID, f.Message, f.Output, func(attempt int, payload []byte) map[string]any {
 		inject := true
 		if p, ok, _ := DecodeRunPayload(payload); ok {
 			inject = p.InjectLastFailure
@@ -365,6 +366,11 @@ func (e *Engine) fail(ctx context.Context, runID, nodeRunID string, f Failure) e
 		return err
 	}
 	e.publish(runID)
+	if closedScope != "" {
+		if stop, ok := e.agents.(FailedScopeDispatcher); ok {
+			stop.StopFailedScope(runID, closedScope)
+		}
+	}
 	return nil
 }
 
