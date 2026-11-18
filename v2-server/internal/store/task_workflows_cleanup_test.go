@@ -83,8 +83,12 @@ func TestTaskWorkflowDeletedAdmissionRestoresOriginalStatus(t *testing.T) {
 			h := taskworkflow.New(f.store, &reviewPort{taskWorkflowPort: taskWorkflowPort{db: f.store}})
 			defer h.Close()
 			rows, err := h.List(f.ctx, f.tenant, task.ID)
-			if err != nil || len(rows) != 1 || !rows[0].Deleted || rows[0].Status != store.WorkflowStatusFailed || rows[0].Failure != "Workflow run was deleted." {
+			if err != nil || len(rows) != 1 || !rows[0].Deleted || rows[0].Status != store.WorkflowStatusFailed || rows[0].Failure != "" {
 				t.Fatalf("deleted admission: %+v %v", rows, err)
+			}
+			var recordedFailure string
+			if err := f.db.QueryRow(f.ctx, `SELECT failure FROM v2_task_workflow_runs WHERE run_id=$1`, id).Scan(&recordedFailure); err != nil || recordedFailure != "Workflow run was deleted." {
+				t.Fatalf("stored link failure = %q %v, want %q", recordedFailure, err, "Workflow run was deleted.")
 			}
 			current, err := f.store.Task(f.ctx, f.tenant, task.ID)
 			if err != nil || current.Status != initial {

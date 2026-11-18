@@ -773,8 +773,12 @@ func (p postStartFailingPort) Start(ctx context.Context, tenant, user, id string
 	if err := p.realWorkflowTaskPort.Start(ctx, tenant, user, id); err != nil {
 		return err
 	}
-	<-p.started
-	return p.err
+	select {
+	case <-p.started:
+		return p.err
+	case <-time.After(10 * time.Second):
+		return errors.New("timed out waiting for the Agent turn to start")
+	}
 }
 
 func TestTaskCommentWorkflowRealWorkflowHostCancelAndUnconfirmedStop(t *testing.T) {

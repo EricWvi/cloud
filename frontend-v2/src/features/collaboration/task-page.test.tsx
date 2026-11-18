@@ -975,3 +975,22 @@ it('falls back to the workflow start failure message on unknown errors in TaskWo
 
   expect(await within(dialog).findByText('工作流启动失败，请检查输入后重试。')).toBeInTheDocument()
 })
+
+it('shows workflow assignee guidance on not_assignee errors in TaskWorkflowDialog', async () => {
+  const user = userEvent.setup()
+  const human = { type: 'human' as const, id: 'user-me', displayName: '演示用户', identifier: '' }
+  vi.mocked(api.getTask).mockResolvedValue(task({ assignee: human }))
+  vi.mocked(workflowsApi.listWorkflows).mockResolvedValue({
+    workflows: [{ id: 'wf-dev', namespace: 'team', name: '需求开发', publishedVersion: 'v1', createdAt: 1, updatedAt: 1 }],
+  })
+  vi.mocked(taskWorkflows.startTaskWorkflow).mockRejectedValueOnce(httpFault(409, 'not_assignee'))
+
+  renderPage()
+  await user.click(await screen.findByRole('button', { name: '用工作流处理' }))
+  const dialog = screen.getByRole('dialog')
+  await screen.findByRole('option', { name: '需求开发（v1）' })
+  await user.selectOptions(within(dialog).getByLabelText('工作流'), 'wf-dev')
+  await user.click(await within(dialog).findByRole('button', { name: '启动工作流' }))
+
+  expect(await within(dialog).findByText('任务派给了别人，只有负责人本人或所属小队成员能用工作流处理。')).toBeInTheDocument()
+})
