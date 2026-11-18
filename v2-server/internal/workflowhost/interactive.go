@@ -205,12 +205,13 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 	if err == nil && result.FailureCode == execution.FailureWorkspaceMissing {
 		// The node's session outlived a restart, but the checkout its Agent worked in is gone (or
 		// unknown to Node): nothing can continue the conversation or produce what it was asked for.
-		if st.interactive[n.d.Node.ID] == n {
-			delete(st.interactive, n.d.Node.ID)
-			st.slotsMayHaveChanged()
-		}
+		// As for a first turn that could not be set up, the session keeps its slot until its End
+		// is confirmed (the execution service has ended it, so End is idempotent).
+		lingering := st.dropInteractive(n)
 		st.mu.Unlock()
-		h.end(st.scope, n.session) // the execution service has ended it; idempotent
+		if lingering {
+			h.endLingering(st, n.d.RunID, n.session)
+		}
 		h.fail(n.d, workflow.Failure{Kind: workflow.FailureInteractiveSession, Message: "the run's checkout no longer exists, so the node's conversation cannot continue"})
 		return
 	}

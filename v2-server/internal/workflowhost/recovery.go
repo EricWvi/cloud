@@ -63,8 +63,19 @@ func (h *Host) recoverParked(ctx context.Context, st *runState, run store.Workfl
 		if err != nil {
 			return err
 		}
-		if n != nil {
-			st.track(n)
+		if n == nil {
+			continue
+		}
+		// A recovered node holds one of the run's session slots from now on, although its new
+		// Agent starts only with its next turn: a conservative count, as the slot is taken back
+		// then anyway.
+		st.track(n)
+		if n.sessionEnded && !n.sessionGone {
+			// The node's session ended before the restart (a stop, a lost Agent) but its End was
+			// never confirmed, so nothing retries it and it would keep its slot until the node
+			// completes. The new process's Node does not hold it: End confirms it at once, unless
+			// the end cannot be written, and is then retried like any unconfirmed End.
+			h.endInteractive(st, n)
 		}
 	}
 	return nil
@@ -130,24 +141,35 @@ func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDis
 
 // failParked fails a parked node that cannot continue after the restart and ends its session.
 // The engine fails only an executing attempt, so the row moves back to running first, as a turn
-// would move it.
+// would move it. Like any session no node tracks, it keeps a slot until its End is confirmed.
+// The new process's Node never held it, so only the execution service's write of the end can
+// leave it unconfirmed, and the End is retried while the run runs (see retryEnd).
 func (h *Host) failParked(st *runState, d workflow.AgentDispatch, session string, f workflow.Failure) error {
 	moved, err := h.store.MoveWorkflowEngineNode(h.ctx, d.RunID, d.NodeRunID, store.WorkflowStatusPending, store.WorkflowStatusRunning,
 		func(node []byte) ([]byte, error) { return node, nil })
 	if err != nil {
 		return fmt.Errorf("fail node run %s: %w", d.NodeRunID, err)
 	}
+	st.mu.Lock()
+	lingering := st.linger(session)
+	st.mu.Unlock()
+	if lingering {
+		h.endLingering(st, d.RunID, session)
+	}
 	if moved {
 		h.fail(d, f)
 	}
-	h.end(st.scope, session) // a failure to confirm is logged; the node no longer waits on it
 	return nil
 }
 
 // endUnparkedSessions ends the sessions execution recovery kept for nodes that turned out not to
-// wait any more: the sweep failed them or their run. Ending one that cannot be confirmed is logged;
-// the session then stays recorded as open until a later end, like any unconfirmed stop.
-// runID, when not empty, limits it to one run.
+// wait any more: the sweep failed them or their run. runID, when not empty, limits it to one run.
+//
+// Unlike a session a run's state tracks, an unconfirmed End here is only logged and not retried
+// (see retryEnd): it runs at startup, before any session starts, so the new process's Node never
+// held these sessions and only the execution service's write of the end can fail. Their runs
+// failed and start no session that a slot would guard, and the next start's execution recovery
+// ends whatever is left open, as their rows no longer wait.
 func (h *Host) endUnparkedSessions(ctx context.Context, runID string) error {
 	sessions, err := h.store.UnparkedWorkflowSessions(ctx, runID)
 	if err != nil {
