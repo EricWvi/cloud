@@ -19,10 +19,12 @@ task v2:e2e    # Playwright 端到端测试
 ```sh
 npm ci
 npm run dev           # /api、/auth、/healthz 代理到 v2-server（V2_SERVER，默认 :8090）
-npm run check         # 类型检查、lint、单元测试、构建；CI 的 v2 workflow 跑同一条
+npm run check         # 类型检查、lint、单元测试、构建、扫描构建产物里的演示 mock；CI 的 v2 workflow 跑同一条
 npm run api:generate  # api/openapi.json 变化后重新生成 src/api
 npm run e2e           # 端到端测试，自己拉起 v2-server（:8091）和前端（:5174）
 ```
+
+录屏用的演示 mock 都在 `src/lib/demo/`，只在 `VITE_DEMO_MOCK=1` 时打开（`task v2:demo` 等录屏命令会设上）。开关是 `flags.ts` 里的构建时常量 `DEMO_MOCK`，调用处要直接读它（`DEMO_MOCK && …`），不要包进函数，这样不带开关的构建会把 mock 的数据和文案整段剔除。`npm run demo:check` 扫描 `dist`，发现 `registry.ts` 里登记的任一 mock 标记就失败；CI 另外用 `VITE_DEMO_MOCK=1` 构建一次，确认每个标记都还能找到。新加 mock 时在 `registry.ts` 登记并给出标记。
 
 端到端测试默认连接 `task v2:db` 的 PostgreSQL（库 `ora_v2_e2e`，可用 `E2E_DATABASE_URL` 指定）。第一次运行前执行 `npx playwright install chromium`；本机已有 Chromium 时，也可以用 `PW_CHROMIUM_PATH` 指定可执行文件。
 

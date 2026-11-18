@@ -80,10 +80,16 @@ jobs:
           npm run api:generate
           git status --porcelain -- src/api
           test -z "$(git status --porcelain -- src/api)"
-      # frontend-v2 defines its gate (types, lint, tests, build) as `npm run check`.
+      # frontend-v2 defines its gate (types, lint, tests, build) as `npm run check`. It ends by
+      # scanning the build for demo mock markers, which a build without VITE_DEMO_MOCK=1 must not have.
       - if: hashFiles('frontend-v2/package-lock.json') != ''
         working-directory: frontend-v2
         run: npm run check
+      # The opposite check on a demo build: every marker must be there, or the scan above proves nothing.
+      - name: Demo build carries every mock marker
+        if: hashFiles('frontend-v2/package-lock.json') != ''
+        working-directory: frontend-v2
+        run: VITE_DEMO_MOCK=1 npx vite build --outDir dist-demo && node scripts/check-demo-mock.ts dist-demo --demo
 
   # The real frontend against the real v2-server on PostgreSQL, through a browser.
   e2e:

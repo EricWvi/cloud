@@ -23,7 +23,8 @@ The builder runs prepare-node.sh first: it compiles Node/reaper at the pinned co
 checks both Agent plugins against pinned SHA-256 digests, and checks Deno's version before recording
 its local digest. Build concurrency is limited to two. Local executable and Deno digests prove
 integrity, not publisher authenticity; trust the build machine and toolchain. The frontend uses
-offline mode with `VITE_DEMO_MOCK=0`. Only the server, built web files, five runtime resources,
+offline mode with `VITE_DEMO_MOCK=0`; the build then scans it and stops if any recording demo mock
+remains (`npm run demo:check`). Only the server, built web files, five runtime resources,
 manifest, launcher and deployment guides are packaged. User configuration, databases, data volumes
 and other files from the preparation directory are excluded. Manifest paths are relative; legacy
 absolute development manifests remain supported.

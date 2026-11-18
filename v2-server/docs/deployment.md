@@ -20,7 +20,8 @@ DESKTOP_REPOSITORY=/build/desktop V2_NODE_ASSETS_DIR=/build/assets \
 
 入口先调用 `prepare-node.sh`：按固定提交编译 Node/reaper，按固定 SHA-256 校验两个 Agent
 插件，检查 Deno 版本并记录本机摘要。构建并发限制为 2。Deno 和本机编译摘要只证明完整性，
-不是官方发布签名；构建机及其工具链必须可信。前端强制 `VITE_DEMO_MOCK=0`，使用 offline mode。
+不是官方发布签名；构建机及其工具链必须可信。前端强制 `VITE_DEMO_MOCK=0`，使用 offline mode；
+构建后扫描前端产物，发现录屏用的演示 mock 就中止打包（`npm run demo:check`）。
 包只包含服务端、web 构建、五项运行资源、清单、启动器和本文档，不复制用户配置、数据库或数据目录。
 准备目录中的其他内容（包括源码、用户文件）不进入包。`assets.json` 使用相对路径，运行时仍兼容旧的绝对路径开发清单。
 

@@ -14,7 +14,7 @@ mkdir -p "$stage/cloud/bin" "$stage/cloud/assets" "$stage/cloud/web" "$stage/clo
 (cd "$root/v2-server" && go build -p 2 -trimpath -o "$stage/cloud/bin/cloud" .)
 # Use a separate mode and explicitly override the mock flag from every Vite env file.
 # Shared .env files may still be read by Vite; none are copied into the package.
-(cd "$root/frontend-v2" && npm ci && VITE_DEMO_MOCK=0 npm run build -- --mode offline)
+(cd "$root/frontend-v2" && npm ci && VITE_DEMO_MOCK=0 npm run build -- --mode offline && npm run demo:check)
 cp -R "$root/frontend-v2/dist/." "$stage/cloud/web/"
 python3 "$root/v2-server/scripts/package-offline.py" "$assets" "$stage/cloud/assets"
 cp "$root/v2-server/scripts/start-offline.sh" "$stage/cloud/start.sh"
