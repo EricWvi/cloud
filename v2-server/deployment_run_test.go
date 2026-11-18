@@ -68,6 +68,8 @@ func TestDeploymentStartSeedsNoDemoData(t *testing.T) {
 	deploymentEnv(t, addr)
 	done := make(chan error, 1)
 	go func() { done <- run(addr, db, false, false, false) }()
+	// No kept-alive connection may outlive the requests, or shutdown would wait for it.
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 	ready := false
 	for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
 		select {
@@ -75,7 +77,7 @@ func TestDeploymentStartSeedsNoDemoData(t *testing.T) {
 			t.Fatalf("deployment start failed: %v", err)
 		default:
 		}
-		if res, err := http.Get("http://" + addr + "/healthz"); err == nil {
+		if res, err := client.Get("http://" + addr + "/healthz"); err == nil {
 			res.Body.Close()
 			if ready = res.StatusCode == 200; ready {
 				break
@@ -85,7 +87,7 @@ func TestDeploymentStartSeedsNoDemoData(t *testing.T) {
 	if !ready {
 		t.Fatal("deployment start never became ready")
 	}
-	res, err := http.Get("http://" + addr + "/auth/providers")
+	res, err := client.Get("http://" + addr + "/auth/providers")
 	if err != nil {
 		t.Fatal(err)
 	}
