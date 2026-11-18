@@ -1,15 +1,17 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router'
-import { Plus, Users } from 'lucide-react'
+import { Plus, UserPlus, Users } from 'lucide-react'
 import type { MemberListItem, SpacePlugin } from '@/api/generated.schemas'
 import { useGetApiV1MeTenants } from '@/api/me/me'
 import { useUser } from '@/app/auth/user'
+import { useEmailLogin } from '@/lib/deploy-mode'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { codeOf, statusOf } from '@/lib/api-client'
 import { archiveSquad, addSquadMember, createSquad, getSquad, listSquads, removeSquadMember, updateSquad, updateSquadMember, type SquadDetail, type SquadMember } from '@/lib/squads-api/generated'
 import { MemberPicker } from './member-picker'
+import { WorkspaceAccess } from './workspace-access'
 import { SquadCard } from './squad-card'
 import { SquadDetailView } from './squad-detail'
 import { PanelDialog } from '@/components/panel/panel-dialog'
@@ -19,7 +21,7 @@ import '@/components/panel/panel.css'
 import './squads.css'
 import { canMaintain, isLeader, squadTotals } from './squad-model'
 
-type Panel = { kind: 'create' } | { kind: 'detail'; id: string } | { kind: 'edit'; id: string } | { kind: 'members'; id: string } | null
+type Panel = { kind: 'create' } | { kind: 'access' } | { kind: 'detail'; id: string } | { kind: 'edit'; id: string } | { kind: 'members'; id: string } | null
 
 /**
  * 设置 / 小队: the workspace's squads, one squad's detail, and the maintainer's edits. Squads are
@@ -33,6 +35,7 @@ export default function SquadsPage() {
   const workspace = tenants.data?.items[0]
   const tenantId = workspace?.id ?? ''
   const workspaceRole = workspace?.role
+  const emailLogin = useEmailLogin()
   const client = useQueryClient()
   const [params, setParams] = useSearchParams()
   const linked = params.get('squad')
@@ -112,7 +115,10 @@ export default function SquadsPage() {
 
   return <div className="mc-scope mc-page">
     <PageHeader title="小队" description="工作空间里人和 Agent 的协作编组，成员在各小队里管理。指派给小队的任务，每个队员都会收到。" count={list.data ? items.length : undefined}
-      actions={<Button onClick={openCreate} disabled={!tenantId || list.isLoading || list.isError}><Plus data-icon="inline-start" />新建小队</Button>} />
+      actions={<>
+        {workspaceRole === 'owner' && <Button variant="outline" onClick={() => { setError(''); setPanel({ kind: 'access' }) }} disabled={!tenantId}><UserPlus data-icon="inline-start" />成员与邀请</Button>}
+        <Button onClick={openCreate} disabled={!tenantId || list.isLoading || list.isError}><Plus data-icon="inline-start" />新建小队</Button>
+      </>} />
       <section className="mc-list-section mc-squad-section" aria-label="小队列表">
 
         <div className="mc-summary" aria-label="编组概览">
@@ -145,6 +151,10 @@ export default function SquadsPage() {
       <SquadForm submitLabel="创建小队" saving={create.isPending} error={error} onSave={draft => create.mutate(draft)} onCancel={close} />
     </PanelDialog>}
 
+    {panel?.kind === 'access' && <PanelDialog icon={<UserPlus size={14} />} eyebrow="工作区" title="成员与邀请" subtitle="用一次性链接邀请新成员，管理未使用的链接，或把成员移出工作区。" onClose={close}>
+      <WorkspaceAccess tenantId={tenantId} userId={me.id} squads={items} />
+    </PanelDialog>}
+
     {panel?.kind === 'edit' && squad && <PanelDialog icon={<Users size={14} />} eyebrow="小队" title={`编辑 ${squad.name}`} subtitle="修改名称、简介与协作说明。" onClose={close}>
       <SquadForm initial={{ name: squad.name, description: squad.description, charter: squad.charter }} submitLabel="保存修改" saving={save.isPending} error={error} onSave={draft => save.mutate({ draft, target: squad })} onCancel={close} />
     </PanelDialog>}
@@ -158,7 +168,7 @@ export default function SquadsPage() {
     </PanelDialog>}
 
     {panel?.kind === 'members' && squad && <PanelDialog icon={<Users size={14} />} eyebrow="小队" title={`添加成员到 ${squad.name}`} subtitle="邀请新成员，或加入当前工作区的有效成员和已安装的 Agent；移出小队不影响工作区成员资格。" onClose={close}>
-      <MemberPicker squad={squad} tenantId={tenantId} canInvite={workspaceRole === 'owner'} adding={add.isPending || addAgent.isPending} error={error}
+      <MemberPicker squad={squad} tenantId={tenantId} canInvite={workspaceRole === 'owner' && emailLogin} adding={add.isPending || addAgent.isPending} error={error}
         onAdd={(member, role) => { setError(''); add.mutate({ member, role, target: squad }) }}
         onAddAgent={(plugin, role) => { setError(''); addAgent.mutate({ plugin, role, target: squad }) }}
         onClose={() => { setError(''); setPanel({ kind: 'detail', id: squad.id }) }} />

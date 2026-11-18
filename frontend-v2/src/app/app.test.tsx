@@ -144,3 +144,63 @@ describe('deployed install hides browser-only settings routes', () => {
     )
   })
 })
+
+describe('accounts outside any workspace', () => {
+  const tenant = { id: '00000000-0000-4000-8000-0000000000aa', name: '研发部', status: 'active', role: 'member' }
+
+  it('shows the no-team screen instead of the shell', async () => {
+    fakeBackend((c) => {
+      if (c.url === '/api/v1/me') return { status: 200, data: demoUser }
+      if (c.url === '/api/v1/me/tenants') return { status: 200, data: { items: [], nextCursor: '' } }
+      return undefined
+    })
+    renderAt('/')
+    expect(await screen.findByRole('heading', { name: '还没有加入团队' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: features[0].title })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '退出登录' })).toBeInTheDocument()
+  })
+
+  it('joins through an invitation link and lands in the shell', async () => {
+    let joined = false
+    const bodies: string[] = []
+    fakeBackend((c) => {
+      if (c.url === '/api/v1/me') return { status: 200, data: demoUser }
+      if (c.url === '/api/v1/me/tenants') return { status: 200, data: { items: joined ? [tenant] : [], nextCursor: '' } }
+      if (c.url === '/api/v1/invites/preview') {
+        bodies.push(String(c.data))
+        return { status: 200, data: { state: 'active', tenant: { id: tenant.id, name: tenant.name }, squad: { id: 's', name: '后端' }, role: 'member', alreadyMember: joined } }
+      }
+      if (c.url === '/api/v1/invites/accept' && c.method === 'post') return (joined = true), { status: 200, data: { tenantId: tenant.id } }
+      return undefined
+    })
+    const router = renderAt('/invite/secret-token')
+    expect(await screen.findByText(/你被邀请以成员身份加入/)).toHaveTextContent('「研发部」的小队「后端」')
+    // Opening the page only previews; the token travels in the body, not the API path.
+    expect(joined).toBe(false)
+    expect(JSON.parse(bodies[0])).toEqual({ token: 'secret-token' })
+    await userEvent.click(screen.getByRole('button', { name: '加入' }))
+    await screen.findByRole('heading', { level: 1, name: features[0].title }, { timeout: 5000 })
+    expect(router.state.location.pathname).toBe(`/${features[0].path}`)
+  })
+
+  it('explains a used link', async () => {
+    fakeBackend((c) => {
+      if (c.url === '/api/v1/me') return { status: 200, data: demoUser }
+      if (c.url === '/api/v1/invites/preview') return { status: 200, data: { state: 'used', tenant: { id: tenant.id, name: tenant.name }, squad: null, role: 'member', alreadyMember: false } }
+      return undefined
+    })
+    renderAt('/invite/used-token')
+    expect(await screen.findByRole('alert')).toHaveTextContent('链接已失效，请联系管理员重新生成。')
+    expect(screen.queryByRole('button', { name: '加入' })).not.toBeInTheDocument()
+  })
+
+  it('asks a signed-out visitor to sign in and comes back to the link', async () => {
+    fakeBackend((c) => {
+      if (c.url === '/api/v1/me') return { status: 401, data: {} }
+      if (c.url === '/auth/providers') return { status: 200, data: { providers: ['email'] } }
+      return undefined
+    })
+    renderAt('/invite/abc')
+    expect(await screen.findByRole('heading', { name: '登录 Ora' })).toBeInTheDocument()
+  })
+})

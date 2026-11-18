@@ -23,3 +23,16 @@ export function useDeployedVersion() {
   })
   return isDeployedProviders(query.data?.providers)
 }
+
+/**
+ * Whether the server offers the email login, which is also what lets an owner invite by address.
+ * Like `useDeployedVersion`, an unknown answer keeps the development behavior.
+ */
+export function useEmailLogin() {
+  const query = useQuery({
+    queryKey: ['auth', 'providers'],
+    queryFn: getProviders,
+    retry: false,
+  })
+  return !isDeployedProviders(query.data?.providers)
+}
