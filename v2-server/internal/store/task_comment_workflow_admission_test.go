@@ -334,3 +334,51 @@ func TestTaskWorkflowRunsClearsDeletedMentionAndSourceFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskWorkflowRunsClearsDeletedHandleFailure(t *testing.T) {
+	f := newSquadFixture(t)
+	user := f.login(t, "owner", "owner")
+	addProject(t, f, user)
+	task := createTask(t, f, user, store.TaskInput{
+		Title:    "Deleted handle failure",
+		Assignee: &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: user},
+	})
+	wf, _, err := f.store.CreateWorkflow(f.ctx, f.tenant, "Workflow", handlingGraph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := f.store.PublishWorkflow(f.ctx, f.tenant, wf.ID, "v1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runID, fresh, err := f.store.CreateTaskWorkflowRun(f.ctx, store.NewTaskWorkflow{
+		TenantID: f.tenant, TaskID: task.ID, UserID: user, Key: "deleted-handle",
+		WorkflowID: wf.ID, SnapshotID: snap.ID,
+	})
+	if err != nil || !fresh {
+		t.Fatalf("create task workflow run = %s %t %v", runID, fresh, err)
+	}
+	if _, err := f.store.StartWorkflowRun(f.ctx, f.tenant, runID); err != nil {
+		t.Fatal(err)
+	}
+	msg := "private run error"
+	if _, err := f.store.FinishWorkflowRun(f.ctx, f.tenant, runID, store.WorkflowStatusFailed, nil, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.SettleTaskWorkflow(f.ctx, f.tenant, runID, "failed", "private handle error"); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := f.store.TaskWorkflowRuns(f.ctx, f.tenant, task.ID)
+	if err != nil || len(before) != 1 || before[0].Failure != "private handle error" || before[0].Deleted {
+		t.Fatalf("before delete = %+v %v", before, err)
+	}
+	if err := f.store.DeleteWorkflowRun(f.ctx, f.tenant, runID); err != nil {
+		t.Fatal(err)
+	}
+	after, err := f.store.TaskWorkflowRuns(f.ctx, f.tenant, task.ID)
+	if err != nil || len(after) != 1 || !after[0].Deleted || after[0].Failure != "" {
+		t.Fatalf("after delete = %+v %v", after, err)
+	}
+}

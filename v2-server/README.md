@@ -590,7 +590,7 @@ not execute these kinds: `crates/application/src/workflow_run/engine/node_type.r
 - **变量与失败尝试投影**：运行 payload 的其余部分不公开；除了 Condition 的 `conditionDecisions`，详情再投影 desktop `GetWorkflowRunResponse` 里的两项。`variables` 读 `variablePool` 的 catalog（`<节点>.<名字>`，按键排序），`sourceNodeId` 取 `writer`，没赋值的不带 `value`，赋了 `null` 的带 `null`；跳过旧的 `selected_branch_id` 路由项，键不合法的项跳过而不让整个详情失败（desktop 在这里报 payload 损坏）。运行开始前没有变量池，读出空列表。`failedAttempts` 是被软删的 `failed` 节点行（desktop 的 `list_failed_attempts`），取各行 `payload.error_detail`，没有的跳过；只有重试、续跑和整次重跑会软删失败行；v2 由自动重试（根作用域与 Loop / Iteration 成员）和「从失败处继续」软删（v2 没有整次重跑），其余情况下为空，当前失败的尝试就是节点自己的行。
 - **能力边界**：支持在同一次运行里「从失败处继续」（只保留现状，不回滚文件，见下文）；整次运行 restart、checkpoint 回滚和换用新发布版本续跑不在演示范围，顶栏“再跑一次”创建新运行。重启中断由执行桥提供，见下文“工作流执行”。
 
-运行页按选中的 Loop scope 或 Iteration 下标投影节点状态，并以该次尝试的 `nodeRunId` 订阅会话事件。该轮未执行的成员没有尝试身份，不继承前一轮的会话或执行元数据。启动输入和根变量只覆盖根 Start，不覆盖 Loop 的本轮入口。`failedAttempts` 按发生它的作用域归属：根作用域的尝试归根节点，Iteration 尝试归它的轮次，Loop 尝试归它的轮次 scope；前端按选中的轮次展示，跨轮不串。
+运行页按选中的 Loop scope 或 Iteration 下标投影节点状态，并以该次尝试的 `nodeRunId` 订阅会话事件。该轮未执行的成员没有尝试身份，不继承前一轮的会话或执行元数据。启动输入和根变量只覆盖根 Start，不覆盖 Loop 的本轮入口；当根 Start 声明了名为 `input` 的显式启动变量且已赋值时，`StartAs` 保留该显式值、不再用 kickoff `input` 覆盖（与 desktop 先写变量再镜像 kickoff 相反，按 `#1235` 有意保留）。`failedAttempts` 按发生它的作用域归属：根作用域的尝试归根节点，Iteration 尝试归它的轮次，Loop 尝试归它的轮次 scope；前端按选中的轮次展示，跨轮不串。
 
 ### 对话
 

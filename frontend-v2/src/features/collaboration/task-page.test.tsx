@@ -956,3 +956,22 @@ it('shows the missing role message in TaskWorkflowDialog when workflow handling 
 
   expect(await within(dialog).findByText('工作流引用的角色在工作区角色目录里不存在，请先在设置的角色页新建同名角色再启动。')).toBeInTheDocument()
 })
+
+it('falls back to the workflow start failure message on unknown errors in TaskWorkflowDialog', async () => {
+  const user = userEvent.setup()
+  const human = { type: 'human' as const, id: 'user-me', displayName: '演示用户', identifier: '' }
+  vi.mocked(api.getTask).mockResolvedValue(task({ assignee: human }))
+  vi.mocked(workflowsApi.listWorkflows).mockResolvedValue({
+    workflows: [{ id: 'wf-dev', namespace: 'team', name: '需求开发', publishedVersion: 'v1', createdAt: 1, updatedAt: 1 }],
+  })
+  vi.mocked(taskWorkflows.startTaskWorkflow).mockRejectedValueOnce(httpFault(500, 'unexpected_error'))
+
+  renderPage()
+  await user.click(await screen.findByRole('button', { name: '用工作流处理' }))
+  const dialog = screen.getByRole('dialog')
+  await screen.findByRole('option', { name: '需求开发（v1）' })
+  await user.selectOptions(within(dialog).getByLabelText('工作流'), 'wf-dev')
+  await user.click(await within(dialog).findByRole('button', { name: '启动工作流' }))
+
+  expect(await within(dialog).findByText('工作流启动失败，请检查输入后重试。')).toBeInTheDocument()
+})

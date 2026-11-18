@@ -229,7 +229,7 @@ func (s *Store) TaskWorkflowRuns(ctx context.Context, tenant, taskID string) ([]
  WHERE c.tenant_id=$1 AND c.task_id=$2 AND c.workflow_run_id IS NOT NULL
  ) SELECT r.id::text,r.workflow_id::text,w.name,s.version,COALESCE(l.started_by::text,''),COALESCE(u.display_name,''),
  CASE WHEN l.kind IN ('handle','decomposition') AND l.status<>'running' THEN l.status ELSE `+derivedRunStatus+` END,
- CASE WHEN l.failure<>'' THEN l.failure WHEN r.deleted_at IS NULL THEN COALESCE(r.error,'') ELSE '' END,l.kind,l.created_count,l.created_at,r.deleted_at IS NOT NULL,l.status
+ CASE WHEN r.deleted_at IS NOT NULL THEN '' WHEN l.failure<>'' THEN l.failure ELSE COALESCE(r.error,'') END,l.kind,l.created_count,l.created_at,r.deleted_at IS NOT NULL,l.status
  FROM links l JOIN v2_workflow_runs r ON r.id=l.run_id AND r.tenant_id=$1
  JOIN v2_workflows w ON w.id=r.workflow_id JOIN v2_workflow_snapshots s ON s.id=r.snapshot_id
  LEFT JOIN users u ON u.id=l.started_by ORDER BY l.created_at DESC,r.id DESC`, tenant, taskID)
