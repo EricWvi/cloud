@@ -51,6 +51,41 @@ description = "A workflow."
 	return f.Name()
 }
 
+func skillPluginArchive(t *testing.T, identifier, version string, skillNames ...string) string {
+	t.Helper()
+	f, e := os.CreateTemp(t.TempDir(), "skill-*.orax")
+	if e != nil {
+		t.Fatal(e)
+	}
+	z := zip.NewWriter(f)
+	manifest, e := z.Create("orax.toml")
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, _ = manifest.Write([]byte(`resolver = 1
+title = "Matt Pocock Skills"
+identifier = "` + identifier + `"
+namespace = "official"
+kind = "skill"
+version = "` + version + `"
+description = "Engineering skills"
+`))
+	for _, name := range skillNames {
+		document, e := z.Create("assets/" + name + "/SKILL.md")
+		if e != nil {
+			t.Fatal(e)
+		}
+		_, _ = document.Write([]byte("---\nname: " + name + "\ndescription: " + name + "\n---\n\n" + name + "\n"))
+	}
+	if e := z.Close(); e != nil {
+		t.Fatal(e)
+	}
+	if e := f.Close(); e != nil {
+		t.Fatal(e)
+	}
+	return f.Name()
+}
+
 func seedTestPluginCatalog(t *testing.T, s *store.Store) {
 	t.Helper()
 	if e := s.ReplacePluginCatalog(context.Background(), []pluginmarket.Entry{
@@ -66,7 +101,30 @@ func seedTestPluginCatalog(t *testing.T, s *store.Store) {
 }
 
 func TestPluginMarketHTTP(t *testing.T) {
-	f := newSquadServer(t)
+	// The Skill install downloads the package to record the names its archive materializes, so
+	// serve a real (validated) archive here.
+	archive := skillPluginArchive(t, "mattpocock.skills", "1.3.1", "tdd", "code-review", "prototype")
+	raw, e := os.ReadFile(archive)
+	if e != nil {
+		t.Fatal(e)
+	}
+	f := newSquadServerWith(t, server.Options{
+		SessionTTL: time.Hour,
+		DownloadPluginPackage: func(_ context.Context, _ string, _ string, _ pluginmarket.Retrieval, _ pluginmarket.Credentials) (string, error) {
+			file, e := os.CreateTemp(t.TempDir(), "download-*.orax")
+			if e != nil {
+				return "", e
+			}
+			if _, e := file.Write(raw); e != nil {
+				_ = file.Close()
+				return "", e
+			}
+			if e := file.Close(); e != nil {
+				return "", e
+			}
+			return file.Name(), nil
+		},
+	})
 	c := newContractClient(t, f.srv.URL)
 	c.login()
 	tenant := c.tenant()
@@ -133,6 +191,27 @@ func TestPluginMarketHTTP(t *testing.T) {
 		t.Fatalf("installed = %v", resource)
 	}
 	version := resource["version"].(float64)
+
+	// The catalog entry for an installed Skill package carries the names its archive materializes
+	// at runtime (assets/<name>/SKILL.md), so the settings page matches user skills against them.
+	status, body = c.do("GET", base+"/catalog", nil)
+	if status != 200 {
+		t.Fatalf("catalog = %d %v", status, body)
+	}
+	for _, raw := range body["items"].([]any) {
+		entry := raw.(map[string]any)
+		if entry["sourceNamespace"] != "official" || entry["identifier"] != "mattpocock.skills" {
+			continue
+		}
+		members, _ := entry["packMembers"].([]any)
+		got := make([]string, 0, len(members))
+		for _, m := range members {
+			got = append(got, m.(string))
+		}
+		if strings.Join(got, ",") != "code-review,prototype,tdd" {
+			t.Fatalf("packMembers = %v", got)
+		}
+	}
 
 	status, replay := c.doHeaders("POST", base, input, map[string]string{
 		"Idempotency-Key": "install-skill",
@@ -491,5 +570,51 @@ func TestWorkflowPluginHTTPInstallAndRemoveKeepWorkflow(t *testing.T) {
 	}
 	if workflows, e := f.store.Workflows(context.Background(), tenant); e != nil || len(workflows) != 2 {
 		t.Fatalf("remove deleted workflows: %+v %v", workflows, e)
+	}
+}
+
+// A Skill install that cannot read its package fails without leaving a selection behind: an
+// unreachable market is retryable (503), a package without discoverable skills is invalid (400).
+func TestSkillInstallFailsWithoutPartialSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		download func(t *testing.T) (string, error)
+		status   int
+		code     string
+	}{
+		{"unreachable market", func(*testing.T) (string, error) { return "", pluginmarket.ErrTransient }, 503, "plugin_package_unavailable"},
+		{"no discoverable skills", func(t *testing.T) (string, error) {
+			return skillPluginArchive(t, "mattpocock.skills", "1.3.1"), nil
+		}, 400, "plugin_package_invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSquadServerWith(t, server.Options{
+				SessionTTL: time.Hour,
+				DownloadPluginPackage: func(context.Context, string, string, pluginmarket.Retrieval, pluginmarket.Credentials) (string, error) {
+					return tc.download(t)
+				},
+			})
+			c := newContractClient(t, f.srv.URL)
+			c.login()
+			tenant := c.tenant()
+			_, body := c.do("GET", "/api/v1/tenants/"+tenant+"/spaces", nil)
+			space := body["items"].([]any)[0].(map[string]any)["id"].(string)
+			base := "/api/v1/tenants/" + tenant + "/spaces/" + space + "/plugins"
+			status, body := c.doHeaders("POST", base, map[string]any{
+				"identifier": "official/mattpocock.skills", "pluginVersion": "1.3.1", "version": 0,
+			}, map[string]string{"Idempotency-Key": "install-skill"})
+			if status != tc.status || body["code"] != tc.code {
+				t.Fatalf("install = %d %v, want %d %s", status, body, tc.status, tc.code)
+			}
+			status, body = c.do("GET", base, nil)
+			if status != 200 {
+				t.Fatalf("plugins = %d %v", status, body)
+			}
+			for _, raw := range body["items"].([]any) {
+				if raw.(map[string]any)["identifier"] == "mattpocock.skills" {
+					t.Fatalf("failed install left a selection: %v", raw)
+				}
+			}
+		})
 	}
 }

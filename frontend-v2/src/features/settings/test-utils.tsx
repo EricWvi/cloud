@@ -94,6 +94,7 @@ export function installMarketplaceBackend({
   progress = [],
   mcpInstallFailure,
   tenantFailures = 0,
+  installFailure,
 }: {
   role?: 'owner' | 'member'
   officialEnabled?: boolean
@@ -106,6 +107,8 @@ export function installMarketplaceBackend({
   mcpInstallFailure?: string
   /** Answers the first N tenant lookups with 500, to exercise discovery failures. */
   tenantFailures?: number
+  /** Makes every install POST fail with this fault, as the server does when the package download fails. */
+  installFailure?: { status: number; code: string }
 } = {}) {
   let remainingTenantFailures = tenantFailures
   const state = {
@@ -520,6 +523,11 @@ export function installMarketplaceBackend({
     )
     if (role !== 'owner')
       return { status: 403, data: { code: 'forbidden', params: {} } }
+    if (method === 'POST' && installFailure)
+      return {
+        status: installFailure.status,
+        data: { code: installFailure.code, params: {} },
+      }
     if (method === 'DELETE') {
       if (index < 0) return { status: 404, data: { code: 'plugin_not_installed', params: {} } }
       const current = state.selections[index]

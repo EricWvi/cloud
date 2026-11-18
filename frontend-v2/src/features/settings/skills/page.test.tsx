@@ -28,6 +28,28 @@ const serverSkill = (overrides: Partial<Skill> = {}): Skill => ({
   ...overrides,
 })
 
+const reviewing = marketplaceEntry('reviewing', {
+  kind: 'skill',
+  readme: '# review\n\n代码审查，用于说明同名冲突。',
+})
+
+// A single-skill package whose readme title differs from the name its archive materializes at
+// runtime (assets/<name>/SKILL.md), as the top-skills.* packages do; the server fills packMembers
+// with the runtime name.
+const codeReviewPackage = marketplaceEntry('top-skills.code-review-and-quality', {
+  kind: 'skill',
+  title: 'Code Review and Quality',
+  readme: '# Code Review and Quality\n\n多轴代码评审。',
+  packMembers: ['code-review-and-quality'],
+})
+
+const pocock = marketplaceEntry('mattpocock.skills', {
+  kind: 'skill',
+  title: 'Matt Pocock Skills',
+  readme: '# Matt Pocock Skills\n\nMatt 的技能合集。',
+  packMembers: ['tdd', 'code-review', 'prototype'],
+})
+
 const skillFile = (
   name: string,
   description = '导入的技能',
@@ -40,6 +62,86 @@ const skillFile = (
   )
 
 beforeEach(() => localStorage.clear())
+
+it('marks a user skill shadowed by a single-skill package whose title differs from its runtime name', async () => {
+  installMarketplaceBackend({
+    catalog: [codeReviewPackage],
+    selections: [marketplaceSelection(codeReviewPackage)],
+    skills: [serverSkill({ id: '00000000-0000-4000-8000-000000000803', name: 'code-review-and-quality' })],
+  })
+  renderSettingsPage(<SkillsPage />)
+  expect(
+    await screen.findByText(/与本空间已安装的市场 Skill「code-review-and-quality」同名/),
+  ).toBeInTheDocument()
+})
+
+it('marks a user skill shadowed by a bundled market Skill name', async () => {
+  installMarketplaceBackend({
+    catalog: [pocock],
+    selections: [marketplaceSelection(pocock)],
+    skills: [serverSkill({ id: '00000000-0000-4000-8000-000000000802', name: 'tdd' })],
+  })
+  renderSettingsPage(<SkillsPage />)
+  expect(
+    await screen.findByText(/与本空间已安装的市场 Skill「tdd」同名/),
+  ).toBeInTheDocument()
+})
+
+it('marks a user skill whose name an installed market Skill takes', async () => {
+  installMarketplaceBackend({
+    catalog: [reviewing],
+    selections: [marketplaceSelection(reviewing)],
+    skills: [serverSkill()],
+  })
+  renderSettingsPage(<SkillsPage />)
+  expect(
+    await screen.findByText(/与本空间已安装的市场 Skill「review」同名/),
+  ).toBeInTheDocument()
+  const localRow = (await screen.findAllByRole('article', { name: 'review' }))[0]
+  const user = userEvent.setup()
+  await user.click(
+    within(localRow).getByRole('button', { name: '查看技能 review' }),
+  )
+  const dialog = await screen.findByRole('dialog')
+  expect(within(dialog).getByText(/同名，在这里不生效，使用的是市场版本/)).toBeInTheDocument()
+})
+
+it('matches only the runtime names once the server records them, not the readme heading', async () => {
+  // The readme says "review", but the archive materializes "code-review": only that name is taken.
+  const recorded = marketplaceEntry('reviewing', {
+    kind: 'skill',
+    readme: '# review\n\n代码审查。',
+    packMembers: ['code-review'],
+  })
+  installMarketplaceBackend({
+    catalog: [recorded],
+    selections: [marketplaceSelection(recorded)],
+    skills: [
+      serverSkill(),
+      serverSkill({ id: '00000000-0000-4000-8000-000000000804', name: 'code-review' }),
+    ],
+  })
+  renderSettingsPage(<SkillsPage />)
+  expect(
+    await screen.findByText(/与本空间已安装的市场 Skill「code-review」同名/),
+  ).toBeInTheDocument()
+  expect(
+    screen.queryByText(/与本空间已安装的市场 Skill「review」同名/),
+  ).not.toBeInTheDocument()
+})
+
+it('does not mark a user skill when the same-name market Skill was removed', async () => {
+  installMarketplaceBackend({
+    catalog: [reviewing],
+    selections: [marketplaceSelection(reviewing, { desiredState: 'removed' })],
+    skills: [serverSkill()],
+  })
+  renderSettingsPage(<SkillsPage />)
+  expect(
+    (await screen.findAllByRole('article', { name: 'review' })).length,
+  ).toBeGreaterThan(0)
+  expect(screen.queryByText(/与本空间已安装的市场 Skill/)).not.toBeInTheDocument()
+})
 
 it('creates, edits, renders and deletes a server-backed skill', async () => {
   const backend = installMarketplaceBackend({
@@ -146,6 +248,19 @@ it('installs and removes the source plugin from the skill row and keeps the docu
   expect(
     screen.getByRole('link', { name: /demo\/writing-kit/ }),
   ).toHaveAttribute('href', '/settings/plugins?plugin=demo%2Fwriting-kit')
+})
+
+it.each([
+  { status: 503, code: 'plugin_package_unavailable', message: '暂时无法从市场下载插件包，请稍后重试。' },
+  { status: 400, code: 'plugin_package_invalid', message: '插件包校验失败或不包含可用的技能，无法安装。' },
+])('explains a failed install ($code) and leaves the skill uninstalled', async ({ status, code, message }) => {
+  installMarketplaceBackend({ catalog: [writing], installFailure: { status, code } })
+  const user = userEvent.setup()
+  renderSettingsPage(<SkillsPage />)
+  const row = await screen.findByRole('article', { name: 'writing-guide' })
+  await user.click(within(row).getByRole('button', { name: '安装技能' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent(message)
+  expect(within(row).getByText('来源插件未安装')).toBeInTheDocument()
 })
 
 it('treats a selected market skill as waiting for delivery without a project node receipt', async () => {

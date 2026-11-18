@@ -101,6 +101,13 @@ func (s *Store) SkillJobs(ctx context.Context) ([]SkillJob, error) {
 		if e := rows.Scan(&j.Project, &j.Selection, &j.Space, &j.Namespace, &j.Identifier, &j.Version, &j.Desired, &j.Locator, &j.Digest, &j.Retrieval, &j.Credentials, &j.Revision, &j.Previous); e != nil {
 			return nil, e
 		}
+		// The official marketplace has no stored source, so its plans freeze an empty retrieval.
+		// Choose the official retrieval now, as the install route does, so delivery follows the
+		// current V2_MARKET_SOCKS_PROXY setting, plans frozen before it are covered, and a later
+		// change takes effect. Custom sources keep the retrieval and credentials their plan froze.
+		if j.Namespace == "official" {
+			j.Retrieval = pluginmarket.OfficialSourceRetrieval()
+		}
 		jobs = append(jobs, j)
 	}
 	return jobs, rows.Err()

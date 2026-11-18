@@ -23,7 +23,7 @@ ID。`members/`、`skills/`、`roles/` 与 `data/marketplace.ts` 不使用它。
   `Retrieval`/`Credentials` 下载、校验并导入，来源来源和官方与否不加区别）；运行时预装的
   OpenCode、Claude Code 只读显示「运行时预装」，没有安装入口；市场 Agent、Hook 与合集
   只浏览并显示「暂不支持安装」（服务端拒绝新建这些选择，返回 `plugin_kind_not_installable`，
-  已有用户选择也不允许更新）。安装工作流会把工作流导入库并发布 v1，卸载保留工作流和历史。
+  已有用户选择也不允许更新）。安装工作流会把工作流导入库并发布 v1，卸载保留工作流和历史。Skill 与工作流安装会先由服务端下载并校验插件包：市场暂时不可达（`plugin_package_unavailable`）提示稍后重试，包校验失败或不含技能（`plugin_package_invalid`）提示无法安装，不留下安装选择。
   目录来自 v2-server 对 `ora-space/marketplace` 的真实 Git 同步，而不是前端内置数据。目录把来源发布的明暗主题
   图标嵌入快照；页面按插件类型分组，未发布图标的条目使用对应的类型图标。owner 可写，
   member 只读。`lib/demo/plugin-installs.ts` 只在 `VITE_DEMO_MOCK=1` 时给市场 Agent、Hook
@@ -36,7 +36,9 @@ ID。`members/`、`skills/`、`roles/` 与 `data/marketplace.ts` 不使用它。
   生成，只读，安装或移除来源插件会改变可用性，移除后仍能预览文档。预览不执行 HTML 或加载远程图片。
 - 用户技能在新 Agent 会话克隆工作副本后物化到 `.opencode/skills/<name>/SKILL.md` 与
   `.claude/skills/<name>/SKILL.md`。项目已有同名目录时保留项目内容；市场 Skill 与用户技能
-  同名时会话以 `skill_name_conflict` 失败，提示用户改名，不覆盖也不静默丢弃任何一方；
+  同名时市场优先：用户技能不写入、会话照常启动，列表和详情会标记这只技能并提示改名。这条只对
+  对话和任务会话成立；工作流节点只投影显式选择的 Skill，单独选了这只用户技能时它照样生效（见
+  `v2-server/README.md`）；
   编辑或删除只影响之后
   启动的会话。
 - 角色是工作区的服务端目录，通过候选契约 `v2-server/roles.openapi.json` 持久化在

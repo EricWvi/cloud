@@ -20,6 +20,17 @@ func (h *handler) pluginCatalog(w http.ResponseWriter, r *http.Request, a access
 		pluginError(w, "plugin catalog", e)
 		return
 	}
+	// Installed skill packages carry the skill names their archives materialize at runtime, so the
+	// settings page compares user skills against the exact names the runtime projects (the manifest's
+	// own packMembers, if any, stays untouched for packages that declare one).
+	if names, e := h.store.InstalledPluginSkillNames(r.Context(), tenant, space); e == nil && len(names) > 0 {
+		for i := range items {
+			id := items[i].SourceNamespace + "/" + items[i].Identifier
+			if installed, ok := names[id]; ok && items[i].Kind == "skill" {
+				items[i].PackMembers = installed
+			}
+		}
+	}
 	body := map[string]any{"items": items}
 	if !syncedAt.IsZero() {
 		body["syncedAt"] = syncedAt
@@ -108,6 +119,39 @@ func (h *handler) installSpacePlugin(w http.ResponseWriter, r *http.Request, a a
 		}
 		resource, e = h.store.InstallWorkflowPlugin(
 			r.Context(), tenant, space, a.UserID, r.URL.Path, key, in, documents, h.opts.ValidateWorkflow,
+		)
+	} else if source.Entry.Kind == "skill" {
+		// Record the skill names this package materializes, so the settings page compares user skills
+		// against the exact names the runtime projects (assets/<name>/SKILL.md). A package that cannot
+		// be downloaded or has no discoverable skill fails the install, as the delivery path does.
+		download := h.opts.DownloadPluginPackage
+		if download == nil {
+			download = pluginmarket.Download
+		}
+		file, e := download(r.Context(), source.Locator, source.Digest, source.Retrieval, source.Credentials)
+		if e != nil {
+			pluginPackageError(w, e)
+			return
+		}
+		defer os.Remove(file)
+		if e := pluginmarket.VerifySkillArchive(file, in.Identifier, source.Entry.Version); e != nil {
+			fault(w, http.StatusBadRequest, "plugin_package_invalid")
+			return
+		}
+		names, e := pluginmarket.SkillNamesInArchive(file, in.Identifier, source.Entry.Version)
+		if e != nil {
+			fault(w, http.StatusBadRequest, "plugin_package_invalid")
+			return
+		}
+		// Names are keyed to the verified package digest and only surface through a selection that
+		// froze that digest, so writing them before the selection leaves nothing visible (and
+		// replaces nothing) if the install itself fails.
+		if e := h.store.UpsertPluginSkills(r.Context(), source.Digest, names); e != nil {
+			pluginError(w, "install plugin", e)
+			return
+		}
+		resource, e = h.store.InstallSpacePlugin(
+			r.Context(), tenant, space, a.UserID, r.URL.Path, key, in,
 		)
 	} else {
 		resource, e = h.store.InstallSpacePlugin(

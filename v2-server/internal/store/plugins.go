@@ -219,7 +219,11 @@ func (s *Store) pluginPackageSource(ctx context.Context, tenant, space, id strin
 		return PluginPackageSource{}, fmt.Errorf("decode catalog entry: %w", e)
 	}
 	source := PluginPackageSource{Entry: entry}
-	if kind != "workflow" && !(mcp && kind == "mcp") {
+	// Only the kinds that download a package need a locator: workflows import their documents,
+	// skills read the names they materialize, and the tenant MCP route installs its host-target
+	// package. Other kinds (agents, packs, hooks) are settled without package bytes and stay
+	// installable/uninstallable per their own rules.
+	if kind != "workflow" && !(!mcp && kind == "skill") && !(mcp && kind == "mcp") {
 		return source, nil
 	}
 	if kind == "mcp" && (entry.URL == nil || entry.SHA256 == nil) {
@@ -243,6 +247,7 @@ func (s *Store) pluginPackageSource(ctx context.Context, tenant, space, id strin
 	}
 	source.Locator, source.Digest = *entry.URL, *entry.SHA256
 	if namespace == "official" {
+		source.Retrieval = pluginmarket.OfficialSourceRetrieval()
 		return source, nil
 	}
 	var retrievalJSON, credentials []byte

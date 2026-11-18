@@ -23,6 +23,21 @@ func TestCredentialsCannotMoveToAnotherSource(t *testing.T) {
 		t.Fatal("credentials crossed space boundary")
 	}
 }
+func TestOfficialSourceRetrieval(t *testing.T) {
+	t.Setenv("V2_MARKET_SOCKS_PROXY", "")
+	r := OfficialSourceRetrieval()
+	if r.Mode != "direct_https" || r.UseProxy {
+		t.Fatalf("unproxied official retrieval = %+v", r)
+	}
+	t.Setenv("V2_MARKET_SOCKS_PROXY", "socks5://127.0.0.1:1")
+	if r := OfficialSourceRetrieval(); !r.UseProxy {
+		t.Fatalf("proxied official retrieval = %+v", r)
+	}
+	t.Setenv("V2_MARKET_SOCKS_PROXY", "http://127.0.0.1:1")
+	if r := OfficialSourceRetrieval(); r.UseProxy {
+		t.Fatalf("non-socks proxy accepted: %+v", r)
+	}
+}
 func TestSignOnlyConfiguredBucket(t *testing.T) {
 	r := Retrieval{Mode: "s3_sigv4", Endpoint: "https://s3.example.com", Bucket: "packages", Region: "us-east-1"}
 	for _, tc := range []struct {

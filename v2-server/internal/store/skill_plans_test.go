@@ -49,6 +49,17 @@ func TestSkillDeliveryCoversEveryBoundProjectWithoutGatingTheSelection(t *testin
 	if e != nil || len(jobs) != 2 || jobs[0].Project != "a" || jobs[1].Project != "b" {
 		t.Fatal(jobs, e)
 	}
+	// Official delivery downloads like the install route: direct without a proxy setting, through
+	// the deployment's SOCKS proxy once one is set, even for a plan frozen before it was.
+	if jobs[0].Retrieval != (pluginmarket.Retrieval{Mode: "direct_https"}) {
+		t.Fatalf("unproxied official delivery retrieval = %+v", jobs[0].Retrieval)
+	}
+	t.Setenv("V2_MARKET_SOCKS_PROXY", "socks5://127.0.0.1:1")
+	if proxied, e := f.store.SkillJobs(f.ctx); e != nil || len(proxied) != 2 ||
+		proxied[0].Retrieval != (pluginmarket.Retrieval{Mode: "direct_https", UseProxy: true}) {
+		t.Fatalf("proxied official delivery = %+v %v", proxied, e)
+	}
+	t.Setenv("V2_MARKET_SOCKS_PROXY", "")
 	run := func(j store.SkillJob, outcome store.SkillJobOutcome) {
 		t.Helper()
 		ok, e := f.store.StartSkillJob(f.ctx, j)
