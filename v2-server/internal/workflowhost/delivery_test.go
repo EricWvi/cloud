@@ -11,6 +11,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/executionruntime"
 	"github.com/wanglongan587/cloud/v2-server/internal/projectrepos"
+	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/workspacefs"
 )
@@ -140,7 +141,7 @@ func TestSharedWorkspaceAttemptsAndInteractiveTurnsDeliver(t *testing.T) {
 	if err != nil || second.InProgress || second.Good == nil || second.Good.TurnPosition != 2 || second.Good.NodeRunID != first.Good.NodeRunID || second.Good.ID == first.Good.ID {
 		t.Fatalf("follow-up delivery: %+v, %v", second, err)
 	}
-	if _, err := f.host.CompleteNode(t.Context(), f.scope, runID, "a", false, ""); err != nil {
+	if _, err := f.host.CompleteNode(t.Context(), f.scope, runID, "a", server.WorkflowNodeCompletion{}); err != nil {
 		t.Fatal(err)
 	}
 	run, nodes := f.await(t, runID, terminal)

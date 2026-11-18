@@ -74,6 +74,17 @@ type Host struct {
 	followingUp func(nodeID string)
 	// moveNode overrides MoveWorkflowEngineNode in tests simulating transient storage errors.
 	moveNode func(ctx context.Context, runID, nodeRunID, from, to string, merge func(node []byte) ([]byte, error)) (bool, error)
+	// runCheckout, when set (tests only), replaces the store's lookup of a run's checkout, which
+	// the deliverable checks read.
+	runCheckout func(ctx context.Context, tenant, runID string) (store.WorkspaceLocation, error)
+}
+
+// checkoutOf is the checkout a run's Agent nodes share.
+func (h *Host) checkoutOf(ctx context.Context, tenant, runID string) (store.WorkspaceLocation, error) {
+	if h.runCheckout != nil {
+		return h.runCheckout(ctx, tenant, runID)
+	}
+	return h.store.WorkflowRunWorkspace(ctx, tenant, runID)
 }
 
 // lifecycleLock is one run's cancel/resume lock and the number of callers holding or waiting.

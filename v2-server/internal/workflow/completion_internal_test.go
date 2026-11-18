@@ -35,13 +35,13 @@ func TestCompletionFileMatches(t *testing.T) {
 func TestCompletionGlobRefusals(t *testing.T) {
 	for _, pattern := range []string{
 		"", "/abs.md", "C:/x.md", `a\b.md`, "!a.md", "a/[x].md", "a/{x,y}.md", "a//b.md", "./a.md",
-		"a/../b.md", "a**/b.md", "a/**b", "con.txt", "dir/LPT1", "a:b.md", "a\x01b", string(make([]byte, 513)),
+		"a/../b.md", "a**/b.md", "a/**b", "con.txt", "dir/LPT1", "dir/d:x.md", "nul .txt", "a\x01b", string(make([]byte, 513)),
 	} {
 		if _, reason := parseCompletionGlob(pattern); reason == "" {
 			t.Errorf("pattern %q was accepted", pattern)
 		}
 	}
-	for _, pattern := range []string{"plan.md", "reports/**/*.md", "a?.txt", "console.txt", "COM0"} {
+	for _, pattern := range []string{"plan.md", "reports/**/*.md", "a?.txt", "console.txt", "COM0", "notes:v2.md"} {
 		if _, reason := parseCompletionGlob(pattern); reason != "" {
 			t.Errorf("pattern %q was refused: %s", pattern, reason)
 		}

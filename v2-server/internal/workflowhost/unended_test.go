@@ -143,7 +143,7 @@ func TestUnconfirmedEndOfAStoppedTurnKeepsTheSlot(t *testing.T) {
 	f.await(t, runID, parked("a"))
 	f.exec.noStart(t, "C started while A's session may still be live")
 	confirm()
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", server.WorkflowNodeCompletion{ConfirmInitialTurn: true}); err != nil {
 		t.Fatal(err)
 	}
 	c := f.exec.awaitStart(t)
@@ -351,7 +351,7 @@ func TestAParkedNodeWhoseSessionIsGoneCompletesAndCancels(t *testing.T) {
 		f := newFixture(t)
 		runID, a := f.startParked(t, interactiveChain, "初稿")
 		gone(f, a)
-		if _, err := f.host.CompleteNode(context.Background(), f.scope, runID, "a", false, "human"); err != nil {
+		if _, err := f.host.CompleteNode(context.Background(), f.scope, runID, "a", confirm); err != nil {
 			t.Fatal(err)
 		}
 		f.exec.finish(f.exec.awaitStart(t), completed("可以"))

@@ -285,7 +285,7 @@ func (r *realInteractive) completes(rid string, before execution.Session, checko
 	if err := os.Remove(filepath.Join(checkout.Path, "ora-v2-result.txt")); err != nil && !os.IsNotExist(err) {
 		r.t.Fatal(err)
 	}
-	if _, err := r.current.host.CompleteNode(r.ctx, r.f.scope, rid, "a", false, "human"); err != nil {
+	if _, err := r.current.host.CompleteNode(r.ctx, r.f.scope, rid, "a", confirm); err != nil {
 		r.t.Fatalf("complete after the Agent was lost: %v", err)
 	}
 	run, nodes := r.awaitRun(rid, func(run store.WorkflowRun, _ []store.WorkflowNodeRun) bool { return terminal(run, nil) })
@@ -440,7 +440,7 @@ func TestRealUnknownCheckoutAfterARestartFailsTheNodeAndIsForgotten(t *testing.T
 	if err != nil || fresh.CloneExecution == "" || fresh.CloneExecution == checkout.CloneExecution || fresh.Path == checkout.Path {
 		t.Fatalf("resumed checkout = %+v %v, want a fresh clone (was %+v)", fresh, err, checkout)
 	}
-	if _, err := r.current.host.CompleteNode(ctx, r.f.scope, rid, "a", false, "human"); err != nil {
+	if _, err := r.current.host.CompleteNode(ctx, r.f.scope, rid, "a", confirm); err != nil {
 		t.Fatalf("complete the resumed node: %v", err)
 	}
 	run, nodes = r.awaitRun(rid, terminal)

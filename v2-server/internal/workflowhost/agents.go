@@ -251,6 +251,11 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 		// The session outlives its turns until completion, a stop or the run's end ends it.
 		request.Lifetime = execution.LifetimeHeld
 	}
+	var baseline *fileBaseline
+	if interactive {
+		// Before the Agent can touch the checkout: what a mustChange deliverable is compared with.
+		baseline = h.captureBaseline(h.ctx, st.scope.TenantID, d.RunID, cfg.CompletionFiles)
+	}
 	a := h.beginSession(st, d, generation)
 	if a == nil {
 		return
@@ -320,10 +325,11 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 
 	if interactive {
 		// Desktop parks an interactive node after its first turn instead of ending the session.
-		n := st.track(&interactiveNode{d: d, executor: executor, cfg: cfg, task: task, session: ref.SessionID, phase: phaseTurn})
+		n := st.track(&interactiveNode{d: d, executor: executor, cfg: cfg, task: task, session: ref.SessionID, phase: phaseTurn,
+			lastOrigin: originWorkflow, baseline: baseline})
 		h.refreshSummary(st, n, store.WorkflowStatusRunning) // the starter can stop the first turn too
 		result, err := h.awaitTurn(st.scope, ref, caller)
-		h.settleInteractiveTurn(st, a, n, result, err)
+		h.settleInteractiveTurn(st, a, n, 0, result, err)
 		return
 	}
 	result, err := h.awaitTurn(st.scope, ref, caller)

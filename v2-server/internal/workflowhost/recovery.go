@@ -96,15 +96,25 @@ func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDis
 	var payload struct {
 		Task        string `json:"task"`
 		Interactive struct {
-			SessionEnded  bool   `json:"session_ended"`
-			Sent          int    `json:"sent"`
-			LastTurnError string `json:"last_turn_error"`
+			SessionEnded  bool                `json:"session_ended"`
+			Sent          int                 `json:"sent"`
+			LastTurnError string              `json:"last_turn_error"`
+			Completion    *completionSnapshot `json:"completion"`
 		} `json:"interactive"`
+		Baseline *fileBaseline `json:"completion_baseline"`
 	}
 	if err := json.Unmarshal(row.Payload, &payload); err != nil {
 		return nil, fmt.Errorf("read the payload of node run %s: %w", row.ID, err)
 	}
-	n := &interactiveNode{d: d, executor: executor, cfg: cfg, task: payload.Task, session: *row.SessionID, phase: phaseParked}
+	n := &interactiveNode{d: d, executor: executor, cfg: cfg, task: payload.Task, session: *row.SessionID, phase: phaseParked,
+		lastOrigin: originWorkflow, baseline: payload.Baseline}
+	// Only the park knew that the starter stopped the turn (or that its result was lost); the
+	// turns themselves do not say so.
+	if c := payload.Interactive.Completion; c != nil && (c.StopCause == stopUserStopped || c.StopCause == stopSessionLost) {
+		n.lastStopCause = c.StopCause
+	}
+	// A turn whose result was never read has no recorded turn either; the park said so.
+	unsettled := payload.Interactive.Completion != nil && payload.Interactive.Completion.TurnKey == nil
 	session, err := h.exec.ReadSession(ctx, st.scope, n.session)
 	if errors.Is(err, execution.ErrNotFound) {
 		return nil, h.failParked(st, d, n.session, workflow.Failure{Kind: workflow.FailureInterruptedByRestart, Message: "the node's session no longer exists after the restart"}.Interactive())
@@ -113,7 +123,7 @@ func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDis
 		return nil, fmt.Errorf("read the session of node run %s: %w", row.ID, err)
 	}
 	// A session that ended before the restart (the starter stopped it, or its Agent was lost)
-	// still lets the node complete with the last normal answer, as it did before.
+	// still lets the node complete: force takes the last normal answer, as completion.go says.
 	n.sessionGone = session.EndedAt != nil
 	n.sessionEnded = n.sessionGone || payload.Interactive.SessionEnded
 	// The summary is the only record of a message the execution service refused at Append: it
@@ -138,6 +148,10 @@ func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDis
 			result := *turn.Result
 			n.turns++
 			n.last = &result
+			n.lastSeq, n.lastOrigin = 0, originWorkflow
+			if seq, err := strconv.Atoi(strings.TrimPrefix(turn.Caller.AttemptID, prefix)); err == nil && strings.HasPrefix(turn.Caller.AttemptID, prefix) {
+				n.lastSeq, n.lastOrigin = seq, originHuman
+			}
 			if endedNormally(result) {
 				n.accepted = &result
 			}
@@ -147,6 +161,7 @@ func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDis
 		}
 		cursor = page.NextCursor
 	}
+	n.unsettled = unsettled && n.last != nil
 	return n, nil
 }
 

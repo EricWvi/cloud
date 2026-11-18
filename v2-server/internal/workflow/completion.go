@@ -78,9 +78,6 @@ func parseCompletionGlob(pattern string) ([]string, string) {
 		if unicode.IsControl(r) {
 			return nil, "must not contain control characters"
 		}
-		if strings.ContainsRune(`:<>|"`, r) {
-			return nil, "must not contain " + string(r)
-		}
 	}
 	segments := strings.Split(pattern, "/")
 	if len(segments)-1 > maxCompletionPathDepth {
@@ -92,6 +89,8 @@ func parseCompletionGlob(pattern string) ([]string, string) {
 			return nil, "must not contain empty, . or .. segments"
 		case len(segment) > maxCompletionSegmentBytes:
 			return nil, "has a segment that is too long"
+		case driveLetter(segment):
+			return nil, "must not contain a Windows drive prefix"
 		case strings.Contains(segment, "**") && segment != "**":
 			return nil, "** must be a whole segment"
 		case reservedDeviceName(segment):
@@ -109,7 +108,7 @@ func driveLetter(p string) bool {
 // portable to a desktop checkout.
 func reservedDeviceName(segment string) bool {
 	stem, _, _ := strings.Cut(segment, ".")
-	stem = strings.ToUpper(strings.TrimRight(stem, " "))
+	stem = strings.ToUpper(strings.TrimRight(stem, " ."))
 	switch stem {
 	case "CON", "PRN", "AUX", "NUL":
 		return true

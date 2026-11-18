@@ -70,7 +70,7 @@ func TestInteractiveRootAgentDoesNotListRetry(t *testing.T) {
 	}
 	f.exec.finish(f.exec.awaitStart(t), completed("draft"))
 	f.await(t, id, parked("a"))
-	if _, err := f.host.CompleteNode(ctx, f.scope, id, "a", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, id, "a", confirm); err != nil {
 		t.Fatal(err)
 	}
 	f.exec.finish(f.exec.awaitStart(t), completed("review"))

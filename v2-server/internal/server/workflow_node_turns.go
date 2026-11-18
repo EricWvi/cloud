@@ -38,16 +38,66 @@ var (
 	ErrWorkflowNodeTurnNotRunning = errors.New("workflow node turn is not running")
 )
 
-// WorkflowNodeIncomplete refuses completing a parked node whose turns give no answer to accept.
-// Reason is a stable code; Detail is a safe, human-readable explanation.
+// WorkflowNodeCompletion is what the starter decided on one completion request: ConfirmInitialTurn
+// adopts the workflow's own opening turn, Force completes despite every other blocker and leaves
+// an audit (desktop CompleteWorkflowNodeRequest). The requester is always the human starter.
+type WorkflowNodeCompletion struct {
+	Force, ConfirmInitialTurn bool
+}
+
+// WorkflowNodeBlocker is one reason a parked node cannot complete: a stable kind and, for a
+// deliverable, the declared path, or a safe detail for an output that does not fit its schema.
+type WorkflowNodeBlocker struct {
+	Kind    string `json:"kind"`
+	Path    string `json:"path,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+// WorkflowNodeIncomplete refuses completing a parked node with the blockers the request left
+// unresolved.
 type WorkflowNodeIncomplete struct {
-	Reason string
-	Detail string
+	Blockers []WorkflowNodeBlocker
 }
 
 func (e *WorkflowNodeIncomplete) Error() string {
-	return fmt.Sprintf("workflow node is incomplete (%s): %s", e.Reason, e.Detail)
+	kinds := make([]string, len(e.Blockers))
+	for i, b := range e.Blockers {
+		kinds[i] = b.Kind
+	}
+	return "workflow node is incomplete: " + strings.Join(kinds, ", ")
 }
+
+// WorkflowNodeTurnKey identifies a node's settled turn: the number of the message that opened
+// it (0 for the workflow's opening turn) and how many turns had settled with it.
+type WorkflowNodeTurnKey struct {
+	UserSeq  int `json:"userSeq"`
+	EndedSeq int `json:"endedSeq"`
+}
+
+// WorkflowNodeTurnChanged refuses a completion whose settled turn is no longer the one the node
+// parked with; the page reloads the run and asks again. Force does not cover it.
+type WorkflowNodeTurnChanged struct {
+	NodeID           string
+	Expected, Actual *WorkflowNodeTurnKey
+}
+
+func (e *WorkflowNodeTurnChanged) Error() string {
+	return fmt.Sprintf("workflow node %s settled another turn since it parked", e.NodeID)
+}
+
+// WorkflowNodeOutputChanged refuses a completion whose answer is no longer the one the node
+// parked with. Force does not cover it.
+type WorkflowNodeOutputChanged struct {
+	NodeID, Expected, Actual string
+}
+
+func (e *WorkflowNodeOutputChanged) Error() string {
+	return fmt.Sprintf("workflow node %s answer changed since it parked", e.NodeID)
+}
+
+// ErrWorkflowNodeCompletionInvalid refuses a completion asking for both confirmInitialTurn and
+// force: desktop admits the pair only for the Agent completion signal, which v2 does not apply.
+var ErrWorkflowNodeCompletionInvalid = errors.New("confirmInitialTurn and force cannot be combined")
 
 // maxNodeTurnRunes bounds one human turn like a chat message, so a turn cannot carry a document.
 const maxNodeTurnRunes = 16000
@@ -118,6 +168,8 @@ func (h *handler) stopWorkflowNodeTurn(w http.ResponseWriter, r *http.Request, a
 // interactiveNodeFault maps the interactive refusals; false leaves err to the lifecycle mapping.
 func interactiveNodeFault(w http.ResponseWriter, err error) bool {
 	var incomplete *WorkflowNodeIncomplete
+	var turnChanged *WorkflowNodeTurnChanged
+	var outputChanged *WorkflowNodeOutputChanged
 	switch {
 	case errors.Is(err, ErrWorkflowRunOwned):
 		fault(w, http.StatusConflict, "run_owned")
@@ -128,9 +180,23 @@ func interactiveNodeFault(w http.ResponseWriter, err error) bool {
 	case errors.As(err, &incomplete):
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"code":      "workflow_node_incomplete",
-			"params":    map[string]any{"reason": incomplete.Reason, "detail": incomplete.Detail},
+			"params":    map[string]any{"blockers": incomplete.Blockers},
 			"requestId": requestID(),
 		})
+	case errors.As(err, &turnChanged):
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"code":      "workflow_node_turn_changed",
+			"params":    map[string]any{"nodeId": turnChanged.NodeID, "expected": turnChanged.Expected, "actual": turnChanged.Actual},
+			"requestId": requestID(),
+		})
+	case errors.As(err, &outputChanged):
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"code":      "workflow_node_output_changed",
+			"params":    map[string]any{"nodeId": outputChanged.NodeID, "expected": outputChanged.Expected, "actual": outputChanged.Actual},
+			"requestId": requestID(),
+		})
+	case errors.Is(err, ErrWorkflowNodeCompletionInvalid):
+		fault(w, http.StatusBadRequest, "invalid_request")
 	default:
 		return false
 	}

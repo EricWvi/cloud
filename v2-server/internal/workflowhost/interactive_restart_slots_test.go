@@ -2,6 +2,7 @@ package workflowhost
 
 import (
 	"context"
+	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"sync"
 	"testing"
 	"time"
@@ -149,7 +150,8 @@ func TestARecoveredNodeWhoseSessionEndedIsEndedAgain(t *testing.T) {
 	if !gone || used != 0 {
 		t.Fatalf("recovered node gone=%v, sessions in use %d, want its slot given back", gone, used)
 	}
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	// The lost follow-up blocks a plain completion; force takes the last normal answer.
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", server.WorkflowNodeCompletion{Force: true}); err != nil {
 		t.Fatalf("complete with the last answer: %v", err)
 	}
 }
