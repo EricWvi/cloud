@@ -7,7 +7,7 @@ import {
   WorkflowUnappliedSettingHint,
 } from "./workflow-unapplied-setting-hint";
 import type { WorkflowMcpCatalogStatus } from "./mcp-catalog";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   IconCheck,
@@ -471,6 +471,8 @@ function AgentConfigurationFields({
   onChange: (config: WorkflowAgentConfig) => void;
 }) {
   const { t } = useTranslation();
+  const skillRequirementHintId = useId();
+  const skillTeamVisibilityHintId = useId();
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [rolePickerOpen, setRolePickerOpen] = useState(false);
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
@@ -853,6 +855,7 @@ function AgentConfigurationFields({
                       catalogsLoading && capabilities.skills.length === 0
                     }
                     aria-label={t("settings.workflow.addSkill")}
+                    aria-describedby={`${skillRequirementHintId} ${skillTeamVisibilityHintId}`}
                   />
                 }
               >
@@ -918,8 +921,17 @@ function AgentConfigurationFields({
             </Popover>
           </div>
         </div>
-        <p className="text-[10px] leading-relaxed text-muted-foreground">
+        <p
+          id={skillRequirementHintId}
+          className="text-[10px] leading-relaxed text-muted-foreground"
+        >
           {t("settings.workflow.skillRequirementHint")}
+        </p>
+        <p
+          id={skillTeamVisibilityHintId}
+          className="text-[10px] leading-relaxed text-muted-foreground"
+        >
+          {t("settings.workflow.skillTeamVisibilityHint")}
         </p>
         <div className="min-w-0 divide-y overflow-hidden rounded-md border border-border">
           {config.skills.map((configuredSkill) => {

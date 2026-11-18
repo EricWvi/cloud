@@ -6,7 +6,7 @@ import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { sampleWorkflowBackend, serveWorkflows, type WorkflowServer } from '@/lib/workflows/test/workflow-server'
 import { chatBackend, tenantId } from '../test-backend'
-import { runSnapshotQuery, useRunStartPreflight, useRunUnappliedSettings } from './server-runs'
+import { projectRunsQuery, runSnapshotQuery, useRunStartPreflight, useRunUnappliedSettings } from './server-runs'
 import { serveRuns, type RunServer } from './test-run-server'
 
 const wrapper = ({ children }: { children: ReactNode }) => (
@@ -47,7 +47,7 @@ describe('the run analysis', () => {
     const { published } = workflows.backend.get({ workflowId })
     runs.runs.set(runId, {
       detail: {
-        run: { id: runId, workflowId, snapshotId: published!.id, projectId: 'p', name: '冻结', status: 'failed', state: '{}', input: null, output: null, error: null, startedAt: 1, finishedAt: 2, createdAt: 1, updatedAt: 2 },
+        run: { id: runId, workflowId, snapshotId: published!.id, projectId: 'p', name: '冻结', status: 'failed', startedByName: '', state: '{}', input: null, output: null, error: null, startedAt: 1, finishedAt: 2, createdAt: 1, updatedAt: 2 },
         nodes: [], scopes: [], conditionDecisions: {}, iterationConditionDecisions: {}, variables: [], failedAttempts: [], startedBy: null,
       },
       graph: published!.graph,
@@ -79,4 +79,15 @@ describe('the run analysis', () => {
     await expect(waitFor(() => expect(analyses()).toBeGreaterThan(1), { timeout: 300 })).rejects.toThrow()
     expect(snapshotReads()).toBe(1)
   })
+
+  it('keeps the starter display name on project run list items', async () => {
+    const entry = runs.runs.get(runId)!
+    entry.detail.run.startedByName = '爱丽丝'
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const own = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    const { result } = renderHook(() => useQuery(projectRunsQuery(tenantId, 'p')), { wrapper: own })
+    await waitFor(() => expect(result.current.data).toHaveLength(1))
+    expect(result.current.data![0]).toMatchObject({ id: runId, startedByName: '爱丽丝' })
+  })
 })
+

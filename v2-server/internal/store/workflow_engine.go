@@ -39,14 +39,18 @@ func (s *Store) WorkflowEngineContext(ctx context.Context, runID string) (Workfl
 		FROM v2_workflow_runs r JOIN v2_workflow_snapshots snap ON snap.id = r.snapshot_id
 		WHERE r.id = $1 AND r.deleted_at IS NULL`, runID)
 	run := &out.Run
+	var starter *string
 	err := row.Scan(&run.ID, &run.TenantID, &run.WorkflowID, &run.SnapshotID, &run.ProjectID,
-		&run.Name, &run.Status, &run.State, &run.Input, &run.Output, &run.Error, &run.RuntimePayload,
+		&run.Name, &run.Status, &starter, &run.State, &run.Input, &run.Output, &run.Error, &run.RuntimePayload,
 		&run.StartedAt, &run.FinishedAt, &run.CreatedAt, &run.UpdatedAt, &out.Graph)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return WorkflowEngineRun{}, ErrWorkflowRunNotFound
 	}
 	if err != nil {
 		return WorkflowEngineRun{}, fmt.Errorf("read workflow engine context: %w", err)
+	}
+	if starter != nil {
+		run.StartedBy = *starter
 	}
 	return out, nil
 }

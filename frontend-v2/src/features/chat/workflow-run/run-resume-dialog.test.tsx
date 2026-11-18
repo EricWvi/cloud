@@ -25,7 +25,7 @@ const definition = normalizeWorkflowDefinition({
 })
 
 const emptyDetail = (id: string): WorkflowRunDetail => ({
-  run: { id, workflowId: 'wf', snapshotId: 's', projectId: 'p', name: '运行', status: 'failed', state: '{}', input: null, output: null, error: null, startedAt: 1, finishedAt: 2, createdAt: 1, updatedAt: 2 },
+  run: { id, workflowId: 'wf', snapshotId: 's', projectId: 'p', name: '运行', status: 'failed', startedByName: '', state: '{}', input: null, output: null, error: null, startedAt: 1, finishedAt: 2, createdAt: 1, updatedAt: 2 },
   nodes: [], scopes: [], conditionDecisions: {}, iterationConditionDecisions: {}, variables: [], failedAttempts: [], startedBy: null,
 })
 
@@ -143,3 +143,4 @@ describe('resume eligibility', () => {
     expect(runKeys.resumePreview('t', 'r').slice(0, runKeys.run('t', 'r').length)).toEqual([...runKeys.run('t', 'r')])
   })
 })
+

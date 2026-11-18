@@ -97,7 +97,7 @@ function nodeRun(over: Partial<WorkflowNodeRun>): WorkflowNodeRun {
 function rail(a: Partial<WorkflowNodeRun>) {
   const detail: WorkflowRunDetail = {
     run: {
-      id: 'run', workflowId: 'wf', snapshotId: 'snap', projectId: 'p', name: '运行', status: 'awaitingInput', state: '{"current_nodes":["a"]}',
+      id: 'run', workflowId: 'wf', snapshotId: 'snap', projectId: 'p', name: '运行', status: 'awaitingInput', startedByName: 'Alice', state: '{"current_nodes":["a"]}',
       input: '需求', output: null, error: null, startedAt: 1_000, finishedAt: null, createdAt: 500, updatedAt: 2_000,
     },
     nodes: [nodeRun({ id: 'start-run' }), nodeRun({ id: 'a-run', nodeId: 'a', nodeType: 'agent', sessionId: 'session-1', finishedAt: null, ...a })],

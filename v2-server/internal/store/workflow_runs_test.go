@@ -194,7 +194,7 @@ func TestWorkflowRunReadsNodesAndScopes(t *testing.T) {
 	if len(runs) != 2 || runs[0].ID != first.ID || runs[1].ID != second.ID {
 		t.Fatalf("run list order = %+v", runs)
 	}
-	if runs[0].Version != "v1" || runs[0].ProjectID != project.ID || runs[0].Status != store.WorkflowStatusPending {
+	if runs[0].Version != "v1" || runs[0].ProjectID != project.ID || runs[0].Status != store.WorkflowStatusPending || runs[0].StartedBy != "" || runs[0].StartedByName != "" {
 		t.Fatalf("summary = %+v", runs[0])
 	}
 	if byProject, err := s.WorkflowRuns(ctx, tenant, "", project.ID); err != nil || len(byProject) != 2 {
@@ -204,9 +204,20 @@ func TestWorkflowRunReadsNodesAndScopes(t *testing.T) {
 		t.Fatalf("unknown project filter = %+v %v", none, err)
 	}
 
+	if err := s.SetWorkflowStarter(ctx, tenant, first.ID, user); err != nil {
+		t.Fatal(err)
+	}
 	started, err := s.StartWorkflowRun(ctx, tenant, first.ID)
-	if err != nil || started.Status != store.WorkflowStatusRunning || started.StartedAt == nil {
+	if err != nil || started.Status != store.WorkflowStatusRunning || started.StartedAt == nil || started.StartedBy != user || started.StartedByName != "history-owner" {
 		t.Fatalf("start = %+v %v", started, err)
+	}
+	listedAfterStart, err := s.WorkflowRuns(ctx, tenant, w.ID, "")
+	if err != nil || listedAfterStart[0].StartedBy != user || listedAfterStart[0].StartedByName != "history-owner" {
+		t.Fatalf("summary after start = %+v %v", listedAfterStart, err)
+	}
+	engineCtx, err := s.WorkflowEngineContext(ctx, first.ID)
+	if err != nil || engineCtx.Run.StartedBy != user {
+		t.Fatalf("engine context starter = %+v %v", engineCtx.Run, err)
 	}
 	if _, err := s.StartWorkflowRun(ctx, tenant, first.ID); !errors.Is(err, store.ErrWorkflowRunState) {
 		t.Fatalf("double start = %v", err)
@@ -255,7 +266,7 @@ func TestWorkflowRunReadsNodesAndScopes(t *testing.T) {
 		t.Fatalf("park missing node = %v", err)
 	}
 	detail, err := s.WorkflowRun(ctx, tenant, first.ID)
-	if err != nil || detail.Status != "awaitingInput" {
+	if err != nil || detail.Status != "awaitingInput" || detail.StartedBy != user || detail.StartedByName != "history-owner" {
 		t.Fatalf("derived run status = %+v %v", detail, err)
 	}
 	// A pending node in a different run does not make this one await input.

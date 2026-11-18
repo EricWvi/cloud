@@ -6,11 +6,11 @@ import type { Conversation } from '@/components/agent-thread/model/types'
 /**
  * Follows one node attempt's session over v2-server's node events stream and folds it as the chat
  * page folds a conversation's, so the run page shows the Agent's whole turn: its thinking, tool
- * calls and answer, live while it runs. `conversation` is null until the first event arrives, and
- * stays null when the stream is refused (an attempt not dispatched yet, or a session that belongs
- * to whoever else started the run), so the page keeps showing what the attempt recorded; `refused`
- * says the server turned the stream away, which the browser only shows as a stream that closed for
- * good before sending anything.
+ * calls and answer, live while it runs for any member of the workspace. `conversation` is null
+ * until the first event arrives, and stays null when the stream is unavailable (e.g. an attempt not
+ * dispatched yet), so the page keeps showing what the attempt recorded; `refused` says the server
+ * turned the stream away, which the browser only shows as a stream that closed for good before
+ * sending anything.
  */
 export function useNodeSession(
   tenantId: string,

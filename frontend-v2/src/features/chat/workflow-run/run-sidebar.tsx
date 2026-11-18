@@ -200,16 +200,21 @@ function RunRow({ tenantId, projectId, run }: { tenantId: string; projectId: str
   const tone = runStatusTone(run.status)
   const label = runStatusLabel(run.status)
   return (
-    <div className={cn('group/run flex h-8 items-center rounded-md pr-1 text-sm', selected ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/60')}>
+    <div className={cn('group/run flex min-h-8 items-center rounded-md pr-1 text-sm', selected ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/60')}>
       <button
         type="button"
-        className="flex h-full min-w-0 flex-1 items-center gap-2 px-2 text-left"
+        className="flex h-full min-w-0 flex-1 items-center gap-2 px-2 py-1 text-left"
         aria-current={selected ? 'page' : undefined}
         aria-label={`工作流运行 ${run.name}（${label}）`}
         onClick={() => selectRun(run.id)}
       >
         <WorkflowIcon className="size-3.5 shrink-0 text-muted-foreground" />
-        <FadeText text={run.name} className="flex-1" />
+        <span className="flex min-w-0 flex-1 flex-col">
+          <FadeText text={run.name} />
+          {run.startedByName && (
+            <span className="truncate text-xs text-muted-foreground">由 {run.startedByName} 发起</span>
+          )}
+        </span>
         <span title={label} className={cn('size-2 shrink-0 rounded-full', tone.dot, isNodeWorking(run.status) && 'animate-pulse')} />
       </button>
       <DropdownMenu>

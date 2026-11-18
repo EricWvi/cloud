@@ -14,6 +14,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
+	"github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
 )
 
 // fakeRunEvents is a run invalidation hub a test publishes on by hand.
@@ -184,6 +185,9 @@ func TestWorkflowNodeEventsRelayTheAttemptSession(t *testing.T) {
 	call, s, srv := workflowServerWithClient(t, func(o *server.Options) { o.Execution, o.Catalog = rt, rt })
 	tenant, user, runID := pendingRun(t, call, s)
 	ctx := context.Background()
+	if err := s.SetWorkflowStarter(ctx, tenant, runID, user); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.StartWorkflowRun(ctx, tenant, runID); err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +243,7 @@ func TestWorkflowNodeEventsRelayTheAttemptSession(t *testing.T) {
 	if replaced := read(""); len(replaced) != 8 {
 		t.Fatalf("replaced session = %q", replaced)
 	}
-	// The session is read in the caller's own scope, never another member's.
+	// The session is read in the starter's scope.
 	mu.Lock()
 	for _, scope := range seen {
 		if scope != (execution.Scope{TenantID: tenant, UserID: user}) {
@@ -261,15 +265,39 @@ func TestWorkflowNodeEventsRelayTheAttemptSession(t *testing.T) {
 	}
 }
 
-func TestWorkflowNodeEventsOfAnotherMembersSessionAreNotFound(t *testing.T) {
+func TestWorkflowNodeEventsReadableByTenantMember(t *testing.T) {
 	rt, _ := chatRuntime()
-	// The execution service keeps the session in its starter's scope; anyone else does not find it.
-	rt.SubscribeFunc = func(context.Context, execution.Scope, string, uint64) (execution.Stream, error) {
-		return nil, execution.ErrNotFound
+	call, s, srv := workflowServerWithClient(t, func(o *server.Options) { o.Execution, o.Catalog = rt, rt })
+	tenant, starter, runID := pendingRun(t, call, s)
+	starterScope := execution.Scope{TenantID: tenant, UserID: starter}
+
+	var mu sync.Mutex
+	var seenSubscribe, seenTurns []execution.Scope
+	replay := rt.SubscribeFunc
+	rt.SubscribeFunc = func(ctx context.Context, scope execution.Scope, sid string, after uint64) (execution.Stream, error) {
+		mu.Lock()
+		seenSubscribe = append(seenSubscribe, scope)
+		mu.Unlock()
+		if scope != starterScope {
+			return nil, execution.ErrNotFound
+		}
+		return replay(ctx, scope, sid, after)
 	}
-	call, s, _ := workflowServerWithClient(t, func(o *server.Options) { o.Execution, o.Catalog = rt, rt })
-	tenant, _, runID := pendingRun(t, call, s)
+	readTurns := rt.ReadTurnsFunc
+	rt.ReadTurnsFunc = func(ctx context.Context, scope execution.Scope, sid, cursor string, limit int) (execution.TurnPage, error) {
+		mu.Lock()
+		seenTurns = append(seenTurns, scope)
+		mu.Unlock()
+		if scope != starterScope {
+			return execution.TurnPage{}, execution.ErrNotFound
+		}
+		return readTurns(ctx, scope, sid, cursor, limit)
+	}
+
 	ctx := context.Background()
+	if err := s.SetWorkflowStarter(ctx, tenant, runID, starter); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.StartWorkflowRun(ctx, tenant, runID); err != nil {
 		t.Fatal(err)
 	}
@@ -280,8 +308,86 @@ func TestWorkflowNodeEventsOfAnotherMembersSessionAreNotFound(t *testing.T) {
 	if _, err := s.BindWorkflowNodeSession(ctx, tenant, runID, node.ID, "s-starter"); err != nil {
 		t.Fatal(err)
 	}
+
+	memberToken := storetest.SignIn(t, s, "workflow-member", "鲍勃", store.RoleMember)
+	memberClient := &http.Client{}
+	getAsMember := func(url string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.AddCookie(&http.Cookie{Name: server.SessionCookie, Value: memberToken})
+		res, err := memberClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
 	path := "/api/v2/tenants/" + tenant + "/workflow-runs/" + runID + "/nodes/" + node.ID + "/events"
-	if status, failure := call("GET", path, nil); status != 404 || failure["code"] != "workflow_node_session_not_found" {
-		t.Fatalf("another member's session = %d %v", status, failure)
+	res := getAsMember(srv.base + path)
+	defer res.Body.Close()
+	if res.StatusCode != 200 || res.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("member events = %d %s", res.StatusCode, res.Header.Get("Content-Type"))
+	}
+	var lines []string
+	for l := range sseLines(t, res.Body) {
+		lines = append(lines, l)
+	}
+	if len(lines) != 8 || lines[0] != "id: 1" || lines[2] != "id: 2" || lines[4] != "id: 3" || lines[6] != "event: end" {
+		t.Fatalf("member stream = %q", lines)
+	}
+	var ended map[string]any
+	_ = json.Unmarshal([]byte(strings.TrimPrefix(lines[3], "data: ")), &ended)
+	if ended["kind"] != "turn_ended" || ended["prompt"] != "你好" || ended["result"].(map[string]any)["answer"] != "好" {
+		t.Fatalf("member turn_ended = %v", ended)
+	}
+
+	resAfter := getAsMember(srv.base + path + "?after=2")
+	defer resAfter.Body.Close()
+	if resAfter.StatusCode != 200 {
+		t.Fatalf("member replay = %d", resAfter.StatusCode)
+	}
+	var replayed []string
+	for l := range sseLines(t, resAfter.Body) {
+		replayed = append(replayed, l)
+	}
+	if len(replayed) != 4 || replayed[0] != "id: 3" || replayed[2] != "event: end" {
+		t.Fatalf("member replay stream = %q", replayed)
+	}
+
+	mu.Lock()
+	for _, scope := range append(seenSubscribe, seenTurns...) {
+		if scope != starterScope {
+			t.Errorf("expected starter scope %+v, got %+v", starterScope, scope)
+		}
+	}
+	mu.Unlock()
+
+	// Cross-tenant requests are still rejected with 404.
+	crossTenant := getAsMember(srv.base + "/api/v2/tenants/00000000-0000-0000-0000-000000000000/workflow-runs/" + runID + "/nodes/" + node.ID + "/events")
+	defer crossTenant.Body.Close()
+	if crossTenant.StatusCode != 404 {
+		t.Fatalf("cross-tenant status = %d", crossTenant.StatusCode)
+	}
+
+	// Non-member detail and list also include the starter's identity and display name.
+	detailRes := getAsMember(srv.base + "/api/v2/tenants/" + tenant + "/workflow-runs/" + runID)
+	defer detailRes.Body.Close()
+	if detailRes.StatusCode != 200 {
+		t.Fatalf("member run detail = %d", detailRes.StatusCode)
+	}
+	var detail struct {
+		Run struct {
+			StartedByName string `json:"startedByName"`
+		} `json:"run"`
+		StartedBy string `json:"startedBy"`
+	}
+	if err := json.NewDecoder(detailRes.Body).Decode(&detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.StartedBy != starter || detail.Run.StartedByName != "Owner" {
+		t.Fatalf("member run detail starter = %+v started by %v", detail.Run, detail.StartedBy)
 	}
 }

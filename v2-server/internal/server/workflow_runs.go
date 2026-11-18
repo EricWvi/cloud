@@ -33,34 +33,36 @@ type workflowStarterStore interface {
 }
 
 type workflowRunView struct {
-	TaskID     string  `json:"taskId,omitempty"`
-	TaskLink   string  `json:"taskLink,omitempty"`
-	ID         string  `json:"id"`
-	WorkflowID string  `json:"workflowId"`
-	SnapshotID string  `json:"snapshotId"`
-	ProjectID  string  `json:"projectId"`
-	Name       string  `json:"name"`
-	Status     string  `json:"status"`
-	State      *string `json:"state"`
-	Input      *string `json:"input"`
-	Output     *string `json:"output"`
-	Error      *string `json:"error"`
-	StartedAt  *int64  `json:"startedAt"`
-	FinishedAt *int64  `json:"finishedAt"`
-	CreatedAt  int64   `json:"createdAt"`
-	UpdatedAt  int64   `json:"updatedAt"`
+	TaskID        string  `json:"taskId,omitempty"`
+	TaskLink      string  `json:"taskLink,omitempty"`
+	ID            string  `json:"id"`
+	WorkflowID    string  `json:"workflowId"`
+	SnapshotID    string  `json:"snapshotId"`
+	ProjectID     string  `json:"projectId"`
+	Name          string  `json:"name"`
+	Status        string  `json:"status"`
+	StartedByName string  `json:"startedByName"`
+	State         *string `json:"state"`
+	Input         *string `json:"input"`
+	Output        *string `json:"output"`
+	Error         *string `json:"error"`
+	StartedAt     *int64  `json:"startedAt"`
+	FinishedAt    *int64  `json:"finishedAt"`
+	CreatedAt     int64   `json:"createdAt"`
+	UpdatedAt     int64   `json:"updatedAt"`
 }
 
 type workflowRunSummaryView struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	ProjectID  string `json:"projectId"`
-	WorkflowID string `json:"workflowId"`
-	Version    string `json:"version"`
-	Status     string `json:"status"`
-	StartedAt  *int64 `json:"startedAt"`
-	FinishedAt *int64 `json:"finishedAt"`
-	CreatedAt  int64  `json:"createdAt"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	ProjectID     string `json:"projectId"`
+	WorkflowID    string `json:"workflowId"`
+	Version       string `json:"version"`
+	Status        string `json:"status"`
+	StartedByName string `json:"startedByName"`
+	StartedAt     *int64 `json:"startedAt"`
+	FinishedAt    *int64 `json:"finishedAt"`
+	CreatedAt     int64  `json:"createdAt"`
 }
 
 type workflowNodeRunView struct {
@@ -113,34 +115,36 @@ func optionalString(raw []byte) *string {
 
 func toWorkflowRunView(run store.WorkflowRun) workflowRunView {
 	return workflowRunView{
-		ID:         run.ID,
-		WorkflowID: run.WorkflowID,
-		SnapshotID: run.SnapshotID,
-		ProjectID:  run.ProjectID,
-		Name:       run.Name,
-		Status:     run.Status,
-		State:      optionalString(run.State),
-		Input:      run.Input,
-		Output:     run.Output,
-		Error:      run.Error,
-		StartedAt:  millisPtr(run.StartedAt),
-		FinishedAt: millisPtr(run.FinishedAt),
-		CreatedAt:  millis(run.CreatedAt),
-		UpdatedAt:  millis(run.UpdatedAt),
+		ID:            run.ID,
+		WorkflowID:    run.WorkflowID,
+		SnapshotID:    run.SnapshotID,
+		ProjectID:     run.ProjectID,
+		Name:          run.Name,
+		Status:        run.Status,
+		StartedByName: run.StartedByName,
+		State:         optionalString(run.State),
+		Input:         run.Input,
+		Output:        run.Output,
+		Error:         run.Error,
+		StartedAt:     millisPtr(run.StartedAt),
+		FinishedAt:    millisPtr(run.FinishedAt),
+		CreatedAt:     millis(run.CreatedAt),
+		UpdatedAt:     millis(run.UpdatedAt),
 	}
 }
 
 func toWorkflowRunSummaryView(run store.WorkflowRunSummary) workflowRunSummaryView {
 	return workflowRunSummaryView{
-		ID:         run.ID,
-		Name:       run.Name,
-		ProjectID:  run.ProjectID,
-		WorkflowID: run.WorkflowID,
-		Version:    run.Version,
-		Status:     run.Status,
-		StartedAt:  millisPtr(run.StartedAt),
-		FinishedAt: millisPtr(run.FinishedAt),
-		CreatedAt:  millis(run.CreatedAt),
+		ID:            run.ID,
+		Name:          run.Name,
+		ProjectID:     run.ProjectID,
+		WorkflowID:    run.WorkflowID,
+		Version:       run.Version,
+		Status:        run.Status,
+		StartedByName: run.StartedByName,
+		StartedAt:     millisPtr(run.StartedAt),
+		FinishedAt:    millisPtr(run.FinishedAt),
+		CreatedAt:     millis(run.CreatedAt),
 	}
 }
 

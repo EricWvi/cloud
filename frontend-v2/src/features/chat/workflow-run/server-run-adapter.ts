@@ -375,6 +375,7 @@ export function toGraphWorkflowRun(detail: WorkflowRunDetail, definition: Workfl
     definitionSnapshot: withRunStartValues(definition, detail),
     name: run.name,
     status,
+    startedByName: run.startedByName,
     nodeStates,
     rounds,
     roundStates,

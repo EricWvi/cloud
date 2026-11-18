@@ -728,6 +728,8 @@ export interface GraphWorkflowRun {
   snapshotId?: string;
   /** v2: the user who started the run, the only one who may talk to or complete an interactive node. */
   startedBy?: string;
+  /** v2: that user's display name, shown on the run page and in the run list. */
+  startedByName?: string;
 }
 
 /**

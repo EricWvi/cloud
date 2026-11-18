@@ -76,9 +76,9 @@ func (h *handler) workflowRunEvents(w http.ResponseWriter, r *http.Request, a ac
 
 // workflowNodeEvents relays one node attempt's session the way the chat routes relay a
 // conversation's, so the run page draws it with the chat page's own rendering. The shared
-// execution service keeps a session in the scope of whoever started the run, and it is read in the
-// caller's own scope: another member of the tenant gets workflow_node_session_not_found and the
-// page keeps showing the task and answer the attempt recorded.
+// execution service keeps a session in the scope of whoever started the run; after checking the
+// caller's tenant membership and locating the run in that tenant, the handler reads the session in
+// the starter's scope so any workspace member can follow live and replayed events.
 func (h *handler) workflowNodeEvents(w http.ResponseWriter, r *http.Request, a access) {
 	s, tenant, ok := h.workflowRunScope(w, a)
 	if !ok {
@@ -89,7 +89,8 @@ func (h *handler) workflowNodeEvents(w http.ResponseWriter, r *http.Request, a a
 		fault(w, http.StatusNotFound, "workflow_run_not_found")
 		return
 	}
-	if _, err := s.WorkflowRun(r.Context(), tenant, runID); err != nil {
+	run, err := s.WorkflowRun(r.Context(), tenant, runID)
+	if err != nil {
 		workflowRunFault(w, err, "workflow node events")
 		return
 	}
@@ -128,7 +129,11 @@ func (h *handler) workflowNodeEvents(w http.ResponseWriter, r *http.Request, a a
 		fault(w, http.StatusBadRequest, "invalid_cursor")
 		return
 	}
-	scope := execution.Scope{TenantID: tenant, UserID: a.UserID}
+	starter := run.StartedBy
+	if starter == "" {
+		starter = a.UserID
+	}
+	scope := execution.Scope{TenantID: tenant, UserID: starter}
 	stream, err := h.opts.Execution.Subscribe(r.Context(), scope, *sessionID, after)
 	switch {
 	case err == nil:
