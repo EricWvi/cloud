@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,14 +36,7 @@ func TestInterruptedTurnsDeliveredBeforeListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
-	database, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	query := database.Query()
-	query.Set("search_path", schema+",public")
-	database.RawQuery = query.Encode()
-	dsn = database.String()
+	dsn = withSearchPath(t, dsn, schema+",public")
 
 	preset, err := store.LoadPreset("users.json")
 	if err != nil {
@@ -123,4 +117,21 @@ func TestInterruptedTurnsDeliveredBeforeListener(t *testing.T) {
 	if !errors.Is(err, checked) {
 		t.Fatalf("startup: %v", err)
 	}
+}
+
+// withSearchPath returns dsn with search_path set, for both connection string forms pgx accepts: a
+// postgres:// URL gets a query parameter, a keyword/value string (as CI uses) gets one more pair.
+func withSearchPath(t *testing.T, dsn, searchPath string) string {
+	t.Helper()
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		database, err := url.Parse(dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		query := database.Query()
+		query.Set("search_path", searchPath)
+		database.RawQuery = query.Encode()
+		return database.String()
+	}
+	return dsn + " search_path='" + searchPath + "'"
 }
