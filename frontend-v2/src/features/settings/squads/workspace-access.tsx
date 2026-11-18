@@ -37,9 +37,10 @@ export function WorkspaceAccess({ tenantId, userId, squads }: {
   const generate = useMutation({
     mutationFn: () => createInviteLink(tenantId, squadId ? { squadId } : {}),
     onSuccess: async (result) => {
+      // The list already shows the new link when its address appears.
+      await refreshLinks()
       setCreated(new URL(result.url, window.location.origin).toString())
       setCopied(false)
-      await refreshLinks()
     },
   })
   const revoke = useMutation({ mutationFn: (id: string) => revokeInviteLink(tenantId, id), onSettled: refreshLinks })
