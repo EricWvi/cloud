@@ -489,22 +489,31 @@ func (h *Host) end(ctx context.Context, run store.TaskRun, reason string) error 
 	if e := h.store.MarkTaskRunEnding(ctx, run.ID, reason); e != nil {
 		return e
 	}
-	e := func() error {
-		if run.TurnActive() {
-			result, e := h.exec.Cancel(ctx, owner, execution.Ref{SessionID: run.SessionID, TurnID: run.LastTurnID})
-			if e != nil {
-				return e
-			}
-			if err := h.settle(ctx, run, run.LastTurnID, result, false); err != nil {
-				return err
-			}
+	var settleErr error
+	if run.TurnActive() {
+		result, e := h.exec.Cancel(ctx, owner, execution.Ref{SessionID: run.SessionID, TurnID: run.LastTurnID})
+		if e != nil {
+			return errors.Join(e, h.store.ClearTaskRunEnding(context.WithoutCancel(ctx), run.ID))
 		}
-		return h.exec.End(ctx, owner, run.SessionID)
-	}()
-	if e != nil {
+		// Cancel already stopped the turn; bound settlement under WithoutCancel so a storage
+		// outage does not hold the task lock indefinitely, and still end the session below.
+		settleCtx, cancel := h.endSettleContext(ctx)
+		settleErr = h.settle(settleCtx, run, run.LastTurnID, result, false)
+		cancel()
+	}
+	endErr := h.exec.End(context.WithoutCancel(ctx), owner, run.SessionID)
+	if e := errors.Join(settleErr, endErr); e != nil {
 		return errors.Join(e, h.store.ClearTaskRunEnding(context.WithoutCancel(ctx), run.ID))
 	}
 	return h.store.EndTaskRun(ctx, run.ID, reason)
+}
+
+func (h *Host) endSettleContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	budget := h.resultRetry.Budget
+	if budget <= 0 {
+		budget = h.resultRetry.Defaults().QueryTimeout
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), budget)
 }
 
 // watch follows an accepted turn until its result and settles it. Observing never stops the turn.
@@ -529,12 +538,32 @@ func (h *Host) watch(scope execution.Scope, run store.TaskRun, ref execution.Ref
 }
 
 // await follows the session until the turn's terminal event. If the stream ends or breaks first,
-// the recorded turn is the authority: it carries the result once written.
+// recoverTurn reads the recorded turn and re-subscribes from the last observed sequence whenever
+// the turn is still running.
 func (h *Host) await(scope execution.Scope, ref execution.Ref) (execution.Result, error) {
-	stream, e := h.exec.Subscribe(h.ctx, scope, ref.SessionID, 0)
-	if e != nil {
-		return h.recorded(scope, ref, e)
+	var cursor uint64
+	stream, e := h.exec.Subscribe(h.ctx, scope, ref.SessionID, cursor)
+	for {
+		if e == nil {
+			var result execution.Result
+			var done bool
+			result, done, e = h.drainStream(stream, ref.TurnID, &cursor)
+			if done {
+				return result, nil
+			}
+		}
+		var next execution.Stream
+		var result execution.Result
+		var got bool
+		result, next, got, e = h.recoverTurn(scope, ref, cursor, e)
+		if got || e != nil {
+			return result, e
+		}
+		stream = next
 	}
+}
+
+func (h *Host) drainStream(stream execution.Stream, turnID string, cursor *uint64) (execution.Result, bool, error) {
 	defer func() { _ = stream.Close() }()
 	for {
 		event, e := stream.Next(h.ctx)
@@ -542,42 +571,59 @@ func (h *Host) await(scope execution.Scope, ref execution.Ref) (execution.Result
 			if errors.Is(e, io.EOF) {
 				e = execution.ErrSessionEnded
 			}
-			return h.recorded(scope, ref, e)
+			return execution.Result{}, false, e
 		}
-		if event.Kind == execution.EventTurnEnded && event.Ref.TurnID == ref.TurnID && event.Result != nil {
-			return *event.Result, nil
+		if event.Sequence > *cursor {
+			*cursor = event.Sequence
+		}
+		if event.Kind == execution.EventTurnEnded && event.Ref.TurnID == turnID && event.Result != nil {
+			return *event.Result, true, nil
 		}
 	}
 }
 
-func (h *Host) recorded(scope execution.Scope, ref execution.Ref, cause error) (execution.Result, error) {
+func (h *Host) recoverTurn(scope execution.Scope, ref execution.Ref, cursor uint64, cause error) (execution.Result, execution.Stream, bool, error) {
 	if h.ctx.Err() != nil {
-		return execution.Result{}, h.ctx.Err()
+		return execution.Result{}, nil, false, h.ctx.Err()
 	}
 	var result execution.Result
+	var next execution.Stream
+	var got bool
 	err := h.resultRetry.Read(h.ctx, func(ctx context.Context) error {
 		// Restart pagination after a failed read; a partial scan never proves absence.
-		for cursor := ""; ; {
-			page, e := h.exec.ReadTurns(ctx, scope, ref.SessionID, cursor, 100)
+		for pageCursor := ""; ; {
+			page, e := h.exec.ReadTurns(ctx, scope, ref.SessionID, pageCursor, 100)
 			if e != nil {
 				return e
 			}
 			for _, t := range page.Items {
-				if t.Ref.TurnID == ref.TurnID && t.Result != nil {
-					result = *t.Result
-					return nil
+				if t.Ref.TurnID == ref.TurnID {
+					if t.Result != nil {
+						result = *t.Result
+						got = true
+						return nil
+					}
+					if t.EndedAt == nil && !errors.Is(cause, execution.ErrSessionEnded) {
+						stream, e := h.exec.Subscribe(h.ctx, scope, ref.SessionID, cursor)
+						if e == nil {
+							next = stream
+							return nil
+						}
+						return e
+					}
+					return execution.ErrUnavailable
 				}
 			}
 			if page.NextCursor == "" {
 				return execution.ErrUnavailable
 			}
-			cursor = page.NextCursor
+			pageCursor = page.NextCursor
 		}
 	})
 	if err != nil {
-		return execution.Result{}, errors.Join(cause, err)
+		return execution.Result{}, nil, false, errors.Join(cause, err)
 	}
-	return result, nil
+	return result, next, got, nil
 }
 
 // settle records a turn's result once and moves the task: a completed or failed turn hands it to
@@ -641,8 +687,6 @@ func (h *Host) settle(ctx context.Context, run store.TaskRun, turnID string, r e
 			return nil // a person or another operation already moved the task
 		}
 		return err
-	}, func(err error) bool {
-		return errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict)
 	})
 	if err != nil && h.ctx.Err() == nil {
 		h.log.Warn("settle task turn", "run", run.ID, "turn", turnID, "error", err)

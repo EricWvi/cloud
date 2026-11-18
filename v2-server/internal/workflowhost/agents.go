@@ -140,7 +140,7 @@ func (h *Host) recordInjectedFailure(tenant, runID, nodeRunID, text string) {
 func (h *Host) fail(d workflow.AgentDispatch, f workflow.Failure) {
 	if err := h.resultRetry.Store(h.ctx, func(ctx context.Context) error {
 		return h.engine.FailNode(ctx, d.RunID, d.NodeRunID, f)
-	}, permanentOutcomeError); err != nil && h.ctx.Err() == nil {
+	}); err != nil && h.ctx.Err() == nil {
 		h.log.Error("record workflow node failure", "run", d.RunID, "node_run", d.NodeRunID, "error", err)
 	}
 }
@@ -158,15 +158,9 @@ func (h *Host) complete(d workflow.AgentDispatch, c workflow.Completion) {
 			return h.engine.Resume(ctx, d.RunID)
 		}
 		return nil
-	}, permanentOutcomeError); err != nil && h.ctx.Err() == nil {
+	}); err != nil && h.ctx.Err() == nil {
 		h.log.Error("record workflow node completion", "run", d.RunID, "node_run", d.NodeRunID, "error", err)
 	}
-}
-
-func permanentOutcomeError(err error) bool {
-	return errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrWorkflowRunState) ||
-		errors.Is(err, store.ErrWorkflowNodeRunState) || errors.Is(err, store.ErrWorkflowScopeState) ||
-		errors.Is(err, store.ErrConflict) || errors.Is(err, execution.ErrInvalidRequest)
 }
 
 // finishCancel closes a run whose cancellation was requested once its turn is known to have
@@ -580,12 +574,32 @@ func (st *runState) forget(a *attemptState) {
 }
 
 // awaitTurn follows the session until the owning turn's terminal event. If the stream ends or
-// breaks first, the recorded attempt is the authority: it carries the result once written.
+// breaks first, recoverTurn reads the durable attempt and re-subscribes from the last observed
+// sequence whenever the turn is still running.
 func (h *Host) awaitTurn(scope execution.Scope, ref execution.Ref, caller execution.Caller) (execution.Result, error) {
-	stream, err := h.exec.Subscribe(h.ctx, scope, ref.SessionID, 0)
-	if err != nil {
-		return h.recordedResult(scope, caller, err)
+	var cursor uint64
+	stream, err := h.exec.Subscribe(h.ctx, scope, ref.SessionID, cursor)
+	for {
+		if err == nil {
+			var result execution.Result
+			var done bool
+			result, done, err = h.drainTurnStream(stream, ref.TurnID, &cursor)
+			if done {
+				return result, nil
+			}
+		}
+		var next execution.Stream
+		var result execution.Result
+		var got bool
+		result, next, got, err = h.recoverTurn(scope, ref, caller, cursor, err)
+		if got || err != nil {
+			return result, err
+		}
+		stream = next
 	}
+}
+
+func (h *Host) drainTurnStream(stream execution.Stream, turnID string, cursor *uint64) (execution.Result, bool, error) {
 	defer stream.Close()
 	for {
 		event, err := stream.Next(h.ctx)
@@ -593,34 +607,48 @@ func (h *Host) awaitTurn(scope execution.Scope, ref execution.Ref, caller execut
 			if errors.Is(err, io.EOF) {
 				err = execution.ErrSessionEnded
 			}
-			return h.recordedResult(scope, caller, err)
+			return execution.Result{}, false, err
 		}
-		if event.Kind == execution.EventTurnEnded && event.Ref.TurnID == ref.TurnID && event.Result != nil {
-			return *event.Result, nil
+		if event.Sequence > *cursor {
+			*cursor = event.Sequence
+		}
+		if event.Kind == execution.EventTurnEnded && event.Ref.TurnID == turnID && event.Result != nil {
+			return *event.Result, true, nil
 		}
 	}
 }
 
-func (h *Host) recordedResult(scope execution.Scope, caller execution.Caller, cause error) (execution.Result, error) {
+func (h *Host) recoverTurn(scope execution.Scope, ref execution.Ref, caller execution.Caller, cursor uint64, cause error) (execution.Result, execution.Stream, bool, error) {
 	if h.ctx.Err() != nil {
-		return execution.Result{}, h.ctx.Err()
+		return execution.Result{}, nil, false, h.ctx.Err()
 	}
 	var result execution.Result
+	var next execution.Stream
+	var got bool
 	err := h.resultRetry.Read(h.ctx, func(ctx context.Context) error {
 		turn, err := h.exec.ReadAttempt(ctx, scope, caller)
 		if err != nil {
 			return err
 		}
-		if turn.Result == nil {
-			return execution.ErrUnavailable // the runtime may still be backfilling it
+		if turn.Result != nil {
+			result = *turn.Result
+			got = true
+			return nil
 		}
-		result = *turn.Result
-		return nil
+		if turn.EndedAt == nil && !errors.Is(cause, execution.ErrSessionEnded) {
+			stream, err := h.exec.Subscribe(h.ctx, scope, ref.SessionID, cursor)
+			if err == nil {
+				next = stream
+				return nil
+			}
+			return err
+		}
+		return execution.ErrUnavailable // ended without a written result; keep polling within budget
 	})
 	if err != nil {
-		return execution.Result{}, errors.Join(cause, err)
+		return execution.Result{}, nil, false, errors.Join(cause, err)
 	}
-	return result, nil
+	return result, next, got, nil
 }
 
 // end stops the node's session, as desktop's stop_session after the turn; the transcript stays
@@ -760,7 +788,7 @@ func (h *Host) resolveExecutor(scope execution.Scope, cfg workflow.AgentConfig) 
 // publicReason names an execution error by its stable sentinel, never infrastructure detail.
 func publicReason(err error) string {
 	if errors.Is(err, executionwait.ErrExhausted) {
-		return "execution result could not be read before the retry deadline; resume the run to retry"
+		return "execution result could not be read before the retry deadline"
 	}
 	for _, known := range []error{
 		execution.ErrUnavailable, execution.ErrNotFound, execution.ErrInvalidRequest, execution.ErrWorkspaceBusy,

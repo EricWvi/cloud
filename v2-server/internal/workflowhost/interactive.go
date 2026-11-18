@@ -284,7 +284,7 @@ func (h *Host) park(st *runState, n *interactiveNode) {
 				func(node []byte) ([]byte, error) { return workflow.MergePayload(node, keys) })
 		}
 		return err
-	}, permanentOutcomeError)
+	})
 	if err != nil {
 		if h.ctx.Err() == nil {
 			// The row stays running and the node unreachable until the run ends; cancelling it still
