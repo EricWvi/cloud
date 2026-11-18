@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
@@ -259,5 +260,38 @@ func TestAFirstTurnOnAnUnknownCheckoutSaysAResumeClonesAgain(t *testing.T) {
 	got := node(nodes, "a")
 	if run.Status != store.WorkflowStatusFailed || errorKind(t, got) != "interactive_session" || !strings.Contains(errorMessage(t, got), "fresh clone") {
 		t.Fatalf("run %s node %s, want an interactive_session failure that points at a fresh clone", run.Status, got.Payload)
+	}
+}
+
+// A node being completed at the restart had its session ended, but its row's summary still read
+// the session as open. The recovery writes the summary again, so the page reads it as awaiting
+// completion and offers no message box its session would refuse.
+func TestARestartDuringCompletionReadsTheSessionAsEnded(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	runID, a := f.startParked(t, interactiveChain, "初稿一")
+	_, nodes := f.await(t, runID, parked("a"))
+	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != false {
+		t.Fatalf("summary before the restart = %v, want the session open", p)
+	}
+	f.exec.recordedTurns(a, node(nodes, "a").ID, completed("初稿一"))
+	// The completion's End was confirmed, then the process stopped before the output was written.
+	ended := time.Now()
+	f.exec.ReadSessionFunc = func(_ context.Context, _ execution.Scope, id string) (execution.Session, error) {
+		if id != a {
+			return execution.Session{}, execution.ErrNotFound
+		}
+		return execution.Session{ID: id, EndedAt: &ended}, nil
+	}
+
+	f.restart(t)
+	_, nodes = f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["session_ended"] == true
+	})
+	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != true || p["answer"] != "初稿一" {
+		t.Fatalf("summary after the restart = %v, want it completable with the earlier answer", p)
+	}
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+		t.Fatalf("complete after the restart: %v", err)
 	}
 }

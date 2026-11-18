@@ -70,6 +70,10 @@ func (h *Host) recoverParked(ctx context.Context, st *runState, run store.Workfl
 		// Agent starts only with its next turn: a conservative count, as the slot is taken back
 		// then anyway.
 		st.track(n)
+		// The row's summary was written before the restart and may lag the session: a node being
+		// completed then had its session ended without the summary saying so, and the page would
+		// offer a message box its session refuses. Write it again from the rebuilt node.
+		h.refreshSummary(st, n, store.WorkflowStatusPending)
 		if n.sessionEnded && !n.sessionGone {
 			// The node's session ended before the restart (a stop, a lost Agent) but its End was
 			// never confirmed, so nothing retries it and it would keep its slot until the node
