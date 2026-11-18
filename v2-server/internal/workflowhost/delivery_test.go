@@ -156,3 +156,37 @@ func TestSharedWorkspaceAttemptsAndInteractiveTurnsDeliver(t *testing.T) {
 		t.Fatalf("one ref per accepted turn: %s, %v", refs, err)
 	}
 }
+
+// A node attempt that fails before any prompt is admitted runs no Agent turn, so it has nothing to
+// deliver: no work row, no record and no ref, while the node fails exactly as without delivery.
+func TestPreAdmissionFailureProducesNoDelivery(t *testing.T) {
+	for name, c := range map[string]struct{ agent, kind string }{
+		"unassigned template": {`{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"{{#start.topic#}}"}`, "prompt_template"},
+		"unknown agent":       {`{"executor":{"agentCli":"official/ora-space.codex","modelId":"fixture"},"prompt":"hi"}`, "missing_agent_ref"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, scope := deliveryWorkflow(t, false)
+			graph := `{"nodes":[{"id":"start","data":{"kind":"start","inputVariables":[{"name":"topic","valueType":"string"}]}},{"id":"a","data":{"kind":"agent","agentConfig":` + c.agent + `}}],"edges":[{"source":"start","target":"a"}]}`
+			runID := f.run(t, graph, nil)
+			if _, err := f.host.StartRun(t.Context(), f.scope, runID); err != nil {
+				t.Fatal(err)
+			}
+			run, nodes := f.await(t, runID, terminal)
+			view, err := f.s.WorkspaceDeliveryView(t.Context(), scope, store.DeliverySource{Kind: execution.CallerWorkflow, ID: runID})
+			if err != nil || view.Latest != nil || view.HasWork || view.InProgress {
+				t.Fatalf("pre-admission failure left delivery state: %+v, %v", view, err)
+			}
+			project, err := f.s.GetProject(t.Context(), scope, f.project)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refs, err := exec.Command("git", "--git-dir="+project.MirrorPath, "for-each-ref", "refs/ora/deliveries").Output()
+			if err != nil || len(refs) != 0 {
+				t.Fatalf("pre-admission failure wrote delivery refs: %q, %v", refs, err)
+			}
+			if run.Status != store.WorkflowStatusFailed || errorKind(t, node(nodes, "a")) != c.kind {
+				t.Fatalf("run %s, node %+v", run.Status, node(nodes, "a"))
+			}
+		})
+	}
+}

@@ -483,3 +483,51 @@ func TestTaskHostUsesDeliveryOutcome(t *testing.T) {
 		}
 	}
 }
+
+// A turn that changes nothing is delivered as empty: the record has no delivery commit, the mirror
+// gains no ref, and the turn's terminal is still published.
+func TestUnchangedTurnRecordsEmptyWithoutRef(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	p, at := runtimeDeliveryProject(t, f)
+	fs, err := workspacefs.NewDeliveryFS(t.TempDir(), workspacefs.DefaultDeliveryObjectBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &orchestrationAgent{started: make(chan *agentCall, 1), ended: make(chan string, 20)}
+	if err := f.service.Close(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.service, err = New(f.ctx, Config{Store: f.db, Models: f.models, Agent: agent, Delivery: fs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, caller := runtimeDeliverySource(t, f, p.ID, execution.CallerChat)
+	ref, err := f.service.Start(f.ctx, f.scope, execution.StartRequest{Caller: caller, Target: execution.Target{ProjectID: p.ID}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("look, change nothing")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := nextAgentCall(t, f, agent)
+	if err := f.db.RecordWorkspace(f.ctx, call.session.WorkspaceID, at); err != nil {
+		t.Fatal(err)
+	}
+	call.result = &execution.Result{Status: execution.StatusCompleted, Answer: "nothing to change", AnswerComplete: true}
+	call.unblock()
+	got, _ := observeTurn(t, f, ref, 0)
+	if got.Status != execution.StatusCompleted {
+		t.Fatalf("published terminal = %+v, want completed", got)
+	}
+	page, err := f.service.ReadTurns(f.ctx, f.scope, ref.SessionID, "", 1)
+	if err != nil || len(page.Items) != 1 || page.Items[0].Result == nil || page.Items[0].Result.Status != execution.StatusCompleted {
+		t.Fatalf("turn result not published: %+v, %v", page, err)
+	}
+	view, err := f.db.WorkspaceDeliveryView(f.ctx, f.scope, src)
+	if err != nil || view.InProgress || view.HasWork || view.Latest == nil || view.Good == nil || view.Good.ID != view.Latest.ID {
+		t.Fatalf("delivery state after an unchanged turn: %+v, %v", view, err)
+	}
+	if d := view.Latest; d.Status != store.DeliveryEmpty || d.DeliveryCommit != "" || d.TurnID != ref.TurnID || d.BaseCommit != at.BaseCommit {
+		t.Fatalf("unchanged turn recorded %+v, want empty with no delivery commit", d)
+	}
+	if refs := runtimeDeliveryGit(t, p.MirrorPath, "for-each-ref", "--format=%(refname)", "refs/ora/deliveries"); refs != "" {
+		t.Fatalf("an empty delivery wrote refs: %s", refs)
+	}
+}
