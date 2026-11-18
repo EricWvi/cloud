@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
@@ -89,6 +90,31 @@ func TestInviteLinkJoinsOnceWithItsSquad(t *testing.T) {
 	}
 	if _, e := f.store.PreviewInvite(f.ctx, "not-a-token", bob); !errors.Is(e, store.ErrNotFound) {
 		t.Fatalf("unknown token = %v", e)
+	}
+}
+
+func TestJoiningTheDemoTeamKeepsItsSpace(t *testing.T) {
+	f := newSquadFixture(t)
+	owner := f.login(t, "owner", store.RoleOwner)
+	_, token, e := f.store.CreateInviteLink(f.ctx, f.tenant, owner, "")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e := f.store.AcceptInvite(f.ctx, token, f.outsider(t, "alice")); e != nil {
+		t.Fatal(e)
+	}
+	var names []string
+	rows, e := f.db.Query(f.ctx, `SELECT name FROM v2_spaces WHERE tenant_id = $1`, f.tenant)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for rows.Next() {
+		var n string
+		_ = rows.Scan(&n)
+		names = append(names, n)
+	}
+	if len(names) != 1 || names[0] != store.DemoSpaceName {
+		t.Fatalf("demo tenant spaces = %v", names)
 	}
 }
 
@@ -191,10 +217,15 @@ func TestOwnerInviteCreatesTheWorkspaceAndItsFirstOwner(t *testing.T) {
 	if _, e := f.store.AcceptInvite(f.ctx, token, first); e != nil || f.member(t, tenant, first) != store.RoleOwner {
 		t.Fatalf("accept = %v", e)
 	}
-	// The new workspace gets the space its projects and Agents need.
-	var spaces int
-	if e := f.db.QueryRow(f.ctx, `SELECT count(*) FROM v2_spaces WHERE tenant_id = $1`, tenant).Scan(&spaces); e != nil || spaces != 1 {
-		t.Fatalf("spaces = %d %v", spaces, e)
+	// The new workspace gets the space its projects and Agents need, without demo wording, and
+	// the Agents this build ships.
+	var spaces, agents int
+	var name, description string
+	if e := f.db.QueryRow(f.ctx, `SELECT count(*), min(name), min(description) FROM v2_spaces WHERE tenant_id = $1`, tenant).Scan(&spaces, &name, &description); e != nil || spaces != 1 || name != store.WorkspaceSpaceName || strings.Contains(name+description, "演示") {
+		t.Fatalf("spaces = %d %q %q %v", spaces, name, description, e)
+	}
+	if e := f.db.QueryRow(f.ctx, `SELECT count(*) FROM v2_space_agents WHERE tenant_id = $1`, tenant).Scan(&agents); e != nil || agents != len(store.BundledAgents) {
+		t.Fatalf("agents = %d %v", agents, e)
 	}
 	// Running the command again for the same name reuses the workspace.
 	if again, _, e := f.store.CreateOwnerInvite(f.ctx, "研发部"); e != nil || again != tenant {

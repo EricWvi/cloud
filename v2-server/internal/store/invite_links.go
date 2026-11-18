@@ -310,8 +310,8 @@ func (s *Store) AcceptInvite(ctx context.Context, token, user string) (string, e
 			return fmt.Errorf("join invited workspace: %w", e)
 		}
 		// A workspace the admin-invite command just created has no space yet; every workspace
-		// needs the one projects and Agents hang off.
-		if e := ensureDemoSpace(ctx, tx, r.tenant, user); e != nil {
+		// needs the one projects and Agents hang off. An existing space (the demo tenant's) stays.
+		if e := ensureWorkspaceSpace(ctx, tx, r.tenant, user); e != nil {
 			return e
 		}
 		if e := seedStarterSkills(ctx, tx, r.tenant, user); e != nil {
@@ -332,9 +332,12 @@ func (s *Store) AcceptInvite(ctx context.Context, token, user string) (string, e
 // sign in. The last owner cannot be removed. Unknown members are ErrNotFound.
 func (s *Store) RemoveMember(ctx context.Context, tenant, user string) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		// Lock the workspace's owner rows so two owners removing each other cannot both succeed.
+		// Lock the owner rows and the target's row, in a fixed order, so two owners removing each
+		// other cannot both succeed; other members' rows stay free.
 		rows, e := tx.Query(ctx, `
-			SELECT user_id::text, role FROM memberships WHERE tenant_id = $1 ORDER BY user_id FOR UPDATE`, tenant)
+			SELECT user_id::text, role FROM memberships
+			WHERE tenant_id = $1 AND (role = 'owner' OR user_id::text = $2)
+			ORDER BY user_id FOR UPDATE`, tenant, user)
 		if e != nil {
 			return fmt.Errorf("lock memberships: %w", e)
 		}
