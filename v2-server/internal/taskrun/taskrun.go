@@ -542,14 +542,21 @@ func (h *Host) watch(scope execution.Scope, run store.TaskRun, ref execution.Ref
 // the turn is still running.
 func (h *Host) await(scope execution.Scope, ref execution.Ref) (execution.Result, error) {
 	var cursor uint64
+	resubscribed := false
 	stream, e := h.exec.Subscribe(h.ctx, scope, ref.SessionID, cursor)
 	for {
 		if e == nil {
+			previousCursor := cursor
 			var result execution.Result
 			var done bool
 			result, done, e = h.drainStream(stream, ref.TurnID, &cursor)
 			if done {
 				return result, nil
+			}
+			if resubscribed && cursor == previousCursor {
+				if pauseErr := h.resultRetry.Pause(h.ctx); pauseErr != nil {
+					return execution.Result{}, errors.Join(e, pauseErr)
+				}
 			}
 		}
 		var next execution.Stream
@@ -560,6 +567,7 @@ func (h *Host) await(scope execution.Scope, ref execution.Ref) (execution.Result
 			return result, e
 		}
 		stream = next
+		resubscribed = true
 	}
 }
 
@@ -621,6 +629,9 @@ func (h *Host) recoverTurn(scope execution.Scope, ref execution.Ref, cursor uint
 		}
 	})
 	if err != nil {
+		if next != nil {
+			_ = next.Close()
+		}
 		return execution.Result{}, nil, false, errors.Join(cause, err)
 	}
 	return result, next, got, nil

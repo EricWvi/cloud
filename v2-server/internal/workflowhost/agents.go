@@ -578,14 +578,21 @@ func (st *runState) forget(a *attemptState) {
 // sequence whenever the turn is still running.
 func (h *Host) awaitTurn(scope execution.Scope, ref execution.Ref, caller execution.Caller) (execution.Result, error) {
 	var cursor uint64
+	resubscribed := false
 	stream, err := h.exec.Subscribe(h.ctx, scope, ref.SessionID, cursor)
 	for {
 		if err == nil {
+			previousCursor := cursor
 			var result execution.Result
 			var done bool
 			result, done, err = h.drainTurnStream(stream, ref.TurnID, &cursor)
 			if done {
 				return result, nil
+			}
+			if resubscribed && cursor == previousCursor {
+				if pauseErr := h.resultRetry.Pause(h.ctx); pauseErr != nil {
+					return execution.Result{}, errors.Join(err, pauseErr)
+				}
 			}
 		}
 		var next execution.Stream
@@ -596,6 +603,7 @@ func (h *Host) awaitTurn(scope execution.Scope, ref execution.Ref, caller execut
 			return result, err
 		}
 		stream = next
+		resubscribed = true
 	}
 }
 
@@ -646,6 +654,9 @@ func (h *Host) recoverTurn(scope execution.Scope, ref execution.Ref, caller exec
 		return execution.ErrUnavailable // ended without a written result; keep polling within budget
 	})
 	if err != nil {
+		if next != nil {
+			_ = next.Close()
+		}
 		return execution.Result{}, nil, false, errors.Join(cause, err)
 	}
 	return result, next, got, nil
