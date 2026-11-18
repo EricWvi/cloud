@@ -91,7 +91,7 @@ test('workflow agent: roles saved in settings appear in the role picker', async 
   await page.goto('/settings/roles')
   await signIn(page)
   const roleName = `发布审查 ${Date.now()}`
-  await page.getByRole('button', { name: '新建角色' }).click()
+  await page.locator('.settings-page-header').getByRole('button', { name: '新建角色', exact: true }).click()
   await page.getByLabel('标题').fill(roleName)
   await page.getByLabel('描述').fill('由工作流 Agent 节点选择')
   await page.getByLabel('内容（Markdown）').fill('# 发布审查\n\n核对发布说明。')

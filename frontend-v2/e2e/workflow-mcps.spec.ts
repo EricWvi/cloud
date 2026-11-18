@@ -146,8 +146,8 @@ test('the Controller rejects a configured MCP before creating a session', async 
   const base = `/api/v2/tenants/${tid}`
   const executors = (await (await page.request.get(`${base}/chat/executors`)).json()).items
   test.skip(executors.length === 0, 'prepared Node assets are required for the Agent executor catalog')
-  // The current pin lacks session_mcp_lifecycle. A Node upgrade that implements that contract must
-  // replace this rejection expectation with lifecycle acceptance, not merely advertise session_mcp.
+  // The pinned Node supports session_mcp_lifecycle, but the Controller lifecycle adapter is
+  // still gated. Keep rejecting before session creation until that adapter is implemented.
   const identifier = 'official/ora-space.tavily-search'
   const mcpPath = `/api/v1/tenants/${tid}/spaces/${sid}/mcp`
   const list = async () => (await (await page.request.get(`/api/v1/tenants/${tid}/mcp`)).json()).items

@@ -61,7 +61,7 @@ Agent 把被切断的模型请求当成网络失败原样重发（OpenCode 0.6.1
 
 工作流显式 MCP 选择经 `execution.MCPSelection` 进入会话。启动前核验有序规范身份、精确版本、16 项和 64 KiB 上限；非空选择要求当前 Node 同时广告 `agent_session`、`session_mcp`、`session_mcp_lifecycle`。缺能力返回 `mcp_node_capability_missing`，不降级为冻结 setup。空选择省略 MCP 协议字段，禁用的工作流绑定不计入选择，仍可按原能力运行。
 
-当前固定 Node `c5265072` 没有 `session_mcp_lifecycle`。即使用其他资源目录提供了具有该能力的 Node，Controller 尚未接入 generation 准入、可靠 `SessionTurnFailed` 及新协议派发，也返回 `mcp_lifecycle_not_ready`；两种拒绝都发生在 clone、安装会话所需插件和 Agent Start 之前。当前非空 MCP 工作流暂不能执行，租户安装和配置可以独立使用。后续生命周期接入完成后才能移除 Controller 门禁，同时启用 `mcp_lifecycle:true` 和对应轮次协议，不能仅通过能力检查后继续发送冻结 setup。
+当前固定 Node（版本以 `scripts/prepare-node.sh` 的 `source_commit` 为准）已具备 `session_mcp_lifecycle`，真实握手测试核验该能力。但 Controller 尚未接入 generation 准入、可靠 `SessionTurnFailed` 及新协议派发，仍返回 `mcp_lifecycle_not_ready`；使用缺少该能力的旧资产时返回 `mcp_node_capability_missing`。两种拒绝都发生在 clone、安装会话所需插件和 Agent Start 之前。当前非空 MCP 工作流暂不能执行，租户安装和配置可以独立使用。后续生命周期接入完成后才能移除 Controller 门禁，同时启用 `mcp_lifecycle:true` 和对应轮次协议，不能仅通过能力检查后继续发送冻结 setup。
 
 包安装与 `spec.mcp` 构造保留为独立接缝及单测，未接入当前被拒绝的启动路径。设置值仅驻留会话内存，停止后释放引用；包安装帧、准备文件和执行持久快照均不含设置值。MCP 失败保留稳定 code 以及可选 `plugin_id`、`setting_id`、`transport`，工作流将其映射为可手动恢复、禁止自动重试的配置失败。这些测试不代表生命周期、刷新或健康探测已经实现。
 
