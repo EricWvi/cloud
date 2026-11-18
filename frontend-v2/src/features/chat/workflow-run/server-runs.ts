@@ -1,5 +1,5 @@
-import { cdaseWorkflow, cdaseDefinition, createCdaseRun, readCdaseRun, cdaseProjectRuns, isCdaseRun, startCdaseRun, updateCdaseInput, endCdaseRun } from '@/lib/demo/cdase'
-import { demoMockEnabled } from '@/lib/demo/flags'
+import { cdaseOffered, isCdaseWorkflow, cdaseDefinition, createCdaseRun, readCdaseRun, cdaseProjectRuns, isCdaseRun, startCdaseRun, updateCdaseInput, endCdaseRun } from '@/lib/demo/cdase'
+import { DEMO_MOCK } from '@/lib/demo/flags'
 import { queryOptions, useQuery } from '@tanstack/react-query'
 import { useMemo } from 'react'
 import {
@@ -81,7 +81,7 @@ export async function listPublishedWorkflows(library: WorkflowContracts, signal?
         }
       }),
   )
-  return [...(demoMockEnabled() ? [cdaseWorkflow] : []), ...offered.filter((w) => w !== null)]
+  return [...(DEMO_MOCK ? cdaseOffered() : []), ...offered.filter((w) => w !== null)]
 }
 
 /**
@@ -134,7 +134,7 @@ export function runAnalysisQuery(tenantId: string, runId: string) {
     staleTime: Number.POSITIVE_INFINITY,
     retry: false,
     queryFn: async ({ client, signal }): Promise<RunAnalysis> => {
-      if (isCdaseRun(runId)) return noAnalysis
+      if (DEMO_MOCK && isCdaseRun(runId)) return noAnalysis
       // The pane has already read the snapshot; reuse it rather than downloading it again.
       const snapshot = await client.ensureQueryData(runFrozenSnapshotQuery(tenantId, runId))
       const { unsupportedNodes, unappliedSettings } = await call(() => analyzeWorkflow(tenantId, { graph: snapshot.graph }, undefined, signal))
@@ -194,7 +194,7 @@ export function runSnapshotQuery(tenantId: string, runId: string) {
     queryKey: runKeys.snapshot(tenantId, runId),
     staleTime: Number.POSITIVE_INFINITY,
     queryFn: async ({ client }) => {
-      if (isCdaseRun(runId)) { readCdaseRun(tenantId, runId); return cdaseDefinition() }
+      if (DEMO_MOCK && isCdaseRun(runId)) { readCdaseRun(tenantId, runId); return cdaseDefinition() }
       const snapshot = await client.ensureQueryData(runFrozenSnapshotQuery(tenantId, runId))
       return definitionOf(snapshot.workflowId, snapshot.version, snapshot.graph, snapshot.updatedAt ?? snapshot.createdAt)
     },
@@ -211,7 +211,7 @@ export function runQuery(tenantId: string, runId: string, definition: WorkflowDe
     queryKey: runKeys.run(tenantId, runId),
     enabled: definition !== undefined,
     staleTime: 0,
-    queryFn: async ({ signal }) => isCdaseRun(runId) ? readCdaseRun(tenantId, runId) : toGraphWorkflowRun(await call(() => getWorkflowRun(tenantId, runId, undefined, signal)), definition!),
+    queryFn: async ({ signal }) => DEMO_MOCK && isCdaseRun(runId) ? readCdaseRun(tenantId, runId) : toGraphWorkflowRun(await call(() => getWorkflowRun(tenantId, runId, undefined, signal)), definition!),
     refetchInterval: (query) => {
       const run = query.state.data
       if (run && isTerminalRunStatus(run.status)) return false
@@ -246,7 +246,7 @@ export function projectRunsQuery(tenantId: string, projectId: string) {
     staleTime: 0,
     queryFn: async ({ signal }) => {
       const { runs } = await call(() => listWorkflowRuns(tenantId, { projectId }, undefined, signal))
-      const local = cdaseProjectRuns(tenantId, projectId).map(({ id, name, status, startedByName, createdAt }) => ({
+      const local = (DEMO_MOCK ? cdaseProjectRuns(tenantId, projectId) : []).map(({ id, name, status, startedByName, createdAt }) => ({
         id,
         name,
         status,
@@ -267,7 +267,7 @@ export function projectRunsQuery(tenantId: string, projectId: string) {
  * dialog did not name.
  */
 export async function createRun(library: WorkflowContracts, tenantId: string, projectId: string, offered: PublishedWorkflow, name: string, injectLastFailure = true): Promise<string> {
-  if (demoMockEnabled() && offered.id === cdaseWorkflow.id) return createCdaseRun(tenantId, projectId, name)
+  if (DEMO_MOCK && isCdaseWorkflow(offered.id)) return createCdaseRun(tenantId, projectId, name)
   const { published } = await library.get({ workflowId: offered.id })
   if (!published) throw new Error('这个工作流已经没有发布版本，请重新选择')
   if (published.id !== offered.snapshotId) {
@@ -286,20 +286,20 @@ export async function createRun(library: WorkflowContracts, tenantId: string, pr
 
 /** Starts a pending run with the Start dialog's prompt and values. */
 export async function startRun(tenantId: string, runId: string, prompt: string, variables: Record<string, unknown>): Promise<void> {
-  if (isCdaseRun(runId)) { startCdaseRun(tenantId, runId, prompt); return }
+  if (DEMO_MOCK && isCdaseRun(runId)) { startCdaseRun(tenantId, runId, prompt); return }
   await call(() => updateWorkflowRunInput(tenantId, runId, { input: prompt, variables }))
   await call(() => startWorkflowRun(tenantId, runId))
 }
 
 /** Sets a pending run's kickoff input: the Start node's prompt, and the values when given. */
 export async function updateRunInput(tenantId: string, runId: string, prompt: string, variables?: Record<string, unknown>): Promise<void> {
-  if (isCdaseRun(runId)) { updateCdaseInput(tenantId, runId, prompt); return }
+  if (DEMO_MOCK && isCdaseRun(runId)) { updateCdaseInput(tenantId, runId, prompt); return }
   await call(() => updateWorkflowRunInput(tenantId, runId, { input: prompt, ...(variables ? { variables } : {}) }))
 }
 
 /** Stops the run; v2-server answers once execution confirmed the stop. */
 export async function cancelRun(tenantId: string, runId: string): Promise<void> {
-  if (isCdaseRun(runId)) { endCdaseRun(tenantId, runId, false); return }
+  if (DEMO_MOCK && isCdaseRun(runId)) { endCdaseRun(tenantId, runId, false); return }
   await call(() => cancelWorkflowRun(tenantId, runId))
 }
 
@@ -327,7 +327,7 @@ export async function completeNode(tenantId: string, runId: string, nodeId: stri
 
 /** Deletes a finished run with its node rows. */
 export async function deleteRun(tenantId: string, runId: string): Promise<void> {
-  if (isCdaseRun(runId)) { endCdaseRun(tenantId, runId, true); return }
+  if (DEMO_MOCK && isCdaseRun(runId)) { endCdaseRun(tenantId, runId, true); return }
   await call(() => deleteWorkflowRun(tenantId, runId))
 }
 

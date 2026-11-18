@@ -3,13 +3,16 @@ import { MemoryRouter } from 'react-router'
 import { afterEach, expect, it, vi } from 'vitest'
 import Page from './page'
 
+const demo = vi.hoisted(() => ({ on: false }))
+vi.mock('@/lib/demo/flags', () => ({ get DEMO_MOCK() { return demo.on } }))
+
 vi.mock('./analysis/list', () => ({ default: () => <section aria-label='会话分析'>会话分析内容</section> }))
 vi.mock('./real-overview', () => ({ default: () => <div>真实任务概览</div> }))
 
-afterEach(() => vi.unstubAllEnvs())
+afterEach(() => { demo.on = false })
 
 it('keeps real overview above session analysis', () => {
-  vi.stubEnv('VITE_DEMO_MOCK', '')
+  demo.on = false
   render(<MemoryRouter><Page /></MemoryRouter>)
   expect(screen.getByRole('heading', { name: 'Dashboard' })).toBeInTheDocument()
   const team = screen.getByRole('region', { name: '团队概览' })
@@ -20,7 +23,7 @@ it('keeps real overview above session analysis', () => {
 })
 
 it('adds demo space usage without replacing real overview or session analysis', () => {
-  vi.stubEnv('VITE_DEMO_MOCK', '1')
+  demo.on = true
   render(<MemoryRouter><Page /></MemoryRouter>)
   const usage = screen.getByRole('region', { name: /^空间用量$/ })
   expect(within(usage).getByText('演示数据')).toBeInTheDocument()

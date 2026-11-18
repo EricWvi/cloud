@@ -9,6 +9,9 @@ import { UserContext } from '@/app/auth/user'
 import { demoUser, fakeBackend } from '@/test/backend'
 import RealOverview from './real-overview'
 
+const demo = vi.hoisted(() => ({ on: false }))
+vi.mock('@/lib/demo/flags', () => ({ get DEMO_MOCK() { return demo.on } }))
+
 const base = '/api/v2/tenants/team/tasks'
 const task = { id: 'task-1', title: '真实任务交付', description: '实际任务描述', tenantId: 'team', projectId: 'project', assignee: { type: 'agent', id: 'agent', displayName: '执行 Agent' }, status: 'review', createdBy: 'user', createdByName: '成员', version: 1, createdAt: '2026-11-05T00:00:00Z', updatedAt: '2026-11-05T01:00:00Z', activeRun: null }
 const timeline = { runs: [{ demoSeed: false, id: 'run', taskId: task.id, startedBy: 'user', startedByName: '成员', executorId: 'executor', executorName: '真实执行器', state: 'ended', lastResult: 'completed', failureCode: '', endReason: 'closed', createdAt: '2026-11-05T00:00:00Z', endedAt: '2026-11-05T01:00:00Z' }], comments: [] }
@@ -20,10 +23,10 @@ function show() {
   return render(content(new QueryClient({ defaultOptions: { queries: { retry: false } } })))
 }
 
-afterEach(() => vi.unstubAllEnvs())
+afterEach(() => { demo.on = false })
 
 it.each(['', '1'])('reads real task ownership and output with demo flag %s', async flag => {
-  vi.stubEnv('VITE_DEMO_MOCK', flag)
+  demo.on = flag === '1'
   const seen = fakeBackend(config => {
     if (config.url === '/api/v1/me/tenants') return tenants
     if (config.url === base) return { status: 200, data: { items: [task], nextCursor: '' } }
@@ -69,7 +72,7 @@ it.each(['incomplete', 'denied timeline'])('does not publish partial totals for 
 })
 
 it('shows zero totals and explicit empty states without demo members', async () => {
-  vi.stubEnv('VITE_DEMO_MOCK', '1')
+  demo.on = true
   fakeBackend(config => {
     if (config.url === '/api/v1/me/tenants') return tenants
     if (config.url === base) return { status: 200, data: { items: [], nextCursor: '' } }
