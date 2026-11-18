@@ -16,9 +16,14 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 )
 
-// LoginAttemptCookie carries one redirect login's key from POST /auth/login to the callback. It is
-// sent only to the callback path and lasts as long as the attempt.
+// LoginAttemptCookie carries one redirect login's key from POST /auth/login to the callback over
+// plain http, sent only to the callback path and lasting as long as the attempt.
 const LoginAttemptCookie = "ora_login"
+
+// SecureLoginAttemptCookie is the attempt cookie at an https address. Like the session cookie it
+// takes the __Host- prefix, so a sibling subdomain cannot plant its own attempt and log the victim
+// into the attacker's account (login CSRF); the prefix requires Path=/.
+const SecureLoginAttemptCookie = "__Host-ora_login"
 
 const (
 	loginAttemptTTL  = 10 * time.Minute
@@ -91,6 +96,14 @@ func (h *handler) publicPath() string {
 	return h.opts.PublicURL.Path
 }
 
+// attemptCookie is the attempt cookie's name and path at this address.
+func (h *handler) attemptCookie(provider string) (name, path string) {
+	if h.secure() {
+		return SecureLoginAttemptCookie, "/"
+	}
+	return LoginAttemptCookie, h.callbackPath(provider)
+}
+
 func (h *handler) callbackPath(provider string) string {
 	return h.publicPath() + "/auth/callback/" + provider
 }
@@ -122,8 +135,9 @@ func (h *handler) redirectProvider(name string) (login.Provider, bool) {
 func (h *handler) startRedirectLogin(w http.ResponseWriter, name string, p login.Provider, returnTo string) {
 	state := randomToken()
 	key := h.attempts.add(loginAttempt{provider: name, state: state, returnTo: localPath(returnTo), expires: time.Now().Add(loginAttemptTTL)}, time.Now())
+	cookie, path := h.attemptCookie(name)
 	http.SetCookie(w, &http.Cookie{
-		Name: LoginAttemptCookie, Value: key, Path: h.callbackPath(name), HttpOnly: true, Secure: h.secure(),
+		Name: cookie, Value: key, Path: path, HttpOnly: true, Secure: h.secure(),
 		SameSite: http.SameSiteLaxMode, MaxAge: int(loginAttemptTTL / time.Second),
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"authorizationUrl": p.AuthorizeURL(state, h.callbackURL(name))})
@@ -141,12 +155,13 @@ func (h *handler) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The attempt is single-use whatever happens next.
-	http.SetCookie(w, &http.Cookie{Name: LoginAttemptCookie, Path: h.callbackPath(name), HttpOnly: true, Secure: h.secure(), SameSite: http.SameSiteLaxMode, MaxAge: -1})
+	cookie, path := h.attemptCookie(name)
+	http.SetCookie(w, &http.Cookie{Name: cookie, Path: path, HttpOnly: true, Secure: h.secure(), SameSite: http.SameSiteLaxMode, MaxAge: -1})
 	fail := func(category, step string, err error) {
 		slog.Warn("login callback", "provider", name, "step", step, "error", err)
 		http.Redirect(w, r, h.publicPath()+"/?login_error="+category, http.StatusSeeOther)
 	}
-	c, e := r.Cookie(LoginAttemptCookie)
+	c, e := r.Cookie(cookie)
 	if e != nil {
 		fail("failed", "attempt", errors.New("no login attempt cookie"))
 		return

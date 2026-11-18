@@ -3,7 +3,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")" && pwd -P)
 : "${V2_LOGIN:?Set V2_LOGIN=huawei-idaas; a deployment names its login methods}"
 # Email login has no password and marks a development database; a deployment never offers it.
-[[ ,${V2_LOGIN// /}, != *,email,* ]] || { echo 'The offline deployment launcher refuses email in V2_LOGIN.' >&2; exit 1; }
+[[ ,${V2_LOGIN//[[:space:]]/}, != *,email,* ]] || { echo 'The offline deployment launcher refuses email in V2_LOGIN.' >&2; exit 1; }
 : "${V2_DATABASE_URL:?Set V2_DATABASE_URL}"
 : "${V2_DATA_DIR:?Set a persistent, private V2_DATA_DIR}"
 : "${V2_MARKET_CREDENTIAL_KEY:?Set the stable V2_MARKET_CREDENTIAL_KEY}"

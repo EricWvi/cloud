@@ -70,7 +70,7 @@ func (f *redirectFixture) start(returnTo string) (state string, attempt *http.Co
 	}
 	target, _ := url.Parse(body["authorizationUrl"].(string))
 	for _, c := range res.Cookies() {
-		if c.Name == server.LoginAttemptCookie {
+		if c.Name == server.LoginAttemptCookie || c.Name == server.SecureLoginAttemptCookie {
 			attempt = c
 		}
 	}
@@ -93,7 +93,9 @@ func (f *redirectFixture) back(query url.Values, attempt *http.Cookie) *http.Res
 func TestRedirectLoginSignsInAndCreatesTheAccount(t *testing.T) {
 	f := newRedirectFixture(t, "https://ora.example.com/ora")
 	state, attempt := f.start("/workflows?x=1")
-	if attempt.Path != "/ora/auth/callback/huawei-idaas" || !attempt.HttpOnly || !attempt.Secure || attempt.MaxAge != 600 {
+	// At an https address the attempt cookie is host-only and __Host- prefixed, so a sibling
+	// subdomain cannot plant one.
+	if attempt.Name != server.SecureLoginAttemptCookie || attempt.Path != "/" || attempt.Domain != "" || !attempt.HttpOnly || !attempt.Secure || attempt.MaxAge != 600 {
 		t.Fatalf("attempt cookie = %+v", attempt)
 	}
 	res := f.back(url.Values{"code": {"c1"}, "state": {state}}, attempt)
@@ -183,4 +185,17 @@ func TestRedirectLoginOnlyForOfferedMethods(t *testing.T) {
 	if res, _ := rawCall(t, "POST", f.srv.URL+"/auth/login", "https://evil.example", nil, map[string]string{"provider": "huawei-idaas"}); res.StatusCode != 403 {
 		t.Fatalf("cross-site start = %d", res.StatusCode)
 	}
+}
+
+// Over plain http (a local stand-in) the attempt cookie keeps its plain name, scoped to the callback.
+func TestRedirectLoginAttemptCookieOverHTTP(t *testing.T) {
+	f := newRedirectFixture(t, "http://127.0.0.1:8090/ora")
+	state, attempt := f.start("/")
+	if attempt.Name != server.LoginAttemptCookie || attempt.Path != "/ora/auth/callback/huawei-idaas" || attempt.Secure {
+		t.Fatalf("attempt cookie = %+v", attempt)
+	}
+	if res := f.back(url.Values{"code": {"c"}, "state": {state}}, attempt); res.Header.Get("Location") != "/" {
+		t.Fatalf("callback = %d %s", res.StatusCode, res.Header.Get("Location"))
+	}
+	// A plain-named cookie is not read at an https address, so a planted one is ignored there.
 }
