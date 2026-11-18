@@ -25,6 +25,8 @@ type recoveryAgent struct {
 	results []execution.Result
 	errs    []error
 	ended   []string
+	// endErrs, when not empty, answer the next Ends in order.
+	endErrs []error
 	// reattached is the checkout each workspace was reattached to: clone execution and path.
 	reattached map[string][2]string
 }
@@ -54,8 +56,13 @@ func (a *recoveryAgent) Run(ctx context.Context, _ execution.Scope, session exec
 
 func (a *recoveryAgent) End(_ context.Context, sid string) error {
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	a.ended = append(a.ended, sid)
-	a.mu.Unlock()
+	if len(a.endErrs) > 0 {
+		err := a.endErrs[0]
+		a.endErrs = a.endErrs[1:]
+		return err
+	}
 	return nil
 }
 func (*recoveryAgent) Rebuild(string) {}
@@ -476,4 +483,95 @@ func TestSessionThatIsNotHeldEndsWhenItsNodeIsLost(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("the conversation's session stayed open after its Node was lost")
+}
+
+// recovering reports whether the service still holds the session for a new Agent.
+func recovering(f *runtimeFixture, sid string) bool {
+	f.service.mu.Lock()
+	defer f.service.mu.Unlock()
+	return f.service.recovering[sid]
+}
+
+// A session waiting for a new Agent, after a restart or after its Node was lost, has no Agent a
+// Node holds: End confirms it and the session stops waiting, so the workflow host's End retries
+// (cloud#394) settle instead of retrying forever.
+func TestEndConfirmsASessionWaitingForANewAgent(t *testing.T) {
+	for name, lose := range map[string]func(t *testing.T, f *runtimeFixture, agent *recoveryAgent, session string, node store.WorkflowNodeRun){
+		"after a restart": func(*testing.T, *runtimeFixture, *recoveryAgent, string, store.WorkflowNodeRun) {},
+		"after its Node was lost": func(t *testing.T, f *runtimeFixture, agent *recoveryAgent, session string, node store.WorkflowNodeRun) {
+			ref, err := followUp(t, f, session, node, 1, "再改一版")
+			if err != nil {
+				t.Fatal(err)
+			}
+			awaitResult(t, f, ref)
+			agent.mu.Lock()
+			agent.results = []execution.Result{{Status: execution.StatusFailed, FailureCode: execution.FailureNodeLost, AgentLost: true}}
+			agent.errs = []error{errors.New(execution.FailureNodeLost)}
+			agent.mu.Unlock()
+			if ref, err = followUp(t, f, session, node, 2, "做到一半"); err != nil {
+				t.Fatal(err)
+			}
+			awaitResult(t, f, ref)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := runtimeDatabase(t, nil)
+			agent := &recoveryAgent{}
+			first, node := parkedSession(t, f, agent, t.TempDir())
+			lose(t, f, agent, first.SessionID, node)
+			if !recovering(f, first.SessionID) {
+				t.Fatal("the session does not wait for a new Agent")
+			}
+			if err := f.service.End(f.ctx, f.scope, first.SessionID); err != nil {
+				t.Fatalf("End of a session waiting for a new Agent = %v, want it confirmed", err)
+			}
+			if recovering(f, first.SessionID) {
+				t.Fatal("the ended session still waits for a new Agent")
+			}
+			if session, err := f.db.ReadExecutionSession(f.ctx, f.scope, first.SessionID); err != nil || session.EndedAt == nil {
+				t.Fatalf("session = %+v %v, want it ended", session, err)
+			}
+		})
+	}
+}
+
+// A held session lost with its Node whose End is not confirmed at first (the retired Node's stop
+// was not proven yet) is confirmed by the next End, and is never continued on a new Agent after
+// that: no turn reaches the Agent again.
+func TestARetriedEndOfASessionLostWithItsNodeNeverRevivesIt(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	agent := &recoveryAgent{}
+	first, node := parkedSession(t, f, agent, t.TempDir())
+	ref, err := followUp(t, f, first.SessionID, node, 1, "再改一版")
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitResult(t, f, ref)
+	agent.mu.Lock()
+	agent.results = []execution.Result{{Status: execution.StatusFailed, FailureCode: execution.FailureNodeLost, AgentLost: true}}
+	agent.errs = []error{errors.New(execution.FailureNodeLost)}
+	// The stop right after the loss, and the first End, find the Node's stop unproven.
+	agent.endErrs = []error{execution.ErrStopUnconfirmed, execution.ErrStopUnconfirmed}
+	agent.mu.Unlock()
+	if ref, err = followUp(t, f, first.SessionID, node, 2, "做到一半"); err != nil {
+		t.Fatal(err)
+	}
+	awaitResult(t, f, ref)
+	if err := f.service.End(f.ctx, f.scope, first.SessionID); !errors.Is(err, execution.ErrStopUnconfirmed) {
+		t.Fatalf("first End = %v, want it unconfirmed", err)
+	}
+	if err := f.service.End(f.ctx, f.scope, first.SessionID); err != nil {
+		t.Fatalf("retried End = %v, want it confirmed", err)
+	}
+	agent.mu.Lock()
+	runs := len(agent.runs)
+	agent.mu.Unlock()
+	if _, err := followUp(t, f, first.SessionID, node, 3, "继续"); err == nil {
+		t.Fatal("a message reached a session whose End was confirmed")
+	}
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if len(agent.runs) != runs || recovering(f, first.SessionID) {
+		t.Fatalf("runs %d -> %d, recovering %v: the ended session was continued", runs, len(agent.runs), recovering(f, first.SessionID))
+	}
 }
