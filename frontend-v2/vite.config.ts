@@ -13,11 +13,13 @@ export default defineConfig({
   },
   server: {
     // v2-server's default address (see v2-server/README.md). Like Cloud's Gateway, it serves the
-    // login routes, the API and the health check; nothing else is proxied.
+    // login routes, the API and the health check; nothing else is proxied. The browser's Host is
+    // kept (Vite's string shorthand would rewrite it): without V2_PUBLIC_URL, v2-server accepts a
+    // cookie-authenticated write only when its Origin names the Host the request arrived at.
     proxy: {
-      '/api': backend,
-      '/auth': backend,
-      '/healthz': backend,
+      '/api': { target: backend, changeOrigin: false },
+      '/auth': { target: backend, changeOrigin: false },
+      '/healthz': { target: backend, changeOrigin: false },
     },
   },
   test: {

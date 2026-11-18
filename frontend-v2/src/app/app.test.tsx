@@ -67,7 +67,7 @@ describe('session gate', () => {
   it('shows the login screen on 401 and signs in by email alone', async () => {
     const seen = fakeBackend((c) => {
       if (c.url === '/api/v1/me') return { status: 401, data: { code: 'unauthenticated', params: {}, requestId: 'x' } }
-      if (c.url === '/auth/providers') return { status: 200, data: { providers: ['email'], default: 'email' } }
+      if (c.url === '/auth/providers') return { status: 200, data: { providers: ['email'] } }
       if (c.url === '/auth/login') return { status: 200, data: { authorizationUrl: '/auth/callback?code=abc' } }
       return undefined
     })
@@ -124,7 +124,7 @@ describe('deployed install hides browser-only settings routes', () => {
         }
       }
       if (c.url === '/auth/providers')
-        return { status: 200, data: { providers: ['idaas'], default: 'idaas' } }
+        return { status: 200, data: { providers: ['huawei-idaas'] } }
       return undefined
     })
   })

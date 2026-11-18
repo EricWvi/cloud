@@ -19,7 +19,7 @@ function wrapperFor(client: QueryClient) {
 function serve(providers: string[]) {
   fakeBackend((c) =>
     c.url === '/auth/providers'
-      ? { status: 200, data: { providers, default: providers[0] } }
+      ? { status: 200, data: { providers } }
       : c.url === '/api/v1/me/tenants'
         ? { status: 200, data: { items: [{ id: tid, name: '演示团队', role: 'member', status: 'active' }], nextCursor: '' } }
         : c.url === `/api/v2/tenants/${tid}/roles`
@@ -44,8 +44,8 @@ function mount() {
 describe('useAgents in a deployed install', () => {
   // Roles are a workspace server catalog, so a deployed install offers them exactly like a
   // development one; only browser-local settings stay hidden.
-  it('offers the workspace roles when the gateway is idaas', async () => {
-    serve(['idaas'])
+  it('offers the workspace roles in a deployed install', async () => {
+    serve(['huawei-idaas'])
     const { result } = mount()
     await waitFor(() => expect(result.current.data?.length).toBe(1))
     expect(result.current.data?.map((role) => role.name)).toEqual(['代码审查'])
