@@ -37,6 +37,12 @@ type workflowSkillState struct {
 // is dropped by the first projection after its session ended, so a live sibling's later turns can
 // still see the skills of a node that started and ended in between.
 //
+// The state file outlives the Node incarnation and the process, while the live siblings are only
+// this incarnation's: the first projection after a restart or a Node loss (a recovered session's
+// new Agent, see execution.Recovery) drops the skills of every sibling that has not projected again
+// yet. None of them is read meanwhile: those siblings lost their Agents with the incarnation, and
+// each projects again (checked against the live ones) before its next turn starts.
+//
 // The caller holds skillsMu, and reads siblings with liveSiblingSkills inside that section.
 func (p *projectRuntime) applyWorkflowSkills(checkout, workspace string, selection execution.Skills, siblings []execution.Skills) error {
 	statePath := filepath.Join(p.root, "workflow-skills-"+digest(workspace)+".json")

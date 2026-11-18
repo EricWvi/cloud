@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -219,5 +221,57 @@ func TestDriverIPCReplacedSessionLeavesItsSuccessorsOwnership(t *testing.T) {
 	h.driver.mu.Unlock()
 	if !owner || holder != current || holder == broken {
 		t.Fatalf("after the replaced execution stopped: owner=%v holder is successor=%v", owner, holder == current)
+	}
+}
+
+// A recovered session (Recovery: its Agent was lost with a restart or its Node) projects its Skills
+// again when its new Agent starts. A live sibling holding another Skill under the same name
+// refuses that start as workflow_skill_name_conflict before anything is sent, reported NotStarted:
+// the execution service then fails only this turn and keeps the session for the next one, which
+// starts once the sibling has ended.
+func TestDriverIPCRecoveredSessionRefusedByASiblingsSkillCanRetry(t *testing.T) {
+	h := newIPCHarness(t, func(f *fakeNodeIPC, m node.Message) bool {
+		if m.Type == "clone_repository" {
+			_ = os.MkdirAll(filepath.Join(f.project.root, "w", "r", m.ExecutionID), 0700)
+		}
+		return false
+	})
+	ctx := ipcContext(t)
+	review := func(content string) *execution.Skills {
+		return &execution.Skills{Documents: []execution.SkillDocument{{Name: "review", Description: "review", Content: content}}}
+	}
+	sibling := h.session("sibling", "run-workspace")
+	sibling.Skills = review("SIBLING-REVIEW")
+	done := runWorkflowTurn(h, ctx, sibling, "sibling-1")
+	f := receiveIPC(t, h.created)
+	siblingStart := nextIPCCommand(t, f, "start_agent_session")
+	f.finishTurn(t, siblingStart, "sibling-1", "live")
+	if got := receiveIPC(t, done); got.err != nil {
+		t.Fatalf("sibling: %+v", got)
+	}
+
+	recovered := h.session("recovered", "run-workspace")
+	recovered.Skills = review("OWN-REVIEW")
+	recovered.Recovery = &execution.Recovery{Handoff: "<ora_previous_conversation>…</ora_previous_conversation>"}
+	got := receiveIPC(t, runWorkflowTurn(h, ctx, recovered, "recovered-2"))
+	if got.err == nil || !got.result.NotStarted || got.result.FailureCode != "workflow_skill_name_conflict" {
+		t.Fatalf("recovered turn beside a clashing sibling = %+v, want it refused before starting", got)
+	}
+	if sentCommand(f, "start_agent_session") {
+		t.Fatal("a refused recovery started an Agent")
+	}
+
+	ending := make(chan error, 1)
+	go func() { ending <- h.driver.End(ctx, sibling.ID) }()
+	nextIPCCommand(t, f, "end_session")
+	f.terminal(siblingStart)
+	if err := receiveIPC(t, ending); err != nil {
+		t.Fatalf("sibling End: %v", err)
+	}
+	done = runWorkflowTurn(h, ctx, recovered, "recovered-3")
+	start := nextIPCCommand(t, f, "start_agent_session")
+	f.finishTurn(t, start, "recovered-3", "continued")
+	if got := receiveIPC(t, done); got.err != nil || got.result.Answer != "continued" {
+		t.Fatalf("retry after the sibling ended: %+v", got)
 	}
 }
