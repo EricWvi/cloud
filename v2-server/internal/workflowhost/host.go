@@ -329,8 +329,10 @@ type runState struct {
 	// keeps its session slot until a retry confirms the End (see linger).
 	unended map[string]bool
 
-	// interactive holds the root-scope interactive Agent nodes whose session is open between
-	// turns, by node ID. A restart rebuilds it from the parked rows (see recoverParked).
+	// interactive holds the root-scope interactive Agent nodes between their turns, by node ID:
+	// while their session is open, and after it ended until its End is confirmed (sessionGone),
+	// which is when the node gives its slot back. A restart rebuilds it from the parked rows (see
+	// recoverParked) and confirms the End of a session that ended before it.
 	interactive map[string]*interactiveNode
 }
 
