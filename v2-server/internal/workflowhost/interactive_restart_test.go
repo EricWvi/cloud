@@ -2,6 +2,7 @@ package workflowhost
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -226,5 +227,37 @@ func TestParkedNodeThatCannotContinueFailsOnRestart(t *testing.T) {
 				t.Fatal("the session of a node that failed on restart was left open")
 			}
 		})
+	}
+}
+
+// errorMessage reads the failure message the engine recorded on a node run.
+func errorMessage(t *testing.T, n store.WorkflowNodeRun) string {
+	t.Helper()
+	var p struct {
+		ErrorDetail struct {
+			Message string `json:"message"`
+		} `json:"error_detail"`
+	}
+	if err := json.Unmarshal(n.Payload, &p); err != nil {
+		t.Fatalf("payload %s: %v", n.Payload, err)
+	}
+	return p.ErrorDetail.Message
+}
+
+// A first turn on a reattached checkout Node no longer knows (the successor of a node completed
+// after the restart) fails without a conversation to lose: its message says a resume starts on a
+// fresh clone, not that a conversation cannot continue.
+func TestAFirstTurnOnAnUnknownCheckoutSaysAResumeClonesAgain(t *testing.T) {
+	f := newFixture(t)
+	runID := f.run(t, interactiveChain, str("支付重构"))
+	if _, err := f.host.StartRun(context.Background(), f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	a := f.exec.awaitStart(t)
+	f.exec.finish(a, execution.Result{Status: execution.StatusFailed, FailureCode: execution.FailureWorkspaceMissing, AgentLost: true})
+	run, nodes := f.await(t, runID, terminal)
+	got := node(nodes, "a")
+	if run.Status != store.WorkflowStatusFailed || errorKind(t, got) != "interactive_session" || !strings.Contains(errorMessage(t, got), "fresh clone") {
+		t.Fatalf("run %s node %s, want an interactive_session failure that points at a fresh clone", run.Status, got.Payload)
 	}
 }
