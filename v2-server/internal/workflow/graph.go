@@ -283,6 +283,14 @@ type AgentConfig struct {
 	Interactive bool
 	// Structured is the output schema when the node requires a JSON object answer.
 	Structured object
+	// CompletionSignal is the configured completion policy, CompletionSignalEndTurn when absent.
+	// v2 runs CompletionSignalAgent as end_turn (it is listed in Unapplied) until it can hand the
+	// Agent its completion tool.
+	CompletionSignal string
+	// AutoAcceptAgentCompletion is saved with the agent policy; v2 never applies it yet.
+	AutoAcceptAgentCompletion bool
+	// CompletionFiles are the deliverables a completion checks in the run's checkout.
+	CompletionFiles []CompletionFile
 }
 
 // Agent reads an Agent node's configuration.
@@ -297,6 +305,9 @@ func (n Node) Agent() AgentConfig {
 		Unapplied: unappliedAgentSettings(c, n.at),
 		Skills:    enabledBindings(c, "skills", "skillId"), MCPs: enabledBindings(c, "mcps", "mcpId")}
 	cfg.Interactive, _ = c["interactive"].(bool)
+	cfg.CompletionSignal = completionSignal(c)
+	cfg.AutoAcceptAgentCompletion, _ = c["autoAcceptAgentCompletion"].(bool)
+	cfg.CompletionFiles = completionFiles(c)
 	if contract, _ := c["outputContract"].(object); contract["type"] == "structured" {
 		cfg.Structured, _ = contract["schema"].(object)
 	}

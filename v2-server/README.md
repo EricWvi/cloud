@@ -572,7 +572,10 @@ including spare nodes, `unappliedSettings` calls the same decision as `Node.Agen
 exact source of attempt payloads (`unappliedAgentSettings` in `internal/workflow`); both pass the
 node's Iteration or Loop, and a spare node is placed by the container it is authored in.
 Interactive mode (a Loop member only, which v2 runs automatically; a root-graph interactive
-Agent parks for its starter) is currently saved but unapplied. Roles and Skills are applied.
+Agent parks for its starter) is currently saved but unapplied, and so are a root interactive
+Agent's `completionSignal: "agent"` and `autoAcceptAgentCompletion: true`: the agent policy needs
+the host completion tool, which v2 cannot hand to the Agent yet (circus#1242), so such a node
+completes as `end_turn`. Roles and Skills are applied.
 Nonempty MCP selections fail explicitly until Node and Controller lifecycle support is ready. Retry
 follows desktop's effective policy (`crates/application/src/workflow_run/engine/retry.rs:66-74` at
 `ebd5b725`): an absent `retry` is the default policy (enabled, 2 retries) and is listed; only

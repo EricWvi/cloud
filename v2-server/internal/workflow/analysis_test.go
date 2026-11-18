@@ -22,6 +22,9 @@ func TestAnalysisReportsUnappliedAgentSettings(t *testing.T) {
 		"disabled retry": {"retry": obj{"enabled": false, "maxRetries": 2, "initialDelaySeconds": 5}},
 		"blank role":     {"roleId": "  "},
 		"plain":          {"prompt": "x"},
+		"agent policy":   {"schemaVersion": 4, "interactive": true, "completionSignal": "agent", "autoAcceptAgentCompletion": true},
+		"end_turn policy": {"schemaVersion": 4, "interactive": true, "completionSignal": "end_turn",
+			"completion": obj{"files": []any{obj{"path": "plan.md"}}}},
 	}
 	g := flat()
 	for id, config := range configs {
@@ -90,7 +93,11 @@ func TestAnalysisReportsUnappliedAgentSettings(t *testing.T) {
 	if len(want) == 0 {
 		t.Fatal("no setting is unapplied any more; replace this fixture with one that still is")
 	}
-	for _, id := range []string{"disabled mcp", "disabled retry", "blank role", "plain"} {
+	// The agent completion policy needs the host completion tool, which v2 cannot hand out yet.
+	if want := []string{"completionSignal", "autoAcceptAgentCompletion"}; !reflect.DeepEqual(got["agent policy"], want) {
+		t.Errorf("agent policy unapplied = %v, want %v", got["agent policy"], want)
+	}
+	for _, id := range []string{"disabled mcp", "disabled retry", "blank role", "plain", "end_turn policy"} {
 		if _, listed := got[id]; listed {
 			t.Errorf("node %q configures nothing the run skips, but analysis lists %v", id, got[id])
 		}
