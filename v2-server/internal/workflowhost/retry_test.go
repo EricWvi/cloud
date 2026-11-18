@@ -712,3 +712,129 @@ func TestReplacedAttemptRecordsTheRunsInjectSetting(t *testing.T) {
 		})
 	}
 }
+
+func TestRetryInjectsPreviousFailureAndRespectsSwitch(t *testing.T) {
+	for _, inject := range []bool{true, false} {
+		t.Run(fmt.Sprintf("inject=%v", inject), func(t *testing.T) {
+			f := newFixture(t)
+			clock := retryClock(t, f)
+			ctx := context.Background()
+			graph := strings.Replace(reviewBranches, `"outputContract":`, `"retry":{"enabled":true,"maxRetries":1,"initialDelaySeconds":0},"outputContract":`, 1)
+			w, _, err := f.s.CreateWorkflow(ctx, f.scope.TenantID, "注入重试", graph)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.s.PublishWorkflow(ctx, f.scope.TenantID, w.ID, "v1", nil); err != nil {
+				t.Fatal(err)
+			}
+			run, err := f.s.CreateWorkflowRun(ctx, f.scope.TenantID, w.ID, "", store.WorkflowRunInput{
+				ProjectID:         f.project,
+				Input:             str("检查支付"),
+				InjectLastFailure: &inject,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.host.UpdateRunInput(ctx, f.scope, run.ID, str("更新后输入"), nil); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.host.StartRun(ctx, f.scope, run.ID); err != nil {
+				t.Fatal(err)
+			}
+			firstSession := f.exec.awaitStart(t)
+			f.exec.finish(firstSession, completed(strings.Repeat("x", 4005)))
+
+			waitRow, p := awaitWait(t, f, run.ID, "review")
+			clock.Store(p.Wait.Due)
+			if err := f.host.engine.WakeRetry(ctx, run.ID, waitRow.ID); err != nil {
+				t.Fatal(err)
+			}
+			retrySession := f.exec.awaitStart(t)
+			prompt := promptText(t, f.exec.request(retrySession).Prompt)
+
+			nodes, err := f.s.WorkflowRunNodes(ctx, f.scope.TenantID, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			retryRow := node(nodes, "review")
+			var stored map[string]any
+			if len(retryRow.Payload) > 0 {
+				if err := json.Unmarshal(retryRow.Payload, &stored); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if inject {
+				if !strings.Contains(prompt, "## 上一次尝试（第 1 次）失败信息") || !strings.Contains(prompt, "失败类型：结构化输出不合格") {
+					t.Fatalf("missing injected previous failure block in prompt:\n%s", prompt)
+				}
+				wantTruncated := strings.Repeat("x", 4000) + "…"
+				if !strings.Contains(prompt, wantTruncated) || strings.Contains(prompt, strings.Repeat("x", 4001)) {
+					t.Fatalf("structured output not bounded to 4000 runes with ellipsis:\n%s", prompt)
+				}
+				injectIdx := strings.Index(prompt, "## 上一次尝试（第 1 次）失败信息")
+				contractIdx := strings.Index(prompt, "<structured_output_contract>")
+				if contractIdx == -1 || injectIdx == -1 || injectIdx > contractIdx {
+					t.Fatalf("expected previous failure before structured contract (inject=%d contract=%d)", injectIdx, contractIdx)
+				}
+				recorded, _ := stored["injected_failure_context"].(string)
+				if !strings.Contains(recorded, "## 上一次尝试（第 1 次）失败信息") || !strings.Contains(recorded, wantTruncated) {
+					t.Fatalf("injected_failure_context = %q", recorded)
+				}
+			} else {
+				if strings.Contains(prompt, "上一次尝试") || strings.Contains(prompt, "Previous attempt") {
+					t.Fatalf("unexpected injected previous failure when disabled:\n%s", prompt)
+				}
+				if _, exists := stored["injected_failure_context"]; exists {
+					t.Fatalf("unexpected injected_failure_context persisted when disabled: %v", stored)
+				}
+			}
+
+			f.exec.finish(retrySession, completed(`{"approved":true}`))
+			f.exec.finish(expectAgent(t, f, "ship"), completed("已发布"))
+			settled, after := f.await(t, run.ID, terminal)
+			if settled.Status != "succeeded" {
+				t.Fatalf("run = %+v", settled)
+			}
+			if inject {
+				var donePayload map[string]any
+				if err := json.Unmarshal(node(after, "review").Payload, &donePayload); err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := donePayload["injected_failure_context"].(string); !ok {
+					t.Fatalf("completed node lost injected_failure_context: %s", node(after, "review").Payload)
+				}
+			}
+		})
+	}
+}
+
+func TestPreviousFailureForInjectionFilteringAndEnglishFormatting(t *testing.T) {
+	errMsg := "refused by policy"
+	refusal := &store.WorkflowNodeRun{
+		Error:   &errMsg,
+		Payload: []byte(`{"error_detail":{"kind":"agent_refusal","attempt":2,"message":""}}`),
+	}
+	prev := previousFailureForInjection(true, refusal)
+	if prev == nil || prev.Attempt != 2 || prev.Message != errMsg || prev.Output != nil {
+		t.Fatalf("prev = %+v", prev)
+	}
+	rendered := renderPreviousFailure(*prev, workflow.LocaleEnUS)
+	for _, want := range []string{
+		"## Previous attempt (2) failed",
+		"Failure type: Agent refused the request",
+		"Failure message: refused by policy",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered missing %q:\n%s", want, rendered)
+		}
+	}
+	sessionFail := &store.WorkflowNodeRun{
+		Payload: []byte(`{"error_detail":{"kind":"session","attempt":1,"message":"boom"}}`),
+	}
+	if got := previousFailureForInjection(true, sessionFail); got != nil {
+		t.Fatalf("non-injectable kind returned %+v", got)
+	}
+	if got := previousFailureForInjection(false, refusal); got != nil {
+		t.Fatalf("disabled flag returned %+v", got)
+	}
+}

@@ -261,14 +261,19 @@ func (e *Engine) StartAs(ctx context.Context, runID, actor string) error {
 }
 
 // preparePayload derives the run payload on first use (v2 creates runs before any graph-aware
-// step) and mirrors the kickoff input, as desktop does at deploy time.
+// step) while preserving creation-time options such as injectLastFailure, and mirrors input.
 func (e *Engine) preparePayload(g *Graph, raw []byte, input *string) (RunPayload, error) {
 	p, ok, err := DecodeRunPayload(raw)
 	if err != nil {
 		return RunPayload{}, err
 	}
-	if !ok {
+	if !ok || (p.StartNodeID == nil && p.Locale == "") {
+		inject := true
+		if ok {
+			inject = p.InjectLastFailure
+		}
 		p = NewRunPayload(g, e.locale)
+		p.InjectLastFailure = inject
 	}
 	return p, p.MirrorInput(input)
 }

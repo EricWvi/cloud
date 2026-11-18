@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import { signIn } from './login.ts'
 type Executor = { agentId: string; agentName: string; modelId: string; modelName: string }
 
-test('workflow agent: an empty directory retains desktop defaults for a new node', async ({ page }) => {
+test('workflow agent: an empty directory leaves a new node executor blank without desktop defaults', async ({ page }) => {
   await page.route('**/api/v2/tenants/*/chat/executors', (route) => route.fulfill({ json: { items: [] } }))
   await page.goto('/workflows')
   await signIn(page)
@@ -15,11 +15,14 @@ test('workflow agent: an empty directory retains desktop defaults for a new node
   await page.reload()
   await page.getByRole('complementary', { name: '工作流列表' }).getByRole('button', { name, exact: true }).click()
   await page.getByRole('toolbar', { name: '添加工作流节点' }).getByRole('button', { name: 'Agent', exact: true }).click()
-  await expect(page.getByText('请选择当前可用的 Agent 和模型。')).toBeVisible()
+  const modelButton = page.getByLabel('Agent 模型', { exact: true })
+  await expect(modelButton).toContainText('没有可用 Agent 模型')
+  await expect(modelButton).not.toContainText(' · ')
+  await expect(page.getByText('请选择当前可用的 Agent 和模型。')).toHaveCount(0)
   await expect.poll(async () => {
     const draft = (await (await page.request.get(`${base}/${wid}/draft`)).json()).snapshot
     return JSON.parse(draft.graph).nodes.find((n: { data: { kind: string } }) => n.data.kind === 'agent')?.data.agentConfig.executor
-  }).toEqual({ agentCli: 'official/ora-space.codeagentcli', modelId: 'gpt-5' })
+  }).toEqual({ agentCli: '', modelId: '' })
 })
 
 test('workflow agent: replace a legacy demo choice, persist real IDs, and execute the selected binding', async ({ page }, testInfo) => {

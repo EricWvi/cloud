@@ -233,11 +233,13 @@ function StatefulInspectorHarness({
     },
   ],
   unappliedSettings,
+  agentModelsLoading,
 }: {
   node: Node<WorkflowNodeData, "workflow">;
   capabilities: ReturnType<typeof createMockWorkflowCapabilities>;
   variableCatalog?: WorkflowVariableCatalogEntry[];
   unappliedSettings?: readonly string[];
+  agentModelsLoading?: boolean;
 }) {
   const [current, setCurrent] = useState(node);
   return (
@@ -253,6 +255,7 @@ function StatefulInspectorHarness({
           onDelete={() => undefined}
           onCloseNode={() => undefined}
           unappliedSettings={unappliedSettings}
+          agentModelsLoading={agentModelsLoading}
         />
       </AppI18nProvider>
     </QueryClientProvider>
@@ -959,6 +962,40 @@ describe("WorkflowInspector unapplied-setting hints", () => {
     );
     expect(screen.getByTestId("workflow-unapplied-interactive")).toHaveTextContent("暂不生效");
     expect(screen.queryByTestId("workflow-interactive-partial")).toBeNull();
+  });
+
+  it("shows localized empty/loading placeholder when executor fields are blank", async () => {
+    await appI18n.changeLanguage("zh-CN");
+    const agent = createAgentNode();
+    const blankNode: Node<WorkflowNodeData, "workflow"> = {
+      ...agent,
+      data: {
+        ...agent.data,
+        agentConfig: {
+          ...agent.data.agentConfig!,
+          executor: { agentCli: "", modelId: "" },
+        },
+      },
+    };
+    const emptyCapabilities = createMockWorkflowCapabilities("zh-CN", []);
+    const { rerender } = render(
+      <StatefulInspectorHarness
+        node={blankNode}
+        capabilities={emptyCapabilities}
+        agentModelsLoading
+      />,
+    );
+    expect(screen.getByLabelText("Agent 模型")).toHaveTextContent("加载中…");
+    expect(screen.getByLabelText("Agent 模型")).not.toHaveTextContent("·");
+
+    rerender(
+      <StatefulInspectorHarness
+        node={blankNode}
+        capabilities={emptyCapabilities}
+      />,
+    );
+    expect(screen.getByLabelText("Agent 模型")).toHaveTextContent("没有可用 Agent 模型");
+    expect(screen.queryByText("请选择当前可用的 Agent 和模型。")).not.toBeInTheDocument();
   });
 });
 

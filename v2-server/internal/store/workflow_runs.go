@@ -57,11 +57,12 @@ const (
 // the run points at the published snapshot, and the schedule seam passes its stable trigger identity
 // instead of duplicating engine state.
 type WorkflowRunInput struct {
-	ProjectID   string
-	Name        string
-	Input       *string
-	TriggerKind string
-	TriggerRef  string
+	ProjectID         string
+	Name              string
+	Input             *string
+	TriggerKind       string
+	TriggerRef        string
+	InjectLastFailure *bool
 }
 
 // WorkflowRun is one run row without its nodes. State and RuntimePayload stay opaque JSON: the
@@ -278,13 +279,17 @@ func createWorkflowRun(ctx context.Context, tx pgx.Tx, tenant, workflowID, snaps
 		if trigger == "" {
 			trigger = "manual"
 		}
+		payload := []byte("{}")
+		if in.InjectLastFailure != nil && !*in.InjectLastFailure {
+			payload = []byte(`{"injectLastFailure":false}`)
+		}
 		run, err = scanWorkflowRun(tx.QueryRow(ctx, `
 			INSERT INTO v2_workflow_runs
 				(tenant_id, workflow_id, snapshot_id, project_id, name, status, state, input,
-				 trigger_kind, trigger_ref)
-			VALUES ($1, $2, $3, $4, $5, 'pending', '{"current_nodes":[]}'::jsonb, $6, $7, $8)
+				 trigger_kind, trigger_ref, payload)
+			VALUES ($1, $2, $3, $4, $5, 'pending', '{"current_nodes":[]}'::jsonb, $6, $7, $8, $9)
 			RETURNING `+workflowRunColumns,
-			tenant, workflowID, snapshotID, in.ProjectID, name, in.Input, trigger, in.TriggerRef))
+			tenant, workflowID, snapshotID, in.ProjectID, name, in.Input, trigger, in.TriggerRef, payload))
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "v2_workflow_runs_schedule_trigger" {
 			return ErrWorkflowRunTriggerTaken
@@ -532,6 +537,40 @@ func (s *Store) WorkflowRunNodes(ctx context.Context, tenant, runID string) ([]W
 		return nil, fmt.Errorf("list node runs: %w", err)
 	}
 	return nodes, nil
+}
+
+// FindLastFailedWorkflowNodeAttempt returns the most recent soft-deleted started failed attempt
+// for (runID, nodeID, iteration) when no later succeeded attempt has replaced it, mirroring
+// desktop's find_last_failed_attempt.
+func (s *Store) FindLastFailedWorkflowNodeAttempt(ctx context.Context, tenant, runID, nodeID string, iteration *int) (*WorkflowNodeRun, error) {
+	node, err := scanNodeRun(s.pool.QueryRow(ctx, "SELECT "+prefixed("f", workflowNodeRunColumns)+`
+		FROM v2_workflow_node_runs f
+		WHERE f.tenant_id = $1
+			AND f.run_id = $2
+			AND f.node_id = $3
+			AND f.iteration IS NOT DISTINCT FROM $4
+			AND f.started_at IS NOT NULL
+			AND f.status = 'failed'
+			AND f.deleted_at IS NOT NULL
+			AND NOT EXISTS (
+				SELECT 1 FROM v2_workflow_node_runs s
+				WHERE s.tenant_id = f.tenant_id
+					AND s.run_id = f.run_id
+					AND s.node_id = f.node_id
+					AND s.iteration IS NOT DISTINCT FROM f.iteration
+					AND s.status = 'succeeded'
+					AND s.id <> f.id
+					AND s.created_at >= f.created_at
+			)
+		ORDER BY f.created_at DESC, f.finished_at DESC NULLS LAST, f.id DESC
+		LIMIT 1`, tenant, runID, nodeID, iteration))
+	if errors.Is(err, ErrWorkflowNodeRunNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find last failed node attempt: %w", err)
+	}
+	return &node, nil
 }
 
 // WorkflowRunFailedAttempts lists the soft-deleted failed rows of one run, oldest first, as

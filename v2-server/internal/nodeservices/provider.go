@@ -22,6 +22,19 @@ type RemoteProvider struct {
 	protocol      Protocol
 	client        *http.Client
 	idle, total   time.Duration
+	afterFunc     func(time.Duration, func()) limitTimer
+}
+
+type limitTimer interface {
+	Stop() bool
+	Reset(time.Duration) bool
+}
+
+func (p *RemoteProvider) startTimer(d time.Duration, fn func()) limitTimer {
+	if p.afterFunc != nil {
+		return p.afterFunc(d, fn)
+	}
+	return time.AfterFunc(d, fn)
 }
 
 // Default limits of one upstream call. A call is cut off when no upstream data arrives for the
@@ -135,9 +148,9 @@ func (p *RemoteProvider) CompleteObserved(w http.ResponseWriter, r *http.Request
 		return 0, false
 	}
 	// The idle timer covers the wait for the response header too and restarts on every chunk.
-	total := time.AfterFunc(p.total, func() { cancel(errMaxDuration) })
+	total := p.startTimer(p.total, func() { cancel(errMaxDuration) })
 	defer total.Stop()
-	idle := time.AfterFunc(p.idle, func() { cancel(errIdleTimeout) })
+	idle := p.startTimer(p.idle, func() { cancel(errIdleTimeout) })
 	defer idle.Stop()
 	resp, err := p.client.Do(req)
 	if err != nil {
@@ -164,6 +177,8 @@ func (p *RemoteProvider) CompleteObserved(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(resp.StatusCode)
 	_, err = io.Copy(flushWriter{w}, idleReader{resp.Body, idle, p.idle})
+	idle.Stop()
+	total.Stop()
 	if err == nil {
 		// net/http passes a body's io.EOF through even after the request was cancelled, so a stream
 		// a limit or the caller cut off can still end cleanly here: it only completed if nothing
@@ -188,7 +203,7 @@ func (p *RemoteProvider) CompleteObserved(w http.ResponseWriter, r *http.Request
 // idleReader restarts the idle timer whenever upstream data arrives.
 type idleReader struct {
 	r     io.Reader
-	timer *time.Timer
+	timer limitTimer
 	idle  time.Duration
 }
 

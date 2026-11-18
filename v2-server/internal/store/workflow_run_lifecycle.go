@@ -90,6 +90,33 @@ func (s *Store) BindWorkflowNodeSession(ctx context.Context, tenant, runID, node
 	return node, err
 }
 
+// MergeWorkflowNodePayload applies fold to a running node attempt's payload while holding the run lock.
+func (s *Store) MergeWorkflowNodePayload(ctx context.Context, tenant, runID, nodeRunID string, fold func([]byte) ([]byte, error)) (WorkflowNodeRun, error) {
+	var node WorkflowNodeRun
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := lockWorkflowRun(ctx, tx, tenant, runID); err != nil {
+			return err
+		}
+		current, err := lockWorkflowNodeRun(ctx, tx, tenant, runID, nodeRunID)
+		if err != nil {
+			return err
+		}
+		if current.Status != WorkflowStatusRunning {
+			return ErrWorkflowNodeRunState
+		}
+		payload, err := fold(current.Payload)
+		if err != nil {
+			return err
+		}
+		node, err = scanNodeRun(tx.QueryRow(ctx, `
+			UPDATE v2_workflow_node_runs SET payload = $4, updated_at = now()
+			WHERE tenant_id = $1 AND run_id = $2 AND id = $3 AND deleted_at IS NULL
+			RETURNING `+workflowNodeRunColumns, tenant, runID, nodeRunID, payload))
+		return err
+	})
+	return node, err
+}
+
 // CompleteWorkflowNodeRun records a successful attempt with its public answer and optional payload.
 // A late completion against an attempt that already finished is a no-op returning the current row,
 // because a retried or cancelled attempt may still race with its own result.

@@ -70,6 +70,7 @@ import {
   supportsWorkflowNodeScope,
   type DemoWorkflow,
   type MockWorkflowVersion,
+  type WorkflowAgentModel,
   type WorkflowCapabilities,
   type WorkflowGlobalVariable,
   type WorkflowAnnotationData,
@@ -366,6 +367,37 @@ export function WorkflowEditor(props: WorkflowEditorProps = {}) {
   );
 }
 
+/** Keeps the selected CLI stable and only substitutes a discovered model, or fills a blank pair with the first catalog entry. */
+type WorkflowNodeExecutor = { agentCli: string; modelId: string };
+
+function repairWorkflowAgentExecutor(
+  executor: WorkflowNodeExecutor,
+  availableAgentModels: readonly WorkflowAgentModel[],
+): WorkflowNodeExecutor {
+  if (availableAgentModels.length === 0) {
+    return executor;
+  }
+  const { agentCli, modelId } = executor;
+  if (agentCli === "" && modelId === "") {
+    const first = availableAgentModels[0]!;
+    return { agentCli: first.agentCli, modelId: first.modelId };
+  }
+  if (
+    availableAgentModels.some(
+      (model) => model.agentCli === agentCli && model.modelId === modelId,
+    )
+  ) {
+    return executor;
+  }
+  const modelForCli = availableAgentModels.find(
+    (model) => model.agentCli === agentCli,
+  );
+  if (modelForCli === undefined) {
+    return executor;
+  }
+  return { agentCli, modelId: modelForCli.modelId };
+}
+
 /** Owns the selected draft graph and publishes library actions to the sidebar list. */
 function WorkflowEditorContent({
   capabilities: capabilitiesOverride,
@@ -414,14 +446,13 @@ function WorkflowEditorContent({
       mcps,
       defaultAgentConfig: {
         ...baseCapabilities.defaultAgentConfig,
-        ...(defaultExecutor === undefined
-          ? {}
-          : {
-              executor: {
+        executor:
+          defaultExecutor === undefined
+            ? { agentCli: "", modelId: "" }
+            : {
                 agentCli: defaultExecutor.agentCli,
                 modelId: defaultExecutor.modelId,
               },
-            }),
         // Roles are optional; a new agent node starts with no role selected.
         roleId: "",
         mcps: [],
@@ -495,6 +526,23 @@ function WorkflowEditorContent({
   const [hydratedWorkflowId, setHydratedWorkflowId] = useState<string | null>(
     null,
   );
+  /** Workflow id whose Agent models have been checked against a non-empty executor catalog. */
+  const [modelHydratedWorkflowId, setModelHydratedWorkflowId] = useState<
+    string | null
+  >(null);
+  /** Baseline per-node executors captured on initial hydrate so late catalog repair skips user edits. */
+  const [hydratedNodeExecutors, setHydratedNodeExecutors] = useState<
+    Readonly<Record<string, WorkflowNodeExecutor>>
+  >({});
+  /** Set when late catalog arrival repaired an already-mounted workflow, to refresh clean history. */
+  const [lateModelRepairedWorkflowId, setLateModelRepairedWorkflowId] =
+    useState<string | null>(null);
+  const clearHydratedWorkflow = useCallback(() => {
+    setHydratedWorkflowId(null);
+    setModelHydratedWorkflowId(null);
+    setHydratedNodeExecutors({});
+    setLateModelRepairedWorkflowId(null);
+  }, []);
   const [previewedVersion, setPreviewedVersion] =
     useState<MockWorkflowVersion | null>(null);
   const [publishDialogOpen, setPublishDialogOpen] = useState(false);
@@ -640,31 +688,33 @@ function WorkflowEditorContent({
       ) {
         return node;
       }
-      const { agentCli, modelId } = node.data.agentConfig.executor;
+      const repaired = repairWorkflowAgentExecutor(
+        node.data.agentConfig.executor,
+        availableAgentModels,
+      );
       if (
-        availableAgentModels.some(
-          (model) => model.agentCli === agentCli && model.modelId === modelId,
-        )
+        repaired.agentCli === node.data.agentConfig.executor.agentCli &&
+        repaired.modelId === node.data.agentConfig.executor.modelId
       ) {
         return node;
       }
-      const modelForCli = availableAgentModels.find(
-        (model) => model.agentCli === agentCli,
-      );
       return {
         ...node,
         data: {
           ...node.data,
           agentConfig: {
             ...node.data.agentConfig,
-            executor: {
-              agentCli,
-              modelId: modelForCli?.modelId ?? modelId,
-            },
+            executor: repaired,
           },
         },
       };
     });
+    const initialExecutors: Record<string, WorkflowNodeExecutor> = {};
+    for (const node of nodes) {
+      if (node.data.kind === "agent" && node.data.agentConfig !== undefined) {
+        initialExecutors[node.id] = node.data.agentConfig.executor;
+      }
+    }
     const hydratedWorkflow: DemoWorkflow = {
       id: draftQuery.data.workflow.id,
       name: draftQuery.data.workflow.name,
@@ -680,6 +730,13 @@ function WorkflowEditorContent({
     };
     setWorkflow(hydratedWorkflow);
     setHydratedWorkflowId(draftQuery.data.workflow.id);
+    setHydratedNodeExecutors(initialExecutors);
+    setModelHydratedWorkflowId(
+      capabilitiesOverride !== undefined || availableAgentModels.length > 0
+        ? draftQuery.data.workflow.id
+        : null,
+    );
+    setLateModelRepairedWorkflowId(null);
     // Capture the server name in the same hydrate turn so autosave can skip no-op renames.
     // eslint-disable-next-line react-hooks/refs -- render-phase hydrate pairs this with setState
     persistedNameRef.current = draftQuery.data.workflow.name;
@@ -689,6 +746,60 @@ function WorkflowEditorContent({
     droppedNodesRef.current = parsed.droppedNodeCount > 0 ? parsed : null;
   }
 
+  // Reconcile untouched or blank Agent executors once a late/retried catalog arrives, without
+  // marking the draft dirty or overwriting an executor the user already picked.
+  if (
+    workflow !== null &&
+    hydratedWorkflowId === resolvedWorkflowId &&
+    modelHydratedWorkflowId !== resolvedWorkflowId &&
+    capabilitiesOverride === undefined &&
+    availableAgentModels.length > 0
+  ) {
+    const nextNodes = workflow.nodes.map((node) => {
+      if (node.data.kind !== "agent" || node.data.agentConfig === undefined) {
+        return node;
+      }
+      const currentExecutor = node.data.agentConfig.executor;
+      const hydratedExecutor = hydratedNodeExecutors[node.id];
+      const isBlank =
+        currentExecutor.agentCli === "" && currentExecutor.modelId === "";
+      const matchesHydrated =
+        hydratedExecutor !== undefined &&
+        hydratedExecutor.agentCli === currentExecutor.agentCli &&
+        hydratedExecutor.modelId === currentExecutor.modelId;
+      if (!isBlank && !matchesHydrated) {
+        return node;
+      }
+      const repairedExecutor = repairWorkflowAgentExecutor(
+        currentExecutor,
+        availableAgentModels,
+      );
+      if (
+        repairedExecutor.agentCli === currentExecutor.agentCli &&
+        repairedExecutor.modelId === currentExecutor.modelId
+      ) {
+        return node;
+      }
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          agentConfig: {
+            ...node.data.agentConfig,
+            executor: repairedExecutor,
+          },
+        },
+      };
+    });
+    const repairedAny = nextNodes.some((node, index) => node !== workflow.nodes[index]);
+    if (repairedAny) {
+      setWorkflow({ ...workflow, nodes: nextNodes });
+      setLateModelRepairedWorkflowId(resolvedWorkflowId);
+    }
+    setModelHydratedWorkflowId(resolvedWorkflowId);
+  }
+
+  const historyHydrateEditGenerationRef = useRef<number | null>(null);
   // History belongs to the mounted draft session, so a workflow switch or
   // activation starts at a clean baseline while ordinary edits keep the stack.
   useEffect(() => {
@@ -698,9 +809,28 @@ function WorkflowEditorContent({
       hydratedWorkflowId === resolvedWorkflowId &&
       workflowRef.current !== null
     ) {
+      historyHydrateEditGenerationRef.current = editGenerationRef.current;
       resetWorkflowHistory(workflowRef.current);
     }
   }, [hydratedWorkflowId, resetWorkflowHistory, resolvedWorkflowId]);
+
+  useEffect(() => {
+    if (
+      hydratedWorkflowId !== resolvedWorkflowId ||
+      lateModelRepairedWorkflowId !== resolvedWorkflowId ||
+      workflowRef.current === null
+    ) {
+      return;
+    }
+    if (historyHydrateEditGenerationRef.current === editGenerationRef.current) {
+      resetWorkflowHistory(workflowRef.current);
+    }
+  }, [
+    hydratedWorkflowId,
+    lateModelRepairedWorkflowId,
+    resetWorkflowHistory,
+    resolvedWorkflowId,
+  ]);
 
   // Explain the nodes the hydrate had to drop, once the draft carrying them has committed.
   // Staying silent would be worse than the loss itself: the dropped nodes leave the draft on
@@ -1208,7 +1338,7 @@ function WorkflowEditorContent({
     // Unmount the left draft now rather than when the next one hydrates, so the canvas
     // never shows (and edits) the previous workflow under the new selection.
     setPreviewedVersion(null);
-    setHydratedWorkflowId(null);
+    clearHydratedWorkflow();
     setWorkflow(null);
     setSelectedWorkflowId(workflowId);
     setSwitchingWorkflow(false);
@@ -1231,7 +1361,7 @@ function WorkflowEditorContent({
       // when it returns, does not overwrite this selection.
       workflowSwitchGeneration.current += 1;
       setPreviewedVersion(null);
-      setHydratedWorkflowId(null);
+      clearHydratedWorkflow();
       setWorkflow(null);
       setSelectedWorkflowId(result.workflow.id);
       return true;
@@ -1307,7 +1437,7 @@ function WorkflowEditorContent({
       await deleteWorkflowMutation.mutateAsync(workflowId);
       if (resolvedWorkflowId === workflowId) {
         setSelectedWorkflowId(null);
-        setHydratedWorkflowId(null);
+        clearHydratedWorkflow();
         setWorkflow(null);
       }
       toast.success(
@@ -1455,7 +1585,7 @@ function WorkflowEditorContent({
       autosave.cancel();
       workflowSwitchGeneration.current += 1;
       setPreviewedVersion(null);
-      setHydratedWorkflowId(null);
+      clearHydratedWorkflow();
       setWorkflow(null);
       setSelectedWorkflowId(result.workflow.id);
       setImportState(null);
@@ -1628,7 +1758,7 @@ function WorkflowEditorContent({
       });
       // Discard any pre-activate dirty flag; the synced draft remounts next.
       autosave.cancel();
-      setHydratedWorkflowId(null);
+      clearHydratedWorkflow();
       toast.success(
         t("settings.workflow.activateVersionSuccess", {
           version: version.version,

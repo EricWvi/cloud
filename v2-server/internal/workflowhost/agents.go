@@ -96,6 +96,46 @@ func (h *Host) abandoned(d workflow.AgentDispatch) bool {
 	return abandoned
 }
 
+func (h *Host) resolvePreviousFailure(tenant string, d workflow.AgentDispatch) string {
+	run, err := h.store.WorkflowRun(h.ctx, tenant, d.RunID)
+	if err != nil {
+		if h.ctx.Err() == nil {
+			h.log.Warn("read workflow run for previous failure injection", "run", d.RunID, "error", err)
+		}
+		return ""
+	}
+	inject := true
+	if rp, ok, err := workflow.DecodeRunPayload(run.RuntimePayload); err != nil {
+		h.log.Warn("decode workflow run payload for previous failure injection", "run", d.RunID, "error", err)
+		return ""
+	} else if ok {
+		inject = rp.InjectLastFailure
+	}
+	if !inject {
+		return ""
+	}
+	prevRow, err := h.store.FindLastFailedWorkflowNodeAttempt(h.ctx, tenant, d.RunID, d.Node.ID, d.Iteration)
+	if err != nil {
+		if h.ctx.Err() == nil {
+			h.log.Warn("find previous failed workflow node attempt", "run", d.RunID, "node", d.Node.ID, "error", err)
+		}
+		return ""
+	}
+	prev := previousFailureForInjection(inject, prevRow)
+	if prev == nil {
+		return ""
+	}
+	return renderPreviousFailure(*prev, d.Locale)
+}
+
+func (h *Host) recordInjectedFailure(tenant, runID, nodeRunID, text string) {
+	if _, err := h.store.MergeWorkflowNodePayload(h.ctx, tenant, runID, nodeRunID, func(existing []byte) ([]byte, error) {
+		return workflow.MergePayload(existing, map[string]any{"injected_failure_context": text})
+	}); err != nil && h.ctx.Err() == nil {
+		h.log.Warn("record workflow node injected failure", "run", runID, "node_run", nodeRunID, "error", err)
+	}
+}
+
 func (h *Host) fail(d workflow.AgentDispatch, f workflow.Failure) {
 	if err := h.engine.FailNode(h.ctx, d.RunID, d.NodeRunID, f); err != nil {
 		h.log.Error("record workflow node failure", "run", d.RunID, "node_run", d.NodeRunID, "error", err)
@@ -176,11 +216,12 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 		fail(workflow.Failure{Kind: workflow.FailurePromptTemplate, Message: err.Error()})
 		return
 	}
+	injectedFailure := h.resolvePreviousFailure(st.scope.TenantID, d)
 	caller := execution.Caller{Kind: execution.CallerWorkflow, ID: d.RunID, NodeID: d.Node.ID, AttemptID: d.NodeRunID}
 	request := execution.StartRequest{
 		MCP:    mcp,
 		Skills: skills, Caller: caller, Target: execution.Target{ProjectID: d.ProjectID},
-		ExecutorID: executor.executor.ID, Prompt: agentPrompt(d, task, roleContent),
+		ExecutorID: executor.executor.ID, Prompt: agentPrompt(d, task, roleContent, injectedFailure),
 	}
 	if interactive {
 		// The session outlives its turns until completion, a stop or the run's end ends it.
@@ -199,6 +240,9 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 			h.finishCancel(st, d.RunID)
 		}
 		return
+	}
+	if injectedFailure != "" {
+		h.recordInjectedFailure(st.scope.TenantID, d.RunID, d.NodeRunID, injectedFailure)
 	}
 	ref, err := h.exec.Start(h.ctx, st.scope, request)
 	cancelling, last, unstopped := st.endStart(a, ref, err)
