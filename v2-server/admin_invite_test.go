@@ -34,6 +34,10 @@ func adminInviteDatabase(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") })
+	// TEST_DATABASE_URL may be a URL or a keyword/value DSN; both pass search_path to the server.
+	if !strings.Contains(url, "://") {
+		return url + " search_path=" + schema + ",public"
+	}
 	sep := "?"
 	if strings.Contains(url, "?") {
 		sep = "&"
