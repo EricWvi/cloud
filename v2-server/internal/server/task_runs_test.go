@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/execution/executiontest"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
+	"github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
 	"github.com/wanglongan587/cloud/v2-server/internal/taskrun"
 )
 
@@ -161,5 +163,102 @@ func TestTaskRunsUnavailableWithoutAHost(t *testing.T) {
 	path := "/api/v2/tenants/" + tid + "/tasks/00000000-0000-4000-8000-000000000001/runs"
 	if status, body := c.doHeaders("POST", path, map[string]any{}, map[string]string{"Idempotency-Key": "k"}); status != 503 || body["code"] != "execution_unavailable" {
 		t.Fatalf("start without a host = %d %v", status, body)
+	}
+}
+
+func TestTaskRunDeliveryGatesReviewAndManualStatus(t *testing.T) {
+	f := newSquadServer(t)
+	f.taskRunServer(t)
+	f.project(t)
+	tid := f.tenant(t)
+	token := storetest.SignIn(t, f.store, "squad-demo", "演示用户", store.RoleOwner)
+	user, err := f.store.SessionUser(f.ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := execution.Scope{TenantID: tid, UserID: user.ID}
+	client := f.taskClient()
+	client.login()
+	for _, tc := range []struct {
+		name       string
+		outcome    store.DeliveryStatus
+		result     execution.Status
+		want       string
+		stopIntent bool
+	}{
+		{"success", store.DeliveryDelivered, execution.StatusCompleted, store.TaskReview, false},
+		{"empty", store.DeliveryEmpty, execution.StatusCompleted, store.TaskReview, false},
+		{"execution failed", store.DeliveryEmpty, execution.StatusFailed, store.TaskReview, false},
+		{"delivery failed", store.DeliveryFailed, execution.StatusCompleted, store.TaskPending, false},
+		{"stopped", store.DeliveryEmpty, execution.StatusCancelled, store.TaskPending, false},
+		{"stop intent after completed delivery", store.DeliveryDelivered, execution.StatusCompleted, store.TaskPending, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			task, err := f.store.CreateTask(f.ctx, tid, user.ID, store.TaskInput{Title: tc.name, ProjectID: taskProjectID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := f.store.CreateTaskRun(f.ctx, store.NewTaskRun{TenantID: tid, TaskID: task.ID, StartedBy: user.ID, StartKey: "delivery", ExecutorID: "opencode:fixture"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref := execution.Ref{SessionID: run.ID + "-session", TurnID: run.ID + "-turn"}
+			turn := execution.Turn{Ref: ref, Caller: execution.Caller{Kind: execution.CallerTask, ID: run.ID, AttemptID: "delivery"}, Prompt: execution.TextPrompt("run")}
+			if err := f.store.CreateDeliveryExecutionSession(f.ctx, scope, execution.Session{ID: ref.SessionID, WorkspaceID: run.ID + "-workspace", Target: &execution.Target{ProjectID: taskProjectID}}, turn); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.RecordTaskTurn(f.ctx, run.ID, ref.SessionID, ref.TurnID); err != nil {
+				t.Fatal(err)
+			}
+			task, err = f.store.TransitionTaskStatus(f.ctx, tid, task.ID, store.TaskPending, store.TaskRunning)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.store.StageDeliveryTerminal(f.ctx, scope, ref, execution.Result{Status: tc.result, AnswerComplete: tc.result == execution.StatusCompleted}); err != nil {
+				t.Fatal(err)
+			}
+			if changed, err := f.store.SettleDeliveredTaskTurn(f.ctx, tid, task.ID, run.ID, ref.TurnID, string(tc.result), ""); changed || !errors.Is(err, store.ErrRunActive) {
+				t.Fatalf("settlement before delivery: %v %v", changed, err)
+			}
+			path := "/api/v2/tenants/" + tid + "/tasks/" + task.ID
+			if code, body := client.do("POST", path+"/status", map[string]any{"status": "review", "version": task.Version}); code != 409 || body["code"] != "run_active" {
+				t.Fatalf("move during staged terminal = %d %v", code, body)
+			}
+			work, err := f.store.DeliveryWork(f.ctx, ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := store.DeliveryRecord{ID: run.ID, Status: tc.outcome, BaseCommit: strings.Repeat("a", 40)}
+			if tc.outcome == store.DeliveryFailed {
+				record.ReasonCode, record.Reason = "changes_too_large", "改动过大"
+			}
+			if tc.outcome == store.DeliveryDelivered {
+				record.DeliveryCommit = strings.Repeat("b", 40)
+			}
+			if _, err := f.store.CommitTurnDelivery(f.ctx, work, record); err != nil {
+				t.Fatal(err)
+			}
+			if tc.stopIntent {
+				if err := f.store.MarkTaskRunEnding(f.ctx, run.ID, store.TaskRunStopped); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if changed, err := f.store.SettleDeliveredTaskTurn(f.ctx, tid, task.ID, run.ID, ref.TurnID, string(tc.result), ""); err != nil || !changed {
+				t.Fatalf("settle: %v %v", changed, err)
+			}
+			after, err := f.store.Task(f.ctx, tid, task.ID)
+			if err != nil || after.Status != tc.want {
+				t.Fatalf("settled task %+v, %v, want %s", after, err, tc.want)
+			}
+			if changed, err := f.store.SettleDeliveredTaskTurn(f.ctx, tid, task.ID, run.ID, ref.TurnID, "completed", ""); err != nil || changed {
+				t.Fatalf("duplicate settled: %v %v", changed, err)
+			}
+			if tc.outcome == store.DeliveryFailed {
+				view, err := f.store.WorkspaceDeliveryView(f.ctx, scope, store.DeliverySource{Kind: execution.CallerTask, ID: run.ID, TaskID: task.ID})
+				if err != nil || view.Failed == nil || view.Failed.Reason != "改动过大" {
+					t.Fatalf("delivery failure missing: %+v %v", view, err)
+				}
+			}
+		})
 	}
 }

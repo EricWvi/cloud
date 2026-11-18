@@ -137,15 +137,8 @@ func finishExecutionTurn(ctx context.Context, tx pgx.Tx, ref execution.Ref, resu
 	if turn.Result != nil {
 		return *turn.Result, nil
 	}
-	normalizeExecutionResult(&result)
-	switch result.Status {
-	case execution.StatusCompleted:
-		if !result.AnswerComplete {
-			return execution.Result{}, execution.ErrInvalidRequest
-		}
-	case execution.StatusCancelled, execution.StatusFailed, execution.StatusInterrupted:
-	default:
-		return execution.Result{}, execution.ErrInvalidRequest
+	if err := validateTerminalResult(&result); err != nil {
+		return execution.Result{}, err
 	}
 	var now time.Time
 	if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&now); err != nil {
@@ -161,6 +154,20 @@ func finishExecutionTurn(ctx context.Context, tx pgx.Tx, ref execution.Ref, resu
 	}
 	_, err = insertExecutionEvent(ctx, tx, execution.Event{Ref: ref, Kind: execution.EventTurnEnded, OccurredAt: now, Result: &result})
 	return result, err
+}
+
+func validateTerminalResult(result *execution.Result) error {
+	normalizeExecutionResult(result)
+	switch result.Status {
+	case execution.StatusCompleted:
+		if !result.AnswerComplete {
+			return execution.ErrInvalidRequest
+		}
+	case execution.StatusCancelled, execution.StatusFailed, execution.StatusInterrupted:
+	default:
+		return execution.ErrInvalidRequest
+	}
+	return nil
 }
 
 // EndExecutionSession marks a quiescent session ended and retains its final event once.
@@ -224,6 +231,15 @@ const parkedInteractiveSession = `EXISTS (SELECT 1 FROM v2_workflow_node_runs n 
 // open, and is returned so the runtime can start a new Agent for it on the next turn.
 // Process and filesystem cleanup, when applicable, belongs to the runtime before this call.
 func (s *Store) RecoverExecutions(ctx context.Context) ([]RecoveredSession, error) {
+	return s.recoverExecutions(ctx, false)
+}
+
+// RecoverExecutionsWithDeliveries concludes old sessions while retaining work for boot delivery.
+func (s *Store) RecoverExecutionsWithDeliveries(ctx context.Context) ([]RecoveredSession, error) {
+	return s.recoverExecutions(ctx, true)
+}
+
+func (s *Store) recoverExecutions(ctx context.Context, deliver bool) ([]RecoveredSession, error) {
 	var kept []RecoveredSession
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		kept = nil
@@ -273,13 +289,23 @@ func (s *Store) RecoverExecutions(ctx context.Context) ([]RecoveredSession, erro
 				return err
 			}
 			if err == nil {
-				var partial string
-				if err := tx.QueryRow(ctx, `SELECT COALESCE(string_agg(data->>'TextDelta','' ORDER BY sequence),'') FROM v2_execution_events WHERE session_id=$1 AND data->>'Kind'='text_delta' AND data#>>'{Ref,TurnID}'=$2`, session.ID, tid).Scan(&partial); err != nil {
-					return err
+				ref := execution.Ref{SessionID: session.ID, TurnID: tid}
+				result := execution.Result{Status: execution.StatusInterrupted, FailureCode: "server_restarted"}
+				if deliver {
+					staged, err := recoverDeliveryWork(ctx, tx, session, ref)
+					if err != nil {
+						return err
+					}
+					if staged != nil {
+						result = *staged
+					}
 				}
-				// A server restart supplies no protocol stop reason.
-				result := execution.Result{Status: execution.StatusInterrupted, Answer: partial, FailureCode: "server_restarted"}
-				if _, err := finishExecutionTurn(ctx, tx, execution.Ref{SessionID: session.ID, TurnID: tid}, result); err != nil {
+				if result.Status == execution.StatusInterrupted {
+					if err := tx.QueryRow(ctx, `SELECT COALESCE(string_agg(data->>'TextDelta','' ORDER BY sequence),'') FROM v2_execution_events WHERE session_id=$1 AND data->>'Kind'='text_delta' AND data#>>'{Ref,TurnID}'=$2`, session.ID, tid).Scan(&result.Answer); err != nil {
+						return err
+					}
+				}
+				if _, err := finishExecutionTurn(ctx, tx, ref, result); err != nil {
 					return err
 				}
 			}

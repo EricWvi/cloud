@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+
+	"github.com/wanglongan587/cloud/v2-server/internal/gitexclude"
 )
 
 // excludeHeader introduces the rules Ora appends, so a person reading the file knows where they
@@ -17,22 +19,35 @@ const excludeHeader = "# Skills Ora materialized for the Agent; not part of the 
 // `git add -A` does not commit them and the workspace views show only the Agent's own changes.
 // paths are slash-separated and relative to the checkout. The rules go to the checkout's own
 // .git/info/exclude, never the project's .gitignore, and existing lines are kept; a path already
-// listed is not added twice. A checkout whose .git is not a plain directory is left alone.
+// listed is not added twice. Linked worktrees use the common Git directory.
 func excludeFromGit(root *os.Root, paths []string) error {
 	if len(paths) == 0 {
 		return nil
 	}
-	if info, err := root.Lstat(".git"); err != nil || !info.IsDir() {
+	if _, err := root.Lstat(".git"); errors.Is(err, fs.ErrNotExist) {
 		return nil
-	}
-	const file = ".git/info/exclude"
-	existing, err := root.ReadFile(file)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	} else if err != nil {
 		return err
 	}
+	layout, err := gitexclude.Resolve(root.Name())
+	if err != nil {
+		return err
+	}
+	excludes, err := layout.Excludes()
+	if err != nil {
+		return err
+	}
+	existing := string(excludes[len(excludes)-1])
 	have := map[string]bool{}
-	for _, line := range strings.Split(string(existing), "\n") {
-		have[line] = true
+	inside := false
+	for line := range strings.SplitSeq(existing, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if line == excludeHeader {
+			inside = true
+		}
+		if inside {
+			have[line] = true
+		}
 	}
 	var add strings.Builder
 	for _, p := range paths {
@@ -54,16 +69,14 @@ func excludeFromGit(root *os.Root, paths []string) error {
 	if add.Len() == 0 {
 		return nil
 	}
-	if err := root.MkdirAll(".git/info", 0o755); err != nil {
-		return err
-	}
 	// One append per call: concurrent writers each add whole lines.
-	f, err := root.OpenFile(file, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
-	if err != nil {
-		return err
-	}
-	_, writeErr := f.WriteString(add.String())
-	return errors.Join(writeErr, f.Close())
+	//
+	// This write follows checkout-controlled pointers (.git as a gitfile or symlink, and
+	// commondir), which the Agent can rewrite to name any directory it likes. That is acceptable
+	// only while the Agent and Cloud run as the same OS user (A1 D2), so it gains nothing it
+	// could not do itself. Revisit before Agents are sandboxed: never follow checkout-controlled
+	// pointers for writes then.
+	return layout.Append(add.String())
 }
 
 // escapeGitPattern makes a path match itself literally in a gitignore rule.
@@ -83,22 +96,24 @@ func escapeGitPattern(p string) string {
 // materialized user skill) lands here, so a later market install may replace it; a project-owned
 // path never does.
 func serviceExcludedPath(root *os.Root, path string) bool {
-	existing, err := root.ReadFile(".git/info/exclude")
+	layout, err := gitexclude.Resolve(root.Name())
 	if err != nil {
 		return false
 	}
-	lines := strings.Split(string(existing), "\n")
-	inside := false
-	for _, line := range lines {
-		if line == excludeHeader {
-			inside = true
-			continue
-		}
-		if !inside {
-			continue
-		}
-		if strings.HasPrefix(line, "/") && strings.TrimSuffix(line, "\r") == "/"+escapeGitPattern(path) {
-			return true
+	excludes, err := layout.Excludes()
+	if err != nil {
+		return false
+	}
+	rule := "/" + escapeGitPattern(path)
+	for _, raw := range excludes {
+		inside := false
+		for line := range strings.SplitSeq(string(raw), "\n") {
+			line = strings.TrimSuffix(line, "\r")
+			if line == excludeHeader {
+				inside = true
+			} else if inside && line == rule {
+				return true
+			}
 		}
 	}
 	return false

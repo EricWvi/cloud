@@ -357,9 +357,6 @@ func (s *Store) SetTaskStatus(ctx context.Context, a Access, id, status string, 
 		if e != nil {
 			return e
 		}
-		if !CanTransitionTask(task.Status, status) {
-			return ErrInvalidTransition
-		}
 		if status == TaskDone || status == TaskCancelled {
 			if !canCloseTask(a, task) {
 				return ErrForbidden
@@ -374,6 +371,9 @@ func (s *Store) SetTaskStatus(ctx context.Context, a Access, id, status string, 
 		}
 		if task.ActiveRun != nil && task.ActiveRun.State == TaskRunRunning {
 			return ErrRunActive
+		}
+		if !CanTransitionTask(task.Status, status) {
+			return ErrInvalidTransition
 		}
 		task, e = writeTaskStatus(ctx, tx, id, status)
 		out = task

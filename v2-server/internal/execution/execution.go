@@ -160,6 +160,9 @@ const (
 	FailureCheckoutTooDeep      = "checkout_too_deep"
 )
 
+// FailureDeliveryUnavailable identifies a terminal fallback when delivery cannot be recorded.
+const FailureDeliveryUnavailable = "delivery_unavailable"
+
 // FailureWorkspaceMissing is the failure code of a turn whose checkout, prepared by an earlier Node
 // incarnation or process, no longer exists: its directory is gone, it was never recorded with its
 // clone execution, or Node no longer knows that clone execution. Nothing can continue the session

@@ -32,6 +32,17 @@ type Adopter interface {
 	Adopt(ctx context.Context) error
 }
 
+// WorkflowRecovery separates durable interruption from any subsequent workflow dispatch.
+type WorkflowRecovery interface {
+	SweepInterrupted(context.Context) ([]string, error)
+	ResumeInterrupted(context.Context, []string) error
+}
+
+// DeliveryRecovery saves the checkouts of concluded turns before new work can run.
+type DeliveryRecovery interface {
+	RecoverTurnDeliveries(context.Context) error
+}
+
 // Hosts are the startup steps, one per owner of state a previous process can leave live.
 type Hosts struct {
 	// TaskWorkflows cancels the live handling runs of tasks and settles their links.
@@ -40,7 +51,8 @@ type Hosts struct {
 	// except runs at a submitted review, which it adopts once the sweep has replayed the review.
 	Decompositions Adopter
 	// WorkflowRuns fails, or absorbs and resumes, the workflow runs left executing.
-	WorkflowRuns Interrupter
+	WorkflowRuns WorkflowRecovery
+	Deliveries   DeliveryRecovery
 	// TaskRuns ends the task Agent turns left live.
 	TaskRuns Interrupter
 }
@@ -56,11 +68,20 @@ func Recover(ctx context.Context, h Hosts) error {
 	if err := h.Decompositions.Recover(ctx); err != nil {
 		return err
 	}
-	if err := h.WorkflowRuns.Interrupt(ctx); err != nil {
+	ids, err := h.WorkflowRuns.SweepInterrupted(ctx)
+	if err != nil {
 		return err
 	}
-	if err := h.Decompositions.Adopt(ctx); err != nil {
+	if err := h.TaskRuns.Interrupt(ctx); err != nil {
 		return err
 	}
-	return h.TaskRuns.Interrupt(ctx)
+	if h.Deliveries != nil {
+		if err := h.Deliveries.RecoverTurnDeliveries(ctx); err != nil {
+			return err
+		}
+	}
+	if err := h.WorkflowRuns.ResumeInterrupted(ctx, ids); err != nil {
+		return err
+	}
+	return h.Decompositions.Adopt(ctx)
 }

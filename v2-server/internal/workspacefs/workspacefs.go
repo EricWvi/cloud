@@ -293,34 +293,38 @@ func (w Workspace) Changes(ctx context.Context) (Changes, error) {
 		if e != nil {
 			return e
 		}
-		counts := parseNumstat(numstat)
-		fields := strings.Split(strings.TrimSuffix(string(status), "\x00"), "\x00")
-		for i := 0; i+1 < len(fields); i += 2 {
-			c := Change{Path: fields[i+1]}
-			switch fields[i] {
-			case "A":
-				c.Status = StatusAdded
-			case "D":
-				c.Status = StatusDeleted
-			default:
-				c.Status = StatusModified
-			}
-			n, ok := counts[c.Path]
-			c.Binary = !ok || n.binary
-			c.Additions, c.Deletions = n.additions, n.deletions
-			if len(out.Files) == MaxChanges {
-				out.Truncated = true
-				break
-			}
-			out.Files = append(out.Files, c)
-		}
+		populateChanges(&out, status, numstat)
 		return nil
 	})
 	if e != nil {
 		return Changes{}, e
 	}
-	slices.SortFunc(out.Files, func(a, b Change) int { return strings.Compare(a.Path, b.Path) })
 	return out, nil
+}
+
+func populateChanges(out *Changes, status, numstat []byte) {
+	counts := parseNumstat(numstat)
+	fields := strings.Split(strings.TrimSuffix(string(status), "\x00"), "\x00")
+	for i := 0; i+1 < len(fields); i += 2 {
+		c := Change{Path: fields[i+1]}
+		switch fields[i] {
+		case "A":
+			c.Status = StatusAdded
+		case "D":
+			c.Status = StatusDeleted
+		default:
+			c.Status = StatusModified
+		}
+		n, ok := counts[c.Path]
+		c.Binary = !ok || n.binary
+		c.Additions, c.Deletions = n.additions, n.deletions
+		if len(out.Files) == MaxChanges {
+			out.Truncated = true
+			break
+		}
+		out.Files = append(out.Files, c)
+	}
+	slices.SortFunc(out.Files, func(a, b Change) int { return strings.Compare(a.Path, b.Path) })
 }
 
 // Diff returns one file's unified diff against the base commit. rel may name a deleted file.

@@ -74,7 +74,7 @@ func (s *Service) syncOne(ctx context.Context, scope execution.Scope, id string)
 	}
 	pullCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	output, err := s.runAuth(pullCtx, project.MirrorPath, auth, "fetch", "--no-tags", "--", project.RepositoryURL, "refs/heads/"+project.Branch)
+	output, err := s.runAuth(pullCtx, project.MirrorPath, auth, "fetch", "--no-tags", "--no-prune", "--no-auto-gc", "--", project.RepositoryURL, "refs/heads/"+project.Branch)
 	if err != nil {
 		reason := s.syncFailureReason(pullCtx, output)
 		return SyncResult{}, s.fail(ctx, scope, project, reason)

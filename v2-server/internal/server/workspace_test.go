@@ -38,35 +38,69 @@ var workspaceContract = sync.OnceValues(func() (routers.Router, error) {
 	return legacy.NewRouter(doc)
 })
 
-// workspaceGet calls a workspace route and checks the response against workspace.openapi.json.
-func workspaceGet(t *testing.T, client *http.Client, base, path string) (int, map[string]any) {
+// workspaceResponse is one workspace route's answer: status, headers, the exact bytes, and the
+// body decoded when it is JSON.
+type workspaceResponse struct {
+	status int
+	header http.Header
+	raw    []byte
+	body   map[string]any
+}
+
+// workspaceCall calls a workspace route and checks the exchange against workspace.openapi.json:
+// the method and path must be an operation, a successful request must satisfy its parameters,
+// and the status, headers, media type and body must match the response. Binary and empty bodies
+// are checked by schema here; callers compare their exact bytes.
+func workspaceCall(t *testing.T, client *http.Client, method, base, path string) workspaceResponse {
 	t.Helper()
-	req, _ := http.NewRequest("GET", base+path, nil)
+	req, _ := http.NewRequest(method, base+path, nil)
 	res, e := client.Do(req)
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer res.Body.Close()
-	raw, _ := io.ReadAll(res.Body)
+	raw, e := io.ReadAll(res.Body)
+	if e != nil {
+		t.Fatal(e)
+	}
 	routes, e := workspaceContract()
 	if e != nil {
 		t.Fatal(e)
 	}
 	route, params, e := routes.FindRoute(req)
 	if e != nil {
-		t.Fatalf("GET %s is not in workspace.openapi.json: %v", path, e)
+		t.Fatalf("%s %s is not in workspace.openapi.json: %v", method, path, e)
 	}
-	in := &openapi3filter.ResponseValidationInput{
-		RequestValidationInput: &openapi3filter.RequestValidationInput{Request: req, PathParams: params, Route: route},
+	in := &openapi3filter.RequestValidationInput{Request: req, PathParams: params, Route: route,
+		Options: &openapi3filter.Options{AuthenticationFunc: openapi3filter.NoopAuthenticationFunc}}
+	if res.StatusCode < 300 {
+		if e := openapi3filter.ValidateRequest(context.Background(), in); e != nil {
+			t.Fatalf("%s %s succeeded with a request workspace.openapi.json refuses: %v", method, path, e)
+		}
+	}
+	out := &openapi3filter.ResponseValidationInput{
+		RequestValidationInput: in,
 		Status:                 res.StatusCode, Header: res.Header, Options: &openapi3filter.Options{IncludeResponseStatus: true},
 	}
-	in.SetBodyBytes(raw)
-	if e := openapi3filter.ValidateResponse(context.Background(), in); e != nil {
-		t.Fatalf("GET %s does not match workspace.openapi.json: %v\n%s", path, e, raw)
+	out.SetBodyBytes(raw)
+	if e := openapi3filter.ValidateResponse(context.Background(), out); e != nil {
+		t.Fatalf("%s %s does not match workspace.openapi.json: %v\n%s", method, path, e, raw)
 	}
-	out := map[string]any{}
-	_ = json.Unmarshal(raw, &out)
-	return res.StatusCode, out
+	got := workspaceResponse{status: res.StatusCode, header: res.Header, raw: raw}
+	if strings.HasPrefix(res.Header.Get("Content-Type"), "application/json") {
+		got.body = map[string]any{}
+		if e := json.Unmarshal(raw, &got.body); e != nil {
+			t.Fatalf("%s %s: %v", method, path, e)
+		}
+	}
+	return got
+}
+
+// workspaceGet is workspaceCall for a JSON GET.
+func workspaceGet(t *testing.T, client *http.Client, base, path string) (int, map[string]any) {
+	t.Helper()
+	res := workspaceCall(t, client, http.MethodGet, base, path)
+	return res.status, res.body
 }
 
 // agentCheckout is a cloned project the Agent then edited: one modified and one new file.

@@ -109,6 +109,11 @@ type Options struct {
 	// DownloadPluginPackage stages a workflow package before import. Nil uses the public
 	// marketplace downloader.
 	DownloadPluginPackage PluginPackageDownloader
+	// Deliveries reads retained turn deliveries for the change view and patch download; nil
+	// answers 503 workspace_unavailable wherever a delivery would be read.
+	Deliveries DeliveryReader
+	// MaxPatchBytes caps a downloadable delivery patch; zero or less uses DefaultMaxPatchBytes.
+	MaxPatchBytes int
 	// Context is the server's lifetime: work the handler runs beyond any one request, such as a
 	// decomposition verdict other requests share, stops when it ends. Nil uses
 	// context.Background(), for tests and callers whose handler lives as long as the process.
@@ -245,6 +250,9 @@ type handler struct {
 	// verdicts judges and caches the decomposition picker's verdict per immutable published
 	// snapshot, shared by every request this handler serves.
 	verdicts *decompositionVerdicts
+	// patchSlots bounds how many delivery patches are built at once: each holds its whole patch,
+	// up to the cap, in memory plus a Git process.
+	patchSlots chan struct{}
 }
 
 // newHandler makes omitted dependencies safe without inferring one interface from another.
@@ -260,7 +268,7 @@ func newHandler(s Store, o Options) *handler {
 	if lifetime == nil {
 		lifetime = context.Background()
 	}
-	h := &handler{store: s, opts: o, verdicts: newDecompositionVerdicts(lifetime)}
+	h := &handler{store: s, opts: o, verdicts: newDecompositionVerdicts(lifetime), patchSlots: make(chan struct{}, maxConcurrentPatches)}
 	if cs, ok := s.(chat.Store); ok {
 		h.chats = chat.New(cs, o.Execution, o.Catalog, chat.Options{})
 	}
