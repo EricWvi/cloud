@@ -1,6 +1,6 @@
--- v2-server's whole schema. The server is temporary, so it applies this idempotently at
--- startup instead of keeping migrations.
-CREATE TABLE IF NOT EXISTS users (
+-- v2-server's initial schema: the state the unversioned schema.sql produced on an empty database,
+-- written as plain DDL. Never edit this file once merged; add the next numbered migration instead.
+CREATE TABLE users (
 	id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	source       text NOT NULL,
 	subject      text NOT NULL,
@@ -12,14 +12,14 @@ CREATE TABLE IF NOT EXISTS users (
 	UNIQUE (source, subject)
 );
 
-CREATE TABLE IF NOT EXISTS tenants (
+CREATE TABLE tenants (
 	id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	name       text NOT NULL UNIQUE,
 	status     text NOT NULL DEFAULT 'active',
 	created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS memberships (
+CREATE TABLE memberships (
 	tenant_id uuid NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
 	user_id   uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
 	role      text NOT NULL,
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS memberships (
 );
 
 -- Only the SHA-256 of a session token is stored.
-CREATE TABLE IF NOT EXISTS v2_schedule_configs (
+CREATE TABLE v2_schedule_configs (
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
  tenant_id uuid NOT NULL REFERENCES tenants(id),
  user_id uuid NOT NULL REFERENCES users(id),
@@ -40,9 +40,9 @@ CREATE TABLE IF NOT EXISTS v2_schedule_configs (
  created_at timestamptz NOT NULL DEFAULT now(),
  updated_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS v2_schedule_configs_owner ON v2_schedule_configs(tenant_id,user_id);
+CREATE INDEX v2_schedule_configs_owner ON v2_schedule_configs(tenant_id,user_id);
 
-CREATE TABLE IF NOT EXISTS v2_schedule_occurrences (
+CREATE TABLE v2_schedule_occurrences (
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
  schedule_id uuid NOT NULL REFERENCES v2_schedule_configs(id),
  kind text NOT NULL CHECK(kind IN ('scheduled','manual')),
@@ -52,35 +52,32 @@ CREATE TABLE IF NOT EXISTS v2_schedule_occurrences (
  snapshot jsonb NOT NULL,
  status text NOT NULL DEFAULT 'recorded',
  recorded_at timestamptz NOT NULL DEFAULT now(),
- UNIQUE(schedule_id,kind,trigger_key)
+ reason text NOT NULL DEFAULT '',
+ execution_ref text NOT NULL DEFAULT '',
+ released boolean NOT NULL DEFAULT true,
+ version bigint NOT NULL DEFAULT 1,
+ waiting_for_input boolean NOT NULL DEFAULT false,
+ UNIQUE(schedule_id,kind,trigger_key),
+ CONSTRAINT v2_schedule_occurrences_status_check CHECK(status IN ('recorded','starting','reconciling','running','cancelling','succeeded','failed','cancelled','interrupted','skipped'))
 );
-CREATE INDEX IF NOT EXISTS v2_schedule_occurrences_history ON v2_schedule_occurrences(schedule_id,recorded_at DESC,id DESC);
-
-ALTER TABLE v2_schedule_occurrences ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT '';
-ALTER TABLE v2_schedule_occurrences ADD COLUMN IF NOT EXISTS execution_ref text NOT NULL DEFAULT '';
-ALTER TABLE v2_schedule_occurrences ADD COLUMN IF NOT EXISTS released boolean NOT NULL DEFAULT true;
-ALTER TABLE v2_schedule_occurrences ADD COLUMN IF NOT EXISTS version bigint NOT NULL DEFAULT 1;
-ALTER TABLE v2_schedule_occurrences DROP CONSTRAINT IF EXISTS v2_schedule_occurrences_status_check;
-ALTER TABLE v2_schedule_occurrences ADD CONSTRAINT v2_schedule_occurrences_status_check CHECK(status IN ('recorded','starting','reconciling','running','cancelling','succeeded','failed','cancelled','interrupted','skipped'));
-ALTER TABLE v2_schedule_occurrences ADD COLUMN IF NOT EXISTS waiting_for_input boolean NOT NULL DEFAULT false;
-DROP INDEX IF EXISTS v2_schedule_active_occurrence;
+CREATE INDEX v2_schedule_occurrences_history ON v2_schedule_occurrences(schedule_id,recorded_at DESC,id DESC);
 CREATE UNIQUE INDEX v2_schedule_active_occurrence ON v2_schedule_occurrences(schedule_id) WHERE NOT released AND NOT waiting_for_input;
 
-CREATE TABLE IF NOT EXISTS sessions (
+CREATE TABLE sessions (
 	token_hash bytea PRIMARY KEY,
 	user_id    uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
 	expires_at timestamptz NOT NULL
 );
 
 -- One-time data cleanups that must not repeat after their source configuration changes.
-CREATE TABLE IF NOT EXISTS v2_data_cleanups (
+CREATE TABLE v2_data_cleanups (
 	name       text PRIMARY KEY,
 	applied_at timestamptz NOT NULL DEFAULT now()
 );
 
 -- Squads group people and Space Agents inside one workspace. Each tenant has exactly one
 -- collaboration space in v2, so tenant_id is the space boundary.
-CREATE TABLE IF NOT EXISTS v2_squads (
+CREATE TABLE v2_squads (
 	id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	tenant_id       uuid NOT NULL REFERENCES tenants (id),
 	name            text NOT NULL,
@@ -93,11 +90,11 @@ CREATE TABLE IF NOT EXISTS v2_squads (
 	created_at      timestamptz NOT NULL DEFAULT now(),
 	updated_at      timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS v2_squads_tenant ON v2_squads (tenant_id, archived_at);
+CREATE INDEX v2_squads_tenant ON v2_squads (tenant_id, archived_at);
 
 -- v2 has exactly one collaboration space per tenant, created with the demo tenant. It exists so
 -- the contract's space and installed-plugin reads answer from real rows instead of a fixture.
-CREATE TABLE IF NOT EXISTS v2_spaces (
+CREATE TABLE v2_spaces (
 	id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	tenant_id   uuid NOT NULL REFERENCES tenants (id),
 	name        text NOT NULL,
@@ -113,7 +110,7 @@ CREATE TABLE IF NOT EXISTS v2_spaces (
 
 -- The latest validated marketplace snapshot. The official Git source replaces this table in one
 -- transaction; Agent entries are excluded because their versions belong to the installed runtime.
-CREATE TABLE IF NOT EXISTS v2_plugin_catalog (
+CREATE TABLE v2_plugin_catalog (
 	source_namespace text NOT NULL,
 	identifier       text NOT NULL,
 	kind             text NOT NULL,
@@ -129,20 +126,17 @@ CREATE TABLE IF NOT EXISTS v2_plugin_catalog (
 -- selection freezes in v2_skill_plans: the names are a fact about those exact bytes, so another
 -- space, source or version can never overwrite what an installed selection resolves to, and a
 -- failed install only adds rows no selection references.
-CREATE TABLE IF NOT EXISTS v2_skill_package_names (
+CREATE TABLE v2_skill_package_names (
 	digest     text NOT NULL,
 	skill_name text NOT NULL,
 	PRIMARY KEY (digest, skill_name)
 );
--- An earlier build keyed the names by "namespace/identifier" alone; they are derived data, so the
--- table is dropped rather than migrated.
-DROP TABLE IF EXISTS v2_plugin_skills;
 
 -- The v2 stand-in for the shared Space Agent directory: one row per plugin installed in a space.
 -- Agent squad members reference the id of an agent row whose observed state is installed. The
 -- columns mirror the contract's SpacePlugin so every installed market package can be read from
 -- the same authoritative space selection state.
-CREATE TABLE IF NOT EXISTS v2_space_agents (
+CREATE TABLE v2_space_agents (
 	id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	tenant_id        uuid NOT NULL REFERENCES tenants (id),
 	space_id         uuid REFERENCES v2_spaces (id),
@@ -154,36 +148,20 @@ CREATE TABLE IF NOT EXISTS v2_space_agents (
 	desired_state    text NOT NULL DEFAULT 'installed',
 	desired_version  text NOT NULL DEFAULT '',
 	observed_state   text NOT NULL DEFAULT 'installed',
-	observed_version text NOT NULL DEFAULT '',
+	-- NULL while no version is observed, e.g. a pending or failed install.
+	observed_version text DEFAULT '',
 	install_error    text,
 	requested_by_user_id uuid REFERENCES users (id),
 	version          bigint NOT NULL DEFAULT 1,
 	created_at       timestamptz NOT NULL DEFAULT now(),
 	updated_at       timestamptz NOT NULL DEFAULT now()
 );
--- Columns added after the first v2 schema; existing demo databases keep their rows. They run
--- before the indexes below, which reference them: on an existing table the CREATE TABLE above is
--- a no-op, so the columns exist only once these statements have run.
-ALTER TABLE v2_space_agents ADD COLUMN IF NOT EXISTS space_id uuid REFERENCES v2_spaces (id);
-ALTER TABLE v2_space_agents ADD COLUMN IF NOT EXISTS source_namespace text NOT NULL DEFAULT 'official';
-ALTER TABLE v2_space_agents ADD COLUMN IF NOT EXISTS identifier text NOT NULL DEFAULT '';
-ALTER TABLE v2_space_agents ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'agent';
-ALTER TABLE v2_space_agents ADD COLUMN IF NOT EXISTS desired_state text NOT NULL DEFAULT 'installed';
-ALTER TABLE v2_space_agents ADD COLUMN IF NOT EXISTS desired_version text NOT NULL DEFAULT '';
-ALTER TABLE v2_space_agents ADD COLUMN IF NOT EXISTS observed_state text NOT NULL DEFAULT 'installed';
-ALTER TABLE v2_space_agents ADD COLUMN IF NOT EXISTS observed_version text NOT NULL DEFAULT '';
-ALTER TABLE v2_space_agents ALTER COLUMN observed_version DROP NOT NULL;
-ALTER TABLE v2_space_agents ADD COLUMN IF NOT EXISTS install_error text;
-ALTER TABLE v2_space_agents ADD COLUMN IF NOT EXISTS requested_by_user_id uuid REFERENCES users (id);
-ALTER TABLE v2_space_agents ADD COLUMN IF NOT EXISTS version bigint NOT NULL DEFAULT 1;
-ALTER TABLE v2_space_agents ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
-
-CREATE INDEX IF NOT EXISTS v2_space_agents_tenant ON v2_space_agents (tenant_id);
-CREATE UNIQUE INDEX IF NOT EXISTS v2_space_agents_plugin ON v2_space_agents (space_id, source_namespace, identifier);
+CREATE INDEX v2_space_agents_tenant ON v2_space_agents (tenant_id);
+CREATE UNIQUE INDEX v2_space_agents_plugin ON v2_space_agents (space_id, source_namespace, identifier);
 
 -- Successful plugin mutations are replayed by Idempotency-Key. The request digest separates a
 -- legitimate retry from reuse of the same key for a different selection.
-CREATE TABLE IF NOT EXISTS v2_plugin_mutations (
+CREATE TABLE v2_plugin_mutations (
 	tenant_id       uuid NOT NULL REFERENCES tenants (id),
 	user_id         uuid NOT NULL REFERENCES users (id),
 	method          text NOT NULL,
@@ -197,7 +175,7 @@ CREATE TABLE IF NOT EXISTS v2_plugin_mutations (
 
 -- User-owned skills are real catalog rows. Their SKILL.md bodies are persisted here and
 -- materialized into each new Agent checkout by the execution runtime.
-CREATE TABLE IF NOT EXISTS v2_skills (
+CREATE TABLE v2_skills (
 	id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	tenant_id   uuid NOT NULL REFERENCES tenants (id),
 	user_id     uuid NOT NULL REFERENCES users (id),
@@ -209,13 +187,13 @@ CREATE TABLE IF NOT EXISTS v2_skills (
 	updated_at  timestamptz NOT NULL DEFAULT now(),
 	deleted_at  timestamptz
 );
-CREATE UNIQUE INDEX IF NOT EXISTS v2_skills_live_name
+CREATE UNIQUE INDEX v2_skills_live_name
 	ON v2_skills (tenant_id, user_id, lower(name)) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS v2_skills_owner
+CREATE INDEX v2_skills_owner
 	ON v2_skills (tenant_id, user_id, updated_at DESC, id) WHERE deleted_at IS NULL;
 -- One-time starter catalog per account. Deleting a starter skill must not recreate it at the next
 -- login, so the marker outlives the skill rows.
-CREATE TABLE IF NOT EXISTS v2_skill_seeds (
+CREATE TABLE v2_skill_seeds (
 	user_id   uuid PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
 	seeded_at timestamptz NOT NULL DEFAULT now()
 );
@@ -224,7 +202,7 @@ CREATE TABLE IF NOT EXISTS v2_skill_seeds (
 -- same rows, and a workflow run resolves the content it injects from here. Desktop keeps roles in a
 -- local agents catalog and editors store the role name in the graph, so the live-name index makes a
 -- name identify at most one role per tenant.
-CREATE TABLE IF NOT EXISTS v2_roles (
+CREATE TABLE v2_roles (
 	id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	tenant_id   uuid NOT NULL REFERENCES tenants (id),
 	name        text NOT NULL,
@@ -236,14 +214,14 @@ CREATE TABLE IF NOT EXISTS v2_roles (
 	updated_at  timestamptz NOT NULL DEFAULT now(),
 	deleted_at  timestamptz
 );
-CREATE UNIQUE INDEX IF NOT EXISTS v2_roles_live_name
+CREATE UNIQUE INDEX v2_roles_live_name
 	ON v2_roles (tenant_id, lower(name)) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS v2_roles_tenant
+CREATE INDEX v2_roles_tenant
 	ON v2_roles (tenant_id, updated_at DESC, id) WHERE deleted_at IS NULL;
 
 -- Members are typed references: a human row points at a user, an agent row at a Space Agent.
 -- Ending a membership keeps the row as history; rejoining inserts a new grant.
-CREATE TABLE IF NOT EXISTS v2_squad_members (
+CREATE TABLE v2_squad_members (
 	id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	squad_id       uuid NOT NULL REFERENCES v2_squads (id) ON DELETE CASCADE,
 	member_type    text NOT NULL CHECK (member_type IN ('human', 'agent')),
@@ -258,13 +236,13 @@ CREATE TABLE IF NOT EXISTS v2_squad_members (
 	CHECK (member_type = 'human' OR NOT maintainer)
 );
 -- At most one live grant per typed identity; ended grants stay as history.
-CREATE UNIQUE INDEX IF NOT EXISTS v2_squad_members_active
+CREATE UNIQUE INDEX v2_squad_members_active
 	ON v2_squad_members (squad_id, member_type, COALESCE(user_id, space_agent_id))
 	WHERE ended_at IS NULL;
-CREATE INDEX IF NOT EXISTS v2_squad_members_squad ON v2_squad_members (squad_id);
+CREATE INDEX v2_squad_members_squad ON v2_squad_members (squad_id);
 
 -- Execution state belongs to the authenticated owner; projects are tenant-shared.
-CREATE TABLE IF NOT EXISTS v2_execution_sessions (
+CREATE TABLE v2_execution_sessions (
  id text PRIMARY KEY,
  tenant_id uuid NOT NULL REFERENCES tenants(id),
  user_id uuid NOT NULL REFERENCES users(id),
@@ -273,7 +251,7 @@ CREATE TABLE IF NOT EXISTS v2_execution_sessions (
  event_sequence bigint NOT NULL DEFAULT 0,
  turn_position bigint NOT NULL DEFAULT 0
 );
-CREATE TABLE IF NOT EXISTS v2_execution_turns (
+CREATE TABLE v2_execution_turns (
  id text PRIMARY KEY,
  session_id text NOT NULL REFERENCES v2_execution_sessions(id),
  tenant_id uuid NOT NULL REFERENCES tenants(id),
@@ -285,9 +263,9 @@ CREATE TABLE IF NOT EXISTS v2_execution_turns (
  UNIQUE (tenant_id, user_id, caller),
  UNIQUE (session_id, position)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS v2_execution_active_turn
+CREATE UNIQUE INDEX v2_execution_active_turn
  ON v2_execution_turns(session_id) WHERE ended_at IS NULL;
-CREATE TABLE IF NOT EXISTS v2_execution_events (
+CREATE TABLE v2_execution_events (
  session_id text NOT NULL REFERENCES v2_execution_sessions(id),
  sequence bigint NOT NULL,
  data jsonb NOT NULL,
@@ -295,18 +273,21 @@ CREATE TABLE IF NOT EXISTS v2_execution_events (
 );
 -- Request-level observations never contain prompts or provider response bodies. Dispatch is
 -- refused until this row is durable; finalization can only replace the started observation.
-CREATE TABLE IF NOT EXISTS v2_model_requests (
+CREATE TABLE v2_model_requests (
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
  session_id text NOT NULL REFERENCES v2_execution_sessions(id),
  turn_id text NOT NULL REFERENCES v2_execution_turns(id),
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  data jsonb NOT NULL
 );
-CREATE INDEX IF NOT EXISTS v2_model_requests_session ON v2_model_requests(session_id,created_at,id);
-CREATE TABLE IF NOT EXISTS v2_projects (
+CREATE INDEX v2_model_requests_session ON v2_model_requests(session_id,created_at,id);
+-- plugin_space_id binds project runtime work to a space, independently of tenant-wide repository
+-- visibility.
+CREATE TABLE v2_projects (
  id text PRIMARY KEY,
  tenant_id uuid NOT NULL REFERENCES tenants(id),
- data jsonb NOT NULL
+ data jsonb NOT NULL,
+ plugin_space_id uuid REFERENCES v2_spaces(id)
 );
 
 -- Chat conversations are page-owned: title, project and executor choice. Each conversation runs
@@ -314,7 +295,7 @@ CREATE TABLE IF NOT EXISTS v2_projects (
 -- for it; once that session ends the conversation is read-only. create_key is the Idempotency-Key
 -- of the request that created the row, so a retried creation finds the same conversation and
 -- replays the same attempt identity.
-CREATE TABLE IF NOT EXISTS v2_chat_conversations (
+CREATE TABLE v2_chat_conversations (
 	id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	tenant_id   uuid NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
 	user_id     uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
@@ -326,12 +307,12 @@ CREATE TABLE IF NOT EXISTS v2_chat_conversations (
 	updated_at  timestamptz NOT NULL DEFAULT now(),
 	UNIQUE (tenant_id, user_id, create_key)
 );
-CREATE INDEX IF NOT EXISTS v2_chat_conversations_owner ON v2_chat_conversations (tenant_id, user_id);
+CREATE INDEX v2_chat_conversations_owner ON v2_chat_conversations (tenant_id, user_id);
 
 -- end_reason records why the session ended (stopped, deleted, interrupted). It is written before
 -- chat asks the port to end the session, so a page seeing session_ended can already read it; with
 -- ended_at still unset it means the end is in progress, and it is cleared if ending fails.
-CREATE TABLE IF NOT EXISTS v2_chat_sessions (
+CREATE TABLE v2_chat_sessions (
 	conversation_id uuid PRIMARY KEY REFERENCES v2_chat_conversations (id) ON DELETE CASCADE,
 	session_id      text NOT NULL UNIQUE,
 	started_at      timestamptz NOT NULL DEFAULT now(),
@@ -341,7 +322,7 @@ CREATE TABLE IF NOT EXISTS v2_chat_sessions (
 	end_reason      text NOT NULL DEFAULT ''
 );
 
-CREATE TABLE IF NOT EXISTS v2_chat_project_order (
+CREATE TABLE v2_chat_project_order (
 	tenant_id   uuid NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
 	user_id     uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
 	project_ids text[] NOT NULL,
@@ -352,7 +333,9 @@ CREATE TABLE IF NOT EXISTS v2_chat_project_order (
 -- assignee and a status the team moves by hand. Starting execution, comments and runs are a later
 -- step; nothing in this table starts one. The assignee is a typed id without a foreign key, because
 -- its target table depends on assignee_type; writes validate the target and reads resolve its name.
-CREATE TABLE IF NOT EXISTS v2_tasks (
+-- A subtask is an ordinary task with a parent: the big requirement it was split from. Only one level
+-- exists; a subtask is never split again.
+CREATE TABLE v2_tasks (
 	id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	tenant_id     uuid NOT NULL REFERENCES tenants (id),
 	title         text NOT NULL,
@@ -365,11 +348,12 @@ CREATE TABLE IF NOT EXISTS v2_tasks (
 	version       bigint NOT NULL DEFAULT 1,
 	created_at    timestamptz NOT NULL DEFAULT now(),
 	updated_at    timestamptz NOT NULL DEFAULT now(),
+	parent_id     uuid REFERENCES v2_tasks (id),
 	CHECK (assignee_type IS NULL OR assignee_type IN ('human', 'agent', 'squad')),
 	CHECK ((assignee_type IS NULL) = (assignee_id IS NULL)),
 	CHECK (status IN ('pending', 'running', 'review', 'done', 'cancelled'))
 );
-CREATE INDEX IF NOT EXISTS v2_tasks_tenant ON v2_tasks (tenant_id, updated_at DESC, id);
+CREATE INDEX v2_tasks_tenant ON v2_tasks (tenant_id, updated_at DESC, id);
 
 -- A task run is one execution session of the task's Agent, started by one person: the session runs
 -- under that person's scope, so only they can append to it, while the whole workspace reads it.
@@ -378,7 +362,7 @@ CREATE INDEX IF NOT EXISTS v2_tasks_tenant ON v2_tasks (tenant_id, updated_at DE
 -- stopped (a person stopped it), replaced (a rerun took over), closed (the task finished) or
 -- interrupted (the server restarted, or the session ended on its own). At most one run per task is
 -- live. start_key is the Idempotency-Key of the request that started it.
-CREATE TABLE IF NOT EXISTS v2_task_runs (
+CREATE TABLE v2_task_runs (
 	id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	task_id       uuid NOT NULL REFERENCES v2_tasks (id) ON DELETE CASCADE,
 	tenant_id     uuid NOT NULL REFERENCES tenants (id),
@@ -397,32 +381,15 @@ CREATE TABLE IF NOT EXISTS v2_task_runs (
 	UNIQUE (task_id, started_by, start_key),
 	CHECK (end_reason IN ('', 'stopped', 'replaced', 'closed', 'interrupted'))
 );
-CREATE UNIQUE INDEX IF NOT EXISTS v2_task_runs_live ON v2_task_runs (task_id) WHERE ended_at IS NULL;
+CREATE UNIQUE INDEX v2_task_runs_live ON v2_task_runs (task_id) WHERE ended_at IS NULL;
 
--- Task comments are the team's side of a task's timeline. mentions holds the typed targets picked
--- from the @ menu ({type, id}); text typed as "@name" never routes. run_id and turn_id are set when
--- the comment was sent to the task's Agent as a turn. create_key is the request's Idempotency-Key.
-CREATE TABLE IF NOT EXISTS v2_task_comments (
-	id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-	task_id    uuid NOT NULL REFERENCES v2_tasks (id) ON DELETE CASCADE,
-	tenant_id  uuid NOT NULL REFERENCES tenants (id),
-	author_id  uuid NOT NULL REFERENCES users (id),
-	create_key text NOT NULL,
-	body       text NOT NULL,
-	mentions   jsonb NOT NULL DEFAULT '[]',
-	run_id     uuid REFERENCES v2_task_runs (id) ON DELETE SET NULL,
-	turn_id    text NOT NULL DEFAULT '',
-	created_at timestamptz NOT NULL DEFAULT now(),
-	UNIQUE (task_id, author_id, create_key)
-);
-CREATE INDEX IF NOT EXISTS v2_task_comments_task ON v2_task_comments (task_id, created_at, id);
 -- Workflow definitions follow desktop's authoring model instead of Cloud's: every definition owns
 -- exactly one mutable draft snapshot (version 'draft') plus immutable published snapshots addressed
 -- by a caller-chosen version, and the workflow row points at the version new runs freeze. The graph
 -- is stored verbatim as text so the editor receives exactly the document it saved; parsing and
 -- participation stay in the workflow domain, not in a JSON column. Published snapshots are frozen
 -- before they are stored, so the editor's unsaved draft can be an unfinished canvas.
-CREATE TABLE IF NOT EXISTS v2_workflows (
+CREATE TABLE v2_workflows (
 	id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	tenant_id             uuid NOT NULL REFERENCES tenants (id),
 	namespace             text NOT NULL DEFAULT 'local',
@@ -434,10 +401,10 @@ CREATE TABLE IF NOT EXISTS v2_workflows (
 );
 -- Desktop refuses duplicate live names case-insensitively within a namespace; v2 has one namespace
 -- per tenant, so the tenant is the namespace boundary.
-CREATE UNIQUE INDEX IF NOT EXISTS v2_workflows_live_name
+CREATE UNIQUE INDEX v2_workflows_live_name
 	ON v2_workflows (tenant_id, lower(name)) WHERE deleted_at IS NULL;
 
-CREATE TABLE IF NOT EXISTS v2_workflow_snapshots (
+CREATE TABLE v2_workflow_snapshots (
 	id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	tenant_id   uuid NOT NULL REFERENCES tenants (id),
 	workflow_id uuid NOT NULL REFERENCES v2_workflows (id),
@@ -449,16 +416,16 @@ CREATE TABLE IF NOT EXISTS v2_workflow_snapshots (
 );
 -- A deleted version may be republished under the same spelling, as in desktop. The partial draft
 -- index keeps the single mutable snapshot unambiguous even under concurrent creation.
-CREATE UNIQUE INDEX IF NOT EXISTS v2_workflow_snapshots_live_version
+CREATE UNIQUE INDEX v2_workflow_snapshots_live_version
 	ON v2_workflow_snapshots (workflow_id, version) WHERE deleted_at IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS v2_workflow_snapshots_one_draft
+CREATE UNIQUE INDEX v2_workflow_snapshots_one_draft
 	ON v2_workflow_snapshots (workflow_id) WHERE version = 'draft' AND deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS v2_workflow_snapshots_history
+CREATE INDEX v2_workflow_snapshots_history
 	ON v2_workflow_snapshots (workflow_id, created_at DESC, id DESC) WHERE deleted_at IS NULL;
 
 -- A workflow plugin imports its documents once per space selection. The mapping keeps repeat
 -- installs and upgrades idempotent while the imported workflows remain user data after removal.
-CREATE TABLE IF NOT EXISTS v2_workflow_plugin_imports (
+CREATE TABLE v2_workflow_plugin_imports (
 	selection_id  uuid NOT NULL REFERENCES v2_space_agents (id) ON DELETE CASCADE,
 	document_path text NOT NULL,
 	workflow_id   uuid NOT NULL REFERENCES v2_workflows (id),
@@ -472,7 +439,7 @@ CREATE TABLE IF NOT EXISTS v2_workflow_plugin_imports (
 -- a running run with a pending node is awaiting input, and that framing changes as nodes move, so it
 -- is computed on read instead of persisted. A failed attempt is a soft-deleted node row (as in
 -- desktop), which is why the identity indexes below are partial on `deleted_at IS NULL`.
-CREATE TABLE IF NOT EXISTS v2_workflow_runs (
+CREATE TABLE v2_workflow_runs (
 	id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	tenant_id    uuid NOT NULL REFERENCES tenants (id),
 	workflow_id  uuid NOT NULL REFERENCES v2_workflows (id),
@@ -491,22 +458,44 @@ CREATE TABLE IF NOT EXISTS v2_workflow_runs (
 	finished_at  timestamptz,
 	created_at   timestamptz NOT NULL DEFAULT now(),
 	updated_at   timestamptz NOT NULL DEFAULT now(),
-	deleted_at   timestamptz
+	deleted_at   timestamptz,
+	started_by   uuid REFERENCES users(id)
 );
-CREATE INDEX IF NOT EXISTS v2_workflow_runs_history
+CREATE INDEX v2_workflow_runs_history
 	ON v2_workflow_runs (workflow_id, created_at, id) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS v2_workflow_runs_project
+CREATE INDEX v2_workflow_runs_project
 	ON v2_workflow_runs (tenant_id, project_id, created_at, id) WHERE deleted_at IS NULL;
 -- A scheduled trigger runs at most one workflow run, ever: its occurrence ID is the run's stable
 -- identity, so a repeated dispatch or a recovery finds the same run instead of creating another.
-CREATE UNIQUE INDEX IF NOT EXISTS v2_workflow_runs_schedule_trigger
+CREATE UNIQUE INDEX v2_workflow_runs_schedule_trigger
 	ON v2_workflow_runs (tenant_id, trigger_ref) WHERE trigger_kind = 'schedule';
+
+-- Task comments are the team's side of a task's timeline. mentions holds the typed targets picked
+-- from the @ menu ({type, id}); text typed as "@name" never routes. run_id and turn_id are set when
+-- the comment was sent to the task's Agent as a turn; workflow_run_id when it started a workflow
+-- run via @ workflow. create_key is the request's Idempotency-Key.
+CREATE TABLE v2_task_comments (
+	id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+	task_id    uuid NOT NULL REFERENCES v2_tasks (id) ON DELETE CASCADE,
+	tenant_id  uuid NOT NULL REFERENCES tenants (id),
+	author_id  uuid NOT NULL REFERENCES users (id),
+	create_key text NOT NULL,
+	body       text NOT NULL,
+	mentions   jsonb NOT NULL DEFAULT '[]',
+	run_id     uuid REFERENCES v2_task_runs (id) ON DELETE SET NULL,
+	turn_id    text NOT NULL DEFAULT '',
+	created_at timestamptz NOT NULL DEFAULT now(),
+	workflow_run_id uuid REFERENCES v2_workflow_runs (id) ON DELETE SET NULL,
+	UNIQUE (task_id, author_id, create_key)
+);
+CREATE INDEX v2_task_comments_task ON v2_task_comments (task_id, created_at, id);
+CREATE INDEX v2_task_comments_workflow_run ON v2_task_comments (tenant_id, task_id, workflow_run_id) WHERE workflow_run_id IS NOT NULL;
 
 -- Execution scopes are the run's root and one row per started Loop round. Root rows carry no
 -- status, state or parent; only Loop rounds do. The cross references to node runs are enforced in
 -- SQL below without foreign keys, because the two tables need each other: a node belongs to a
 -- scope, and a round scope names the Loop node run that opened it.
-CREATE TABLE IF NOT EXISTS v2_workflow_scopes (
+CREATE TABLE v2_workflow_scopes (
 	id                      text PRIMARY KEY,
 	tenant_id               uuid NOT NULL REFERENCES tenants (id),
 	run_id                  uuid NOT NULL REFERENCES v2_workflow_runs (id),
@@ -522,11 +511,11 @@ CREATE TABLE IF NOT EXISTS v2_workflow_scopes (
 	),
 	UNIQUE (parent_loop_node_run_id, round_index)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS v2_workflow_scopes_one_active_round
+CREATE UNIQUE INDEX v2_workflow_scopes_one_active_round
 	ON v2_workflow_scopes (parent_loop_node_run_id)
 	WHERE parent_loop_node_run_id IS NOT NULL AND status IN ('pending', 'running');
 
-CREATE TABLE IF NOT EXISTS v2_workflow_run_roots (
+CREATE TABLE v2_workflow_run_roots (
 	run_id   uuid PRIMARY KEY REFERENCES v2_workflow_runs (id),
 	scope_id text NOT NULL UNIQUE REFERENCES v2_workflow_scopes (id)
 );
@@ -534,7 +523,7 @@ CREATE TABLE IF NOT EXISTS v2_workflow_run_roots (
 -- One row per node attempt. `iteration` is the composite-region round (0-based) and stays NULL for
 -- outer and Loop body rows; Loop rounds are scopes, not iterations. `payload` keeps the domain's
 -- JSON (stop reason, failure detail, file changes) without this layer interpreting it.
-CREATE TABLE IF NOT EXISTS v2_workflow_node_runs (
+CREATE TABLE v2_workflow_node_runs (
 	id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	tenant_id   uuid NOT NULL REFERENCES tenants (id),
 	run_id      uuid NOT NULL REFERENCES v2_workflow_runs (id),
@@ -554,17 +543,17 @@ CREATE TABLE IF NOT EXISTS v2_workflow_node_runs (
 	updated_at  timestamptz NOT NULL DEFAULT now(),
 	deleted_at  timestamptz
 );
-CREATE INDEX IF NOT EXISTS v2_workflow_node_runs_history
+CREATE INDEX v2_workflow_node_runs_history
 	ON v2_workflow_node_runs (run_id, created_at, id) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS v2_workflow_node_runs_iteration
+CREATE INDEX v2_workflow_node_runs_iteration
 	ON v2_workflow_node_runs (run_id, iteration, created_at, id) WHERE deleted_at IS NULL;
 -- Retry replaces a failed attempt by soft-deleting it and inserting the next row, so one live row
 -- per (scope, node, iteration) is the invariant, and the database keeps concurrent dispatches from
 -- both creating one.
-CREATE UNIQUE INDEX IF NOT EXISTS v2_workflow_node_runs_live_identity
+CREATE UNIQUE INDEX v2_workflow_node_runs_live_identity
 	ON v2_workflow_node_runs (scope_id, node_id, COALESCE(iteration, -1)) WHERE deleted_at IS NULL;
 
-CREATE TABLE IF NOT EXISTS v2_market_sources (
+CREATE TABLE v2_market_sources (
  space_id uuid NOT NULL REFERENCES v2_spaces(id) ON DELETE CASCADE,
  namespace text NOT NULL,
  url text NOT NULL, branch text NOT NULL, enabled boolean NOT NULL DEFAULT true,
@@ -573,80 +562,26 @@ CREATE TABLE IF NOT EXISTS v2_market_sources (
  snapshot jsonb NOT NULL DEFAULT '[]', git_credentials bytea, PRIMARY KEY(space_id,namespace)
 );
 
-ALTER TABLE v2_market_sources ADD COLUMN IF NOT EXISTS retrieval jsonb NOT NULL DEFAULT '{}';
-ALTER TABLE v2_market_sources ADD COLUMN IF NOT EXISTS credentials bytea;
-ALTER TABLE v2_market_sources ADD COLUMN IF NOT EXISTS git_credentials bytea;
-
--- Earlier v2 databases seeded demo/* plugin selections and idempotency responses. Those rows no
--- longer have a catalog entry. Clear references before removing them so upgrades stay valid.
-UPDATE v2_tasks
-SET assignee_type = NULL, assignee_id = NULL
-WHERE assignee_type = 'agent'
-	AND assignee_id IN (SELECT id FROM v2_space_agents WHERE source_namespace = 'demo');
-UPDATE v2_squads
-SET leader_agent_id = NULL
-WHERE leader_agent_id IN (SELECT id FROM v2_space_agents WHERE source_namespace = 'demo');
-DELETE FROM v2_squad_members
-WHERE space_agent_id IN (SELECT id FROM v2_space_agents WHERE source_namespace = 'demo');
--- Hook demo selections are current server-backed state and must survive restarts; older demo
--- agents and skills no longer have a catalog entry.
-DELETE FROM v2_space_agents WHERE source_namespace = 'demo' AND kind <> 'hook';
-DELETE FROM v2_plugin_mutations
-WHERE response->'resource'->>'sourceNamespace' = 'demo';
-
--- Bind project runtime work to a space, independently of tenant-wide repository visibility.
-ALTER TABLE v2_projects ADD COLUMN IF NOT EXISTS plugin_space_id uuid REFERENCES v2_spaces(id);
-UPDATE v2_projects p SET plugin_space_id=s.id FROM v2_spaces s
-WHERE p.plugin_space_id IS NULL AND s.tenant_id=p.tenant_id AND s.archived_at IS NULL
-AND s.slug='demo';
-
-CREATE TABLE IF NOT EXISTS v2_skill_plans (
+CREATE TABLE v2_skill_plans (
  selection_id uuid PRIMARY KEY REFERENCES v2_space_agents(id) ON DELETE CASCADE,
  locator text NOT NULL, digest text NOT NULL, target text NOT NULL, retrieval jsonb NOT NULL, credentials bytea
 );
-CREATE TABLE IF NOT EXISTS v2_skill_results (
+CREATE TABLE v2_skill_results (
  selection_id uuid NOT NULL REFERENCES v2_space_agents(id) ON DELETE CASCADE,
  project_id text NOT NULL REFERENCES v2_projects(id) ON DELETE CASCADE,
  revision bigint NOT NULL, state text NOT NULL, installed_version text, failure text,
  retry_count integer NOT NULL DEFAULT 0, retry_at timestamptz,
  PRIMARY KEY(selection_id,project_id)
 );
-ALTER TABLE v2_skill_results ADD COLUMN IF NOT EXISTS retry_count integer NOT NULL DEFAULT 0;
-ALTER TABLE v2_skill_results ADD COLUMN IF NOT EXISTS retry_at timestamptz;
--- A Skill selection is the Space selection itself, not a Node-confirmed install: settle rows an older
--- version left waiting for a project Node, and drop the selections whose removal never finished.
--- Rows without a frozen plan have no package to deliver: they must not read as installed, so they
--- stay failed and ask for a reinstall instead. The settle UPDATE below only touches rows that
--- still have a frozen plan, so it cannot undo this prompt.
-UPDATE v2_space_agents a SET observed_state='failed', observed_version=NULL,
- install_error='旧版本没有保留安装包信息，请重新安装。'
-WHERE kind='skill' AND desired_state='installed'
- AND NOT EXISTS(SELECT 1 FROM v2_skill_plans p WHERE p.selection_id=a.id);
-UPDATE v2_space_agents SET observed_state='installed', observed_version=desired_version, install_error=NULL
-WHERE kind='skill' AND desired_state='installed' AND (observed_state<>'installed' OR install_error IS NOT NULL)
- AND EXISTS(SELECT 1 FROM v2_skill_plans p WHERE p.selection_id=v2_space_agents.id);
--- Settled removal rows are dropped once no project still needs to remove the package.
-DELETE FROM v2_space_agents a
-WHERE kind='skill' AND desired_state='removed'
- AND NOT EXISTS(
-	SELECT 1 FROM v2_skill_results r
-	WHERE r.selection_id=a.id AND (r.installed_version IS NOT NULL OR r.state IN ('applying','failed'))
- );
 
-UPDATE v2_space_agents SET observed_state='pending',observed_version=NULL
-WHERE kind NOT IN ('agent','skill','workflow','hook') AND desired_state='installed' AND observed_state='installed';
-
--- A subtask is an ordinary task with a parent: the big requirement it was split from. Only one level
--- exists; a subtask is never split again.
-ALTER TABLE v2_tasks ADD COLUMN IF NOT EXISTS parent_id uuid REFERENCES v2_tasks (id);
-CREATE INDEX IF NOT EXISTS v2_tasks_parent ON v2_tasks (parent_id) WHERE parent_id IS NOT NULL;
+CREATE INDEX v2_tasks_parent ON v2_tasks (parent_id) WHERE parent_id IS NOT NULL;
 
 -- A task decomposition is one run of a workflow over a task, started by one person; when the run
 -- succeeds, its `tasks` output becomes the task's subtasks. status is running until the run ends,
 -- then succeeded (created_count subtasks were written in the same transaction) or failed (failure
 -- says why). At most one decomposition per task runs at a time. start_key is the Idempotency-Key of
 -- the request that started it.
-CREATE TABLE IF NOT EXISTS v2_task_decompositions (
+CREATE TABLE v2_task_decompositions (
 	id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	task_id         uuid NOT NULL REFERENCES v2_tasks (id) ON DELETE CASCADE,
 	tenant_id       uuid NOT NULL REFERENCES tenants (id),
@@ -663,23 +598,24 @@ CREATE TABLE IF NOT EXISTS v2_task_decompositions (
 	UNIQUE (task_id, started_by, start_key),
 	CHECK (status IN ('running', 'succeeded', 'failed'))
 );
-CREATE UNIQUE INDEX IF NOT EXISTS v2_task_decompositions_live ON v2_task_decompositions (task_id) WHERE status = 'running';
+CREATE UNIQUE INDEX v2_task_decompositions_live ON v2_task_decompositions (task_id) WHERE status = 'running';
+CREATE INDEX v2_task_decompositions_run ON v2_task_decompositions(tenant_id,workflow_run_id);
 
 -- Where each execution workspace's checkout lives on this host and the commit it was cloned at,
 -- recorded by the Agent runtime once the checkout is ready, so pages can still show its files after
 -- the session ends or the server restarts. id is execution.Session.WorkspaceID; sessions of one
 -- workflow run share it. The directory may since have been removed (`-cleanup`); readers check.
-CREATE TABLE IF NOT EXISTS v2_workspaces (
-	id          text PRIMARY KEY,
-	path        text NOT NULL,
-	base_commit text NOT NULL,
-	created_at  timestamptz NOT NULL DEFAULT now()
+-- clone_execution is the Node clone execution that produced the checkout, so a restarted server can
+-- start a session on it again (Node resolves checkouts from its own ledger across its restarts).
+CREATE TABLE v2_workspaces (
+	id              text PRIMARY KEY,
+	path            text NOT NULL,
+	base_commit     text NOT NULL,
+	created_at      timestamptz NOT NULL DEFAULT now(),
+	clone_execution text NOT NULL DEFAULT ''
 );
--- The Node clone execution that produced the checkout, so a restarted server can start a session
--- on it again (Node resolves checkouts from its own ledger across its restarts).
-ALTER TABLE v2_workspaces ADD COLUMN IF NOT EXISTS clone_execution text NOT NULL DEFAULT '';
 
-CREATE TABLE IF NOT EXISTS v2_turn_delivery_work (
+CREATE TABLE v2_turn_delivery_work (
     turn_id text PRIMARY KEY REFERENCES v2_execution_turns(id),
     tenant_id uuid NOT NULL REFERENCES tenants(id),
     project_id uuid NOT NULL,
@@ -690,10 +626,10 @@ CREATE TABLE IF NOT EXISTS v2_turn_delivery_work (
     observed_at timestamptz,
     CHECK ((terminal_result IS NULL) = (observed_at IS NULL))
 );
-CREATE INDEX IF NOT EXISTS v2_turn_delivery_work_source
+CREATE INDEX v2_turn_delivery_work_source
     ON v2_turn_delivery_work (tenant_id, source_kind, source_id);
 
-CREATE TABLE IF NOT EXISTS v2_turn_deliveries (
+CREATE TABLE v2_turn_deliveries (
     id uuid PRIMARY KEY,
     sequence bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
     turn_id text NOT NULL UNIQUE REFERENCES v2_execution_turns(id),
@@ -725,32 +661,33 @@ CREATE TABLE IF NOT EXISTS v2_turn_deliveries (
             AND reason_code IS NOT NULL AND reason IS NOT NULL)
     )
 );
-CREATE INDEX IF NOT EXISTS v2_turn_deliveries_source_recent
+CREATE INDEX v2_turn_deliveries_source_recent
     ON v2_turn_deliveries (tenant_id, source_kind, source_id, sequence DESC);
-CREATE INDEX IF NOT EXISTS v2_turn_deliveries_source_good
+CREATE INDEX v2_turn_deliveries_source_good
     ON v2_turn_deliveries (tenant_id, source_kind, source_id, sequence DESC)
     WHERE status IN ('delivered','empty');
 
-ALTER TABLE v2_workflow_runs ADD COLUMN IF NOT EXISTS started_by uuid REFERENCES users(id);
-CREATE TABLE IF NOT EXISTS v2_workflow_forms (
+CREATE TABLE v2_workflow_forms (
  id uuid PRIMARY KEY REFERENCES v2_workflow_node_runs(id), tenant_id uuid NOT NULL REFERENCES tenants(id),
  run_id uuid NOT NULL UNIQUE REFERENCES v2_workflow_runs(id), node_id text NOT NULL,
  reviewer_id uuid NOT NULL REFERENCES users(id), config jsonb NOT NULL, findings jsonb NOT NULL, report text NOT NULL,
  answers jsonb NOT NULL DEFAULT '[]', status text NOT NULL DEFAULT 'open' CHECK(status IN ('open','submitted')),
  version bigint NOT NULL DEFAULT 1, submitted_by uuid REFERENCES users(id), submit_key text NOT NULL DEFAULT '',
- results jsonb NOT NULL DEFAULT '[]'
+ results jsonb NOT NULL DEFAULT '[]', submitted_at timestamptz
 );
-CREATE TABLE IF NOT EXISTS v2_workflow_finding_tasks (
+CREATE INDEX v2_workflow_forms_task_results ON v2_workflow_forms USING gin(results jsonb_path_ops);
+CREATE TABLE v2_workflow_finding_tasks (
  tenant_id uuid NOT NULL REFERENCES tenants(id), project_id text NOT NULL, finding_key text NOT NULL,
  task_id uuid REFERENCES v2_tasks(id), PRIMARY KEY(tenant_id,project_id,finding_key)
 );
 
-ALTER TABLE v2_workflow_forms ADD COLUMN IF NOT EXISTS submitted_at timestamptz;
-
 -- Task handling owns one run; inspection reports retain their existing many-task associations.
-CREATE UNIQUE INDEX IF NOT EXISTS v2_tasks_tenant_identity ON v2_tasks(tenant_id,id);
-CREATE UNIQUE INDEX IF NOT EXISTS v2_workflow_runs_tenant_identity ON v2_workflow_runs(tenant_id,id);
-CREATE TABLE IF NOT EXISTS v2_task_workflow_runs (
+-- Status ownership belongs to the handling admission (status_revision, task_status), independent of
+-- editable task metadata. task_version and original_status are compatibility columns from the
+-- earlier general-version fence, retained for old readers but no longer a settlement fence.
+CREATE UNIQUE INDEX v2_tasks_tenant_identity ON v2_tasks(tenant_id,id);
+CREATE UNIQUE INDEX v2_workflow_runs_tenant_identity ON v2_workflow_runs(tenant_id,id);
+CREATE TABLE v2_task_workflow_runs (
  run_id uuid PRIMARY KEY,
  tenant_id uuid NOT NULL,
  task_id uuid NOT NULL,
@@ -759,26 +696,18 @@ CREATE TABLE IF NOT EXISTS v2_task_workflow_runs (
  status text NOT NULL DEFAULT 'running' CHECK(status IN ('running','succeeded','failed','cancelled','interrupted')),
  failure text NOT NULL DEFAULT '',
  created_at timestamptz NOT NULL DEFAULT now(),
+ task_version bigint,
+ original_status text NOT NULL DEFAULT 'pending',
+ status_revision bigint NOT NULL DEFAULT 1,
+ task_status text NOT NULL DEFAULT 'running',
  FOREIGN KEY(tenant_id,task_id) REFERENCES v2_tasks(tenant_id,id),
  FOREIGN KEY(tenant_id,run_id) REFERENCES v2_workflow_runs(tenant_id,id),
  UNIQUE(task_id,started_by,start_key)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS v2_task_workflow_runs_live ON v2_task_workflow_runs(task_id) WHERE status='running';
-
--- Compatibility columns from the earlier general-version fence. Status ownership below
--- replaces task_version so ordinary task edits cannot interfere with settlement.
-ALTER TABLE v2_task_workflow_runs ADD COLUMN IF NOT EXISTS task_version bigint;
-ALTER TABLE v2_task_workflow_runs ADD COLUMN IF NOT EXISTS original_status text NOT NULL DEFAULT 'pending';
-CREATE INDEX IF NOT EXISTS v2_task_decompositions_run ON v2_task_decompositions(tenant_id,workflow_run_id);
-CREATE INDEX IF NOT EXISTS v2_workflow_forms_task_results ON v2_workflow_forms USING gin(results jsonb_path_ops);
-
--- Status ownership belongs to the handling admission, independent of editable task metadata.
--- task_version is retained for old readers but is no longer a settlement fence.
-ALTER TABLE v2_task_workflow_runs ADD COLUMN IF NOT EXISTS status_revision bigint NOT NULL DEFAULT 1;
-ALTER TABLE v2_task_workflow_runs ADD COLUMN IF NOT EXISTS task_status text NOT NULL DEFAULT 'running';
+CREATE UNIQUE INDEX v2_task_workflow_runs_live ON v2_task_workflow_runs(task_id) WHERE status='running';
 
 -- Tenant MCP installation caches verified package bytes. Credentials are encrypted before SQL.
-CREATE TABLE IF NOT EXISTS v2_tenant_mcps (
+CREATE TABLE v2_tenant_mcps (
  tenant_id uuid NOT NULL REFERENCES tenants(id),
  plugin_id text NOT NULL,
  name text NOT NULL,
@@ -794,17 +723,9 @@ CREATE TABLE IF NOT EXISTS v2_tenant_mcps (
 
 -- Keep the optimistic-lock generation after uninstall, so an old editor cannot
 -- update or remove a later installation of the same tenant/plugin identity.
-CREATE TABLE IF NOT EXISTS v2_tenant_mcp_revisions (
+CREATE TABLE v2_tenant_mcp_revisions (
  tenant_id uuid NOT NULL REFERENCES tenants(id),
  plugin_id text NOT NULL,
  revision bigint NOT NULL,
  PRIMARY KEY(tenant_id,plugin_id)
 );
-INSERT INTO v2_tenant_mcp_revisions(tenant_id,plugin_id,revision)
- SELECT tenant_id,plugin_id,revision FROM v2_tenant_mcps
- ON CONFLICT(tenant_id,plugin_id) DO UPDATE
- SET revision=GREATEST(v2_tenant_mcp_revisions.revision,excluded.revision);
-
--- A comment may start a workflow run via @ workflow; added after v2_workflow_runs is created.
-ALTER TABLE v2_task_comments ADD COLUMN IF NOT EXISTS workflow_run_id uuid REFERENCES v2_workflow_runs (id) ON DELETE SET NULL;
-CREATE INDEX IF NOT EXISTS v2_task_comments_workflow_run ON v2_task_comments (tenant_id, task_id, workflow_run_id) WHERE workflow_run_id IS NOT NULL;
