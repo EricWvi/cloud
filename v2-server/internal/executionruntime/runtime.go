@@ -47,9 +47,10 @@ type ModelChoice struct {
 
 // Config is trusted startup configuration. Agent may be nil for model-only operation.
 type Config struct {
-	Store  *store.Store
-	Models map[string]ModelChoice
-	Agent  AgentDriver
+	Store    *store.Store
+	Models   map[string]ModelChoice
+	Agent    AgentDriver
+	Delivery DeliveryFilesystem
 }
 
 // pending is a turn result whose write still failed after retries. The service keeps storing it
@@ -80,12 +81,13 @@ type stopCall struct {
 }
 
 type worker struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	ref    execution.Ref
-	scope  execution.Scope
-	group  string
-	err    error
+	terminalMu sync.Mutex
+	cancel     context.CancelFunc
+	done       chan struct{}
+	ref        execution.Ref
+	scope      execution.Scope
+	group      string
+	err        error
 }
 
 // Service owns all execution workers. Close must finish before the database is closed.
@@ -93,6 +95,7 @@ type Service struct {
 	db         *store.Store
 	models     map[string]ModelChoice
 	agent      AgentDriver
+	delivery   DeliveryFilesystem
 	ctx        context.Context
 	cancel     context.CancelFunc
 	mu         sync.Mutex
@@ -140,12 +143,16 @@ func New(ctx context.Context, cfg Config) (*Service, error) {
 		}
 		models[id] = choice
 	}
-	kept, err := cfg.Store.RecoverExecutions(ctx)
+	recoverExecution := cfg.Store.RecoverExecutions
+	if cfg.Delivery != nil {
+		recoverExecution = cfg.Store.RecoverExecutionsWithDeliveries
+	}
+	kept, err := recoverExecution(ctx)
 	if err != nil {
 		return nil, err
 	}
 	owned, cancel := context.WithCancel(ctx)
-	s := &Service{db: cfg.Store, models: models, agent: cfg.Agent, ctx: owned, cancel: cancel, finishTurn: cfg.Store.FinishExecutionTurn,
+	s := &Service{db: cfg.Store, models: models, agent: cfg.Agent, ctx: owned, cancel: cancel, delivery: cfg.Delivery, finishTurn: cfg.Store.FinishExecutionTurn,
 		finishRetryDelays: defaultFinishRetryDelays, concludeInterval: defaultConcludeInterval, stopTimeout: defaultStopTimeout,
 		workers: map[string]*worker{}, groups: map[string]string{}, workspaces: map[string]string{}, held: map[string]bool{}, recovering: map[string]bool{}, ending: map[string]bool{}, unsaved: map[string]pending{}, stops: map[string]*stopCall{}}
 	for _, r := range kept {
@@ -311,7 +318,11 @@ func (s *Service) start(ctx context.Context, scope execution.Scope, caller execu
 		}
 	}
 	turn := execution.Turn{Ref: execution.Ref{SessionID: session.ID, TurnID: newID()}, Caller: caller, Prompt: copyPrompt(prompt), StartedAt: time.Now().UTC()}
-	if err := s.db.CreateExecutionSession(ctx, scope, session, turn); err != nil {
+	create := s.db.CreateExecutionSession
+	if s.delivery != nil {
+		create = s.db.CreateDeliveryExecutionSession
+	}
+	if err := create(ctx, scope, session, turn); err != nil {
 		return execution.Ref{}, publicError(err)
 	}
 	if lifetime == execution.LifetimeHeld {
@@ -441,7 +452,11 @@ func (s *Service) Append(ctx context.Context, scope execution.Scope, req executi
 			continue
 		}
 		turn := execution.Turn{Ref: execution.Ref{SessionID: session.ID, TurnID: newID()}, Caller: req.Caller, Prompt: copyPrompt(req.Prompt), StartedAt: time.Now().UTC()}
-		if err := s.db.AppendExecutionTurn(ctx, scope, session.ID, turn); err != nil {
+		appendTurn := s.db.AppendExecutionTurn
+		if s.delivery != nil {
+			appendTurn = s.db.AppendDeliveryExecutionTurn
+		}
+		if err := appendTurn(ctx, scope, session.ID, turn); err != nil {
 			return execution.Ref{}, publicError(err)
 		}
 		s.launch(scope, session, turn, group)
@@ -458,6 +473,15 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 	s.groups[group] = turn.Ref.TurnID
 	go func() {
 		defer cancel()
+		var finalErr error
+		defer func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			w.err = finalErr
+			delete(s.groups, group)
+			delete(s.workers, turn.Ref.TurnID)
+			close(w.done)
+		}()
 		emit := func(_ context.Context, event execution.Event) error {
 			write, stop := context.WithTimeout(context.Background(), 10*time.Second)
 			defer stop()
@@ -465,6 +489,12 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 			if event.Kind == execution.EventTurnEnded {
 				if event.Result == nil {
 					return execution.ErrInvalidRequest
+				}
+				if s.delivery != nil {
+					w.terminalMu.Lock()
+					defer w.terminalMu.Unlock()
+					_, err := s.db.StageDeliveryTerminal(write, scope, turn.Ref, *event.Result)
+					return err
 				}
 				_, err := s.db.FinishExecutionTurn(write, scope, turn.Ref, *event.Result)
 				return err
@@ -539,7 +569,18 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		// An Agent error means the session is gone; the driver marks the results it publishes
 		// itself, and this marks the ones only the runtime writes.
 		result.AgentLost = !retry && (result.AgentLost || agentErr != nil)
-		result, err := s.finish(scope, turn.Ref, result)
+		var err error
+		var finalized bool
+		if s.delivery != nil && session.Target != nil {
+			result, finalized, err = s.finishDelivery(scope, turn.Ref, result, agentErr)
+			if err != nil {
+				finalErr = err
+				return // Keep the durable obligation for boot after shutdown.
+			}
+		}
+		if !finalized {
+			result, err = s.finish(scope, turn.Ref, result)
+		}
 		// Failures stay with this session: nothing here stops admission for other sessions.
 		// A held session survives a turn the Agent itself ended without completing: the driver
 		// reports no error then, and the Agent is still there to take the next turn.
@@ -578,12 +619,7 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 				s.concludeLater(scope, session.ID, stopped)
 			}
 		}
-		s.mu.Lock()
-		w.err = err
-		delete(s.groups, group)
-		delete(s.workers, turn.Ref.TurnID)
-		close(w.done)
-		s.mu.Unlock()
+		finalErr = err
 	}()
 }
 
@@ -763,11 +799,44 @@ func (s *Service) Cancel(ctx context.Context, scope execution.Scope, ref executi
 		// Serialize with Append: a late retry for an already finished turn must not
 		// stop a newer turn. Once cancellation wins, no new turn can enter this session.
 		s.mu.Lock()
+		w := s.workers[ref.TurnID]
+		if s.delivery != nil && w != nil {
+			w.terminalMu.Lock()
+		}
 		turn, err = s.readTurn(ctx, scope, ref)
-		if err == nil && turn.Result == nil {
+		var staged bool
+		if err == nil && turn.Result == nil && s.delivery != nil && w != nil {
+			work, workErr := s.db.DeliveryWork(ctx, ref)
+			staged = workErr == nil && work.Result != nil
+			if workErr != nil && !errors.Is(workErr, store.ErrNotFound) {
+				err = publicError(workErr)
+			}
+		}
+		if err == nil && turn.Result == nil && !staged {
 			s.ending[ref.SessionID] = true
+			if w != nil {
+				w.cancel()
+			}
+		}
+		if s.delivery != nil && w != nil {
+			w.terminalMu.Unlock()
 		}
 		s.mu.Unlock()
+		if staged {
+			select {
+			case <-ctx.Done():
+				return execution.Result{}, ctx.Err()
+			case <-w.done:
+			}
+			turn, err := s.readTurn(ctx, scope, ref)
+			if err != nil {
+				return execution.Result{}, err
+			}
+			if turn.Result == nil {
+				return execution.Result{}, execution.ErrStopUnconfirmed
+			}
+			return *turn.Result, nil
+		}
 		if err != nil {
 			return execution.Result{}, err
 		}

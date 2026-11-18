@@ -28,6 +28,7 @@ V2_LOGIN=email go run .                # 开发模式，监听 127.0.0.1:8090
 | `V2_ADDR` | `127.0.0.1:8090` | 监听地址 |
 | `V2_DATABASE_URL` | `postgres://ora:ora-local@127.0.0.1:55432/ora_v2?sslmode=disable` | PostgreSQL |
 | `V2_DATA_DIR` | `$HOME/.ora-v2` | 仓库 mirror、marketplace checkout、Node 与对话目录；同一目录只允许一个进程持有，使用短路径以满足 Unix socket 长度限制；用 release 构建的 Node 时，它和各级父目录都不能组可写或其他人可写（不能放在 `/tmp` 下），否则启动时报错退出 |
+| `V2_DELIVERY_MAX_OBJECT_BYTES` | `67108864`（64 MiB） | 每轮交付相对起点新增的 Git 对象的未压缩字节总数，须为正整数；超限记录「改动过大」 |
 | `V2_USERS_FILE` | `users.json` | 启动时预置的账号文件（相对进程工作目录）：`users` 里的 `email`、可选的 `displayName`、`role`（`owner` / `member`）；`retired` 里列出要从成员页移除的旧预置 `email`。`users` 幂等写入，已存在的账号只更新名字和角色；不在 `users` 里的账号默认保留，只有 `retired` 中的地址会在首次启动时软删除。文件缺失、没有 owner、邮箱重复或 `users` 与 `retired` 重叠时拒绝启动 |
 | `V2_PLUGIN_MARKETPLACE_URL` | `https://github.com/ora-space/marketplace` | 未设置使用开发默认，显式空字符串关闭官方源；插件市场 Git HTTPS 地址；禁止携带凭据、query 或 fragment。离线测试直接构造 Syncer 使用本地仓库 |
 | `V2_PLUGIN_MARKETPLACE_BRANCH` | `main` | 市场同步分支；启动时浅克隆并拉取，之后按间隔快进工作副本 |
@@ -282,7 +283,8 @@ Agent 正在执行一轮时，人工推进返回 409 `run_active`。
 - **一个任务最多一个活着的运行**：与活工作流处理也互斥（409 `run_active`），空闲 Agent 会话必须先结束才能交给工作流。重新执行会先结束空闲的旧会话（`endReason = replaced`）；正在执行一轮时是 409 `run_active`，要先停。
   页面不排队，追问在一轮执行中同样是 409 `run_active`。
 - **停止即结束这次运行**：固定 Node 上取消一轮会结束整个会话，之后只能重新执行。任务完成或取消时结束空闲会话（`closed`）。
-- **重启**：进程启动前把上一个进程留下的活运行记为 `interrupted`，正在执行的任务回到 `pending`；不重放、不恢复。
+- **回合交付**：完成或执行失败的回合，在交付为 `delivered` 或 `empty` 后进入待验收。交付失败或停止回到待处理，交付失败的原因保存在交付记录中。交付期间任务仍为进行中，人工推进返回 409 `run_active`。
+- **重启**：进程启动前结束上一个进程留下的活运行，正在执行或交付的任务回到 `pending`。启动补交付只保存原工作目录的内容，不重放回合。
 - **派给人的任务**：负责人本人可以用自己选的 Agent 处理，执行器就决定了 Agent。只有负责人能开运行（包括重新执行和 `toAgent` 评论开的新运行），
   别人是 409 `not_assignee`；别人仍能看过程、停止。跑完、停止对任务状态的推进与 Agent 任务相同。
 - **执行器**：`executorId` 必须是上面 `executors` 列出的执行器，否则 400 `invalid_executor`；不填时选目录中的第一项，目录为空时不启动执行。
@@ -617,13 +619,23 @@ not execute these kinds: `crates/application/src/workflow_run/engine/node_type.r
 
   session 结束后对话只读：再发消息返回 409 `conversation_ended`，页面提示新开对话。不会在同一对话里新开 session，也不重放上下文。
 - **幂等**：创建对话和发消息必须带 `Idempotency-Key`，它就是该轮的 attempt ID。用同一个 key 重试，返回原对话和原 Ref，不会重复执行；同一个 key 换了参数，返回 409 `idempotency_conflict`。结果未知时返回 503 `outcome_unknown`，要用同一个 key 重试。第一条消息被明确拒绝时不留下空对话。
-- **上一轮未结束**：返回 409 `turn_running`，由页面排队，上一轮结束后再发。
+- **上一轮未结束或正在交付**：返回 409 `turn_running`，由页面排队，交付有结果后再发。交付失败单独记录，不结束仍健康的 Agent 会话。
 - **事件流**：每条消息的 `id` 是 session 内序号，`Last-Event-ID`（或 `after`）从其后续上。`session_ended` 之后发 `end` 事件；读取失败发 `failure`，不会冒充正常结束。快照 `history` 每次整份替换，`records[].data` 是固定 Node 的 HistoryLine。关闭事件流只停止观察，不停止 Agent。
 - **简化**：同一对话的操作用进程内互斥串行，依赖 v2-server 是单进程；首版只接文本消息，必须选项目。
 
 装配：`server.New` 用传入的 store 和注入的 `Execution` / `Catalog` 建一个 `chat.Service`，chat 不改 `main.go` 或启动入口。chat 只调用公共 `execution.Service`，不直接写执行存储的事件、终态或 End；chat 自己的表只记录对话、session 归属和结束原因。
 
 HTTP 集成测试按 `chat.openapi.json` 验证 JSON 响应，向注入点传入 `executiontest.Stub`，覆盖对话生命周期、停止后只读、事件流续传、项目顺序和执行不可用；`internal/chat` 的测试用真实 PostgreSQL 和执行端口替身，覆盖幂等重试、结果未知、上一轮未结束、停止与重启后只读和删除顺序。
+
+### 回合交付
+
+普通对话、任务 Agent 运行和工作流 Agent 节点的每一轮已接受消息在结束后交付，包含失败和停止。工作流节点完成操作和没有接受消息的尝试不产生交付。工作流共用目录的交付按顺序进行，其他仍在运行的节点可以继续写入。交付失败单独记录，工作流仍按执行结果推进。
+
+交付在项目镜像里新建 `refs/ora/deliveries/<projectId>/<deliveryId>`（两个 ID 都是 UUID）。提交的唯一父提交是工作区登记的起点，包含 Git 纳入的工作区内容，忽略规则和 Ora 物化的技能目录照常排除。交付提交使用固定的 Ora 身份。同步只更新该项目绑定分支的快照，已创建的交付 ref 不会重写或删除。
+
+先写 Git ref，再写 PostgreSQL 记录。起点和结果的树相同记为 `empty`，无 ref；大小超限或其他失败记为 `failed` 并保留原因。崩溃时写到镜像但未落库的 ref 不会从交付读接口发现。启动先结束未完成的执行，再补交付，之后才恢复工作流调度和接收请求。已清理的目录记录 `workspace_removed`；`-cleanup` 保留镜像与交付历史。
+
+本模块提供从镜像读取交付记录的变更、单文件 diff 与含二进制内容的完整 patch 的后端能力。下节列出现有工作区 HTTP 路由。
 
 ### Agent 工作区查看
 

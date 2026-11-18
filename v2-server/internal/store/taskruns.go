@@ -366,7 +366,7 @@ func (s *Store) ClearTaskRunEnding(ctx context.Context, runID string) error {
 }
 
 // InterruptTaskRuns ends every run a previous process left live and returns those whose turn was
-// still running, so their tasks can leave 进行中.
+// still running. Their tasks return to pending in the same transaction.
 func (s *Store) InterruptTaskRuns(ctx context.Context) ([]TaskRun, error) {
 	var out []TaskRun
 	e := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -382,6 +382,10 @@ func (s *Store) InterruptTaskRuns(ctx context.Context) ([]TaskRun, error) {
 		}
 		for _, r := range live {
 			if r.turnActive {
+				if _, e := tx.Exec(ctx, `UPDATE v2_tasks SET status='pending',version=version+1,updated_at=now()
+					WHERE tenant_id=$1 AND id=$2 AND status='running'`, r.TenantID, r.TaskID); e != nil {
+					return e
+				}
 				out = append(out, r)
 			}
 		}
@@ -672,4 +676,51 @@ func (s *Store) MySquadTasks(ctx context.Context, tenant, caller string) ([]MySq
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// SettleDeliveredTaskTurn advances the task and releases the run's active turn atomically.
+// Only the owning active turn can change the task, and only after its delivery is durable.
+func (s *Store) SettleDeliveredTaskTurn(ctx context.Context, tenant, taskID, runID, turnID, result, failureCode string) (bool, error) {
+	var settled bool
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var from string
+		if err := tx.QueryRow(ctx, `SELECT status FROM v2_tasks WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, tenant, taskID).Scan(&from); err != nil {
+			return err
+		}
+		var ending, session string
+		err := tx.QueryRow(ctx, `SELECT end_reason,COALESCE(session_id,'') FROM v2_task_runs
+			WHERE id=$1 AND tenant_id=$2 AND task_id=$3 AND last_turn_id=$4 AND turn_active AND ended_at IS NULL
+			FOR UPDATE`, runID, tenant, taskID, turnID).Scan(&ending, &session)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var delivery DeliveryStatus
+		err = tx.QueryRow(ctx, `SELECT status FROM v2_turn_deliveries WHERE
+			tenant_id=$1 AND source_kind='task' AND source_id=$2 AND turn_id=$3 AND session_id=$4`,
+			tenant, runID, turnID, session).Scan(&delivery)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrRunActive
+		}
+		if err != nil {
+			return err
+		}
+		to := TaskReview
+		if delivery == DeliveryFailed || result == "cancelled" || result == "interrupted" || ending != "" {
+			to = TaskPending
+		}
+		if _, err := tx.Exec(ctx, `UPDATE v2_task_runs SET turn_active=false,last_result=$2,failure_code=$3 WHERE id=$1`, runID, result, failureCode); err != nil {
+			return err
+		}
+		if CanRunTransitionTask(from, to) {
+			if _, err := writeTaskStatus(ctx, tx, taskID, to); err != nil {
+				return err
+			}
+		}
+		settled = true
+		return nil
+	})
+	return settled, err
 }

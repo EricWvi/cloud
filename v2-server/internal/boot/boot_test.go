@@ -39,13 +39,29 @@ type interrupter struct {
 
 func (i interrupter) Interrupt(context.Context) error { return i.s.run(i.name) }
 
+type workflows struct{ s *steps }
+
+func (w workflows) SweepInterrupted(context.Context) ([]string, error) {
+	return []string{"interrupted"}, w.s.run("workflow-runs")
+}
+func (w workflows) ResumeInterrupted(_ context.Context, ids []string) error {
+	if !slices.Equal(ids, []string{"interrupted"}) {
+		return errors.New("missing interrupted workflow IDs")
+	}
+	return w.s.run("workflow-resume")
+}
+
+type deliveries struct{ s *steps }
+
+func (d deliveries) RecoverTurnDeliveries(context.Context) error { return d.s.run("deliveries") }
+
 type decompositions struct{ s *steps }
 
 func (d decompositions) Recover(context.Context) error { return d.s.run("decompositions") }
 func (d decompositions) Adopt(context.Context) error   { return d.s.run("decompositions-adopt") }
 
-func TestRecoverOrdersTaskOwnersBeforeTheWorkflowSweep(t *testing.T) {
-	all := []string{"task-workflows", "decompositions", "workflow-runs", "decompositions-adopt", "task-runs"}
+func TestRecoverDeliversBeforeWorkflowResumeAndAdmission(t *testing.T) {
+	all := []string{"task-workflows", "decompositions", "workflow-runs", "task-runs", "deliveries", "workflow-resume", "decompositions-adopt"}
 	for i, failing := range append([]string{""}, all...) {
 		name := failing
 		if name == "" {
@@ -56,7 +72,8 @@ func TestRecoverOrdersTaskOwnersBeforeTheWorkflowSweep(t *testing.T) {
 			err := boot.Recover(context.Background(), boot.Hosts{
 				TaskWorkflows:  recoverer{s, "task-workflows"},
 				Decompositions: decompositions{s},
-				WorkflowRuns:   interrupter{s, "workflow-runs"},
+				WorkflowRuns:   workflows{s},
+				Deliveries:     deliveries{s},
 				TaskRuns:       interrupter{s, "task-runs"},
 			})
 			if (failing != "") != errors.Is(err, errBroken) {

@@ -679,6 +679,58 @@ CREATE TABLE IF NOT EXISTS v2_workspaces (
 -- on it again (Node resolves checkouts from its own ledger across its restarts).
 ALTER TABLE v2_workspaces ADD COLUMN IF NOT EXISTS clone_execution text NOT NULL DEFAULT '';
 
+CREATE TABLE IF NOT EXISTS v2_turn_delivery_work (
+    turn_id text PRIMARY KEY REFERENCES v2_execution_turns(id),
+    tenant_id uuid NOT NULL REFERENCES tenants(id),
+    project_id uuid NOT NULL,
+    source_kind text NOT NULL CHECK (source_kind IN ('chat','task','workflow')),
+    source_id uuid NOT NULL,
+    workspace_id text NOT NULL CHECK (workspace_id <> ''),
+    terminal_result jsonb,
+    observed_at timestamptz,
+    CHECK ((terminal_result IS NULL) = (observed_at IS NULL))
+);
+CREATE INDEX IF NOT EXISTS v2_turn_delivery_work_source
+    ON v2_turn_delivery_work (tenant_id, source_kind, source_id);
+
+CREATE TABLE IF NOT EXISTS v2_turn_deliveries (
+    id uuid PRIMARY KEY,
+    sequence bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
+    turn_id text NOT NULL UNIQUE REFERENCES v2_execution_turns(id),
+    session_id text NOT NULL REFERENCES v2_execution_sessions(id),
+    tenant_id uuid NOT NULL REFERENCES tenants(id),
+    project_id uuid NOT NULL,
+    source_kind text NOT NULL CHECK (source_kind IN ('chat','task','workflow')),
+    source_id uuid NOT NULL,
+    workspace_id text NOT NULL,
+    turn_position bigint NOT NULL CHECK (turn_position > 0),
+    node_id text,
+    node_run_id uuid,
+    base_commit text CHECK (base_commit ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'),
+    delivery_commit text CHECK (delivery_commit ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'),
+    status text NOT NULL CHECK (status IN ('delivered','empty','failed')),
+    reason_code text CHECK (reason_code IN
+        ('changes_too_large','workspace_not_ready','workspace_removed',
+         'workspace_unstable','delivery_unavailable')),
+    reason text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CHECK ((source_kind = 'workflow') = (node_id IS NOT NULL AND node_run_id IS NOT NULL)),
+    CHECK ((node_id IS NULL) = (node_run_id IS NULL)),
+    CHECK (
+        (status = 'delivered' AND base_commit IS NOT NULL AND delivery_commit IS NOT NULL
+            AND reason_code IS NULL AND reason IS NULL)
+        OR (status = 'empty' AND base_commit IS NOT NULL AND delivery_commit IS NULL
+            AND reason_code IS NULL AND reason IS NULL)
+        OR (status = 'failed' AND delivery_commit IS NULL
+            AND reason_code IS NOT NULL AND reason IS NOT NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS v2_turn_deliveries_source_recent
+    ON v2_turn_deliveries (tenant_id, source_kind, source_id, sequence DESC);
+CREATE INDEX IF NOT EXISTS v2_turn_deliveries_source_good
+    ON v2_turn_deliveries (tenant_id, source_kind, source_id, sequence DESC)
+    WHERE status IN ('delivered','empty');
+
 ALTER TABLE v2_workflow_runs ADD COLUMN IF NOT EXISTS started_by uuid REFERENCES users(id);
 CREATE TABLE IF NOT EXISTS v2_workflow_forms (
  id uuid PRIMARY KEY REFERENCES v2_workflow_node_runs(id), tenant_id uuid NOT NULL REFERENCES tenants(id),

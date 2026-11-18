@@ -7,8 +7,8 @@
 // person runs the Agent that person picks, and only they start it: the work is theirs.
 //
 // The run moves its task: starting or following up puts it in 进行中, a finished turn (completed or
-// failed) hands it to 待验收, and a stopped or interrupted turn returns it to 待处理. While a turn
-// runs, nobody moves the task by hand. Runs never outlive the process: Interrupt ends what a
+// failed) with a good delivery hands it to 待验收. A stopped, interrupted or undeliverable turn
+// returns it to 待处理. While a turn runs or delivers, nobody moves the task by hand. Runs never outlive the process: Interrupt ends what a
 // previous process left live before the host serves requests.
 package taskrun
 
@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/executionwait"
@@ -55,6 +56,7 @@ type Store interface {
 	DeleteTaskRun(ctx context.Context, id string) error
 	RecordTaskTurn(ctx context.Context, runID, sessionID, turnID string) error
 	SettleTaskTurn(ctx context.Context, runID, turnID, result, failureCode string) (bool, error)
+	SettleDeliveredTaskTurn(ctx context.Context, tenant, taskID, runID, turnID, result, failureCode string) (bool, error)
 	EndTaskRun(ctx context.Context, runID, reason string) error
 	MarkTaskRunEnding(ctx context.Context, runID, reason string) error
 	ClearTaskRunEnding(ctx context.Context, runID string) error
@@ -75,6 +77,7 @@ type Host struct {
 	stop        context.CancelFunc
 	workers     sync.WaitGroup
 	resultRetry executionwait.Policy
+	deliveries  bool
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
@@ -86,6 +89,9 @@ func New(s Store, exec execution.Service, catalog execution.Catalog, log *slog.L
 		log = slog.Default()
 	}
 	h := &Host{store: s, exec: exec, catalog: catalog, log: log, locks: map[string]*sync.Mutex{}}
+	if runtime, ok := exec.(interface{ DeliveryEnabled() bool }); ok && runtime.DeliveryEnabled() {
+		h.deliveries = true
+	}
 	h.ctx, h.stop = context.WithCancel(context.Background())
 	return h
 }
@@ -103,9 +109,6 @@ func (h *Host) Interrupt(ctx context.Context) error {
 	runs, e := h.store.InterruptTaskRuns(ctx)
 	if e != nil {
 		return fmt.Errorf("interrupt task runs: %w", e)
-	}
-	for _, r := range runs {
-		h.moveTask(ctx, r.TenantID, r.TaskID, store.TaskRunning, store.TaskPending)
 	}
 	if len(runs) != 0 {
 		h.log.Info("interrupted task runs left by the previous process", "runs", len(runs))
@@ -522,6 +525,15 @@ func (h *Host) watch(scope execution.Scope, run store.TaskRun, ref execution.Ref
 	go func() {
 		defer h.workers.Done()
 		result, e := h.await(scope, ref)
+		for e != nil && h.deliveries && h.ctx.Err() == nil {
+			h.log.Warn("retry observing task turn during delivery", "run", run.ID, "turn", ref.TurnID, "error", e)
+			select {
+			case <-h.ctx.Done():
+				return
+			case <-time.After(time.Second):
+			}
+			result, e = h.await(scope, ref)
+		}
 		if e != nil {
 			if h.ctx.Err() != nil {
 				return // the next process interrupts this run
@@ -645,6 +657,26 @@ func (h *Host) settle(ctx context.Context, run store.TaskRun, turnID string, r e
 	defer cancel()
 	stop := context.AfterFunc(h.ctx, cancel)
 	defer stop()
+	if h.deliveries {
+		for {
+			err := h.resultRetry.Store(owned, func(write context.Context) error {
+				if lockAttempt {
+					defer h.lock(run.TaskID)()
+				}
+				_, err := h.store.SettleDeliveredTaskTurn(write, run.TenantID, run.TaskID, run.ID, turnID, string(r.Status), r.FailureCode)
+				return err
+			})
+			if err == nil || !lockAttempt || owned.Err() != nil {
+				return err
+			}
+			h.log.Warn("retry settling delivered task turn", "run", run.ID, "turn", turnID, "error", err)
+			select {
+			case <-owned.Done():
+				return owned.Err()
+			case <-time.After(time.Second):
+			}
+		}
+	}
 	to := store.TaskReview
 	if r.Status == execution.StatusCancelled || r.Status == execution.StatusInterrupted {
 		to = store.TaskPending
