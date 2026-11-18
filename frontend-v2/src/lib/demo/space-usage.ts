@@ -1,4 +1,4 @@
-import { demoMockEnabled } from './flags'
+import { DEMO_MOCK } from './flags'
 
 /** A demo-only snapshot of a workspace aggregation, independent of real session observations. */
 export interface SpaceUsage {
@@ -26,5 +26,5 @@ const snapshot: SpaceUsage = {
 
 /** Returns demonstration usage only with the shared explicit opt-in. */
 export function spaceUsageDemo(): SpaceUsage | null {
-  return demoMockEnabled() ? snapshot : null
+  return DEMO_MOCK ? snapshot : null
 }

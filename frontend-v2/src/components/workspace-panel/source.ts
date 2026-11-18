@@ -1,4 +1,5 @@
 import { cdaseWorkspaceReader } from '@/lib/demo/cdase'
+import { DEMO_MOCK } from '@/lib/demo/flags'
 import {
   getChatWorkspaceChanges,
   getChatWorkspaceDiff,
@@ -57,7 +58,7 @@ export function workspaceReader(source: WorkspaceSource): WorkspaceReader {
     }
   }
   const { tenantId: t, runId: r } = source
-  const demo = cdaseWorkspaceReader(t, r)
+  const demo = DEMO_MOCK ? cdaseWorkspaceReader(t, r) : undefined
   if (demo) return demo
   return {
     key: ['workspace', 'run', t, r],

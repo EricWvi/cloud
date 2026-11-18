@@ -1,4 +1,5 @@
 import { isCdaseRun } from '@/lib/demo/cdase'
+import { DEMO_MOCK } from '@/lib/demo/flags'
 import { useEffect, useRef } from 'react'
 
 /**
@@ -18,7 +19,7 @@ export function useRunInvalidations(
     handlers.current = on
   })
   useEffect(() => {
-    if (!active || tenantId === '' || isCdaseRun(runId)) return
+    if (!active || tenantId === '' || (DEMO_MOCK && isCdaseRun(runId))) return
     const source = new EventSource(`/api/v2/tenants/${tenantId}/workflow-runs/${runId}/events`)
     source.onopen = () => handlers.current.connected(true)
     source.onerror = () => handlers.current.connected(false)

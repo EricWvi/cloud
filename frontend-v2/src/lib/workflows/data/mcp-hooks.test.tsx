@@ -14,7 +14,7 @@ const original = http.defaults.adapter
 afterEach(() => { http.defaults.adapter = original; useDemoPluginSelections.getState().reset() })
 
 const mock = vi.hoisted(() => ({ enabled: true }))
-vi.mock('@/lib/demo/flags', () => ({ demoMockEnabled: () => mock.enabled }))
+vi.mock('@/lib/demo/flags', () => ({ get DEMO_MOCK() { return mock.enabled } }))
 
 it('ignores historical browser MCP choices and refreshes after server installation changes', async () => {
   let installed = false

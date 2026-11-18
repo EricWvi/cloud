@@ -8,6 +8,9 @@ import { demoUser, fakeBackend } from '@/test/backend'
 import List from './list'
 import Detail from './detail'
 
+const demo = vi.hoisted(() => ({ on: false }))
+vi.mock('@/lib/demo/flags', () => ({ get DEMO_MOCK() { return demo.on } }))
+
 const tenant = '00000000-0000-4000-8000-000000000002'
 const base = `/api/v2/tenants/${tenant}/dashboard/sessions`
 const session = {
@@ -41,10 +44,10 @@ function show(detail = false) {
     </MemoryRouter>,
   )
 }
-afterEach(() => vi.unstubAllEnvs())
+afterEach(() => { demo.on = false })
 
 it.each(['task', 'chat'])('reads real %s session data with demo mock enabled and opens its source link', async (source) => {
-  vi.stubEnv('VITE_DEMO_MOCK', '1')
+  demo.on = true
   const current = { ...session, source, href: source === 'chat' ? '/chat?conversation=chat-1' : session.href }
   const seen = fakeBackend((config) => {
     if (config.url === '/api/v1/me/tenants') {

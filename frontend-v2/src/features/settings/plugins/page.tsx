@@ -33,6 +33,7 @@ import {
   waitForDemoInstallDelay,
   withDemoCatalog,
 } from '@/lib/demo/plugin-installs'
+import { DEMO_MOCK } from '@/lib/demo/flags'
 import { pluginKind, pluginKindOrder } from './plugin-kind'
 import { PluginMark } from './plugin-mark'
 import { isPreinstalledAgent } from '@/lib/plugin-runtime'
@@ -59,7 +60,7 @@ function StateBadge({
 }) {
   if (selection && isPreinstalledAgent(selection))
     return <Badge variant="outline">运行时预装</Badge>
-  if (demoSelected) return <Badge variant="secondary">已安装（演示）</Badge>
+  if (DEMO_MOCK && demoSelected) return <Badge variant="secondary">已安装（演示）</Badge>
   // A removed Skill deletes its selection row, so "未安装" must come from the catalog kind, not
   // the (missing) selection. Other kinds have no server state to report and show no badge.
   const state = selection?.observedState ?? 'removed'
@@ -152,7 +153,7 @@ export default function PluginsPage() {
     demo: boolean
   }>()
   const [params, setParams] = useSearchParams()
-  const availableCatalog = withDemoCatalog(market.catalog)
+  const availableCatalog = DEMO_MOCK ? withDemoCatalog(market.catalog) : market.catalog
   const available = new Set(availableCatalog.map(pluginKey))
   const catalog = [
     ...availableCatalog,
@@ -176,7 +177,7 @@ export default function PluginsPage() {
   const installable = (entry: PluginCatalogEntry) =>
     entry.kind === 'skill' || entry.kind === 'workflow' || entry.kind === 'mcp'
   const demoSelected = (entry: PluginCatalogEntry) =>
-    demoInstallable(entry) && demoSelection.includes(pluginKey(entry))
+    DEMO_MOCK && demoInstallable(entry) && demoSelection.includes(pluginKey(entry))
   const filtered = catalog
     .filter((entry) => {
       const selection = serverSelection(entry)
@@ -187,13 +188,13 @@ export default function PluginsPage() {
         (kind === 'all' || entry.kind === kind) &&
         (status === 'all' ||
           (status === 'installed'
-            ? demoInstallable(entry)
-              ? demoSelected(entry)
+            ? (DEMO_MOCK && demoInstallable(entry))
+              ? (DEMO_MOCK && demoSelected(entry))
               : pluginInstalled(selection)
             : status === 'failed'
               ? selection?.observedState === 'failed'
-              : demoInstallable(entry)
-                ? !demoSelected(entry)
+              : (DEMO_MOCK && demoInstallable(entry))
+                ? !(DEMO_MOCK && demoSelected(entry))
                 : !selection || selection.observedState === 'removed'))
       )
     })
@@ -222,7 +223,7 @@ export default function PluginsPage() {
   )
   const installedKeys = new Set([
     ...installedSelections.map(pluginKey),
-    ...catalog.filter(demoSelected).map(pluginKey),
+    ...(DEMO_MOCK ? catalog.filter(demoSelected).map(pluginKey) : []),
   ])
   const clear = () => {
     setSearch('')
@@ -242,7 +243,7 @@ export default function PluginsPage() {
     market.resetErrors()
     const delay = waitForDemoInstallDelay(demoInstallDelayMs())
     try {
-      if (demoInstallable(entry)) {
+      if (DEMO_MOCK && demoInstallable(entry)) {
         await delay
         setDemoSelected(demoScope, key, true)
         toast.success(`已安装 ${entry.title}`)
@@ -265,8 +266,8 @@ export default function PluginsPage() {
   }
   const requestRemove = (entry: PluginCatalogEntry) => {
     market.resetErrors()
-    if (demoInstallable(entry)) {
-      if (demoSelected(entry)) setRemoving({ entry, demo: true })
+    if (DEMO_MOCK && demoInstallable(entry)) {
+      if (DEMO_MOCK && demoSelected(entry)) setRemoving({ entry, demo: true })
       return
     }
     const selection = serverSelection(entry)
@@ -274,7 +275,7 @@ export default function PluginsPage() {
   }
   const confirmRemove = () => {
     if (!removing) return
-    if (removing.demo) {
+    if (DEMO_MOCK && removing.demo) {
       setDemoSelected(demoScope, pluginKey(removing.entry), false)
       toast.success(`已移除 ${removing.entry.title}`)
       setRemoving(undefined)
@@ -306,8 +307,8 @@ export default function PluginsPage() {
       )
     // Agents and Hooks have no server-backed install; only the demo mock records their
     // lifecycle (in the browser) so the recording can show it.
-    if (demoInstallable(entry))
-      return demoSelected(entry) ? (
+    if (DEMO_MOCK && demoInstallable(entry))
+      return (DEMO_MOCK && demoSelected(entry)) ? (
         <Button
           size="sm"
           variant="outline"
@@ -558,7 +559,7 @@ export default function PluginsPage() {
                             <StateBadge
                               selection={serverSelection(entry)}
                               kind={entry.kind}
-                              demoSelected={demoSelected(entry)}
+                              demoSelected={DEMO_MOCK && demoSelected(entry)}
                             />
                             {actions(entry)}
                           </div>
@@ -620,7 +621,7 @@ export default function PluginsPage() {
               <StateBadge
                 selection={selectedSelection}
                 kind={selected.kind}
-                demoSelected={demoSelected(selected)}
+                demoSelected={DEMO_MOCK && demoSelected(selected)}
               />
             </div>
             {actions(selected)}
@@ -654,13 +655,13 @@ export default function PluginsPage() {
                 ? selected.version
                 : '来源不可用'}
             </dd>
-            {installable(selected) || demoInstallable(selected) ? (
+            {installable(selected) || (DEMO_MOCK && demoInstallable(selected)) ? (
               <>
                 <dt>安装选择</dt>
                 <dd>
                   {selectedSelection && isPreinstalledAgent(selectedSelection)
                     ? '运行时预装，未开始本地安装'
-                    : demoSelected(selected)
+                    : (DEMO_MOCK && demoSelected(selected))
                       ? '已选择（演示）'
                       : selectedSelection?.desiredState === 'installed'
                         ? `安装 ${selectedSelection?.desiredVersion}`
@@ -670,7 +671,7 @@ export default function PluginsPage() {
                 <dd>
                   {selectedSelection && isPreinstalledAgent(selectedSelection)
                     ? '运行时预装（服务端未变更）'
-                    : demoSelected(selected)
+                    : (DEMO_MOCK && demoSelected(selected))
                       ? '演示安装（浏览器本地状态）'
                       : (selectedSelection?.observedVersion ?? '尚未安装')}
                 </dd>
@@ -704,7 +705,7 @@ export default function PluginsPage() {
                 : selected.kind === 'workflow'
                 ? '安装会导入工作流并发布初始版本，可在工作流库中运行。'
                 : '空间选择适用于该空间的项目。 只有项目节点确认后才显示已安装。'
-              : demoInstallable(selected)
+              : (DEMO_MOCK && demoInstallable(selected))
                 ? '演示安装只记录浏览器本地状态，不会请求服务端。'
                 : selectedSelection && isPreinstalledAgent(selectedSelection)
                   ? '该 Agent 由运行时预装，不提供安装操作。'
@@ -741,7 +742,7 @@ export default function PluginsPage() {
                 ? '将从团队移除该 MCP。已有节点绑定会提示不可用，新会话使用它时将失败。'
               : removing.entry.kind === 'skill'
                 ? '将请求项目节点卸载该技能包，完成后不再提供其中的技能。'
-                : removing.demo
+                : DEMO_MOCK && removing.demo
                   ? '只移除浏览器本地记录的演示安装，不会请求服务端。'
                   : '将从空间移除该插件选择。此操作不会卸载其他工作空间或 Agent 运行时中的包。'
           }

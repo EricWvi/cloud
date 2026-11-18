@@ -5,7 +5,7 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import { DtsReceipt } from './dts-receipt'
 
 const mock = vi.hoisted(() => ({ enabled: true, submit: vi.fn() }))
-vi.mock('@/lib/demo/flags', () => ({ demoMockEnabled: () => mock.enabled }))
+vi.mock('@/lib/demo/flags', () => ({ get DEMO_MOCK() { return mock.enabled } }))
 vi.mock('@/lib/demo/dts', () => ({ simulateDtsSubmission: mock.submit }))
 
 beforeEach(() => { mock.enabled = true; mock.submit.mockReset() })
