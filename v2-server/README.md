@@ -12,7 +12,7 @@ Cloud v2 的**临时**单体后端：一个进程、一个 PostgreSQL 库，实�
 
 ## 运行
 
-需要 Linux/WSL、Git、Go（版本见 `go.mod`）和 PostgreSQL。仓库根目录的 `compose.yaml` 提供本地 PostgreSQL（127.0.0.1:55432）。v2-server 默认连接其中的 `ora_v2` 库，库不存在时自动创建，启动时建表。Node 数据目录放在 Linux 原生文件系统。
+需要 Linux/WSL、Git、Go（版本见 `go.mod`）和 PostgreSQL。仓库根目录的 `compose.yaml` 提供本地 PostgreSQL（127.0.0.1:55432）。v2-server 默认连接其中的 `ora_v2` 库，库不存在时自动创建，启动时自动执行尚未应用的迁移（见下文「数据库迁移」）。Node 数据目录放在 Linux 原生文件系统。
 
 ```sh
 docker compose -p cloud up -d --wait   # 在仓库根目录
@@ -46,6 +46,20 @@ V2_LOGIN=email go run .                # 开发模式，监听 127.0.0.1:8090
 ```sh
 TEST_DATABASE_URL='postgres://ora:ora-local@127.0.0.1:55432/ora?sslmode=disable' go test -race ./...
 ```
+
+### 数据库迁移
+
+表结构由 [`internal/store/migrations`](internal/store/migrations) 下按序编号的 SQL 文件定义（`NNNN_snake_name.sql`，从 `0001` 起连续），编译进 binary，`store.Open` 在启动时自动执行尚未应用的文件。每个文件在单独的事务里执行，并在同一事务里把版本、文件名和文件内容的 SHA-256 写进当前 schema 的 `v2_schema_migrations`；多个进程同时启动时由按 schema 加的事务级 advisory lock 串行，每个迁移只执行一次。`0001_initial.sql` 是迁移引入前 `schema.sql` 在空库上建出的最终结构。
+
+启动在执行任何迁移前先校验，不满足就报错退出并指出文件或版本：文件名不合规或编号不连续、已应用的迁移内容或文件名被改动、库里有本 binary 不认识的更新版本、已应用的最高版本以下还有未应用的文件，以及库里已有 v2-server 的表却没有 `v2_schema_migrations`（迁移引入前的库，须删除重建，不做衔接）。
+
+改表结构或修数据：
+
+- 新增下一个编号的文件，不要修改、改名或重新编号已合入 `main` 的文件；已应用文件的校验和不一致时服务拒绝启动。
+- 编号取 `main` 上最新编号的下一个；合入前 rebase 后再核对，不能使用等于或小于 `main` 最新编号的数字。按名字顺序执行"所有未应用文件"时，插在已有编号之下的文件在升级库上最后执行、在新库上却在中间执行，两边的结构会分叉，所以启动直接拒绝这种情况。
+- 数据修复也写成迁移，只执行一次，不再每次启动重跑。
+- 每个文件在一个事务里执行，所以文件里不能写 `BEGIN`/`COMMIT` 等事务控制语句，也不能用 PostgreSQL 禁止在事务块中执行的语句（`CREATE INDEX CONCURRENTLY`、`VACUUM`、`ALTER SYSTEM` 等）；以行首事务控制语句开头的文件启动时直接拒绝。
+- 迁移需要能在空库上从 `0001` 起建出同样的结构：`internal/store/migrate_test.go` 对每个 k 先应用 1..k 再升级到最新，与新建库比较表、列、约束、索引、函数、触发器、枚举值、视图定义和序列，必须完全一致。
 
 ### 录屏场景 seed
 
@@ -858,7 +872,7 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 - 小队权限把 workspace `owner` 角色当作工作区管理员；成员撤销不会自动关闭其小队编组（由后续接入撤销事务的运行承接）。
 - 空间与插件：每个租户固定一个「演示空间」，开发登录时自动创建；里面登记两个真实安装、不可从设置页移除的 Agent 插件——`official/ora-space.opencode@0.6.11` 和 `official/ora-space.claude@0.4.5`，即 [`scripts/prepare-node.sh`](scripts/prepare-node.sh) 校验 SHA 后准备、chat、工作流与定时任务真正加载的那两个。目录来自配置的 marketplace Git 仓库，不读取仓库内硬编码条目；解析 `orax.toml`、README 和 logo，校验后事务替换 PostgreSQL 快照，同步失败或没有可见条目时保留上一版。MCP 通过租户安装和配置接口管理。Plugins 页对市场 Agent、Hook、合集等其他类型只浏览，不提供安装或移除（服务端拒绝新建这些选择，返回 `plugin_kind_not_installable`）；系统预装的 Agent 也只读展示「运行时预装」。Skill 就是空间选择本身，写入即可用、删除即移除，项目 Node 只按选择接收安装包，不参与状态确认。工作流插件由 v2-server 下载并校验 `.orax`，在安装事务里导入 `assets/workflows/*.json`、发布 `v1` 并记录来源幂等表；租户已有同名工作流时给新导入的定义加「（插件）」或序号，不改动已有定义；移除只清除选择，不删除工作流、快照或运行历史。安装写入口要求 owner、`Idempotency-Key` 和当前 version。
 - 成员列表：`memberships` 没有成员 id、版本和加入来源，所以 `id` 直接用 user id、`version` 恒为 1、`status` 取用户状态，`joinMethod` / `joinedAt` / `actorDisplayName` 恒为空；分页参数被忽略，一页返回全部。切到正式 Cloud 的成员接口时替换。
-- 启动时直接建表，没有迁移。
+- 数据库迁移只有前进方向、启动时自动执行，没有单独的 migrate 命令和回滚脚本；引入迁移之前的数据库直接重建，不做衔接（见「数据库迁移」）。
 - 本地 Node 的传输、监督和配套服务位于 [`internal/node`](internal/node/README.md) 与
   [`internal/nodeservices`](internal/nodeservices/README.md)，通过项目 Agent driver 接入服务入口。
   配套服务只支持演示仓库的只读 Git、固定 OpenCode / Claude Code 包、各协议的 fixture，以及配置的 OpenAI / Anthropic 兼容 provider；
