@@ -26,16 +26,24 @@ func TestLoginPreflightBeforeEffects(t *testing.T) {
 	}
 }
 
-func TestLoginDefaultsToEmailInListedOrder(t *testing.T) {
-	for value, want := range map[string]string{"": "email", "  ": "email", " email ": "email"} {
-		got, err := parseLogin(value, true)
-		if err != nil || strings.Join(got, ",") != want {
-			t.Fatalf("parseLogin(%q) = %v, %v; want %s", value, got, err, want)
-		}
+func TestLoginMustBeSet(t *testing.T) {
+	for _, value := range []string{"", "  "} {
+		t.Run("V2_LOGIN="+value, func(t *testing.T) {
+			t.Setenv("V2_LOGIN", value)
+			root := filepath.Join(t.TempDir(), "must-not-exist")
+			t.Setenv("V2_DATA_DIR", root)
+			err := run("127.0.0.1:0", "invalid database URL", false, false, false)
+			if err == nil || !strings.Contains(err.Error(), "V2_LOGIN must be set") || !strings.Contains(err.Error(), "email") {
+				t.Fatalf("startup without V2_LOGIN = %v", err)
+			}
+			if _, err := os.Stat(root); !os.IsNotExist(err) {
+				t.Fatal("startup touched filesystem before rejecting the missing V2_LOGIN")
+			}
+		})
 	}
-	got, err := parseLogin("", false)
-	if err != nil || !got.has("email") || got.has("huawei-idaas") {
-		t.Fatalf("default login = %v, %v", got, err)
+	got, err := parseLogin(" email ", true)
+	if err != nil || strings.Join(got, ",") != "email" {
+		t.Fatalf("parseLogin(email) = %v, %v", got, err)
 	}
 }
 
@@ -62,6 +70,7 @@ func TestPublicURL(t *testing.T) {
 			t.Fatalf("parsePublicURL(%q) accepted", value)
 		}
 	}
+	t.Setenv("V2_LOGIN", "email")
 	t.Setenv("V2_PUBLIC_URL", "ora.example.com")
 	root := filepath.Join(t.TempDir(), "must-not-exist")
 	t.Setenv("V2_DATA_DIR", root)

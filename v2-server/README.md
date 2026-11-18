@@ -16,14 +16,14 @@ Cloud v2 的**临时**单体后端：一个进程、一个 PostgreSQL 库，实�
 
 ```sh
 docker compose -p cloud up -d --wait   # 在仓库根目录
-go run .                               # 开发模式（邮箱登录），监听 127.0.0.1:8090
+V2_LOGIN=email go run .                # 开发模式，监听 127.0.0.1:8090
 ```
 
 收到 SIGTERM 或中断信号时，进程会取消 HTTP 请求上下文，让保持打开的对话 SSE 关闭观察并等待其读取协程退出，再结束 HTTP、公共执行服务和数据库。关闭浏览器或单条 SSE 只停止对应观察者，不取消执行 worker；进程退出时的执行停止与完整终态保存仍由公共执行服务负责。
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `V2_LOGIN` | `email` | 开放的登录方式，逗号分隔，登录页按这个顺序显示；未设置或为空即 `email`。本构建只提供 `email`（只凭邮箱登录，仅用于开发和演示）；写了未知、重复或空的项在任何数据操作前拒绝启动。`-fixture-check`、`-test-fixtures` 要求开了 `email` |
+| `V2_LOGIN` | 必填 | 开放的登录方式，逗号分隔，登录页按这个顺序显示；不设或为空拒绝启动（没有默认值，忘了配置的部署不会开出无密码的邮箱登录），开发写 `email`，`task v2:demo` 等入口已设好。本构建只提供 `email`（只凭邮箱登录，仅用于开发和演示）；写了未知、重复或空的项在任何数据操作前拒绝启动。`-fixture-check`、`-test-fixtures` 要求开了 `email` |
 | `V2_PUBLIC_URL` | 未设置 | 浏览器访问本服务的地址（`http`/`https`，可带路径前缀，不带查询串）。设置后，带会话 Cookie 的写请求只接受这个 origin；未设置时 `Origin` 须与请求的 Host 相同。是 `https` 时会话 Cookie 改名为 `__Host-ora_session` 并加 `Secure`。在会改写 Host 的反向代理后面必须设置它，否则 `Origin` 与 Host 对不上，所有写请求都会 `403`。开了 `email` 又是 `https` 时启动日志会警告 |
 | `V2_FRONTEND_DIR` | 未设置 | 前端构建目录；未设置保留 API-only |
 | `V2_ADDR` | `127.0.0.1:8090` | 监听地址 |
@@ -936,7 +936,7 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 ## 内网部署
 
 首次部署构建和长期安装/升级步骤见 [部署说明](docs/deployment.md)（[English](docs/deployment.en.md)）。
-开发启动不设 `V2_LOGIN` 即为邮箱登录。本构建还不提供 IDaaS 登录，部署所需的 `V2_LOGIN` 取值在任何数据操作前拒绝启动，不会回落 email。`V2_FRONTEND_DIR` 指向前端构建目录，空值保留 API-only。
+开发启动设 `V2_LOGIN=email`，demo 与开发 task 已设置。本构建还不提供 IDaaS 登录，部署所需的 `V2_LOGIN` 取值在任何数据操作前拒绝启动，不会回落 email。`V2_FRONTEND_DIR` 指向前端构建目录，空值保留 API-only。
 `V2_PLUGIN_MARKETPLACE_URL` 未设置保留开发默认，显式空字符串关闭官方同步和目录，保留自定义源；`V2_MARKET_CREDENTIAL_KEY` 同步保护自定义市场 S3/Git 凭据、租户 MCP 设置与私有项目仓库令牌。
 
 部署边界依据：[Cloud 单进程（A1）](https://github.com/ora-space/specs/blob/main/decisions/cloud/lifecycle/0-single-process-cloud-on-enterprise-intranet.md) 和[登录与会话（A6）](https://github.com/ora-space/specs/blob/main/decisions/cloud/login/0-idaas-or-email-login-with-shared-web-and-desktop-sessions.md)。

@@ -29,12 +29,13 @@ type loginMethods []string
 // has reports whether the method is offered.
 func (m loginMethods) has(method string) bool { return slices.Contains(m, method) }
 
-// parseLogin reads V2_LOGIN, a comma-separated list of login methods. Unset or empty means email, so
-// a development checkout starts without configuration; a deployment names its methods explicitly.
-// An unknown, repeated or empty entry fails before any database or filesystem effect.
+// parseLogin reads V2_LOGIN, a comma-separated list of login methods. It must be set: there is no
+// default, so a deployment that forgot it never comes up with the passwordless email login (A6
+// invariant 1). An unknown, repeated or empty entry fails as well, all before any database or
+// filesystem effect.
 func parseLogin(value string, fixtures bool) (loginMethods, error) {
 	if strings.TrimSpace(value) == "" {
-		value = server.LoginProviderEmail
+		return nil, fmt.Errorf("V2_LOGIN must be set to the login methods to offer, comma-separated: email for development; this build provides %s", strings.Join(server.LoginProviders, ", "))
 	}
 	var methods loginMethods
 	for _, entry := range strings.Split(value, ",") {
