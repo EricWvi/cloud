@@ -19,6 +19,10 @@ const DefaultMaxPatchBytes = 16 << 20
 // Options.MaxPatchBytes is lowered to it.
 const MaxPatchBytesCeiling = 256 << 20
 
+// patchWriteTimeout bounds how long one client may take to read a built patch, so memory held for
+// slow or stalled readers is released.
+const patchWriteTimeout = 2 * time.Minute
+
 // maxConcurrentPatches is how many patches the process builds at once. Further downloads wait for
 // a slot for as long as their request lives, so memory stays within this many caps.
 const maxConcurrentPatches = 4
@@ -293,12 +297,21 @@ func (h *handler) workspacePatch(find resolveSource) func(http.ResponseWriter, *
 		limit = min(limit, MaxPatchBytesCeiling)
 		select {
 		case h.patchSlots <- struct{}{}:
-			defer func() { <-h.patchSlots }()
 		case <-r.Context().Done():
 			// The caller left while waiting; nobody reads an answer.
 			return
 		}
+		// The slot bounds concurrent Git work and buffers, not the client's reading speed: it is
+		// released as soon as the patch is built, and the write below has its own deadline, so a
+		// few clients that stop reading cannot hold every slot. The source may have been deleted
+		// while this request waited, so the delivery is looked up again under the slot.
+		rec, ok = pinnedDelivery(w, r, src, r.PathValue("deliveryId"))
+		if !ok {
+			<-h.patchSlots
+			return
+		}
 		patch, e := h.opts.Deliveries.DeliveryPatch(r.Context(), snapshotOf(&rec), limit)
+		<-h.patchSlots
 		switch {
 		case errors.Is(e, workspacefs.ErrTooLarge):
 			faultWithParams(w, http.StatusRequestEntityTooLarge, "patch_too_large", map[string]any{"message": "改动过大，无法在线下载", "maxBytes": limit})
@@ -316,6 +329,9 @@ func (h *handler) workspacePatch(find resolveSource) func(http.ResponseWriter, *
 		header.Set("Content-Disposition", `attachment; filename="delivery-`+rec.ID+`.patch"`)
 		header.Set("Content-Length", strconv.Itoa(len(patch)))
 		header.Set("X-Content-Type-Options", "nosniff")
+		if e := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(patchWriteTimeout)); e != nil {
+			slog.Warn("set delivery patch write deadline", "delivery", rec.ID, "error", e)
+		}
 		w.WriteHeader(http.StatusOK)
 		if _, e := w.Write(patch); e != nil {
 			slog.Error("write delivery patch", "delivery", rec.ID, "error", e)

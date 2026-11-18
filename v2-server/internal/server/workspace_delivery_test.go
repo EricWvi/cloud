@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -860,5 +862,44 @@ func TestConcurrentPatchBuildsAreBounded(t *testing.T) {
 	srv.Close()
 	if gate.peak != 4 || len(gate.entered) != downloads-4 {
 		t.Fatalf("peak concurrent patch builds = %d and %d more builds after the first four, want 4 and %d", gate.peak, len(gate.entered), downloads-4)
+	}
+}
+
+// TestStalledPatchReadersDoNotHoldEveryBuildSlot opens as many downloads as there are build slots
+// and never reads them. Their patches are larger than the socket buffers, so each handler is
+// stuck writing; a further download must still be served because the slot is released once the
+// patch is built.
+func TestStalledPatchReadersDoNotHoldEveryBuildSlot(t *testing.T) {
+	f := newDeliveryFixture(t)
+	task := f.taskSource("停滞的下载")
+	ref := task.start()
+	var big strings.Builder
+	for i := 0; big.Len() < 12<<20; i++ {
+		fmt.Fprintf(&big, "%08d %s\n", i, newUUID())
+	}
+	f.write(task.root, "big.txt", big.String())
+	d := task.finish(ref, false)
+	srv := f.serveWith(f.fs, server.DefaultMaxPatchBytes)
+	u, _ := url.Parse(srv.URL)
+	path := task.prefix + "/deliveries/" + d.ID + "/patch"
+	for range 4 {
+		conn, err := net.Dial("tcp", u.Host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\nCookie: %s=%s\r\n\r\n", path, u.Host, server.SessionCookie, f.ownerToken)
+	}
+	time.Sleep(2 * time.Second) // let the four handlers build their patches and block writing
+	client := f.client(srv.URL, f.ownerToken)
+	client.Timeout = 20 * time.Second
+	res, err := client.Get(srv.URL + path)
+	if err != nil {
+		t.Fatalf("a download behind four stalled readers did not complete: %v", err)
+	}
+	defer res.Body.Close()
+	n, _ := io.Copy(io.Discard, res.Body)
+	if res.StatusCode != http.StatusOK || n == 0 {
+		t.Fatalf("download behind stalled readers: status %d, %d bytes", res.StatusCode, n)
 	}
 }
