@@ -171,7 +171,8 @@ func TestRealWorkflowSelectedSkills(t *testing.T) {
 	}
 	t.Cleanup(host.Close)
 	f := &fixture{s: db, host: host, scope: server.WorkflowRunScope{TenantID: tenant, UserID: user}, project: project.ID}
-	graph := strings.Replace(twoAgents, `"roleId":"reviewer"`, `"skills":[{"skillId":"official/mattpocock.skills","enabled":true},{"skillId":"workflow-review","enabled":true}]`, 1)
+	graph := strings.Replace(twoAgents, `"modelId":"Other Model"`, `"modelId":"fixture"`, 1)
+	graph = strings.Replace(graph, `"roleId":"reviewer"`, `"skills":[{"skillId":"official/mattpocock.skills","enabled":true},{"skillId":"workflow-review","enabled":true}]`, 1)
 	rid := f.run(t, graph, str("Read selected Skills and retain evidence."))
 	if _, err := host.StartRun(ctx, f.scope, rid); err != nil {
 		t.Fatal(err)
