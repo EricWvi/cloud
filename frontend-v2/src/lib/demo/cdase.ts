@@ -121,7 +121,7 @@ export function cdaseWorkspaceReader(tenantId: string, id: string) {
   return {
     key: ['workspace', 'run', tenantId, id],
     entries: async (path: string) => { readCdaseRun(tenantId, id); return { path, entries: [], truncated: false } },
-    changes: async () => { readCdaseRun(tenantId, id); return { baseCommit: '', files: [], truncated: false } },
+    changes: async () => { readCdaseRun(tenantId, id); return { baseCommit: '', files: [], truncated: false, deliveryState: { mode: 'working_directory' as const, inProgress: false } } },
     file: missingFile,
     diff: missingFile,
   }

@@ -1,5 +1,5 @@
 import { type UseQueryResult, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeftIcon, ChevronRightIcon, FileIcon, FileTextIcon, FolderIcon, GitCompareArrowsIcon, PanelRightIcon, RefreshCwIcon, XIcon } from 'lucide-react'
+import { ArrowLeftIcon, ChevronRightIcon, DownloadIcon, FileIcon, FileTextIcon, FolderIcon, GitCompareArrowsIcon, LoaderCircleIcon, PanelRightIcon, RefreshCwIcon, TriangleAlertIcon, XIcon } from 'lucide-react'
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { Button } from '@/components/ui/button'
@@ -9,6 +9,7 @@ import { codeOf } from '@/lib/api-client'
 import { subtleScrollbar } from '@/lib/scrollbar'
 import { cn } from '@/lib/utils'
 import type { WorkspaceChange, WorkspaceChanges, WorkspaceEntry } from '@/lib/workspace-api/generated'
+import { type DeliveryNotice, deliveryNotice, patchFailureText, savePatch } from './delivery'
 import { parsePatch } from './patch'
 import { languageOf, relativePath, type WorkspaceReader, type WorkspaceSource, workspaceReader } from './source'
 
@@ -21,10 +22,12 @@ export interface OpenRequest {
 }
 
 /**
- * A side panel that shows an Agent's checkout read-only, as desktop's review pane does: what
- * changed against the commit it started from, each file's diff expandable in place, and every
- * file. The page bumps `revision` whenever the Agent may have written (a tool call finished, a
- * turn or node ended), and the panel reads the checkout again.
+ * A side panel that shows an Agent's work read-only, as desktop's review pane does: what changed
+ * against the commit it started from, each file's diff expandable in place, and every file. The
+ * changes come from the source's latest turn delivery, with its patch to download, a note while a
+ * turn runs and the reason a later delivery failed; a source from before deliveries shows its
+ * checkout instead. Files are always the live checkout. The page bumps `revision` whenever the
+ * Agent may have written (a tool call finished, a turn or node ended), and the panel reads again.
  */
 export function WorkspacePanel({
   source,
@@ -226,11 +229,22 @@ function ChangesList({
   if (query.isPending) return <Message>正在读取变更…</Message>
   if (query.isError) return <Failure error={query.error} onRetry={() => void query.refetch()} />
   const { truncated } = query.data
-  if (query.data.files.length === 0) return <Message>还没有文件改动。</Message>
+  const notice = deliveryNotice(query.data.deliveryState)
+  const bar = notice && <DeliveryBar key={notice.view?.id ?? ''} reader={reader} notice={notice} />
+  if (query.data.files.length === 0) {
+    return (
+      <>
+        {bar}
+        <Message>{notice?.view?.status === 'empty' ? '本轮没有改动。' : '还没有文件改动。'}</Message>
+      </>
+    )
+  }
   const added = query.data.files.reduce((n, c) => n + c.additions, 0)
   const removed = query.data.files.reduce((n, c) => n + c.deletions, 0)
+  const deliveryId = notice?.view?.id
   return (
     <div ref={scroller} className={cn('min-h-0 flex-1 overflow-y-auto', subtleScrollbar)}>
+      {bar}
       <p className="px-3 py-2 text-xs text-muted-foreground">
         相对初始版本改动了 {query.data.files.length} 个文件 <span className="text-success">+{added}</span> <span className="text-destructive">−{removed}</span>
       </p>
@@ -261,7 +275,7 @@ function ChangesList({
                 </span>
               </AccordionTrigger>
               <AccordionContent className="pb-0">
-                <DiffContent reader={reader} change={c} onOpenFile={onOpenFile} />
+                <DiffContent reader={reader} change={c} deliveryId={deliveryId} onOpenFile={onOpenFile} />
               </AccordionContent>
             </AccordionItem>
           )
@@ -272,9 +286,82 @@ function ChangesList({
   )
 }
 
+/**
+ * What the change list says about its deliveries: a failure newer than what it shows, that a turn
+ * is running, and the shown delivery's patch to download.
+ */
+function DeliveryBar({ reader, notice }: { reader: WorkspaceReader; notice: DeliveryNotice }) {
+  const [downloading, setDownloading] = useState(false)
+  const [error, setError] = useState<string>()
+  const { view, failure, inProgress } = notice
+  const downloadable = view?.status === 'delivered' && reader.patch
+  if (!failure && !inProgress && !downloadable) return null
+  const download = async () => {
+    if (!view || !reader.patch) return
+    setDownloading(true)
+    setError(undefined)
+    try {
+      const blob = await reader.patch(view.id)
+      if (blob instanceof Blob && blob.size > 0) savePatch(blob, view.id)
+      else setError('本轮没有改动。')
+    } catch (e) {
+      setError(await patchFailureText(e))
+    } finally {
+      setDownloading(false)
+    }
+  }
+  return (
+    <div className="flex flex-col gap-1.5 border-b px-3 py-2 text-xs">
+      {failure && (
+        <p role="alert" className="flex items-start gap-1.5 rounded-md bg-destructive/10 px-2 py-1.5 text-destructive">
+          <TriangleAlertIcon className="mt-px size-3.5 shrink-0" />
+          <span>
+            本轮交付失败：{failure.reason ?? '原因未知'}
+            {view && <span className="text-muted-foreground">。下面是上一次成功的交付。</span>}
+          </span>
+        </p>
+      )}
+      {inProgress && (
+        <p role="status" className="flex items-center gap-1.5 text-muted-foreground">
+          <LoaderCircleIcon className="size-3.5 shrink-0 animate-spin" />
+          {inProgress === 'previous' ? '本轮进行中，显示的是上一轮的交付' : '本轮进行中，结束后显示改动'}
+        </p>
+      )}
+      {downloadable && (
+        <div className="flex min-w-0 items-center gap-2">
+          <Button size="sm" variant="outline" className="h-7 px-2 text-xs" disabled={downloading} onClick={() => void download()}>
+            <DownloadIcon />
+            {downloading ? '正在下载…' : '下载 patch'}
+          </Button>
+          {error && (
+            <span role="alert" className="min-w-0 text-destructive">
+              {error}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** One file's diff, read when its row first opens, drawn straight into the row without a frame. */
-function DiffContent({ reader, change, onOpenFile }: { reader: WorkspaceReader; change: WorkspaceChange; onOpenFile: (path: string) => void }) {
-  const query = useQuery({ queryKey: [...reader.key, 'diff', change.path], queryFn: () => reader.diff(change.path), retry: false })
+function DiffContent({
+  reader,
+  change,
+  deliveryId,
+  onOpenFile,
+}: {
+  reader: WorkspaceReader
+  change: WorkspaceChange
+  /** The delivery the list shows, so the diff stays the same snapshot even if a newer one lands. */
+  deliveryId?: string
+  onOpenFile: (path: string) => void
+}) {
+  const query = useQuery({
+    queryKey: [...reader.key, 'diff', change.path, deliveryId ?? ''],
+    queryFn: () => reader.diff(change.path, deliveryId),
+    retry: false,
+  })
   const parsed = useMemo(() => (query.data ? parsePatch(query.data.patch) : undefined), [query.data])
   let body: ReactNode
   if (query.isPending) body = <Message compact>正在读取改动…</Message>

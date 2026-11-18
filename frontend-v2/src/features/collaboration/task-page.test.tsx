@@ -505,7 +505,7 @@ it('opens the newest workflow run with its workspace from the page header', asyn
   localStorage.clear()
   vi.mocked(api.getTask).mockResolvedValue(requirement)
   vi.mocked(api.listTaskDecompositions).mockResolvedValue({ items: [decomposition({ status: 'succeeded', createdCount: 2 })] })
-  vi.mocked(workspaceApi.getWorkflowRunWorkspaceChanges).mockResolvedValue({ baseCommit: 'abc', files: [], truncated: false })
+  vi.mocked(workspaceApi.getWorkflowRunWorkspaceChanges).mockResolvedValue({ baseCommit: 'abc', files: [], truncated: false, deliveryState: { mode: 'delivery', inProgress: false } })
   renderPage()
 
   const button = await screen.findByRole('button', { name: '工作区' })
@@ -528,7 +528,7 @@ it('opens the newest workflow run with its workspace from the page header', asyn
 it('shows the workspace of the Agent run on screen', async () => {
   localStorage.clear()
   vi.mocked(api.getTaskTimeline).mockResolvedValue({ runs: [run({ id: 'run-1', state: 'ended' }), run({ id: 'run-2', state: 'idle' })], comments: [] })
-  vi.mocked(workspaceApi.getTaskRunWorkspaceChanges).mockResolvedValue({ baseCommit: 'abc', files: [], truncated: false })
+  vi.mocked(workspaceApi.getTaskRunWorkspaceChanges).mockResolvedValue({ baseCommit: 'abc', files: [], truncated: false, deliveryState: { mode: 'delivery', inProgress: false } })
   renderPage('?run=run-1')
 
   await userEvent.click(await screen.findByRole('button', { name: '工作区' }))
