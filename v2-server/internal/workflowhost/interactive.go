@@ -254,18 +254,43 @@ func (h *Host) refreshSummary(st *runState, n *interactiveNode, status string) {
 	h.hub.Publish(n.d.RunID)
 }
 
+func (h *Host) moveEngineNode(ctx context.Context, runID, nodeRunID, from, to string, merge func(node []byte) ([]byte, error)) (bool, error) {
+	if h.moveNode != nil {
+		return h.moveNode(ctx, runID, nodeRunID, from, to, merge)
+	}
+	return h.store.MoveWorkflowEngineNode(ctx, runID, nodeRunID, from, to, merge)
+}
+
 // park moves the node back to awaiting input with its summary. A run that stopped running
 // meanwhile (a sibling failed it) has no use for the node: its session ends and the row closes.
 func (h *Host) park(st *runState, n *interactiveNode) {
 	st.mu.Lock()
 	keys := map[string]any{"interactive": n.summary(), "task": n.task}
 	st.mu.Unlock()
-	moved, err := h.store.MoveWorkflowEngineNode(h.ctx, n.d.RunID, n.d.NodeRunID, store.WorkflowStatusRunning, store.WorkflowStatusPending,
-		func(node []byte) ([]byte, error) { return workflow.MergePayload(node, keys) })
+	var moved bool
+	writeUncertain := false
+	err := h.resultRetry.Store(h.ctx, func(ctx context.Context) error {
+		var err error
+		moved, err = h.moveEngineNode(ctx, n.d.RunID, n.d.NodeRunID, store.WorkflowStatusRunning, store.WorkflowStatusPending,
+			func(node []byte) ([]byte, error) { return workflow.MergePayload(node, keys) })
+		if err != nil {
+			writeUncertain = true
+			return err
+		}
+		if !moved && writeUncertain {
+			// An earlier attempt may have committed before its connection broke. Refreshing in
+			// pending succeeds only while the run is still running and the row already parked.
+			moved, err = h.moveEngineNode(ctx, n.d.RunID, n.d.NodeRunID, store.WorkflowStatusPending, store.WorkflowStatusPending,
+				func(node []byte) ([]byte, error) { return workflow.MergePayload(node, keys) })
+		}
+		return err
+	})
 	if err != nil {
-		// The row stays running and the node unreachable until the run ends; cancelling it still
-		// ends the session through the sweep.
-		h.log.Error("park interactive workflow node", "run", n.d.RunID, "node_run", n.d.NodeRunID, "error", err)
+		if h.ctx.Err() == nil {
+			// The row stays running and the node unreachable until the run ends; cancelling it still
+			// ends the session through the sweep.
+			h.log.Error("park interactive workflow node", "run", n.d.RunID, "node_run", n.d.NodeRunID, "error", err)
+		}
 		return
 	}
 	if !moved {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/executionwait"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
@@ -46,6 +47,8 @@ type Host struct {
 	busyRetry   time.Duration
 	// endRetry is the first wait before an unconfirmed End is retried (see retryEnd); tests lower it.
 	endRetry time.Duration
+	// resultRetry bounds polling for a turn's recorded result after a stream break; tests lower it.
+	resultRetry executionwait.Policy
 	// sessionLimit caps a run's unfinished sessions (see sessionsInUse); tests lower it.
 	sessionLimit int
 	engine       *workflow.Engine
@@ -69,6 +72,8 @@ type Host struct {
 	dispatching func(workflow.AgentDispatch)
 	// followingUp, when set (tests only), runs first in every accepted follow-up's goroutine.
 	followingUp func(nodeID string)
+	// moveNode overrides MoveWorkflowEngineNode in tests simulating transient storage errors.
+	moveNode func(ctx context.Context, runID, nodeRunID, from, to string, merge func(node []byte) ([]byte, error)) (bool, error)
 }
 
 // lifecycleLock is one run's cancel/resume lock and the number of callers holding or waiting.
