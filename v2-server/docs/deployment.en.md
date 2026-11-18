@@ -85,7 +85,7 @@ Keep configuration and secrets in protected process-manager configuration, outsi
 
 The launcher resolves `V2_FRONTEND_DIR` and `V2_NODE_ASSETS_DIR` relative to itself, checks archive
 contents and executes the server. The fixture flags require email login and a deployment start refuses them. `-cleanup` is allowed: stop the service, then run
-`start.sh -cleanup` with the same configuration; it removes only registered, confirmed-stopped Node and conversation directories
+`start.sh -cleanup` with the same configuration (IDaaS settings are not needed); it removes only registered, confirmed-stopped Node and conversation directories
 and keeps repository mirrors and database history. A deployment start skips development presets, demo preparation and demo warming.
 
 **Database profile**: on its first start (or first `admin-invite`) a database records whether it is a development database (email
@@ -95,7 +95,7 @@ would receive demo data and passwordless login). To change, create a new databas
 
 ## First administrator
 
-A deployment database has no accounts. On the Cloud host, with the same environment as the service, run:
+A deployment database has no accounts. On the Cloud host, with the same environment as the service, run (`V2_LOGIN=huawei-idaas` is required: this command has no development default, and its first run fixes the database profile):
 
 ```sh
 ./bin/cloud admin-invite -team <team name>

@@ -68,7 +68,7 @@ PostgreSQL、IDaaS、模型和内部 Git/S3 服务。Git 和系统库须预先�
 
 `start.sh` 从自身位置确定 `V2_FRONTEND_DIR` 和 `V2_NODE_ASSETS_DIR`，校验包文件后执行服务。
 `-fixture-check`、`-test-fixtures` 要求开了邮箱登录，部署启动会拒绝。`-cleanup` 可以用：先停止服务，再以同样的配置执行
-`start.sh -cleanup`，它只删除已登记且确认停止的 Node 与对话目录，保留仓库镜像和数据库历史。部署启动不加载开发用户 preset、
+`start.sh -cleanup`（不需要 IDaaS 配置），它只删除已登记且确认停止的 Node 与对话目录，保留仓库镜像和数据库历史。部署启动不加载开发用户 preset、
 不准备 demo 项目、不预热 demo Node。
 
 **数据库类型**：库在第一次启动（或第一次运行 `admin-invite`）时记下自己是开发库（开了邮箱登录）还是部署库（没开）。之后以另一种方式
@@ -77,7 +77,7 @@ PostgreSQL、IDaaS、模型和内部 Git/S3 服务。Git 和系统库须预先�
 
 ## 第一个管理员
 
-部署库里没有任何账号。在 Cloud 所在机器上，用与服务相同的环境变量运行：
+部署库里没有任何账号。在 Cloud 所在机器上，用与服务相同的环境变量运行（必须带上 `V2_LOGIN=huawei-idaas`：这条命令没有开发默认值，第一次运行会决定库的类型）：
 
 ```sh
 ./bin/cloud admin-invite -team <团队名>

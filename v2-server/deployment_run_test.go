@@ -141,7 +141,7 @@ func TestDeploymentStartRefusesADevelopmentDatabase(t *testing.T) {
 	addr := freeAddr(t)
 	deploymentEnv(t, addr)
 	// A development database: a previous email start recorded it.
-	t.Setenv("V2_LOGIN", "")
+	t.Setenv("V2_LOGIN", "email")
 	if err := adminInvite([]string{"-db", db, "-team", "演示团队"}, &strings.Builder{}); err != nil {
 		t.Fatal(err)
 	}
@@ -190,5 +190,11 @@ func TestDeploymentConfigurationIsCheckedBeforeEffects(t *testing.T) {
 	// a deployment too.
 	if err := run("127.0.0.1:0", "invalid database URL", true, false, false); err != nil {
 		t.Fatalf("deployment cleanup = %v", err)
+	}
+	// It needs no login configuration either.
+	t.Setenv("V2_IDAAS_CLIENT_ID", "")
+	t.Setenv("V2_IDAAS_CLIENT_SECRET", "")
+	if err := run("127.0.0.1:0", "invalid database URL", true, false, false); err != nil {
+		t.Fatalf("cleanup without IDaaS configuration = %v", err)
 	}
 }

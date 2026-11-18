@@ -26,6 +26,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/executionruntime"
 	"github.com/wanglongan587/cloud/v2-server/internal/idaas"
+	loginpkg "github.com/wanglongan587/cloud/v2-server/internal/login"
 	"github.com/wanglongan587/cloud/v2-server/internal/nodeservices"
 	"github.com/wanglongan587/cloud/v2-server/internal/pluginmarket"
 	"github.com/wanglongan587/cloud/v2-server/internal/preparedassets"
@@ -79,9 +80,12 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	if e != nil {
 		return e
 	}
-	redirects, e := loginRedirects(login, publicURL, os.Getenv)
-	if e != nil {
-		return e
+	// -cleanup only removes Node directories and serves nothing, so it needs no login configuration.
+	var redirects map[string]loginpkg.Provider
+	if !cleanup {
+		if redirects, e = loginRedirects(login, publicURL, os.Getenv); e != nil {
+			return e
+		}
 	}
 	slog.Info("login methods", "V2_LOGIN", strings.Join(login, ","))
 	if c, ok := redirects[server.LoginProviderHuaweiIDaaS].(*idaas.Client); ok {

@@ -30,6 +30,11 @@ func adminInvite(args []string, out io.Writer) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("admin-invite takes no arguments, got %q", fs.Args())
 	}
+	// Unlike a server start, this has no development default: it fixes the profile of a database
+	// that may be a new deployment's, so the login methods must be the ones that database is for.
+	if strings.TrimSpace(os.Getenv("V2_LOGIN")) == "" {
+		return errors.New("admin-invite needs V2_LOGIN set as for the server (a deployment: V2_LOGIN=huawei-idaas)")
+	}
 	methods, e := parseLogin(os.Getenv("V2_LOGIN"), false)
 	if e != nil {
 		return e

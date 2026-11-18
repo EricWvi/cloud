@@ -112,7 +112,7 @@ seed 在 [`demo/`](demo/README.md)：`env.go` 是上表和重置、准备本地 
 | `GET /healthz` | 契约 | 数据库可达即 `ok` |
 | `GET /auth/providers` | Gateway | `{"providers": [...]}`：`V2_LOGIN` 开放的登录方式，按配置顺序 |
 | `POST /auth/login` | Gateway | 邮箱登录：`email` 必须是预置文件或 owner 邀请过的账号，否则 `403 email_not_invited`，不会自动建用户；成功后设置会话 Cookie（`ora_session`，`V2_PUBLIC_URL` 为 https 时 `__Host-ora_session`），`authorizationUrl` 即 `returnTo`（只接受站内路径）。`V2_LOGIN` 没开的方式返回 `400 unknown_provider`；`Origin` 是别的站点时 `403 origin_mismatch`。只凭邮箱就能登录等于谁都能冒充谁，**仅用于演示环境** |
-| `GET /auth/callback/{provider}` | Gateway | 跳转式登录（`huawei-idaas`）回来的地址：核对只发往这个路径的 `ora_login` Cookie 里的登录尝试（内存里，10 分钟、只能用一次）和 `state`，向提供方换取身份，按 `source`+`subject`（IDaaS 为 `huawei-corp`+`uuid`）找或建账号、刷新显示名，签会话后 303 回到发起登录时的 `returnTo`。失败一律 303 到 `/?login_error=failed\|unavailable\|disabled`，日志只记步骤和对方错误码。`POST /auth/login` 对跳转式方式返回提供方的登录地址，`returnTo` 不出现在其中；回调地址只由 `V2_PUBLIC_URL` 得出 |
+| `GET /auth/callback/{provider}` | Gateway | 跳转式登录（`huawei-idaas`）回来的地址：核对只发往这个路径的 `ora_login` Cookie 里的登录尝试（内存里，10 分钟、只能用一次；最多 10000 条，满了挤掉最早的，所以灌满它只会让别人未完成的登录重来，不会拒绝新登录）和 `state`，向提供方换取身份，按 `source`+`subject`（IDaaS 为 `huawei-corp`+`uuid`）找或建账号、刷新显示名，签会话后 303 回到发起登录时的 `returnTo`。失败一律 303 到 `/?login_error=failed\|unavailable\|disabled`，日志只记步骤和对方错误码。`POST /auth/login` 对跳转式方式返回提供方的登录地址，`returnTo` 不出现在其中；回调地址只由 `V2_PUBLIC_URL` 得出 |
 | `POST /auth/logout` | Gateway | 吊销会话，`204`；`Origin` 是别的站点时 `403 origin_mismatch` |
 | `GET /api/v1/me` | 契约 | 当前用户；无会话 `401 unauthenticated`。契约禁止额外字段，当前用户的角色从 `GET /api/v1/me/tenants` 的 `role` 读取 |
 | `GET /api/v1/me/tenants` | 契约 | 当前用户所在租户，一页返回全部，`nextCursor` 为空 |

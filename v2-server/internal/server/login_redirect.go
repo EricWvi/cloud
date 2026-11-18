@@ -42,23 +42,28 @@ type loginAttempts struct {
 
 func newLoginAttempts() *loginAttempts { return &loginAttempts{items: map[string]loginAttempt{}} }
 
-// add stores an attempt under a new random key, or reports false when too many are in flight.
-func (a *loginAttempts) add(at loginAttempt, now time.Time) (string, bool) {
+// add stores an attempt under a new random key. POST /auth/login is public, so the table is
+// unauthenticated input: expired attempts are dropped on every add, and a full table evicts its
+// oldest attempt instead of refusing new logins. Flooding it can then only push out other people's
+// unfinished attempts (they click the login button again), and only by sustaining more than
+// maxLoginAttempts starts per loginAttemptTTL.
+func (a *loginAttempts) add(at loginAttempt, now time.Time) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	var oldest string
+	for k, v := range a.items {
+		if !now.Before(v.expires) {
+			delete(a.items, k)
+		} else if oldest == "" || v.expires.Before(a.items[oldest].expires) {
+			oldest = k
+		}
+	}
 	if len(a.items) >= maxLoginAttempts {
-		for k, v := range a.items {
-			if !now.Before(v.expires) {
-				delete(a.items, k)
-			}
-		}
-		if len(a.items) >= maxLoginAttempts {
-			return "", false
-		}
+		delete(a.items, oldest)
 	}
 	key := randomToken()
 	a.items[key] = at
-	return key, true
+	return key
 }
 
 // take removes and returns the attempt, so each one is used at most once.
@@ -70,6 +75,8 @@ func (a *loginAttempts) take(key string, now time.Time) (loginAttempt, bool) {
 	return at, ok && now.Before(at.expires)
 }
 
+// randomToken is 256 random bits. crypto/rand.Read never returns an error (it panics if the
+// system source fails), so there is nothing to check.
 func randomToken() string {
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)
@@ -114,11 +121,7 @@ func (h *handler) redirectProvider(name string) (login.Provider, bool) {
 // stays here and never appears in that address.
 func (h *handler) startRedirectLogin(w http.ResponseWriter, name string, p login.Provider, returnTo string) {
 	state := randomToken()
-	key, ok := h.attempts.add(loginAttempt{provider: name, state: state, returnTo: localPath(returnTo), expires: time.Now().Add(loginAttemptTTL)}, time.Now())
-	if !ok {
-		fault(w, http.StatusServiceUnavailable, "login_unavailable")
-		return
-	}
+	key := h.attempts.add(loginAttempt{provider: name, state: state, returnTo: localPath(returnTo), expires: time.Now().Add(loginAttemptTTL)}, time.Now())
 	http.SetCookie(w, &http.Cookie{
 		Name: LoginAttemptCookie, Value: key, Path: h.callbackPath(name), HttpOnly: true, Secure: h.secure(),
 		SameSite: http.SameSiteLaxMode, MaxAge: int(loginAttemptTTL / time.Second),
