@@ -79,3 +79,37 @@ func (s *Store) CloseOrphanedWorkflowNode(ctx context.Context, runID, nodeRunID 
 	})
 	return closed, err
 }
+
+// OpenWorkflowSession is an execution session still open whose workflow node no longer waits on
+// it, with the scope that owns it.
+type OpenWorkflowSession struct {
+	TenantID, UserID, SessionID string
+}
+
+// UnparkedWorkflowSessions lists the open execution sessions bound to a workflow node that is not
+// parked awaiting input in a running run. On startup execution recovery keeps the held session of
+// every node parked in a running run; the workflow host ends those whose node the restart sweep
+// failed, or whose run it failed, so no session outlives the node it served. A non-empty runID
+// limits the list to that run's nodes.
+func (s *Store) UnparkedWorkflowSessions(ctx context.Context, runID string) ([]OpenWorkflowSession, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT e.tenant_id::text, e.user_id::text, e.id
+		FROM v2_execution_sessions e
+		JOIN v2_workflow_node_runs n ON n.session_id = e.id
+		JOIN v2_workflow_runs r ON r.id = n.run_id
+		WHERE e.ended_at IS NULL
+			AND NOT (n.status = 'pending' AND n.deleted_at IS NULL AND r.status = 'running' AND r.deleted_at IS NULL)
+			AND ($1 = '' OR r.id::text = $1)
+		ORDER BY e.id`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list unparked workflow sessions: %w", err)
+	}
+	sessions, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (OpenWorkflowSession, error) {
+		var o OpenWorkflowSession
+		return o, row.Scan(&o.TenantID, &o.UserID, &o.SessionID)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list unparked workflow sessions: %w", err)
+	}
+	return sessions, nil
+}

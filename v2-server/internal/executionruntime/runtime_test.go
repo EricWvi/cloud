@@ -609,8 +609,9 @@ func (a *orchestrationAgent) End(_ context.Context, sid string) error {
 	}
 	return nil
 }
-func (a *orchestrationAgent) Rebuild(string)              {}
-func (a *orchestrationAgent) Close(context.Context) error { return nil }
+func (a *orchestrationAgent) Rebuild(string)                  {}
+func (a *orchestrationAgent) Reattach(string, string, string) {}
+func (a *orchestrationAgent) Close(context.Context) error     { return nil }
 
 func nextAgentCall(t *testing.T, f *runtimeFixture, a *orchestrationAgent) *agentCall {
 	t.Helper()
@@ -924,7 +925,9 @@ func TestModelsFromEnvironmentAppliesRequestLimits(t *testing.T) {
 
 // A held workflow session survives a turn the Agent itself ended without completing (the driver
 // reports no error), so the caller can keep talking; a default session does not, and a held one
-// whose Agent is gone (the driver reports an error) ends too. Only a workflow may hold a session.
+// whose Agent is gone (the driver reports an error) ends too, also when its Node was lost on this
+// first turn. A held session whose Node is lost on a later turn stays open instead, and its next
+// turn starts a new Agent (see recovery_db_test.go). Only a workflow may hold a session.
 func TestRuntimeHeldSessionSurvivesAnAgentEndedTurn(t *testing.T) {
 	f := runtimeDatabase(t, nil)
 	if err := f.service.Close(f.ctx); err != nil {
@@ -953,33 +956,37 @@ func TestRuntimeHeldSessionSurvivesAnAgentEndedTurn(t *testing.T) {
 		}
 		return session.EndedAt == nil
 	}
+	nodeLost := execution.Result{Status: execution.StatusFailed, FailureCode: execution.FailureNodeLost}
 	for name, tc := range map[string]struct {
 		lifetime execution.Lifetime
 		result   execution.Result
 		err      error
 		live     bool
+		// lost is whether the recorded turn says its Agent is gone for good.
+		lost bool
 	}{
-		"held, refused":           {execution.LifetimeHeld, refused, nil, true},
-		"held, Agent gone":        {execution.LifetimeHeld, gone, execution.ErrSessionEnded, false},
-		"held, transport lost":    {execution.LifetimeHeld, execution.Result{Status: execution.StatusFailed, FailureCode: "agent_transport_closed"}, execution.ErrUnavailable, false},
-		"default, refused":        {execution.LifetimeTurn, refused, nil, false},
-		"held, completed":         {execution.LifetimeHeld, execution.Result{Status: execution.StatusCompleted, AnswerComplete: true, StopReason: "end_turn"}, nil, true},
-		"held, unasked cancel":    {execution.LifetimeHeld, execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}, nil, true},
-		"default, unasked cancel": {execution.LifetimeTurn, execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}, nil, false},
+		"held, refused":           {execution.LifetimeHeld, refused, nil, true, false},
+		"held, Agent gone":        {execution.LifetimeHeld, gone, execution.ErrSessionEnded, false, true},
+		"held, Node lost":         {execution.LifetimeHeld, nodeLost, errors.New(execution.FailureNodeLost), false, true},
+		"default, Node lost":      {execution.LifetimeTurn, nodeLost, errors.New(execution.FailureNodeLost), false, true},
+		"default, refused":        {execution.LifetimeTurn, refused, nil, false, false},
+		"held, completed":         {execution.LifetimeHeld, execution.Result{Status: execution.StatusCompleted, AnswerComplete: true, StopReason: "end_turn"}, nil, true, false},
+		"held, unasked cancel":    {execution.LifetimeHeld, execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}, nil, true, false},
+		"default, unasked cancel": {execution.LifetimeTurn, execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}, nil, false, false},
 	} {
 		ref, err := f.service.Start(f.ctx, f.scope, request(name, tc.lifetime))
 		if err != nil {
 			t.Fatalf("%s: start: %v", name, err)
 		}
 		call := nextAgentCall(t, f, a)
-		call.result, call.err, call.silent = &tc.result, tc.err, name == "held, transport lost"
+		call.result, call.err, call.silent = &tc.result, tc.err, tc.result.FailureCode == execution.FailureNodeLost
 		call.unblock()
 		recorded, _ := observeTurn(t, f, ref, 0)
 		if got := live(ref.SessionID); got != tc.live {
 			t.Fatalf("%s: session live = %v, want %v", name, got, tc.live)
 		}
-		if recorded.AgentLost != (tc.err != nil) {
-			t.Fatalf("%s: recorded AgentLost = %v, want %v", name, recorded.AgentLost, tc.err != nil)
+		if recorded.AgentLost != tc.lost {
+			t.Fatalf("%s: recorded AgentLost = %v, want %v", name, recorded.AgentLost, tc.lost)
 		}
 		if !tc.live {
 			continue

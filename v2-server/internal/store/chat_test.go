@@ -36,7 +36,7 @@ func TestInterruptEndedChatSessionsAfterRecovery(t *testing.T) {
 	if err := f.s.MarkChatSessionEnding(ctx, "s-stopping", store.EndStopped); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.s.RecoverExecutions(ctx); err != nil {
+	if _, err := f.s.RecoverExecutions(ctx); err != nil {
 		t.Fatal(err)
 	}
 	// Started by the new process, after recovery.

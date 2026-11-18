@@ -202,6 +202,19 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 		h.fail(n.d, workflow.Failure{Kind: workflow.FailureInteractiveSession, Message: message})
 		return
 	}
+	if err == nil && result.FailureCode == execution.FailureWorkspaceMissing {
+		// The node's session outlived a restart, but the checkout its Agent worked in is gone (or
+		// unknown to Node): nothing can continue the conversation or produce what it was asked for.
+		// As for a first turn that could not be set up, the session keeps its slot until its End
+		// is confirmed (the execution service has ended it, so End is idempotent).
+		lingering := st.dropInteractive(n)
+		st.mu.Unlock()
+		if lingering {
+			h.endLingering(st, n.d.RunID, n.session)
+		}
+		h.fail(n.d, workflow.Failure{Kind: workflow.FailureInteractiveSession, Message: "the run's checkout no longer exists, so the node's conversation cannot continue"})
+		return
+	}
 	if err == nil {
 		n.turns++
 		n.last = &result

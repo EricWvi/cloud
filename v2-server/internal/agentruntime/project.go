@@ -29,9 +29,12 @@ type controlWait struct {
 
 type checkout struct {
 	workflow bool
-	id, path string
-	ready    chan struct{}
-	err      error
+	// reattached marks a checkout an earlier Node incarnation or process prepared (see
+	// Driver.Reattach): only such a clone execution can be unknown to the Node starting on it.
+	reattached bool
+	id, path   string
+	ready      chan struct{}
+	err        error
 }
 
 // installation is one plugin's install on this Node incarnation, shared by its sessions.
@@ -94,7 +97,11 @@ type projectRuntime struct {
 	// projected marks the admitted workflow sessions whose Skills are on the checkout: only they
 	// count as live siblings for the next projection (see liveSiblingSkills). A sibling admitted
 	// but still preparing, or refused, has put nothing there.
-	projected    map[string]bool
+	projected map[string]bool
+	// holders is the session that registered a session ID's owners and projected entries: a
+	// session replaced under the same ID (see agentSession.replaceable) may stop after its
+	// successor registered, and must not remove the successor's entries.
+	holders      map[string]*agentSession
 	acknowledged map[string]uint64
 }
 
@@ -108,11 +115,54 @@ func (d *Driver) nextID(prefix string) string {
 }
 
 func (d *Driver) dropProject(p *projectRuntime) {
+	// A workflow run's checkout outlives the Node incarnation that cloned it: Node resolves it
+	// from its clone execution in its own ledger, so the run's next session on a new incarnation
+	// starts on the same directory (see Reattach) instead of a fresh clone.
+	p.mu.Lock()
+	kept := map[string]Checkout{}
+	for workspace, entry := range p.checkouts {
+		select {
+		case <-entry.ready:
+			if entry.workflow && entry.err == nil && entry.path != "" {
+				kept[workspace] = Checkout{Path: entry.path, CloneExecution: entry.id}
+			}
+		default:
+		}
+	}
+	p.mu.Unlock()
 	d.mu.Lock()
+	for workspace, at := range kept {
+		if _, known := d.recorded[workspace]; !known {
+			d.recorded[workspace] = at
+		}
+	}
 	if d.projects[p.id] == p {
 		delete(d.projects, p.id)
 	}
 	d.mu.Unlock()
+}
+
+// forgetCheckout drops a reattached checkout Node refused as unknown (its ledger lost the clone
+// execution), here and in the record, so the workspace's next session clones again instead of
+// failing on it too. Entries for another clone execution are left alone.
+func (p *projectRuntime) forgetCheckout(workspace string, entry *checkout) {
+	p.mu.Lock()
+	if p.checkouts[workspace] == entry {
+		delete(p.checkouts, workspace)
+	}
+	p.mu.Unlock()
+	p.driver.mu.Lock()
+	if p.driver.recorded[workspace].CloneExecution == entry.id {
+		delete(p.driver.recorded, workspace)
+	}
+	p.driver.mu.Unlock()
+	if forget := p.driver.opts.ForgetCheckout; forget != nil {
+		ctx, cancel := context.WithTimeout(p.ctx, 10*time.Second)
+		defer cancel()
+		// A record left behind only reattaches the same unknown checkout after a later restart,
+		// whose first session is refused and forgets it again.
+		_ = forget(ctx, workspace, entry.id)
+	}
 }
 
 func (d *Driver) project(ctx context.Context, id string, config Project) (*projectRuntime, error) {
@@ -127,7 +177,7 @@ func (d *Driver) project(ctx context.Context, id string, config Project) (*proje
 			lifetime, cancel := context.WithCancel(context.Background())
 			p = &projectRuntime{driver: d, id: id, root: filepath.Join(d.opts.Root, digest(id)[:16]), configuration: config,
 				ready: make(chan struct{}), ctx: lifetime, cancel: cancel, loopDone: make(chan struct{}), dead: make(chan struct{}),
-				controls: map[string]*controlWait{}, agents: map[string]*agentSession{}, checkouts: map[string]*checkout{}, installs: map[string]*installation{}, owners: map[string]map[string]*execution.Skills{}, projected: map[string]bool{}, acknowledged: map[string]uint64{}}
+				controls: map[string]*controlWait{}, agents: map[string]*agentSession{}, checkouts: map[string]*checkout{}, installs: map[string]*installation{}, owners: map[string]map[string]*execution.Skills{}, holders: map[string]*agentSession{}, projected: map[string]bool{}, acknowledged: map[string]uint64{}}
 			d.projects[id] = p
 			go p.initialize()
 		}
@@ -452,8 +502,20 @@ func (p *projectRuntime) checkoutPath(ctx context.Context, workspace string, con
 }
 
 func (p *projectRuntime) prepareCheckout(ctx context.Context, scope execution.Scope, workspace string, config Project, caller execution.CallerKind, timing *preparation) (*checkout, error) {
+	var recorded Checkout
+	if caller == execution.CallerWorkflow {
+		p.driver.mu.Lock()
+		recorded = p.driver.recorded[workspace]
+		p.driver.mu.Unlock()
+	}
 	p.mu.Lock()
 	entry := p.checkouts[workspace]
+	if entry == nil && recorded.CloneExecution != "" {
+		// An earlier process prepared this run's checkout (see Driver.Reattach): start on it.
+		entry = &checkout{workflow: true, reattached: true, id: recorded.CloneExecution, path: recorded.Path, ready: make(chan struct{})}
+		close(entry.ready)
+		p.checkouts[workspace] = entry
+	}
 	if entry == nil {
 		entry = &checkout{workflow: caller == execution.CallerWorkflow, id: p.driver.nextID("c") + "-" + digest(workspace), ready: make(chan struct{})}
 		p.checkouts[workspace] = entry
@@ -486,7 +548,7 @@ func (p *projectRuntime) prepareCheckout(ctx context.Context, scope execution.Sc
 				}
 			}
 			if record := p.driver.opts.RecordWorkspace; record != nil {
-				if err := record(ctx, workspace, Checkout{Path: path, BaseCommit: config.Commit}); err != nil {
+				if err := record(ctx, workspace, Checkout{Path: path, BaseCommit: config.Commit, CloneExecution: entry.id}); err != nil {
 					entry.err = err
 					return
 				}
@@ -567,7 +629,7 @@ func (p *projectRuntime) transportFailed() {
 	p.mu.Unlock()
 	p.deadOnce.Do(func() { close(p.dead) })
 	for _, a := range agents {
-		a.fail("agent_transport_closed", execution.ErrUnavailable)
+		a.fail(execution.FailureNodeLost, execution.ErrUnavailable)
 	}
 }
 

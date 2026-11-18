@@ -81,6 +81,7 @@ StopReason 与 FailureCode 分别保留，清理失败不能改写已持久化�
   定时任务和工作流用完 session 后主动 End，不用订阅 EOF 代替停止确认。
 - 后端重启先结束旧活 session，写入 EndedAt/session_ended，将未结束 turn 标为 interrupted/turn_ended，
   再对外提供服务。不自动重放 prompt，不恢复旧会话；旧会话 Append 返回 `ErrSessionEnded`，历史仍可读。
+  例外是停在等待输入的交互式工作流节点的 held 会话：它保持打开，下一轮 Append 在原目录上新起 Agent 并交接记录下的对话（`Session.Recovery`，见 `executionruntime`）。
 
 首版只在 Linux/WSL 使用固定 Node 的完全访问模式，由 Node/Agent 管理权限；没有页面权限回应接口。
 附件、动态插件和模型热切换不在首版支持范围。页面拥有标题、排序、删除、业务队列及 HTTP/SSE，

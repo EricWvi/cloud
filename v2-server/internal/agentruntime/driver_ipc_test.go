@@ -40,6 +40,8 @@ type fakeNodeIPC struct {
 	seq               map[string]uint64
 	hook              func(*fakeNodeIPC, node.Message) bool
 	missingCapability atomic.Pointer[string]
+	// failSend, when set, fails the write of the commands it returns an error for.
+	failSend atomic.Pointer[func(node.Message) error]
 }
 
 func (f *fakeNodeIPC) Supports(capability string) bool {
@@ -78,6 +80,11 @@ func (f *fakeNodeIPC) Ack(ctx context.Context, m node.Message) error {
 	}
 }
 func (f *fakeNodeIPC) Send(ctx context.Context, m node.Message) error {
+	if fail := f.failSend.Load(); fail != nil {
+		if err := (*fail)(m); err != nil {
+			return err
+		}
+	}
 	select {
 	case <-f.closed:
 		return net.ErrClosed
@@ -148,7 +155,7 @@ func newIPCHarnessWith(t *testing.T, bindings map[string]nodeservices.Binding, h
 	root := t.TempDir()
 	config := Project{MirrorPath: filepath.Join(root, "mirror.git"), Commit: "0123456789012345678901234567890123456789", SnapshotRef: "refs/snapshots/demo"}
 	h := &ipcHarness{created: make(chan *fakeNodeIPC, 16), config: config, scope: execution.Scope{TenantID: "tenant", UserID: "user"}}
-	d := &Driver{opts: Options{Root: filepath.Join(root, "projects"), Bindings: bindings, ResolveProject: func(context.Context, execution.Scope, string) (Project, error) { return config, nil }}, boot: "fake", projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, controlTimeout: time.Second}
+	d := &Driver{opts: Options{Root: filepath.Join(root, "projects"), Bindings: bindings, ResolveProject: func(context.Context, execution.Scope, string) (Project, error) { return config, nil }}, boot: "fake", projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, recorded: map[string]Checkout{}, controlTimeout: time.Second}
 	h.driver = d
 	d.startProject = func(p *projectRuntime) error {
 		if err := os.MkdirAll(filepath.Join(p.root, "w", "n"), 0700); err != nil {

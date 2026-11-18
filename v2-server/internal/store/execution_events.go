@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
 	"time"
 
@@ -197,19 +199,46 @@ func endExecutionSession(ctx context.Context, tx pgx.Tx, session execution.Sessi
 	return err
 }
 
+// RecoveredSession is a session RecoverExecutions kept open: the held session of an interactive
+// workflow node parked awaiting input. Its Agent is gone with the old process; the next turn
+// starts a new Agent on the same checkout and hands it the recorded conversation.
+type RecoveredSession struct {
+	Scope   execution.Scope
+	Session execution.Session
+	// Caller is the session's first turn's caller: the workflow run that owns it.
+	Caller execution.Caller
+}
+
+// parkedInteractiveSession is the SQL condition, on the session aliased s, that the session is the
+// held session of an interactive workflow node parked awaiting input in a running run: the node
+// row is pending with a session summary (only a parked interactive node has both). The workflow
+// host decides on startup whether the wait is valid and ends the session when it is not.
+const parkedInteractiveSession = `EXISTS (SELECT 1 FROM v2_workflow_node_runs n JOIN v2_workflow_runs r ON r.id = n.run_id
+	WHERE n.session_id = s.id AND n.deleted_at IS NULL AND n.status = 'pending' AND n.node_type = 'agent'
+		AND n.payload ? 'interactive' AND r.status = 'running' AND r.deleted_at IS NULL)`
+
 // RecoverExecutions runs before admission and reads are exposed by the single-process runtime.
-// It ends old live sessions without replaying prompts and never rewrites completed results.
+// It ends old live sessions without replaying prompts and never rewrites completed results. The
+// one exception is the held session of an interactive workflow node parked awaiting input
+// (desktop keeps a valid interactive wait across a restart): it has no turn in flight and stays
+// open, and is returned so the runtime can start a new Agent for it on the next turn.
 // Process and filesystem cleanup, when applicable, belongs to the runtime before this call.
-func (s *Store) RecoverExecutions(ctx context.Context) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT data FROM v2_execution_sessions WHERE ended_at IS NULL ORDER BY id FOR UPDATE`)
+func (s *Store) RecoverExecutions(ctx context.Context) ([]RecoveredSession, error) {
+	var kept []RecoveredSession
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		kept = nil
+		rows, err := tx.Query(ctx, `SELECT s.data, s.tenant_id::text, s.user_id::text, `+parkedInteractiveSession+`
+			AND NOT EXISTS (SELECT 1 FROM v2_execution_turns t WHERE t.session_id = s.id AND t.ended_at IS NULL)
+			FROM v2_execution_sessions s WHERE s.ended_at IS NULL ORDER BY s.id FOR UPDATE OF s`)
 		if err != nil {
 			return err
 		}
 		var sessions []execution.Session
 		for rows.Next() {
 			var raw []byte
-			if err := rows.Scan(&raw); err != nil {
+			var scope execution.Scope
+			var parked bool
+			if err := rows.Scan(&raw, &scope.TenantID, &scope.UserID, &parked); err != nil {
 				rows.Close()
 				return err
 			}
@@ -218,11 +247,24 @@ func (s *Store) RecoverExecutions(ctx context.Context) error {
 				rows.Close()
 				return err
 			}
+			if parked && session.Target != nil {
+				kept = append(kept, RecoveredSession{Scope: scope, Session: session})
+				continue
+			}
 			sessions = append(sessions, session)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
 			return err
+		}
+		for i := range kept {
+			var caller []byte
+			if err := tx.QueryRow(ctx, `SELECT caller FROM v2_execution_turns WHERE session_id=$1 ORDER BY position LIMIT 1`, kept[i].Session.ID).Scan(&caller); err != nil {
+				return fmt.Errorf("read recovered session caller: %w", err)
+			}
+			if err := json.Unmarshal(caller, &kept[i].Caller); err != nil {
+				return fmt.Errorf("read recovered session caller: %w", err)
+			}
 		}
 		for _, session := range sessions {
 			var tid string
@@ -247,4 +289,62 @@ func (s *Store) RecoverExecutions(ctx context.Context) error {
 		}
 		return nil
 	})
+	return kept, err
+}
+
+// ParkedWorkflowSessions lists the sessions, open or already ended, of every interactive workflow
+// node parked awaiting input in a running run, with their owner and first caller. A node whose
+// session ended before the restart (its turn was stopped, its Agent lost) still survives it and
+// can be completed, so its run's later sessions must find the run's directory as well.
+func (s *Store) ParkedWorkflowSessions(ctx context.Context) ([]RecoveredSession, error) {
+	rows, err := s.pool.Query(ctx, `SELECT s.data, s.tenant_id::text, s.user_id::text,
+			(SELECT t.caller FROM v2_execution_turns t WHERE t.session_id = s.id ORDER BY t.position LIMIT 1)
+		FROM v2_execution_sessions s WHERE `+parkedInteractiveSession+` ORDER BY s.id`)
+	if err != nil {
+		return nil, fmt.Errorf("list parked workflow sessions: %w", err)
+	}
+	defer rows.Close()
+	var parked []RecoveredSession
+	for rows.Next() {
+		var raw, caller []byte
+		var r RecoveredSession
+		if err := rows.Scan(&raw, &r.Scope.TenantID, &r.Scope.UserID, &caller); err != nil {
+			return nil, fmt.Errorf("list parked workflow sessions: %w", err)
+		}
+		if err := json.Unmarshal(raw, &r.Session); err != nil || caller == nil || json.Unmarshal(caller, &r.Caller) != nil {
+			continue // not a workflow Agent session this recovery can serve
+		}
+		if r.Session.Target != nil {
+			parked = append(parked, r)
+		}
+	}
+	return parked, rows.Err()
+}
+
+// LatestHistory returns the settled records of a session's latest history snapshot, the
+// conversation the page shows. Only the server's own recovery reads it, so it is not scoped. A
+// session that never published a snapshot has none.
+func (s *Store) LatestHistory(ctx context.Context, sessionID string) ([]execution.HistoryRecord, error) {
+	var raw []byte
+	err := s.pool.QueryRow(ctx, `SELECT data FROM v2_execution_events WHERE session_id=$1 AND data->>'Kind'='history_snapshot' ORDER BY sequence DESC LIMIT 1`, sessionID).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read latest history: %w", err)
+	}
+	var event execution.Event
+	if err := json.Unmarshal(raw, &event); err != nil {
+		return nil, fmt.Errorf("read latest history: %w", err)
+	}
+	if event.History == nil {
+		return nil, nil
+	}
+	records := make([]execution.HistoryRecord, 0, len(event.History.Records))
+	for _, record := range event.History.Records {
+		if !record.Preview {
+			records = append(records, record)
+		}
+	}
+	return records, nil
 }

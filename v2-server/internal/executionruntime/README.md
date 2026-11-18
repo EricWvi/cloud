@@ -8,6 +8,9 @@
 
 `New` 只在调用方已完成 Node 停止恢复后构造，并先结束旧的持久会话、结算未完成轮次为 interrupted。
 同一数据库和数据目录只能有一个服务实例。它不重建旧 worker、不重放 prompt，也不恢复旧 Agent 上下文。
+唯一的例外是停在等待输入的交互式工作流节点的 held 会话（`store.RecoverExecutions` 的判定：节点行 `pending`、有 `interactive` 摘要、运行仍在 `running`、会话没有未结束的轮次）：它保持打开，仍是 held，工作流 run 共用目录的映射也从它恢复，记下的 checkout 还在时交给 driver 的 `Reattach`（会话已经结束、只能完成的停住节点也算），所以这个 run 之后的每个会话（包括直接完成节点后启动的后继）都在原目录上开始；是否真的合法由工作流执行桥在启动时判定，不合法的由执行桥 End。
+这种会话的下一轮（`recovery.go`）在原目录上新起一个 Agent，并把最近一次历史快照渲染成交接记录（每轮的用户消息、回答，工具调用只有名称和结果，没有输入输出和推理；和这轮消息合起来不超过 Node 的 64 KB，放不下时先去掉最早的轮次）随 `execution.Session.Recovery` 交给 driver。新 Agent 是新的 provider 会话，第一轮没有提示缓存。
+这一轮记录的提示只有用户输入的原文。新 Agent 没能启动（driver 报 `NotStarted`：项目、checkout、插件没准备好）时这一轮失败，会话保持打开、仍待恢复，下一轮再试；Node 按 checkout 拒绝了新会话（例如名额已满）时和普通会话一样，会话结束；目录已不存在、没有记下 clone 执行 ID，或者 Node 已经不认识记下的 clone 执行 ID（driver 报告）时结果为 `workspace_missing`（`AgentLost`），会话结束。
 `main` 持有数据目录锁，先构造项目 driver，再构造本服务，最后开放 HTTP。
 
 Start/StartModel/Append 以当前租户授权（`TenantAccess`，store 在记录会话或轮次的事务内再查一次）和 Caller attempt 接收，记录原始 prompt 后启动服务自有 worker。
@@ -16,7 +19,7 @@ Start/StartModel/Append 以当前租户授权（`TenantAccess`，store 在记录
 重新检查授权、会话和 attempt，再接收下一轮；等待遵从请求 context，不提前释放目录或重叠派发。
 原轮尚无持久终态时仍立即返回 Busy，已存在的同 attempt 重试仍直接返回原 Ref。
 不同对话、定时触发各有自己的 checkout；同一 workflow run 复用一个 checkout，run 的各个会话在里面并存：换节点时不结束之前的会话（`LifetimeHeld` 的交互节点会话因此能一直等到发起人回来），每个会话由调用方自己 End；它们的轮次可以同时执行。调用方 End 失败的会话不会再被下一个节点的 Start 顺带结束，它留在 checkout 上并占 Node 的一个会话名额，直到该项目的 Node 被重建（见下文）或进程重启。Node 以 `shared_checkout_sessions` 能力允许同一 checkout 上有多个 Agent 会话。
-没有完成的 Agent 轮次结束 `LifetimeTurn` 会话；`LifetimeHeld` 会话只在 driver 报错（Agent 丢失）或这一轮的结果写不进数据库时结束，runtime 自己写的结果此时带 `AgentLost`。
+没有完成的 Agent 轮次结束 `LifetimeTurn` 会话；`LifetimeHeld` 会话只在 driver 报错（Agent 丢失）或这一轮的结果写不进数据库时结束，runtime 自己写的结果此时带 `AgentLost`。例外是首轮之后的 Node 丢失（`execution.FailureNodeLost`）：held 会话保持打开、按服务重启后同样的方式待恢复（首轮没有可交接的记录，照旧结束），丢失的 Node 进程树当场经 supervisor 停掉；Node 在这一轮送到 Agent 之前就已不在（driver 返回 `execution.ErrNodeLost`）时，这一轮立即交给新起的 Agent，否则这一轮失败、不重放，下一轮再新起。待恢复的会话（重启或 Node 丢失之后）没有 Node 还持有的 Agent：对它 End 会确认（旧 Node 进程树已由 supervisor 停掉，或这个进程从没起过它），会话结束、不再待恢复，所以调用方对没确认的 End 的重试（工作流的名额，见根 README）会停下来，之后的消息也不会再起新 Agent。
 只支持文本 prompt；附件、权限询问、运行中切换模型尚不支持。
 
 公共读取、Cancel 和 End 只按原归属（租户与用户）定位，不再检查租户授权：页面请求已由 HTTP 租户路由授权。执行中撤权后不能再接收新轮次。

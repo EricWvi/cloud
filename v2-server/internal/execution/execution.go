@@ -160,6 +160,21 @@ const (
 	FailureCheckoutTooDeep      = "checkout_too_deep"
 )
 
+// FailureWorkspaceMissing is the failure code of a turn whose checkout, prepared by an earlier Node
+// incarnation or process, no longer exists: its directory is gone, it was never recorded with its
+// clone execution, or Node no longer knows that clone execution. Nothing can continue the session
+// there, so it ends.
+const FailureWorkspaceMissing = "workspace_missing"
+
+// FailureNodeLost is the failure code of a turn whose session lost its Node: the Node process
+// exited or its connection broke. A held workflow session survives it (its next turn starts a new
+// Agent, see Recovery); any other session ends.
+const FailureNodeLost = "agent_transport_closed"
+
+// ErrNodeLost is returned with FailureNodeLost when the Node was already gone before the turn
+// reached its Agent: nothing of the turn ran, so a replacement Agent can take it at once.
+var ErrNodeLost = errors.New("the session's Node was lost before the turn reached its Agent")
+
 // CheckoutRefused reports whether code is one of Node's checkout refusals.
 func CheckoutRefused(code string) bool {
 	return code == FailureCheckoutBusy || code == FailureCheckoutSessionLimit || code == FailureCheckoutTooDeep
@@ -191,6 +206,23 @@ type Session struct {
 	WorkspaceID string
 	CreatedAt   time.Time
 	EndedAt     *time.Time
+	// Recovery is set, never persisted, on the first turn a held session takes after a server
+	// restart lost its Agent: the driver starts a new Agent on the same checkout (reattached
+	// beforehand, see executionruntime) and hands it the recorded conversation instead of starting
+	// from nothing.
+	Recovery *Recovery `json:"-"`
+}
+
+// Recovery is what a driver needs to bring a held session back after its Agent was lost with the
+// server process. The new Agent is a new provider session: it learns the conversation from
+// Handoff, which lists tool calls by name and outcome only, and has no prompt cache.
+type Recovery struct {
+	// Handoff is sent ahead of the turn's prompt as its own block. It is context for the Agent
+	// only: the turn records the prompt alone, and the page never shows the block.
+	Handoff string
+	// History is the settled conversation the page showed before the restart; the new Agent's
+	// history is published after it, so the page keeps one continuous conversation.
+	History []HistoryRecord
 }
 
 // TurnPage lists accepted turns in stable creation order. NextCursor is empty at the current

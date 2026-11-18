@@ -48,12 +48,18 @@ type Options struct {
 	// RecordWorkspace remembers where a workspace's checkout is, once it is ready and before the
 	// Agent starts, so pages can read its files later. Nil records nothing.
 	RecordWorkspace func(ctx context.Context, workspaceID string, checkout Checkout) error
+	// ForgetCheckout drops the record of a reattached checkout whose clone execution Node no
+	// longer knows, so a later process does not reattach it again. Nil forgets nothing.
+	ForgetCheckout func(ctx context.Context, workspaceID, cloneExecution string) error
 }
 
 // Checkout is a workspace's directory on this host and the commit it was cloned at.
+// CloneExecution is the Node clone execution behind it: Node resolves a session's checkout from
+// that ID in its own ledger, also after Node restarted, so a recovered session can start on it.
 type Checkout struct {
-	Path       string
-	BaseCommit string
+	Path           string
+	BaseCommit     string
+	CloneExecution string
 }
 
 // Emit retains an event before its source Node envelope can be acknowledged. It must honor ctx.
@@ -62,12 +68,16 @@ type Emit func(context.Context, execution.Event) error
 
 // Driver owns one Node per project and one physical Agent execution per logical session.
 type Driver struct {
-	opts           Options
-	boot           string
-	mu             sync.Mutex
-	closed         bool
-	projects       map[string]*projectRuntime
-	sessions       map[string]*agentSession
+	opts     Options
+	boot     string
+	mu       sync.Mutex
+	closed   bool
+	projects map[string]*projectRuntime
+	sessions map[string]*agentSession
+	// recorded are workflow checkouts an earlier Node incarnation prepared, by workspace (see
+	// Reattach): Node resolves them from their clone execution in its own ledger, so a later
+	// session of the workspace starts on the same directory instead of a fresh clone.
+	recorded       map[string]Checkout
 	serial         atomic.Uint64
 	controlTimeout time.Duration
 	startProject   func(*projectRuntime) error
@@ -109,7 +119,21 @@ func New(opts Options) (*Driver, error) {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, execution.ErrUnavailable
 	}
-	return &Driver{opts: opts, boot: hex.EncodeToString(nonce[:]), projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, controlTimeout: 2 * time.Minute}, nil
+	return &Driver{opts: opts, boot: hex.EncodeToString(nonce[:]), projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, recorded: map[string]Checkout{}, controlTimeout: 2 * time.Minute}, nil
+}
+
+// Reattach makes a workflow workspace's checkout, prepared by an earlier process, the one its
+// sessions start on: Node resolves it from its clone execution in its own ledger, also on a new
+// Node incarnation, so its files and uncommitted edits stay and nothing is cloned again. Callers
+// reattach before any session of the workspace starts; a checkout this process already prepared
+// for the workspace wins.
+func (d *Driver) Reattach(workspaceID, cloneExecution, path string) {
+	if workspaceID == "" || cloneExecution == "" || path == "" {
+		return
+	}
+	d.mu.Lock()
+	d.recorded[workspaceID] = Checkout{Path: path, CloneExecution: cloneExecution}
+	d.mu.Unlock()
 }
 
 // Run executes the admitted turn. Normal Append reuses its original live Agent conversation. A
@@ -189,6 +213,9 @@ func (d *Driver) run(ctx context.Context, scope execution.Scope, session executi
 	call, fresh, err := a.begin(turn.Ref.TurnID, emit)
 	if err != nil {
 		a.commandMu.Unlock()
+		if errors.Is(err, execution.ErrNodeLost) {
+			return failed(execution.FailureNodeLost), err
+		}
 		return failed("agent_session_unavailable"), err
 	}
 	if fresh {
@@ -200,7 +227,15 @@ func (d *Driver) run(ctx context.Context, scope execution.Scope, session executi
 	err = a.submit(turn.Ref.TurnID, text, fresh)
 	a.commandMu.Unlock()
 	if err != nil {
-		a.fail("agent_dispatch_failed", err)
+		code := "agent_dispatch_failed"
+		select {
+		case <-a.project.dead:
+			// The Node died while the turn was being sent. Part of it may have arrived and run,
+			// so the turn counts as lost with its Node, not as one that never reached the Agent.
+			code = execution.FailureNodeLost
+		default:
+		}
+		a.fail(code, err)
 		a.requestEnd()
 	}
 	select {
