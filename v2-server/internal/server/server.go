@@ -36,6 +36,12 @@ type Store interface {
 	UserByEmail(ctx context.Context, email string) (store.User, error)
 	StartSession(ctx context.Context, userID string, ttl time.Duration) (string, error)
 	InviteMember(ctx context.Context, tenant string, in store.Invite) (store.Member, error)
+	CreateInviteLink(ctx context.Context, tenant, creator, squad string) (store.InviteLink, string, error)
+	ListInviteLinks(ctx context.Context, tenant string) ([]store.InviteLink, error)
+	RevokeInviteLink(ctx context.Context, tenant, id string) error
+	PreviewInvite(ctx context.Context, token, user string) (store.InvitePreview, error)
+	AcceptInvite(ctx context.Context, token, user string) (string, error)
+	RemoveMember(ctx context.Context, tenant, user string) error
 	Logout(ctx context.Context, token string) error
 	SessionUser(ctx context.Context, token string) (store.User, error)
 	Tenants(ctx context.Context, userID string) ([]store.Tenant, error)
@@ -139,6 +145,12 @@ func newRouter(h *handler) *router {
 	rt.session("GET /api/v1/me/tenants", h.tenants)
 	rt.tenant("GET /api/v1/tenants/{tid}/members", h.members)
 	rt.owner("POST /api/v2/tenants/{tid}/members", h.invite)
+	rt.owner("DELETE /api/v2/tenants/{tid}/members/{uid}", h.removeMember)
+	rt.owner("POST /api/v2/tenants/{tid}/invite-links", h.createInviteLink)
+	rt.owner("GET /api/v2/tenants/{tid}/invite-links", h.inviteLinks)
+	rt.owner("DELETE /api/v2/tenants/{tid}/invite-links/{id}", h.revokeInviteLink)
+	rt.session("POST /api/v1/invites/preview", h.previewInvite)
+	rt.session("POST /api/v1/invites/accept", h.acceptInvite)
 	rt.tenant("GET /api/v2/tenants/{tid}/skills", h.listSkills)
 	rt.tenant("POST /api/v2/tenants/{tid}/skills", h.createSkill)
 	rt.tenant("POST /api/v2/tenants/{tid}/skills/import", h.importSkill)

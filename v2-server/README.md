@@ -128,13 +128,23 @@ seed 在 [`demo/`](demo/README.md)：`env.go` 是上表和重置、准备本地 
 
 任务 Agent 会话分析的五个只读接口见上文「会话分析与模型请求观测」和 `dashboard.openapi.json`。
 
-### 成员邀请
+### 成员与邀请
 
-邀请接口不在正式契约里，由独立候选契约 [`members.openapi.json`](members.openapi.json) 描述（正式 Cloud 的成员写入收敛后替换）。
+登录不等于入队：没有加入任何工作区的账号登录后，页面显示「还没有加入团队」（A6 D4）。入队靠一次性邀请链接；开了邮箱登录时另有按邮箱邀请。这些接口不在正式契约里，由独立候选契约 [`members.openapi.json`](members.openapi.json) 描述（正式 Cloud 的成员写入收敛后替换）。
 
 | 路由 | 行为 |
 |---|---|
-| `POST /api/v2/tenants/{tid}/members` | 只有 owner 可以邀请：`email` 必填，`displayName` 选填（默认取邮箱 @ 前面的部分），`squadId` 选填（同时加入该小队，小队必须属于本工作区且未归档）。提交即创建账号并加入"演示团队"（角色 `member`），不需要对方接受；被邀请的邮箱随后可以直接登录。写权限不足 `403 forbidden`，已在团队 `409 member_exists`，小队不存在 `404 not_found` |
+| `POST /api/v2/tenants/{tid}/members` | 按邮箱邀请，**只在 `V2_LOGIN` 开了 `email` 时提供**，否则 `404 not_found`。只有 owner 可以邀请：`email` 必填，`displayName` 选填（默认取邮箱 @ 前面的部分），`squadId` 选填（同时加入该小队，小队必须属于本工作区且未归档）。提交即创建账号并加入"演示团队"（角色 `member`），不需要对方接受；被邀请的邮箱随后可以直接登录。写权限不足 `403 forbidden`，已在团队 `409 member_exists`，小队不存在 `404 not_found` |
+| `POST /api/v2/tenants/{tid}/invite-links` | owner 生成一条成员邀请链接，`squadId` 选填（同时加入该未归档小队，否则 `404 squad_not_found`）。令牌 256 位随机数，库里只存 SHA-256；7 天内有效、只能用一次。响应里的 `url` 是唯一一次出现令牌的地方：设置了 `V2_PUBLIC_URL` 时是绝对地址，否则是站内路径 `/invite/<令牌>` |
+| `GET /api/v2/tenants/{tid}/invite-links` | owner 查看还能用的链接（生成人、小队、过期时间）和已用的链接（使用人、时间）；过期或吊销且没人用过的不列；从不返回令牌 |
+| `DELETE /api/v2/tenants/{tid}/invite-links/{id}` | owner 吊销一条没用过的链接，`204`；已用 `409 invite_already_used`，不存在 `404 invite_not_found` |
+| `POST /api/v1/invites/preview` | 登录用户查看链接去向：`{state, tenant, squad, role, alreadyMember}`，`state` 为 `active` / `used` / `expired` / `revoked`；不改变任何状态。令牌放请求体，不进访问日志。未知令牌 `404 invite_not_found` |
+| `POST /api/v1/invites/accept` | 加入：一个事务里锁定链接、核对未用未过期未吊销、标为已用并记下使用人，按链接的角色加入工作区（选了小队且小队仍有效就同时加入），返回 `{tenantId}`。已是成员直接返回，链接不消耗。不可用 `410 invite_unavailable`（`params.reason`：`used` / `expired` / `revoked`） |
+| `DELETE /api/v2/tenants/{tid}/members/{uid}` | owner 把成员移出工作区：删除成员关系、结束他在本工作区小队里的编组（保留历史，小队 `version` 加一），账号保留、还能登录；下一个请求就看不到这个工作区。最后一个 owner `409 last_owner`，不是成员 `404 member_not_found` |
+
+**第一个管理员**：`v2-server admin-invite [-team <名称>]` 直连数据库（`V2_DATABASE_URL` 或 `-db`），确保这个工作区存在，写一条角色为 `owner`、24 小时有效、只能用一次的链接并打印，然后退出，不启动服务。库里只有一个工作区时可以省略 `-team`。HTTP 接口不能生成 `owner` 链接。这条命令也用来找回管理员（例如唯一的管理员离开）。第一个人打开链接加入时，新工作区会补上项目和 Agent 所需的默认空间。
+
+前端：`/invite/<令牌>` 页预览并「加入」（没有会话先登录，登录后回到这一页）；设置 / 小队的「成员与邀请」（只有 owner 看得到）里生成链接、吊销未用的链接、查看已用记录、移出成员（最后一个管理员不能移出）。
 
 升级已有数据库时，启动会软删除旧开发登录建出的 `dev/demo`「演示用户」，并按 `users.json` 的 `retired` 列表一次性软删除旧预置成员。这些账号的成员记录、小队与对话引用保留，但不再出现在成员页，也不能登录。它们在小队里的成员关系会在每次启动时结束；记录留在库里，但小队详情（包括「已退出」历史）不再列出这些账号，也不计入成员、维护者人数。软删除后账号不会恢复：再邀请同一邮箱返回 `409 user_unavailable`，把它重新写回 `users` 也只会更新名字，既不恢复登录，也不补发 starter skill；`retired` 的清理同样只执行一次，手动恢复的账号不会在下次启动时再被删除。
 

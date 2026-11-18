@@ -45,6 +45,13 @@ import (
 const defaultDatabase = "postgres://ora:ora-local@127.0.0.1:55432/ora_v2?sslmode=disable"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "admin-invite" {
+		if e := adminInvite(os.Args[2:], os.Stdout); e != nil {
+			slog.Error("admin-invite", "error", e)
+			os.Exit(1)
+		}
+		return
+	}
 	addr := flag.String("addr", envOr("V2_ADDR", "127.0.0.1:8090"), "listen address")
 	dbURL := flag.String("db", envOr("V2_DATABASE_URL", defaultDatabase), "PostgreSQL URL")
 	cleanup := flag.Bool("cleanup", false, "stop and remove owned conversation directories; retain repository mirrors and database history")
