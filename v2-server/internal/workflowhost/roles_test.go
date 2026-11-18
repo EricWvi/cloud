@@ -205,8 +205,8 @@ func TestInteractiveRoleLookupDatabaseErrorIsNotAutoRetryable(t *testing.T) {
 		t.Fatal("interactive Agent dispatch never started")
 	}
 	// Break v2_roles inside this test's isolated schema after StartRun's preflight passes so
-	// ResolveWorkflowRole hits a database query error inside runAgent.
-	if _, err := admin.Exec(ctx, `ALTER TABLE v2_roles RENAME TO v2_roles_broken`); err != nil {
+	// ResolveWorkflowRole hits a database query error inside runAgent without falling back to public.v2_roles.
+	if _, err := admin.Exec(ctx, `ALTER TABLE v2_roles RENAME COLUMN content TO broken_content`); err != nil {
 		close(proceed)
 		t.Fatal(err)
 	}
