@@ -49,7 +49,7 @@ var ownerLink = regexp.MustCompile(`(?m)^(\S*)/invite/([A-Za-z0-9_-]{43})$`)
 
 func TestAdminInvitePrintsAOneTimeOwnerLink(t *testing.T) {
 	db := adminInviteDatabase(t)
-	t.Setenv("V2_LOGIN", "")
+	t.Setenv("V2_LOGIN", "email")
 	t.Setenv("V2_PUBLIC_URL", "")
 	var out bytes.Buffer
 	if err := adminInvite([]string{"-db", db}, &out); err == nil || !strings.Contains(err.Error(), "-team") {
@@ -88,7 +88,7 @@ func TestAdminInviteChecksConfigurationFirst(t *testing.T) {
 	if err := adminInvite([]string{"-db", "invalid database URL", "-team", "x"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "V2_LOGIN") {
 		t.Fatalf("unknown login = %v", err)
 	}
-	t.Setenv("V2_LOGIN", "")
+	t.Setenv("V2_LOGIN", "email")
 	if err := adminInvite([]string{"-db", "invalid database URL", "extra"}, &bytes.Buffer{}); err == nil {
 		t.Fatal("stray argument accepted")
 	}
