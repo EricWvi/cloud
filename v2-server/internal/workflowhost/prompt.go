@@ -16,7 +16,6 @@ import (
 // already started in.
 const promptWorkspaceRoot = "."
 
-// agentPrompt is desktop's assemble_workflow_prompt (crates/backend/src/workflow/run/prompt.rs)
 // agentPrompt is desktop's assemble_workflow_prompt (crates/backend/src/workflow/run/prompt.rs).
 // The node's prompt is already rendered against the pool, roleContent is the role definition read
 // from the tenant's role catalog just before this attempt started (an empty content sends no

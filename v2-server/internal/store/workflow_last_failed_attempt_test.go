@@ -77,14 +77,23 @@ func TestLastFailedNodeAttemptIgnoresAFailureARetryRecovered(t *testing.T) {
 	if _, err := s.CompleteWorkflowNodeRun(ctx, tenant, run.ID, next.ID, store.WorkflowNodeResult{Output: &answer}); err != nil {
 		t.Fatal(err)
 	}
+	// Resuming soft-deletes the recovering success together with the failure; it still counts.
+	if err := s.ResumeWorkflowEngineRun(ctx, run.ID, func(store.WorkflowResumeState) ([]string, error) {
+		return []string{"agent-recovered"}, nil
+	}, func(payload []byte, _ []string) ([]byte, error) {
+		return payload, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	if found := findLastFailed(t, s, tenant, run.ID, "agent-recovered", nil); found != nil {
 		t.Fatalf("recovered failure %s still offered as the previous failure: %+v", failed.ID, found)
 	}
 }
 
-// Round 1 of a Loop must not inherit round 0's failure: the finder matches the iteration exactly,
-// including "no iteration at all" for a node outside any round.
+// Item 1 of an Iteration must not inherit item 0's failure: the finder matches the iteration index
+// exactly, including "no iteration at all" for a node outside any Iteration. Loop rounds carry no
+// index and are deliberately not told apart, as in desktop.
 func TestLastFailedNodeAttemptIsScopedToItsIteration(t *testing.T) {
 	s := storetest.Open(t)
 	user, tenant := storetest.Login(t, s, "last-failed-iteration")
