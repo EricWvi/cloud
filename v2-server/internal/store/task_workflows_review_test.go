@@ -545,3 +545,34 @@ func TestTaskWorkflowAssigneePolicy(t *testing.T) {
 		t.Fatalf("Agent-assigned member=%v", err)
 	}
 }
+
+func TestInterruptTaskRunInvalidatesWorkflowStatusRevision(t *testing.T) {
+	f, user, task, wid := reviewWorkflow(t)
+	id, _, err := f.store.CreateTaskWorkflowRun(f.ctx, store.NewTaskWorkflow{TenantID: f.tenant, TaskID: task.ID, UserID: user, Key: "interrupted", WorkflowID: wid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model an old overlapping Agent run and handling link to verify the status fence even
+	// when interruption is called independently of the boot sequence.
+	if _, err := f.db.Exec(f.ctx, `INSERT INTO v2_task_runs(task_id,tenant_id,started_by,start_key,executor_id,executor_name)
+		VALUES($1,$2,$3,'agent','test','test')`, task.ID, f.tenant, user); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(f.ctx, `UPDATE v2_tasks SET status='running' WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	var before, after int
+	if err := f.db.QueryRow(f.ctx, `SELECT status_revision FROM v2_task_workflow_runs WHERE run_id=$1`, id).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.InterruptTaskRuns(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.QueryRow(f.ctx, `SELECT status_revision FROM v2_task_workflow_runs WHERE run_id=$1`, id).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.store.Task(f.ctx, f.tenant, task.ID)
+	if err != nil || got.Status != store.TaskPending || after != before+1 {
+		t.Fatalf("interruption: status=%s, revision=%d to %d, err=%v", got.Status, before, after, err)
+	}
+}

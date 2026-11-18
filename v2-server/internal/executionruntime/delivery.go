@@ -23,16 +23,19 @@ type DeliveryFilesystem interface {
 func (s *Service) DeliveryEnabled() bool { return s.delivery != nil }
 
 const (
-	deliveryGitTimeout   = 2 * time.Minute
-	deliveryWriteTimeout = 10 * time.Second
+	deliveryGitTimeout    = 2 * time.Minute
+	deliveryWriteTimeout  = 10 * time.Second
+	deliveryWriteAttempts = 3
 )
 
-func retryDeliveryWrite(ctx context.Context, run func(context.Context) error) error {
-	for {
+// A zero attempt limit keeps live delivery pending while the service can retry.
+func retryDeliveryWrite(ctx context.Context, maxAttempts int, run func(context.Context) error) error {
+	for attempt := 1; ; attempt++ {
 		write, cancel := context.WithTimeout(ctx, deliveryWriteTimeout)
 		err := run(write)
 		cancel()
-		if err == nil || errors.Is(err, execution.ErrInvalidRequest) || errors.Is(err, execution.ErrNotFound) {
+		if err == nil || (maxAttempts > 0 && attempt >= maxAttempts) ||
+			errors.Is(err, execution.ErrInvalidRequest) || errors.Is(err, execution.ErrNotFound) || errors.Is(err, store.ErrNotFound) {
 			return err
 		}
 		select {
@@ -43,14 +46,24 @@ func retryDeliveryWrite(ctx context.Context, run func(context.Context) error) er
 	}
 }
 
+func (s *Service) stageDelivery(ctx context.Context, w *worker, result execution.Result) (execution.Result, error) {
+	w.terminalMu.Lock()
+	defer w.terminalMu.Unlock()
+	actual, err := s.db.StageDeliveryTerminal(ctx, w.scope, w.ref, result)
+	if err == nil {
+		w.staged = true
+	}
+	return actual, err
+}
+
 // finishDelivery keeps the execution worker and its admission slot until the record and public
 // terminal result commit. Capture time and the computed ref survive transient database failures.
-func (s *Service) finishDelivery(scope execution.Scope, ref execution.Ref, result execution.Result, agentErr error) (execution.Result, bool, error) {
+func (s *Service) finishDelivery(w *worker, result execution.Result, agentErr error) (execution.Result, bool, error) {
 	var work store.DeliveryWork
 	var enrolled bool
-	err := retryDeliveryWrite(s.ctx, func(ctx context.Context) error {
+	err := retryDeliveryWrite(s.ctx, 0, func(ctx context.Context) error {
 		var err error
-		work, err = s.db.DeliveryWork(ctx, ref)
+		work, err = s.readDeliveryWork(ctx, w.ref)
 		enrolled = err == nil
 		if errors.Is(err, store.ErrNotFound) {
 			return nil
@@ -60,17 +73,17 @@ func (s *Service) finishDelivery(scope execution.Scope, ref execution.Ref, resul
 	if err != nil || !enrolled {
 		return result, enrolled || err != nil, err
 	}
-	err = retryDeliveryWrite(s.ctx, func(ctx context.Context) error {
-		actual, err := s.db.StageDeliveryTerminal(ctx, scope, ref, result)
+	err = retryDeliveryWrite(s.ctx, 0, func(ctx context.Context) error {
+		actual, err := s.stageDelivery(ctx, w, result)
 		if errors.Is(err, execution.ErrInvalidRequest) && result.Status != execution.StatusFailed {
 			result.Status, result.FailureCode = execution.StatusFailed, "execution_failed"
-			actual, err = s.db.StageDeliveryTerminal(ctx, scope, ref, result)
+			actual, err = s.stageDelivery(ctx, w, result)
 		}
 		if err != nil {
 			return err
 		}
 		result = actual
-		work, err = s.db.DeliveryWork(ctx, ref)
+		work, err = s.readDeliveryWork(ctx, w.ref)
 		return err
 	})
 	if err != nil {
@@ -80,9 +93,9 @@ func (s *Service) finishDelivery(scope execution.Scope, ref execution.Ref, resul
 	// successful protocol terminal has no such ambiguity. Do not take a misleading snapshot.
 	unstable := false
 	if agentErr != nil && !result.NotStarted && !errors.Is(agentErr, execution.ErrSessionEnded) {
-		unstable = s.stopAgent(s.ctx, ref.SessionID) != nil
+		unstable = s.stopAgent(s.ctx, w.ref.SessionID) != nil
 	}
-	return result, true, s.publishDelivery(s.ctx, work, unstable)
+	return result, true, s.publishDelivery(s.ctx, work, unstable, 0)
 }
 
 func deliveryFailure(record store.DeliveryRecord, code, reason string) store.DeliveryRecord {
@@ -90,7 +103,7 @@ func deliveryFailure(record store.DeliveryRecord, code, reason string) store.Del
 	return record
 }
 
-func (s *Service) publishDelivery(ctx context.Context, work store.DeliveryWork, unstable bool) error {
+func (s *Service) publishDelivery(ctx context.Context, work store.DeliveryWork, unstable bool, maxAttempts int) error {
 	key := work.Workspace.Path
 	if key == "" {
 		key = work.WorkspaceID
@@ -105,9 +118,9 @@ func (s *Service) publishDelivery(ctx context.Context, work store.DeliveryWork, 
 	// authoritative and avoids creating an orphan during ordinary duplicate notifications.
 	var current store.DeliveryWork
 	var found bool
-	err := retryDeliveryWrite(ctx, func(ctx context.Context) error {
+	err := retryDeliveryWrite(ctx, maxAttempts, func(ctx context.Context) error {
 		var err error
-		current, err = s.db.DeliveryWork(ctx, work.Ref)
+		current, err = s.readDeliveryWork(ctx, work.Ref)
 		found = err == nil
 		if errors.Is(err, store.ErrNotFound) {
 			return nil
@@ -159,15 +172,53 @@ func (s *Service) publishDelivery(ctx context.Context, work store.DeliveryWork, 
 	if !validDeliveryBase(record.BaseCommit) {
 		record.BaseCommit = ""
 	}
-	return retryDeliveryWrite(ctx, func(ctx context.Context) error {
-		_, err := s.db.CommitTurnDelivery(ctx, work, record)
+	return retryDeliveryWrite(ctx, maxAttempts, func(ctx context.Context) error {
+		_, err := s.commitDelivery(ctx, work, record)
 		if errors.Is(err, store.ErrDeliveryWorkspaceChanged) {
 			// Leave an already created ref orphaned: it no longer describes the turn's binding.
 			record = deliveryFailure(store.DeliveryRecord{ID: newID(), BaseCommit: record.BaseCommit}, "workspace_unstable", "工作区状态无法确认")
-			_, err = s.db.CommitTurnDelivery(ctx, work, record)
+			_, err = s.commitDelivery(ctx, work, record)
 		}
 		return err
 	})
+}
+
+func (s *Service) recordUnavailableDelivery(ctx context.Context, work store.DeliveryWork) error {
+	base := work.Workspace.BaseCommit
+	if !validDeliveryBase(base) {
+		base = ""
+	}
+	record := deliveryFailure(store.DeliveryRecord{ID: newID(), BaseCommit: base}, execution.FailureDeliveryUnavailable, "无法保存本轮交付")
+	return retryDeliveryWrite(ctx, deliveryWriteAttempts, func(ctx context.Context) error {
+		_, err := s.commitDelivery(ctx, work, record)
+		return err
+	})
+}
+
+func (s *Service) finishUnavailableDelivery(w *worker, result execution.Result, cause error) (execution.Result, error) {
+	slog.Warn("turn delivery could not finalize", "turn", w.ref.TurnID, "error", cause)
+	result.Status, result.FailureCode = execution.StatusFailed, execution.FailureDeliveryUnavailable
+	var work store.DeliveryWork
+	var actual execution.Result
+	err := retryDeliveryWrite(s.ctx, deliveryWriteAttempts, func(ctx context.Context) error {
+		var err error
+		work, err = s.readDeliveryWork(ctx, w.ref)
+		if err != nil {
+			return err
+		}
+		actual, err = s.stageDelivery(ctx, w, result)
+		return err
+	})
+	if errors.Is(err, store.ErrNotFound) {
+		return result, cause // The ordinary execution path can finish a turn without delivery work.
+	}
+	if err == nil {
+		err = s.recordUnavailableDelivery(s.ctx, work)
+	}
+	if err != nil {
+		return result, errors.Join(cause, err)
+	}
+	return actual, nil
 }
 
 func validDeliveryBase(base string) bool {
@@ -184,12 +235,31 @@ func (s *Service) RecoverTurnDeliveries(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list interrupted turn deliveries: %w", err)
 	}
+	var failed error
 	for _, turn := range work {
 		budget, cancel := context.WithTimeout(ctx, deliveryGitTimeout+30*time.Second)
-		err := s.publishDelivery(budget, turn, false)
+		err := s.publishDelivery(budget, turn, false, deliveryWriteAttempts)
 		cancel()
-		if err != nil {
-			return fmt.Errorf("recover turn delivery %s: %w", turn.Ref.TurnID, err)
+		if err == nil {
+			continue
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		slog.Warn("interrupted turn delivery could not finalize", "turn", turn.Ref.TurnID, "error", err)
+		if fallback := s.recordUnavailableDelivery(ctx, turn); fallback != nil {
+			slog.Error("could not record interrupted turn delivery failure", "turn", turn.Ref.TurnID, "error", fallback)
+			failed = errors.Join(failed, fmt.Errorf("recover turn delivery %s: %w", turn.Ref.TurnID, errors.Join(err, fallback)))
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if failed != nil {
+		check, cancel := context.WithTimeout(ctx, deliveryWriteTimeout)
+		defer cancel()
+		if err := s.db.Ping(check); err != nil {
+			return errors.Join(failed, fmt.Errorf("delivery recovery database unavailable: %w", err))
 		}
 	}
 	return nil

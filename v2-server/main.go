@@ -86,7 +86,15 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	if e != nil || limit <= 0 {
 		return errors.New("V2_DELIVERY_MAX_OBJECT_BYTES must be a positive integer")
 	}
-	delivery, e := workspacefs.NewDeliveryFS(base, limit)
+	// The data-root lock excludes delivery writers from the previous process.
+	scratch := filepath.Join(base, "delivery-scratch")
+	if e := os.RemoveAll(scratch); e != nil {
+		return fmt.Errorf("clear delivery scratch: %w", e)
+	}
+	if e := os.Mkdir(scratch, 0700); e != nil {
+		return fmt.Errorf("create delivery scratch: %w", e)
+	}
+	delivery, e := workspacefs.NewDeliveryFS(scratch, limit)
 	if e != nil {
 		return e
 	}

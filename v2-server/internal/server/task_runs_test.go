@@ -180,16 +180,18 @@ func TestTaskRunDeliveryGatesReviewAndManualStatus(t *testing.T) {
 	client := f.taskClient()
 	client.login()
 	for _, tc := range []struct {
-		name    string
-		outcome store.DeliveryStatus
-		result  execution.Status
-		want    string
+		name       string
+		outcome    store.DeliveryStatus
+		result     execution.Status
+		want       string
+		stopIntent bool
 	}{
-		{"success", store.DeliveryDelivered, execution.StatusCompleted, store.TaskReview},
-		{"empty", store.DeliveryEmpty, execution.StatusCompleted, store.TaskReview},
-		{"execution failed", store.DeliveryEmpty, execution.StatusFailed, store.TaskReview},
-		{"delivery failed", store.DeliveryFailed, execution.StatusCompleted, store.TaskPending},
-		{"stopped", store.DeliveryEmpty, execution.StatusCancelled, store.TaskPending},
+		{"success", store.DeliveryDelivered, execution.StatusCompleted, store.TaskReview, false},
+		{"empty", store.DeliveryEmpty, execution.StatusCompleted, store.TaskReview, false},
+		{"execution failed", store.DeliveryEmpty, execution.StatusFailed, store.TaskReview, false},
+		{"delivery failed", store.DeliveryFailed, execution.StatusCompleted, store.TaskPending, false},
+		{"stopped", store.DeliveryEmpty, execution.StatusCancelled, store.TaskPending, false},
+		{"stop intent after completed delivery", store.DeliveryDelivered, execution.StatusCompleted, store.TaskPending, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			task, err := f.store.CreateTask(f.ctx, tid, user.ID, store.TaskInput{Title: tc.name, ProjectID: taskProjectID})
@@ -235,6 +237,11 @@ func TestTaskRunDeliveryGatesReviewAndManualStatus(t *testing.T) {
 			}
 			if _, err := f.store.CommitTurnDelivery(f.ctx, work, record); err != nil {
 				t.Fatal(err)
+			}
+			if tc.stopIntent {
+				if err := f.store.MarkTaskRunEnding(f.ctx, run.ID, store.TaskRunStopped); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if changed, err := f.store.SettleDeliveredTaskTurn(f.ctx, tid, task.ID, run.ID, ref.TurnID, string(tc.result), ""); err != nil || !changed {
 				t.Fatalf("settle: %v %v", changed, err)

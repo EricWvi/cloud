@@ -82,6 +82,7 @@ type stopCall struct {
 
 type worker struct {
 	terminalMu sync.Mutex
+	staged     bool
 	cancel     context.CancelFunc
 	done       chan struct{}
 	ref        execution.Ref
@@ -118,6 +119,8 @@ type Service struct {
 	concludeInterval  time.Duration
 	stopTimeout       time.Duration
 	readRetry         executionwait.Policy
+	readDeliveryWork  func(context.Context, execution.Ref) (store.DeliveryWork, error)
+	commitDelivery    func(context.Context, store.DeliveryWork, store.DeliveryRecord) (store.DeliveryRecord, error)
 	finishTurn        func(context.Context, execution.Scope, execution.Ref, execution.Result) (execution.Result, error)
 	// observerReadFailed, when set by a test before admission, observes actual
 	// failed SQL reads so an outage need not be paced by sleeps.
@@ -153,6 +156,7 @@ func New(ctx context.Context, cfg Config) (*Service, error) {
 	}
 	owned, cancel := context.WithCancel(ctx)
 	s := &Service{db: cfg.Store, models: models, agent: cfg.Agent, ctx: owned, cancel: cancel, delivery: cfg.Delivery, finishTurn: cfg.Store.FinishExecutionTurn,
+		readDeliveryWork: cfg.Store.DeliveryWork, commitDelivery: cfg.Store.CommitTurnDelivery,
 		finishRetryDelays: defaultFinishRetryDelays, concludeInterval: defaultConcludeInterval, stopTimeout: defaultStopTimeout,
 		workers: map[string]*worker{}, groups: map[string]string{}, workspaces: map[string]string{}, held: map[string]bool{}, recovering: map[string]bool{}, ending: map[string]bool{}, unsaved: map[string]pending{}, stops: map[string]*stopCall{}}
 	for _, r := range kept {
@@ -491,9 +495,7 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 					return execution.ErrInvalidRequest
 				}
 				if s.delivery != nil {
-					w.terminalMu.Lock()
-					defer w.terminalMu.Unlock()
-					_, err := s.db.StageDeliveryTerminal(write, scope, turn.Ref, *event.Result)
+					_, err := s.stageDelivery(write, w, *event.Result)
 					return err
 				}
 				_, err := s.db.FinishExecutionTurn(write, scope, turn.Ref, *event.Result)
@@ -572,10 +574,21 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		var err error
 		var finalized bool
 		if s.delivery != nil && session.Target != nil {
-			result, finalized, err = s.finishDelivery(scope, turn.Ref, result, agentErr)
-			if err != nil {
+			result, finalized, err = s.finishDelivery(w, result, agentErr)
+			if err != nil && s.ctx.Err() != nil {
 				finalErr = err
 				return // Keep the durable obligation for boot after shutdown.
+			}
+			if err != nil {
+				result, err = s.finishUnavailableDelivery(w, result, err)
+				finalized = err == nil
+				if err != nil {
+					// A delivery record could not be stored. The ordinary failure path still
+					// concludes execution and releases its task to pending.
+					agentErr = errors.Join(agentErr, err)
+					retry = false
+					result.AgentLost = true
+				}
 			}
 		}
 		if !finalized {
@@ -798,31 +811,42 @@ func (s *Service) Cancel(ctx context.Context, scope execution.Scope, ref executi
 	if session.Target != nil {
 		// Serialize with Append: a late retry for an already finished turn must not
 		// stop a newer turn. Once cancellation wins, no new turn can enter this session.
+		var staged bool
+		if s.delivery != nil {
+			work, workErr := s.readDeliveryWork(ctx, ref)
+			if workErr != nil && !errors.Is(workErr, store.ErrNotFound) {
+				return execution.Result{}, publicError(workErr)
+			}
+			staged = workErr == nil && work.Result != nil
+		}
 		s.mu.Lock()
 		w := s.workers[ref.TurnID]
 		if s.delivery != nil && w != nil {
+			// A stage may have committed after the read. Wait for it outside the global
+			// mutex, then read the public terminal again before deciding to stop.
+			s.mu.Unlock()
 			w.terminalMu.Lock()
+			s.mu.Lock()
+			staged = staged || w.staged
 		}
 		turn, err = s.readTurn(ctx, scope, ref)
-		var staged bool
-		if err == nil && turn.Result == nil && s.delivery != nil && w != nil {
-			work, workErr := s.db.DeliveryWork(ctx, ref)
-			staged = workErr == nil && work.Result != nil
-			if workErr != nil && !errors.Is(workErr, store.ErrNotFound) {
-				err = publicError(workErr)
-			}
-		}
 		if err == nil && turn.Result == nil && !staged {
 			s.ending[ref.SessionID] = true
 			if w != nil {
 				w.cancel()
 			}
 		}
+		s.mu.Unlock()
 		if s.delivery != nil && w != nil {
 			w.terminalMu.Unlock()
 		}
-		s.mu.Unlock()
-		if staged {
+		if err != nil {
+			return execution.Result{}, err
+		}
+		if turn.Result != nil {
+			return *turn.Result, nil
+		}
+		if staged && w != nil {
 			select {
 			case <-ctx.Done():
 				return execution.Result{}, ctx.Err()
@@ -835,12 +859,6 @@ func (s *Service) Cancel(ctx context.Context, scope execution.Scope, ref executi
 			if turn.Result == nil {
 				return execution.Result{}, execution.ErrStopUnconfirmed
 			}
-			return *turn.Result, nil
-		}
-		if err != nil {
-			return execution.Result{}, err
-		}
-		if turn.Result != nil {
 			return *turn.Result, nil
 		}
 		if err := s.End(ctx, scope, ref.SessionID); err != nil {

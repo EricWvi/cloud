@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 )
 
 // ScheduledTaskStartPrefix cannot occur in a client Idempotency-Key HTTP header.
@@ -381,13 +382,19 @@ func (s *Store) InterruptTaskRuns(ctx context.Context) ([]TaskRun, error) {
 			return fmt.Errorf("interrupt task runs: %w", e)
 		}
 		for _, r := range live {
-			if r.turnActive {
-				if _, e := tx.Exec(ctx, `UPDATE v2_tasks SET status='pending',version=version+1,updated_at=now()
-					WHERE tenant_id=$1 AND id=$2 AND status='running'`, r.TenantID, r.TaskID); e != nil {
+			if !r.turnActive {
+				continue
+			}
+			var status string
+			if e := tx.QueryRow(ctx, `SELECT status FROM v2_tasks WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, r.TenantID, r.TaskID).Scan(&status); e != nil {
+				return e
+			}
+			if status == TaskRunning {
+				if _, e := writeTaskStatus(ctx, tx, r.TaskID, TaskPending); e != nil {
 					return e
 				}
-				out = append(out, r)
 			}
+			out = append(out, r)
 		}
 		return nil
 	})
@@ -702,9 +709,23 @@ func (s *Store) SettleDeliveredTaskTurn(ctx context.Context, tenant, taskID, run
 			tenant_id=$1 AND source_kind='task' AND source_id=$2 AND turn_id=$3 AND session_id=$4`,
 			tenant, runID, turnID, session).Scan(&delivery)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrRunActive
-		}
-		if err != nil {
+			// The runtime can retain a terminal even when the delivery write itself fails.
+			// Only that failure may release a task without a delivery record.
+			if result != string(execution.StatusFailed) || failureCode != execution.FailureDeliveryUnavailable {
+				return ErrRunActive
+			}
+			var ended bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM v2_execution_turns
+				WHERE id=$1 AND session_id=$2 AND tenant_id=$3 AND ended_at IS NOT NULL
+				AND data#>>'{Result,Status}'=$4 AND data#>>'{Result,FailureCode}'=$5)`,
+				turnID, session, tenant, result, failureCode).Scan(&ended); err != nil {
+				return err
+			}
+			if !ended {
+				return ErrRunActive
+			}
+			delivery = DeliveryFailed
+		} else if err != nil {
 			return err
 		}
 		to := TaskReview

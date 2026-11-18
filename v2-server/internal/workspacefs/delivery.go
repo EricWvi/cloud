@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -257,6 +258,9 @@ func (s *DeliveryFS) Deliver(ctx context.Context, req DeliveryRequest) (Snapshot
 	if _, err := g.value(ctx, "read-tree", "--reset", base); err != nil {
 		return Snapshot{}, err
 	}
+	if err := checkDeliveryFileBytes(ctx, g, root, s.maxObjects); err != nil {
+		return Snapshot{}, err
+	}
 	if _, err := g.value(ctx, "add", "-A", "--", "."); err != nil {
 		return Snapshot{}, err
 	}
@@ -290,6 +294,56 @@ func (s *DeliveryFS) Deliver(ctx context.Context, req DeliveryRequest) (Snapshot
 	return Snapshot{Commit: commit}, nil
 }
 
+// checkDeliveryFileBytes rejects oversized worktree input before Git writes any blobs.
+func checkDeliveryFileBytes(ctx context.Context, g deliveryGit, root string, remaining int64) error {
+	tree, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer tree.Close()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := g.command(ctx, "ls-files", "-z", "-m", "-o", "--exclude-standard")
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	waited := false
+	defer func() {
+		if !waited {
+			cancel()
+			_ = cmd.Wait()
+		}
+	}()
+	reader := bufio.NewReader(out)
+	for {
+		name, err := reader.ReadString(0)
+		if err == io.EOF && name == "" {
+			waited = true
+			return cmd.Wait()
+		}
+		if err != nil {
+			return err
+		}
+		info, err := tree.Lstat(strings.TrimSuffix(name, "\x00"))
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			continue // Git lists tracked deletions as modifications.
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			if info.Size() > remaining {
+				return ErrDeliveryTooLarge
+			}
+			remaining -= info.Size()
+		}
+	}
+}
+
 func copyDeliveryExclude(root, scratch string) ([]byte, error) {
 	at, err := os.OpenRoot(root)
 	if errors.Is(err, os.ErrNotExist) {
@@ -300,14 +354,17 @@ func copyDeliveryExclude(root, scratch string) ([]byte, error) {
 	}
 	defer at.Close()
 	const exclude = ".git/info/exclude"
-	info, err := at.Stat(exclude)
-	if errors.Is(err, os.ErrNotExist) {
+	info, err := at.Lstat(exclude)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > MaxDiffBytes {
+	if !info.Mode().IsRegular() {
+		return nil, nil
+	}
+	if info.Size() > MaxDiffBytes {
 		return nil, errors.New("invalid workspace excludes")
 	}
 	file, err := at.Open(exclude)

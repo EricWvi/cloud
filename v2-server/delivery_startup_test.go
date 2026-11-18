@@ -89,6 +89,14 @@ func TestInterruptedTurnsDeliveredBeforeListener(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	stale := filepath.Join(root, "delivery-scratch", "delivery-interrupted", "objects")
+	if err := os.MkdirAll(stale, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "blob"), []byte("abandoned scratch object"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
 	t.Setenv("V2_DATA_DIR", root)
 	t.Setenv("V2_LOGIN", "email")
 	t.Setenv("V2_USERS_FILE", "users.json")
@@ -97,6 +105,10 @@ func TestInterruptedTurnsDeliveredBeforeListener(t *testing.T) {
 	t.Setenv("V2_PLUGIN_MARKETPLACE_URL", "")
 	checked := errors.New("first listener request checked")
 	err = runWithListener("127.0.0.1:0", dsn, false, false, true, func(srv *http.Server) error {
+		scratch, err := os.ReadDir(filepath.Join(root, "delivery-scratch"))
+		if err != nil || len(scratch) != 0 {
+			return fmt.Errorf("boot retained delivery scratch: %v, %v", scratch, err)
+		}
 		recorder := httptest.NewRecorder()
 		srv.Handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 		if recorder.Code != http.StatusOK {
