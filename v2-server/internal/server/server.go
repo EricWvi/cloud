@@ -324,9 +324,12 @@ func (h *handler) tenants(w http.ResponseWriter, r *http.Request, u store.User) 
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "nextCursor": ""})
 }
 
-// localPath keeps a post-login redirect on this origin.
+// localPath keeps a post-login redirect on this origin. Control characters are refused too:
+// browsers strip tabs and newlines from a Location, so "/\t/evil.example" would become
+// "//evil.example".
 func localPath(p string) string {
-	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.HasPrefix(p, "/\\") {
+	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.HasPrefix(p, "/\\") ||
+		strings.ContainsFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return "/"
 	}
 	return p

@@ -199,3 +199,15 @@ func TestRedirectLoginAttemptCookieOverHTTP(t *testing.T) {
 	}
 	// A plain-named cookie is not read at an https address, so a planted one is ignored there.
 }
+
+// returnTo goes into a server-side Location, so it must stay on this origin even with control
+// characters a browser would strip.
+func TestRedirectLoginKeepsReturnToOnThisOrigin(t *testing.T) {
+	f := newRedirectFixture(t, "https://ora.example.com")
+	for _, target := range []string{"/\t/evil.example", "/\n/evil.example", "//evil.example", "https://evil.example/"} {
+		state, attempt := f.start(target)
+		if res := f.back(url.Values{"code": {"c"}, "state": {state}}, attempt); res.Header.Get("Location") != "/" {
+			t.Fatalf("returnTo %q redirected to %q", target, res.Header.Get("Location"))
+		}
+	}
+}
