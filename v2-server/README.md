@@ -23,7 +23,7 @@ V2_LOGIN=email go run .                # 开发模式，监听 127.0.0.1:8090
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `V2_LOGIN` | 必填 | 开放的登录方式，逗号分隔，登录页按这个顺序显示；不设或为空拒绝启动（没有默认值，忘了配置的部署不会开出无密码的邮箱登录），开发写 `email`，`task v2:demo` 等入口已设好。本构建只提供 `email`（只凭邮箱登录，仅用于开发和演示）；写了未知、重复或空的项在任何数据操作前拒绝启动。`-fixture-check`、`-test-fixtures` 要求开了 `email` |
+| `V2_LOGIN` | 必填 | 开放的登录方式，逗号分隔，登录页按这个顺序显示；不设或为空拒绝启动（没有默认值，忘了配置的部署不会开出无密码的邮箱登录），开发写 `email`，`task v2:demo` 等入口已设好。可选 `email`（只凭邮箱登录，仅用于开发和演示）与 `huawei-idaas`（华为 IDaaS，配置见[部署说明](docs/deployment.md)）；写了未知、重复或空的项在任何数据操作前拒绝启动。`-fixture-check`、`-test-fixtures` 要求开了 `email` |
 | `V2_PUBLIC_URL` | 未设置 | 浏览器访问本服务的地址（`http`/`https`，只能是根地址，不带路径、查询串）。设置后，带会话 Cookie 的写请求只接受这个 origin；未设置时 `Origin` 须与请求的 Host 相同。是 `https` 时会话 Cookie 改名为 `__Host-ora_session` 并加 `Secure`。在会改写 Host 的反向代理后面必须设置它，否则 `Origin` 与 Host 对不上，所有写请求都会 `403`。开了 `email` 又是 `https` 时启动日志会警告 |
 | `V2_FRONTEND_DIR` | 未设置 | 前端构建目录；未设置保留 API-only |
 | `V2_ADDR` | `127.0.0.1:8090` | 监听地址 |
@@ -112,6 +112,7 @@ seed 在 [`demo/`](demo/README.md)：`env.go` 是上表和重置、准备本地 
 | `GET /healthz` | 契约 | 数据库可达即 `ok` |
 | `GET /auth/providers` | Gateway | `{"providers": [...]}`：`V2_LOGIN` 开放的登录方式，按配置顺序 |
 | `POST /auth/login` | Gateway | 邮箱登录：`email` 必须是预置文件或 owner 邀请过的账号，否则 `403 email_not_invited`，不会自动建用户；成功后设置会话 Cookie（`ora_session`，`V2_PUBLIC_URL` 为 https 时 `__Host-ora_session`），`authorizationUrl` 即 `returnTo`（只接受站内路径）。`V2_LOGIN` 没开的方式返回 `400 unknown_provider`；`Origin` 是别的站点时 `403 origin_mismatch`。只凭邮箱就能登录等于谁都能冒充谁，**仅用于演示环境** |
+| `GET /auth/callback/{provider}` | Gateway | 跳转式登录（`huawei-idaas`）回来的地址：核对只发往这个路径的 `ora_login` Cookie 里的登录尝试（内存里，10 分钟、只能用一次）和 `state`，向提供方换取身份，按 `source`+`subject`（IDaaS 为 `huawei-corp`+`uuid`）找或建账号、刷新显示名，签会话后 303 回到发起登录时的 `returnTo`。失败一律 303 到 `/?login_error=failed\|unavailable\|disabled`，日志只记步骤和对方错误码。`POST /auth/login` 对跳转式方式返回提供方的登录地址，`returnTo` 不出现在其中；回调地址只由 `V2_PUBLIC_URL` 得出 |
 | `POST /auth/logout` | Gateway | 吊销会话，`204`；`Origin` 是别的站点时 `403 origin_mismatch` |
 | `GET /api/v1/me` | 契约 | 当前用户；无会话 `401 unauthenticated`。契约禁止额外字段，当前用户的角色从 `GET /api/v1/me/tenants` 的 `role` 读取 |
 | `GET /api/v1/me/tenants` | 契约 | 当前用户所在租户，一页返回全部，`nextCursor` 为空 |
@@ -950,7 +951,7 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 ## 内网部署
 
 首次部署构建和长期安装/升级步骤见 [部署说明](docs/deployment.md)（[English](docs/deployment.en.md)）。
-开发启动设 `V2_LOGIN=email`，demo 与开发 task 已设置。本构建还不提供 IDaaS 登录，部署所需的 `V2_LOGIN` 取值在任何数据操作前拒绝启动，不会回落 email。`V2_FRONTEND_DIR` 指向前端构建目录，空值保留 API-only。
+开发启动设 `V2_LOGIN=email`，demo 与开发 task 已设置。部署设 `V2_LOGIN=huawei-idaas` 和 IDaaS 配置，第一个管理员用 `v2-server admin-invite` 生成链接，见部署说明。`V2_FRONTEND_DIR` 指向前端构建目录，空值保留 API-only。
 `V2_PLUGIN_MARKETPLACE_URL` 未设置保留开发默认，显式空字符串关闭官方同步和目录，保留自定义源；`V2_MARKET_CREDENTIAL_KEY` 同步保护自定义市场 S3/Git 凭据、租户 MCP 设置与私有项目仓库令牌。
 
 部署边界依据：[Cloud 单进程（A1）](https://github.com/ora-space/specs/blob/main/decisions/cloud/lifecycle/0-single-process-cloud-on-enterprise-intranet.md) 和[登录与会话（A6）](https://github.com/ora-space/specs/blob/main/decisions/cloud/login/0-idaas-or-email-login-with-shared-web-and-desktop-sessions.md)。

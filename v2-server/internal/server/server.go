@@ -16,6 +16,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/chat"
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/execution/executiontest"
+	"github.com/wanglongan587/cloud/v2-server/internal/login"
 	"github.com/wanglongan587/cloud/v2-server/internal/pluginmarket"
 	"github.com/wanglongan587/cloud/v2-server/internal/projectrepos"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
@@ -34,6 +35,7 @@ type Store interface {
 	ChangeMarket(context.Context, string, string, string, string, store.MarketSource) error
 	Ping(ctx context.Context) error
 	UserByEmail(ctx context.Context, email string) (store.User, error)
+	SignInExternal(ctx context.Context, source, subject, displayName string) (store.User, error)
 	StartSession(ctx context.Context, userID string, ttl time.Duration) (string, error)
 	InviteMember(ctx context.Context, tenant string, in store.Invite) (store.Member, error)
 	CreateInviteLink(ctx context.Context, tenant, creator, squad string) (store.InviteLink, string, error)
@@ -82,6 +84,9 @@ type Options struct {
 	SessionTTL time.Duration
 	// LoginProviders are the login methods V2_LOGIN offers, in display order; empty means email.
 	LoginProviders []string
+	// LoginRedirects implements every offered login method other than email, by name. Their
+	// callback is PublicURL + /auth/callback/<name>, so PublicURL must be set when any is offered.
+	LoginRedirects map[string]login.Provider
 	// PublicURL is the address browsers use for this server (V2_PUBLIC_URL). When set, it is the
 	// only origin cookie-authenticated writes accept, and an https address makes the session cookie
 	// Secure with the __Host- prefix. Nil compares Origin with the request's Host instead.
@@ -141,6 +146,7 @@ func newRouter(h *handler) *router {
 	rt.public("GET /auth/providers", h.providers)
 	rt.public("POST /auth/login", h.login)
 	rt.public("POST /auth/logout", h.logout)
+	rt.public("GET /auth/callback/{provider}", h.callback)
 	rt.session("GET /api/v1/me", h.me)
 	rt.session("GET /api/v1/me/tenants", h.tenants)
 	rt.tenant("GET /api/v1/tenants/{tid}/members", h.members)
@@ -268,6 +274,8 @@ type handler struct {
 	// patchSlots bounds how many delivery patches are built at once: each holds its whole patch,
 	// up to the cap, in memory plus a Git process.
 	patchSlots chan struct{}
+	// attempts holds the redirect logins in flight, between POST /auth/login and the callback.
+	attempts *loginAttempts
 }
 
 // newHandler makes omitted dependencies safe without inferring one interface from another.
@@ -283,7 +291,7 @@ func newHandler(s Store, o Options) *handler {
 	if lifetime == nil {
 		lifetime = context.Background()
 	}
-	h := &handler{store: s, opts: o, verdicts: newDecompositionVerdicts(lifetime), patchSlots: make(chan struct{}, maxConcurrentPatches)}
+	h := &handler{store: s, opts: o, verdicts: newDecompositionVerdicts(lifetime), patchSlots: make(chan struct{}, maxConcurrentPatches), attempts: newLoginAttempts()}
 	if cs, ok := s.(chat.Store); ok {
 		h.chats = chat.New(cs, o.Execution, o.Catalog, chat.Options{})
 	}

@@ -3,8 +3,8 @@
 [中文](deployment.md)
 
 Basis: [Single-process Cloud (A1)](https://github.com/ora-space/specs/blob/main/decisions/cloud/lifecycle/0-single-process-cloud-on-enterprise-intranet.md) D2/D5/D6 and [Login and sessions (A6)](https://github.com/ora-space/specs/blob/main/decisions/cloud/login/0-idaas-or-email-login-with-shared-web-and-desktop-sessions.md).
-This build does not provide IDaaS login. `V2_LOGIN=idaas` refuses startup before touching data;
-it is not a deployable release and must not fall back to email. Database migrations run
+A deployment offers only Huawei IDaaS login (`V2_LOGIN=huawei-idaas`), never email. IDaaS login is implemented
+but has not yet completed a real login against the intranet IDaaS; do not go live before it has. Database migrations run
 automatically at startup. Production deployment
 requires a version supporting the required capabilities and a verified HTTPS entrypoint.
 
@@ -45,12 +45,23 @@ version before migrations cannot be upgraded and startup refuses it; drop and re
 
 Keep configuration and secrets in protected process-manager configuration, outside the archive:
 
-- `V2_LOGIN=idaas`: the only deployment login. This build does not provide it and refuses startup.
+- `V2_LOGIN=huawei-idaas`: a deployment lists only this, never `email` (email login has no password, so knowing a member's address is enough to sign in as them).
   When `/auth/providers` does not list `email`, the frontend treats the install as a deployment and hides
   only the browser-only model-connections page; the workspace roles page and workflow role fields remain available.
-- `V2_PUBLIC_URL`: public HTTPS address, the root only, without a path (see "HTTPS ingress");
-  configure `V2_IDAAS_BASE_URL`, `V2_IDAAS_CLIENT_ID` and `V2_IDAAS_CLIENT_SECRET` as specified by A6.
-  This build does not yet support IDaaS login.
+- `V2_PUBLIC_URL`: the public HTTPS address browsers use, the root only, without a path (see "HTTPS ingress"); a path is refused at startup. The IDaaS callback is fixed at
+  `<V2_PUBLIC_URL>/auth/callback/huawei-idaas`, derived only from it and never from request headers; startup logs it, and it must
+  match the IDaaS application's registration exactly. Cookie-authenticated writes accept only this origin, and the session cookie is
+  `__Host-ora_session` (`Secure`). Invitation links are built from it too.
+- `V2_IDAAS_CLIENT_ID`, `V2_IDAAS_CLIENT_SECRET`: the IDaaS application's credentials; startup fails without either. Keep the secret in protected configuration only.
+- `V2_IDAAS_BASE_URL`: IDaaS origin, default `https://uniportal.huawei.com`; the test environment is `https://uniportal-beta.huawei.com`.
+- `V2_IDAAS_API`: which IDaaS endpoint set to call. Default `oauth2` (the set the integration guide and official samples use:
+  authorize with `display=page`, JSON token and userinfo requests, failures reported as an `errorCode` in the response);
+  `oauth2-v1` is the older `/oauth2/v1/` form endpoint set. Fix it once the site confirms which set works.
+- `V2_IDAAS_SCOPE`: default `base.profile`. `V2_IDAAS_DISPLAY_NAME_FIELD`: the userinfo field used as display name, default
+  `displayName` (`cn=张三, en=Zhang San` yields the Chinese name, else the English one; without the field the uuid is shown).
+- IDaaS console registration: authentication `client_secret_post`, PKCE off; the callback as logged at startup; request the
+  `displayName` user attribute (otherwise only the uuid is returned), optionally `uid` and `email`, not the phone number.
+  Cloud identifies people by `uuid` alone (account source `huawei-corp`).
 - `V2_DATABASE_URL`: dedicated PostgreSQL connection with required TLS and least privilege.
 - `V2_ADDR`: plain HTTP listener, default `127.0.0.1:8090`. Only the enterprise HTTPS ingress may
   connect; see "HTTPS ingress" for binding. v2-server does not terminate TLS itself. HTTPS is
@@ -73,9 +84,23 @@ Keep configuration and secrets in protected process-manager configuration, outsi
   existing conversations from continuing; notify users and start new conversations while retaining history.
 
 The launcher resolves `V2_FRONTEND_DIR` and `V2_NODE_ASSETS_DIR` relative to itself, checks archive
-contents and executes the server. Deployment startup must not use cleanup or fixture flags. It
-skips development presets, demo preparation and demo warming; this build blocks deployment startup
-because it does not provide IDaaS login.
+contents and executes the server. The fixture flags require email login and a deployment start refuses them. `-cleanup` is allowed: stop the service, then run
+`start.sh -cleanup` with the same configuration; it removes only registered, confirmed-stopped Node and conversation directories
+and keeps repository mirrors and database history. A deployment start skips development presets, demo preparation and demo warming.
+
+## First administrator
+
+A deployment database has no accounts. On the Cloud host, with the same environment as the service, run:
+
+```sh
+./bin/cloud admin-invite -team <team name>
+```
+
+It connects to the database, makes sure the team exists, writes a one-time administrator invitation valid for 24 hours, prints it
+(`<V2_PUBLIC_URL>/invite/<token>`) and exits without starting the server. The first person to open it, sign in with their Huawei
+account and click 加入 becomes the administrator, who then generates member links in Settings → Squads → 成员与邀请. `-team` may
+be omitted when exactly one team exists. Use the same command to recover when the only administrator has left. No HTTP route can
+create an administrator link.
 
 Install enterprise CAs in the host system trust store using your distribution's enterprise process.
 Git and Go HTTPS use system CAs. Never disable certificate verification.
@@ -85,10 +110,9 @@ Git and Go HTTPS use system CAs. Never disable certificate verification.
 HTTPS is terminated by the enterprise's existing ingress (gateway or reverse proxy). v2-server does
 not configure TLS and the offline package ships no reverse proxy: the IDaaS callback domain and
 certificate already belong to the enterprise ingress. v2-server serves plain HTTP on `V2_ADDR` and
-does not read forwarding headers such as `X-Forwarded-*`. The target version that provides IDaaS
-login takes its public address only from `V2_PUBLIC_URL`; when that is https, it adds `Secure` and
-the `__Host-` prefix to the session cookie and accepts cookie-authenticated writes only from that
-address. This build does none of this yet.
+does not read forwarding headers such as `X-Forwarded-*`. It takes its public address only from
+`V2_PUBLIC_URL`; when that is https, it adds `Secure` and the `__Host-` prefix to the session cookie
+and accepts cookie-authenticated writes only from that address.
 
 Ingress requirements:
 
@@ -96,12 +120,12 @@ Ingress requirements:
   added or stripped. Pages, `/api` and `/auth` are all served from the root and the frontend uses
   absolute paths starting with `/`, so the public address must be a root address (for example
   `https://ora.example.com`), not a path prefix. v2-server does not read `Host`, so rewriting it
-  does no harm. The target version checks cookie-authenticated writes against `Origin`, so the
+  does no harm. v2-server checks cookie-authenticated writes against `Origin`, so the
   ingress must not rewrite `Origin`.
-- Do not rewrite `Set-Cookie` (no added `Domain`, no changed `Path`): browsers refuse the target
-  version's `__Host-` cookies once either is changed, and sign-in does not stick.
+- Do not rewrite `Set-Cookie` (no added `Domain`, no changed `Path`): browsers refuse the
+  `__Host-` cookies once either is changed, and sign-in does not stick.
 - Route to a single v2-server process, with no load balancing across instances: v2-server is a
-  single-process service, and the target version keeps logins in progress in process memory.
+  single-process service, and it keeps logins in progress in process memory.
 - Do not buffer `text/event-stream` responses. Live updates for conversations, task runs, workflow runs
   and workflow nodes use SSE on paths ending in `/chat/conversations/{cid}/events`,
   `/tasks/{taskid}/runs/{rid}/events`, `/workflow-runs/{rid}/events` and
@@ -128,10 +152,9 @@ Ingress requirements:
   submitting a form or sending a node turn; skill and role create, update and import take 2 MiB,
   and the rest are smaller. Do not truncate bodies separately, or saving a large workflow or
   starting a run fails at the ingress.
-- IDaaS callback: the target version fixes the callback at
+- IDaaS callback: the callback is fixed at
   `<V2_PUBLIC_URL>/auth/callback/huawei-idaas`, derived only from `V2_PUBLIC_URL` and printed at
-  startup; the ingress must forward this path with its query string unchanged. This build does not
-  have the route yet.
+  startup; the ingress must forward this path with its query string unchanged.
 
 The hop from the ingress to `V2_ADDR` is unencrypted HTTP. Use HTTP/1.1 on this hop; v2-server does
 not speak cleartext HTTP/2 (h2c). When the ingress runs on the same host, bind `V2_ADDR` to
@@ -158,9 +181,8 @@ Before deployment, confirm and record with the enterprise network or gateway own
 
 ## First intranet acceptance
 
-Run the complete procedure only with a target version that provides IDaaS login,
-following that version's administrator bootstrap instructions. This build is for deployment
-preflight only and cannot go live. Email login or model fixtures cannot substitute for onsite acceptance.
+Email login or model fixtures cannot substitute for onsite acceptance. Administrator bootstrap is described in "First
+administrator" above.
 
 1. Prepare dedicated PostgreSQL and a persistent volume, a registered IDaaS application, an administrator
    and a second employee account, a real project, a working model connection, and an internal Git repository
@@ -179,8 +201,8 @@ preflight only and cannot go live. Email login or model fixtures cannot substitu
    JSON containing `"status":"ok"`. Run the same command from another intranet machine; it must time
    out or be refused. When the ingress shares the host, `ss -ltn` must list the port only as
    `127.0.0.1:<port>`.
-4. On the acceptance instance, migrate and bootstrap the IDaaS administrator according to the target
-   version's instructions, then invite the second employee to sign in and join the team. In a browser,
+4. On the acceptance instance, bootstrap the IDaaS administrator as described in "First administrator"
+   (database migrations run at startup), then invite the second employee to sign in and join the team. In a browser,
    open `V2_PUBLIC_URL` through the ingress and verify that web and `/api` share an origin, the Network
    panel's Protocol column shows `h2`, the IDaaS callback returns to the registered public HTTPS
    address, and the session cookie name has the `__Host-` prefix and the cookie has `Secure`,
