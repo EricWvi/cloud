@@ -427,3 +427,53 @@ func TestFirstTurnLostWithItsNodeEndsTheSession(t *testing.T) {
 	}
 	t.Fatal("the session stayed open after its first turn was lost")
 }
+
+func TestSessionThatIsNotHeldEndsWhenItsNodeIsLost(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	if err := f.service.Close(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	agent := &recoveryAgent{}
+	var err error
+	if f.service, err = New(f.ctx, Config{Store: f.db, Models: f.models, Agent: agent}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.CreateProject(f.ctx, f.scope, store.Project{ID: "project", Name: "Demo", RepositoryURL: "https://example.com/demo.git", Commit: "fixed", MirrorPath: "/fake/unused"}); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := f.service.Start(f.ctx, f.scope, execution.StartRequest{Caller: execution.Caller{Kind: execution.CallerChat, ID: "conversation", AttemptID: "first"},
+		Target: execution.Target{ProjectID: "project"}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("第一轮")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitResult(t, f, ref)
+
+	// A conversation's Node is gone before its second turn reaches the Agent. Only a held session
+	// is continued on a new Agent; this one ends as before, and the turn is not run again.
+	agent.mu.Lock()
+	agent.results = []execution.Result{{Status: execution.StatusFailed, FailureCode: execution.FailureNodeLost, AgentLost: true}}
+	agent.errs = []error{execution.ErrNodeLost}
+	runs := len(agent.runs)
+	agent.mu.Unlock()
+	next, err := f.service.Append(f.ctx, f.scope, execution.AppendRequest{SessionID: ref.SessionID, Caller: execution.Caller{Kind: execution.CallerChat, ID: "conversation", AttemptID: "second"}, Prompt: execution.TextPrompt("第二轮")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := awaitResult(t, f, next); r.Status != execution.StatusFailed || r.FailureCode != execution.FailureNodeLost || !r.AgentLost {
+		t.Fatalf("conversation turn after its Node was lost = %+v, want it failed with the session's Agent lost", r)
+	}
+	agent.mu.Lock()
+	ran := agent.runs[runs:]
+	agent.mu.Unlock()
+	if len(ran) != 1 || ran[0].Recovery != nil {
+		t.Fatalf("runs after the Node was lost = %+v, want the one lost attempt and no new Agent", ran)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if session, err := f.db.ReadExecutionSession(f.ctx, f.scope, ref.SessionID); err == nil && session.EndedAt != nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the conversation's session stayed open after its Node was lost")
+}

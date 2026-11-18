@@ -40,6 +40,8 @@ type fakeNodeIPC struct {
 	seq               map[string]uint64
 	hook              func(*fakeNodeIPC, node.Message) bool
 	missingCapability atomic.Pointer[string]
+	// failSend, when set, fails the write of the commands it returns an error for.
+	failSend atomic.Pointer[func(node.Message) error]
 }
 
 func (f *fakeNodeIPC) Supports(capability string) bool {
@@ -78,6 +80,11 @@ func (f *fakeNodeIPC) Ack(ctx context.Context, m node.Message) error {
 	}
 }
 func (f *fakeNodeIPC) Send(ctx context.Context, m node.Message) error {
+	if fail := f.failSend.Load(); fail != nil {
+		if err := (*fail)(m); err != nil {
+			return err
+		}
+	}
 	select {
 	case <-f.closed:
 		return net.ErrClosed

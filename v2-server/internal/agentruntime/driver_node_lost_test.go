@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"sync"
 	"testing"
 
@@ -24,6 +25,79 @@ func runWorkflowTurn(h *ipcHarness, ctx context.Context, session execution.Sessi
 		done <- ipcRunOutcome{result, err}
 	}()
 	return done
+}
+
+// startedSession runs a workflow session's first turn to its answer and returns its Node and
+// project.
+func startedSession(t *testing.T, h *ipcHarness, ctx context.Context, session execution.Session) (*fakeNodeIPC, *projectRuntime) {
+	t.Helper()
+	done := runWorkflowTurn(h, ctx, session, "first")
+	f := receiveIPC(t, h.created)
+	f.finishTurn(t, nextIPCCommand(t, f, "start_agent_session"), "first", "ready")
+	if got := receiveIPC(t, done); got.err != nil {
+		t.Fatalf("first turn: %+v", got)
+	}
+	h.driver.mu.Lock()
+	p := h.driver.projects["project"]
+	h.driver.mu.Unlock()
+	return f, p
+}
+
+// sentCommand reports whether a command of kind is waiting in f's sent queue.
+func sentCommand(f *fakeNodeIPC, kind string) bool {
+	for {
+		select {
+		case m := <-f.sent:
+			if m.Type == kind {
+				return true
+			}
+		default:
+			return false
+		}
+	}
+}
+
+// A turn that finds its Node already gone reports ErrNodeLost: nothing was sent, so the execution
+// service may hand the same turn to a new Agent.
+func TestDriverIPCTurnAfterItsNodeDiedReportsTheNodeLost(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	session := h.session("held", "run-workspace")
+	f, p := startedSession(t, h, ctx, session)
+	_ = f.Close()
+	receiveIPC(t, p.dead)
+
+	got := receiveIPC(t, runWorkflowTurn(h, ctx, session, "second"))
+	if !errors.Is(got.err, execution.ErrNodeLost) || got.result.Status != execution.StatusFailed || got.result.FailureCode != execution.FailureNodeLost {
+		t.Fatalf("turn after the Node died = %+v, want ErrNodeLost with %s", got, execution.FailureNodeLost)
+	}
+	if sentCommand(f, "submit_user_turn") {
+		t.Fatal("a turn was sent to a dead Node")
+	}
+}
+
+// A Node that dies while a turn is being written may have received it: the turn fails with its
+// Node but never reports ErrNodeLost, so it is not run again on a new Agent.
+func TestDriverIPCTurnSentAsItsNodeDiesIsNotReportedUnsent(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	session := h.session("held", "run-workspace")
+	f, p := startedSession(t, h, ctx, session)
+	fail := func(m node.Message) error {
+		if m.Type != "submit_user_turn" {
+			return nil
+		}
+		// The connection breaks during the write: the Node is dead before its sessions are failed.
+		p.deadOnce.Do(func() { close(p.dead) })
+		return net.ErrClosed
+	}
+	f.failSend.Store(&fail)
+
+	got := receiveIPC(t, runWorkflowTurn(h, ctx, session, "second"))
+	if errors.Is(got.err, execution.ErrNodeLost) || got.err == nil || got.result.Status != execution.StatusFailed || got.result.FailureCode != execution.FailureNodeLost {
+		t.Fatalf("turn whose write failed as its Node died = %+v, want %s without ErrNodeLost", got, execution.FailureNodeLost)
+	}
+	_ = f.Close()
 }
 
 // A reattached checkout whose clone execution Node no longer knows is gone for Node: the session
