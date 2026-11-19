@@ -291,12 +291,14 @@ describe('RunNodeSessionActions', () => {
     const shown = view({})
     await sendFromComposer('再改一版')
     // The session ended underneath the message (or the refusal ended it), so there is nowhere to
-    // send it again: the notice says both and points to resuming from the failure.
+    // send it again: the notice says both and offers both ways on, completing with the previous
+    // answer or resuming from the failure.
     shown.show({ session: { ...parked, sent: 1, sessionEnded: true, lastTurnError: 'not_delivered' } })
     const notice = screen.getByRole('status').textContent ?? ''
     expect(notice).toContain(zh['workflowRun.v2.interactive.undeliveredEnded'])
     expect(notice).toContain('未送达')
     expect(notice).toContain('会话也已结束')
+    expect(notice).toContain('用上一轮的回答完成这一步')
     expect(notice).toContain('从失败处继续')
     // The notice already says the session ended; the generic line does not repeat it.
     expect(screen.queryByText(zh['workflowRun.v2.interactive.sessionEnded'])).toBeNull()
