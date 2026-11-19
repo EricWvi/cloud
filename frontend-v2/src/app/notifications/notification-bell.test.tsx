@@ -10,7 +10,9 @@ import { routes } from '../routes'
 import { notificationText } from './notification-text'
 
 const tenantId = '00000000-0000-4000-8000-0000000000aa'
-const inbox = `/api/v2/tenants/${tenantId}/notifications`
+// The app's query cache outlives a test; a test that needs a cold inbox uses another workspace.
+let workspace = tenantId
+const inboxOf = (tid: string) => `/api/v2/tenants/${tid}/notifications`
 
 const notice = (over: Partial<Notification>): Notification => ({
   id: 'n1', kind: 'assigned', taskId: 't1', taskTitle: '修登录页', taskStatus: 'pending',
@@ -34,6 +36,7 @@ describe('notification bell', () => {
       notice({ id: 'n3', kind: 'review', taskId: 't3', taskTitle: '旧任务', actorId: null, actorName: null, readAt: '2026-11-18T00:00:00Z' }),
     ]
     reads = []
+    workspace = tenantId
     inboxStatus = 200
     pageSize = 30
     inboxReads = []
@@ -55,10 +58,10 @@ describe('notification bell', () => {
     seen = fakeBackend((c) => {
       if (c.url === '/api/v1/me') return { status: 200, data: demoUser }
       if (c.url === '/api/v1/me/tenants') {
-        return { status: 200, data: { items: [{ id: tenantId, name: '演示团队', status: 'active', role: 'member' }], nextCursor: '' } }
+        return { status: 200, data: { items: [{ id: workspace, name: '演示团队', status: 'active', role: 'member' }], nextCursor: '' } }
       }
-      if (c.url === inbox && c.method === 'get') return readInbox(c.params as { cursor?: string } | undefined)
-      if (c.url === `${inbox}/read`) {
+      if (c.url === inboxOf(workspace) && c.method === 'get') return readInbox(c.params as { cursor?: string } | undefined)
+      if (c.url === `${inboxOf(workspace)}/read`) {
         const body = JSON.parse(c.data as string) as { ids?: string[]; all?: boolean }
         reads.push(body)
         items = items.map(n => (body.all || body.ids?.includes(n.id)) && !n.readAt ? { ...n, readAt: '2026-11-19T03:00:00Z' } : n)
@@ -93,7 +96,8 @@ describe('notification bell', () => {
     const router = renderAt('/')
     await userEvent.click(await screen.findByRole('button', { name: '提醒，2 条未读' }))
     await userEvent.click(within(await screen.findByRole('list', { name: '提醒列表' })).getByRole('button', { name: /修登录页/ }))
-    await waitFor(() => expect(router.state.location.pathname).toBe('/collaboration/tasks/t1'))
+    // The task page is a lazy chunk; its first load can take over a second on a cold machine.
+    await waitFor(() => expect(router.state.location.pathname).toBe('/collaboration/tasks/t1'), { timeout: 8000 })
     expect(reads).toEqual([{ ids: ['n1'] }])
     expect(await screen.findByRole('button', { name: '提醒，1 条未读' })).toBeInTheDocument()
   })
@@ -102,7 +106,7 @@ describe('notification bell', () => {
     const router = renderAt('/')
     await userEvent.click(await screen.findByRole('button', { name: '提醒，2 条未读' }))
     await userEvent.click(within(await screen.findByRole('list', { name: '提醒列表' })).getByRole('button', { name: /旧任务/ }))
-    await waitFor(() => expect(router.state.location.pathname).toBe('/collaboration/tasks/t3'))
+    await waitFor(() => expect(router.state.location.pathname).toBe('/collaboration/tasks/t3'), { timeout: 8000 })
     expect(reads).toEqual([])
   })
 
@@ -129,7 +133,7 @@ describe('notification bell', () => {
     expect(within(list).queryByText('很早的未读')).not.toBeInTheDocument()
     await userEvent.click(within(list).getByRole('button', { name: '加载更多' }))
     await userEvent.click(await within(list).findByRole('button', { name: /很早的未读/ }))
-    await waitFor(() => expect(router.state.location.pathname).toBe('/collaboration/tasks/t9'))
+    await waitFor(() => expect(router.state.location.pathname).toBe('/collaboration/tasks/t9'), { timeout: 8000 })
     expect(reads).toEqual([{ ids: ['old'] }])
   })
 
@@ -360,12 +364,22 @@ describe('notification bell', () => {
     act(() => focusManager.setFocused(undefined))
   })
 
+  it('still shows the bell when the first read fails, and says the list could not load', async () => {
+    inboxStatus = 503
+    workspace = '00000000-0000-4000-8000-0000000000bb'
+    renderAt('/')
+    // The default three retries (1 s, 2 s, 4 s) run before the read fails for good.
+    const bell = await screen.findByRole('button', { name: '提醒' }, { timeout: 12_000 })
+    await userEvent.click(bell)
+    expect(await screen.findByText('提醒加载失败')).toBeInTheDocument()
+  }, 20_000)
+
   it('says so when there is nothing', async () => {
     items = []
     renderAt('/')
     await userEvent.click(await screen.findByRole('button', { name: '提醒' }))
     expect(await screen.findByText('暂无提醒')).toBeInTheDocument()
-    expect(seen).toContain(`GET ${inbox}`)
+    expect(seen).toContain(`GET ${inboxOf(workspace)}`)
   })
 })
 

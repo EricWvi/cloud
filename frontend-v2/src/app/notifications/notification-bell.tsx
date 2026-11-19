@@ -27,6 +27,7 @@ type InboxPage = NotificationList & { denied?: true }
 type Older = InfiniteData<InboxPage, string>
 
 const deniedPage: InboxPage = { items: [], unread: 0, nextCursor: '', denied: true }
+const emptyPage: InboxPage = { items: [], unread: 0, nextCursor: '' }
 
 /**
  * The server no longer lets the caller read this workspace's inbox (removed from the team). The
@@ -77,9 +78,11 @@ export function NotificationBell() {
     refetchInterval: POLL_MS,
   })
   // The newest page keeps polling here, so the bell comes back if access does. The list below is
-  // unmounted meanwhile: whether it was open and what it had paged through are gone with it.
-  if (!tenantId || !newest.data || newest.data.denied) return null
-  return <NotificationPanel tenantId={tenantId} newest={newest.data} newestFailed={newest.isError} />
+  // unmounted meanwhile: whether it was open and what it had paged through are gone with it. A first
+  // read that failed for another reason still shows the bell, whose list says it could not load.
+  const page = newest.data ?? (newest.isError ? emptyPage : undefined)
+  if (!tenantId || !page || page.denied) return null
+  return <NotificationPanel tenantId={tenantId} newest={page} newestFailed={newest.isError} />
 }
 
 function NotificationPanel({ tenantId, newest, newestFailed }: { tenantId: string; newest: InboxPage; newestFailed: boolean }) {
