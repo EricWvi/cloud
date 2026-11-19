@@ -41,7 +41,8 @@ type deliverableCheckout struct {
 }
 
 // maxDigestBytes bounds the content one deliverable digest reads; a larger file cannot be judged.
-const maxDigestBytes = 64 << 20
+// Tests lower it.
+var maxDigestBytes int64 = 64 << 20
 
 // checkoutOf is the checkout a run's Agent nodes share, with its project's mirror.
 func (h *Host) checkoutOf(ctx context.Context, tenant, runID string) (deliverableCheckout, error) {

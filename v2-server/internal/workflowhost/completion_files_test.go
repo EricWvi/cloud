@@ -81,7 +81,7 @@ func declarations(t *testing.T, specs ...string) []workflow.CompletionFile {
 	return files
 }
 
-func lower(t *testing.T, bound *int, to int) {
+func lower[T int | int64](t *testing.T, bound *T, to T) {
 	t.Helper()
 	was := *bound
 	*bound = to
@@ -329,5 +329,23 @@ func TestTheBaseCommitBlobIsComparedAsStored(t *testing.T) {
 	blockers, _ := h.fileBlockers(t.Context(), "", "", declarations(t, "out/*.md!"), &fileBaseline{Source: baselineCommit})
 	if !reflect.DeepEqual(blockers, []completionBlocker{fileBlocker(blockerFileUnchanged, "out/*.md")}) {
 		t.Fatalf("an untouched file = %v, want file_unchanged", blockers)
+	}
+}
+
+// A file the digest bound leaves unread is never judged unchanged against the base commit: a new
+// or changed deliverable past the bound, at an exact path or matched by a glob, is
+// file_check_unavailable.
+func TestAFileTooLargeToDigestIsNotJudgedUnchanged(t *testing.T) {
+	r := newCheckoutRepo(t, map[string]string{"out/a.md": "small"})
+	base := r.git("rev-parse", "HEAD")
+	h := r.host(base)
+	lower(t, &maxDigestBytes, 8)
+	r.write("dist/app.bin", "a new file past the bound")
+	r.write("out/a.md", "changed past the bound")
+	for _, decl := range []string{"dist/app.bin!", "out/*.md!"} {
+		blockers, warnings := h.fileBlockers(t.Context(), "", "", declarations(t, decl), &fileBaseline{Source: baselineCommit})
+		if len(blockers) != 0 || !reflect.DeepEqual(warnings, []string{warningFileCheck}) {
+			t.Fatalf("%s: %v %v, want file_check_unavailable and no blocker", decl, blockers, warnings)
+		}
 	}
 }

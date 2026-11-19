@@ -180,8 +180,12 @@ func changedSince(ctx context.Context, at deliverableCheckout, f workflow.Comple
 				return false, false
 			}
 			after, err := fileDigest(at.Path, path)
-			if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
 				continue // gone since the listing
+			}
+			if err != nil {
+				// Unread (too large, unreadable): missing data never judges a file unchanged.
+				return false, false
 			}
 			if before != after {
 				return true, true
