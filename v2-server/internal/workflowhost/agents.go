@@ -798,8 +798,8 @@ func (h *Host) resolveExecutor(scope execution.Scope, cfg workflow.AgentConfig) 
 // outlasts it, or any other error that says nothing about this node, is returned to abort startup
 // like a session that cannot be read, leaving the row for the next start. A verdict fails the node
 // as before the restart: an executor the catalog no longer offers, or a catalog that has nothing
-// for the run's scope (ErrNotFound, such as for a starter who left the workspace), which would
-// otherwise abort every later start on the same row.
+// for the run's scope (ErrNotFound; today's catalog ignores the scope and never returns it, the
+// branch is for a scoped catalog), which would otherwise abort every later start on the same row.
 func (h *Host) recoveredExecutor(ctx context.Context, scope execution.Scope, cfg workflow.AgentConfig) (resolvedExecutor, *workflow.Failure, error) {
 	if cfg.AgentCLI == "" {
 		return resolvedExecutor{}, &workflow.Failure{Kind: workflow.FailureMissingAgentRef, Message: "the node selects no Agent"}, nil
