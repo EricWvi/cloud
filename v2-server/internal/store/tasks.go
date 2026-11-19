@@ -235,7 +235,9 @@ func lockTask(ctx context.Context, tx pgx.Tx, tenant, id string, version int64) 
 }
 
 // writeTaskStatus applies a transition that the caller already validated and returns the row.
-func writeTaskStatus(ctx context.Context, tx pgx.Tx, id, status string) (Task, error) {
+// Reaching 待验收 notifies the task's creator unless actor, the person making the move, is them;
+// actor is empty when a run makes it.
+func writeTaskStatus(ctx context.Context, tx pgx.Tx, id, status, actor string) (Task, error) {
 	// Only status writers revoke handling ownership. Metadata edits and reassignment must not
 	// interfere with run settlement; an internal status cycle must invalidate the old admission.
 	if _, err := tx.Exec(ctx, `UPDATE v2_task_workflow_runs SET status_revision=status_revision+1 WHERE task_id=$1 AND status='running'`, id); err != nil {
@@ -246,7 +248,11 @@ func writeTaskStatus(ctx context.Context, tx pgx.Tx, id, status string) (Task, e
 		WHERE id = $1`, id, status); e != nil {
 		return Task{}, fmt.Errorf("update task status: %w", e)
 	}
-	return scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` `+taskJoins+` WHERE t.id = $1`, id))
+	task, e := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` `+taskJoins+` WHERE t.id = $1`, id))
+	if e != nil || status != TaskReview {
+		return task, e
+	}
+	return task, notifyReview(ctx, tx, task.TenantID, task.ID, task.CreatedBy, actor, task.Version)
 }
 
 // Tasks lists the workspace's tasks, most recently changed first.
@@ -317,7 +323,10 @@ func (s *Store) CreateTask(ctx context.Context, tenant, user string, in TaskInpu
 		task, e := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` `+taskJoins+`
 			WHERE t.id = $1`, taskID))
 		out = task
-		return e
+		if e != nil || in.Assignee == nil {
+			return e
+		}
+		return notifyAssigned(ctx, tx, tenant, taskID, user, *in.Assignee, task.Version)
 	})
 	return out, e
 }
@@ -375,7 +384,7 @@ func (s *Store) SetTaskStatus(ctx context.Context, a Access, id, status string, 
 		if !CanTransitionTask(task.Status, status) {
 			return ErrInvalidTransition
 		}
-		task, e = writeTaskStatus(ctx, tx, id, status)
+		task, e = writeTaskStatus(ctx, tx, id, status, a.UserID)
 		out = task
 		return e
 	})
@@ -398,7 +407,7 @@ func (s *Store) TransitionTaskStatus(ctx context.Context, tenant, id, from, to s
 		if !CanRunTransitionTask(from, to) {
 			return ErrInvalidTransition
 		}
-		task, e = writeTaskStatus(ctx, tx, id, to)
+		task, e = writeTaskStatus(ctx, tx, id, to, "")
 		out = task
 		return e
 	})
@@ -406,11 +415,13 @@ func (s *Store) TransitionTaskStatus(ctx context.Context, tenant, id, from, to s
 }
 
 // SetTaskAssignee replaces or clears the typed assignee under a version check. Assigning a squad
-// puts the task in front of every member; none of them is picked for it.
-func (s *Store) SetTaskAssignee(ctx context.Context, tenant, id string, ref *TaskAssigneeRef, version int64) (Task, error) {
+// puts the task in front of every member; none of them is picked for it. A new assignee is
+// notified unless actor, the person assigning, is them; re-sending the same assignee is not new.
+func (s *Store) SetTaskAssignee(ctx context.Context, tenant, id, actor string, ref *TaskAssigneeRef, version int64) (Task, error) {
 	var out Task
 	e := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if _, e := lockTask(ctx, tx, tenant, id, version); e != nil {
+		before, e := lockTask(ctx, tx, tenant, id, version)
+		if e != nil {
 			return e
 		}
 		var kind, assignee string
@@ -427,7 +438,10 @@ func (s *Store) SetTaskAssignee(ctx context.Context, tenant, id string, ref *Tas
 		}
 		task, e := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` `+taskJoins+` WHERE t.id = $1`, id))
 		out = task
-		return e
+		if e != nil || ref == nil || (before.Assignee != nil && before.Assignee.Type == ref.Type && before.Assignee.ID == ref.ID) {
+			return e
+		}
+		return notifyAssigned(ctx, tx, tenant, id, actor, *ref, task.Version)
 	})
 	return out, e
 }

@@ -154,7 +154,7 @@ func testPersonalTask(t *testing.T, lost bool) {
 	if e != nil || review.Reason != "task_no_longer_actionable" || review.ExecutionRef != "" {
 		t.Fatalf("review: %+v %v", review, e)
 	}
-	_, e = f.db.SetTaskAssignee(ctx, scope.TenantID, src.ID, nil, current.Version)
+	_, e = f.db.SetTaskAssignee(ctx, scope.TenantID, src.ID, "", nil, current.Version)
 	if e != nil {
 		t.Fatal(e)
 	}

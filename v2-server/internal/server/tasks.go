@@ -21,7 +21,7 @@ type taskStore interface {
 	CreateTask(context.Context, string, string, store.TaskInput) (store.Task, error)
 	UpdateTask(context.Context, string, string, store.TaskInput) (store.Task, error)
 	SetTaskStatus(context.Context, store.Access, string, string, int64) (store.Task, error)
-	SetTaskAssignee(context.Context, string, string, *store.TaskAssigneeRef, int64) (store.Task, error)
+	SetTaskAssignee(context.Context, string, string, string, *store.TaskAssigneeRef, int64) (store.Task, error)
 }
 
 // taskUUID matches the ids this server mints for tasks; anything else cannot exist.
@@ -289,7 +289,7 @@ func (h *handler) setTaskAssignee(w http.ResponseWriter, r *http.Request, a acce
 		}
 		ref = validAssigneeRef(&in)
 	}
-	task, e := s.SetTaskAssignee(r.Context(), tenant, id, ref, req.Version)
+	task, e := s.SetTaskAssignee(r.Context(), tenant, id, a.UserID, ref, req.Version)
 	if e != nil {
 		if taskFault(w, e) {
 			return

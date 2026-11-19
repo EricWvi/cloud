@@ -390,7 +390,7 @@ func (s *Store) InterruptTaskRuns(ctx context.Context) ([]TaskRun, error) {
 				return e
 			}
 			if status == TaskRunning {
-				if _, e := writeTaskStatus(ctx, tx, r.TaskID, TaskPending); e != nil {
+				if _, e := writeTaskStatus(ctx, tx, r.TaskID, TaskPending, ""); e != nil {
 					return e
 				}
 			}
@@ -471,14 +471,23 @@ func (s *Store) CreateTaskComment(ctx context.Context, in NewTaskComment) (TaskC
 	if e != nil {
 		return TaskComment{}, e
 	}
-	if _, e := s.pool.Exec(ctx, `
-		INSERT INTO v2_task_comments (task_id, tenant_id, author_id, create_key, body, mentions, run_id, turn_id)
-		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, '')::uuid, $8)
-		ON CONFLICT (task_id, author_id, create_key) DO NOTHING`,
-		in.TaskID, in.TenantID, in.AuthorID, in.CreateKey, in.Body, mentions, in.RunID, in.TurnID); e != nil {
-		return TaskComment{}, fmt.Errorf("insert task comment: %w", e)
-	}
-	return s.TaskCommentByKey(ctx, in.TenantID, in.TaskID, in.AuthorID, in.CreateKey)
+	var out TaskComment
+	e = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		tag, e := tx.Exec(ctx, `
+			INSERT INTO v2_task_comments (task_id, tenant_id, author_id, create_key, body, mentions, run_id, turn_id)
+			VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, '')::uuid, $8)
+			ON CONFLICT (task_id, author_id, create_key) DO NOTHING`,
+			in.TaskID, in.TenantID, in.AuthorID, in.CreateKey, in.Body, mentions, in.RunID, in.TurnID)
+		if e != nil {
+			return fmt.Errorf("insert task comment: %w", e)
+		}
+		out, e = taskCommentByKey(ctx, tx, in.TenantID, in.TaskID, in.AuthorID, in.CreateKey)
+		if e != nil || tag.RowsAffected() == 0 {
+			return e
+		}
+		return notifyMentioned(ctx, tx, in.TenantID, in.TaskID, out)
+	})
+	return out, e
 }
 
 func marshalTaskMentions(in []TaskMention) ([]byte, error) {
@@ -554,7 +563,7 @@ func (s *Store) CreateTaskWorkflowComment(ctx context.Context, in NewTaskWorkflo
 			return err
 		}
 		fresh = true
-		return nil
+		return notifyMentioned(ctx, tx, in.TenantID, in.TaskID, comment)
 	})
 	return comment, fresh, err
 }
@@ -736,7 +745,7 @@ func (s *Store) SettleDeliveredTaskTurn(ctx context.Context, tenant, taskID, run
 			return err
 		}
 		if CanRunTransitionTask(from, to) {
-			if _, err := writeTaskStatus(ctx, tx, taskID, to); err != nil {
+			if _, err := writeTaskStatus(ctx, tx, taskID, to, ""); err != nil {
 				return err
 			}
 		}

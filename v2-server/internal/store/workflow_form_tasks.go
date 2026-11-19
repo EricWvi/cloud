@@ -96,6 +96,9 @@ func (s *Store) CreateWorkflowFormTasks(ctx context.Context, runID, nodeRunID st
 				}
 				id = &created
 				action = "created"
+				if err := notifyAssigned(ctx, tx, r.tenant, created, f.SubmittedBy, *item.Assignee, 1); err != nil {
+					return err
+				}
 				if _, err := tx.Exec(ctx, `UPDATE v2_workflow_finding_tasks SET task_id=$4 WHERE tenant_id=$1 AND project_id=$2 AND finding_key=$3`, r.tenant, project, item.Key, *id); err != nil {
 					return err
 				}
