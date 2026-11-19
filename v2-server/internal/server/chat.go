@@ -368,6 +368,9 @@ func chatFault(w http.ResponseWriter, op string, e error) {
 		fault(w, http.StatusNotFound, "not_found")
 	case errors.Is(e, store.ErrKeyReused), errors.Is(e, execution.ErrConflict):
 		fault(w, http.StatusConflict, "idempotency_conflict")
+	case errors.Is(e, chat.ErrReclaimUnavailable):
+		// No Agent runtime here to judge the checkout: neither preview nor discard can be offered.
+		fault(w, http.StatusServiceUnavailable, "workspace_reclaim_unavailable")
 	case errors.Is(e, chat.ErrDeletionPreviewStale):
 		// The person would drop something the preview did not show: fetch it again.
 		fault(w, http.StatusConflict, "deletion_preview_stale")

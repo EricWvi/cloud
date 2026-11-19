@@ -34,6 +34,7 @@ type Store interface {
 	RenameChatConversation(ctx context.Context, tenant, user, id, title string) error
 	DeleteChatConversation(ctx context.Context, tenant, user, id string) error
 	DeleteChatConversationReclaiming(ctx context.Context, tenant, user, id string, mode store.ReclaimMode) (string, error)
+	ChatCheckout(ctx context.Context, tenant, user, id string) (store.ChatCheckout, error)
 	RecordChatTurn(ctx context.Context, conversationID, sessionID, attemptID, turnID string, at time.Time) error
 	EndChatSession(ctx context.Context, sessionID, reason string, at time.Time) error
 	MarkChatSessionEnding(ctx context.Context, sessionID, reason string) error
@@ -51,6 +52,12 @@ type Reclaims interface {
 // person would drop something they were not shown. Nothing is deleted.
 var ErrDeletionPreviewStale = errors.New("deletion preview stale")
 
+// ErrReclaimUnavailable reports a conversation whose checkout this server cannot judge: it runs
+// without an Agent runtime, so it can neither preview the checkout nor verify a discard. A
+// deletion that keeps the default mode still goes ahead and leaves the reclaim to a start that
+// can judge it.
+var ErrReclaimUnavailable = errors.New("workspace reclaim unavailable")
+
 // reclaimBudget bounds the reclaim a deletion executes before answering; what does not finish
 // stays recorded and is finished at the next start.
 const reclaimBudget = 2 * time.Minute
@@ -59,8 +66,9 @@ const reclaimBudget = 2 * time.Minute
 type Options struct {
 	// Now is the clock; nil uses time.Now.
 	Now func() time.Time
-	// Reclaims judges and reclaims a deleted conversation's checkout. Nil (no Agent runtime, so
-	// no checkouts) leaves any recorded reclaim to the next server start.
+	// Reclaims judges and reclaims a deleted conversation's checkout. Nil (no Agent runtime)
+	// refuses previews and discards of a conversation with a checkout, and leaves a recorded
+	// reclaim to a later start that has a runtime.
 	Reclaims Reclaims
 }
 
@@ -311,6 +319,16 @@ func (s *Service) Delete(ctx context.Context, scope execution.Scope, conversatio
 	if e != nil {
 		return none, e
 	}
+	if mode == store.ReclaimDiscard && s.reclaim == nil {
+		// Nothing can verify what the person was shown; refuse before anything changes.
+		checkout, e := s.store.ChatCheckout(ctx, scope.TenantID, scope.UserID, conversationID)
+		if e != nil {
+			return none, e
+		}
+		if checkout.Registered {
+			return none, ErrReclaimUnavailable
+		}
+	}
 	if mode == store.ReclaimDiscard && s.reclaim != nil {
 		// Judged again before the session ends, so a stale discard leaves everything as it was.
 		v, e := s.reclaim.Preview(ctx, scope.TenantID, scope.UserID, conversationID)
@@ -331,7 +349,9 @@ func (s *Service) Delete(ctx context.Context, scope execution.Scope, conversatio
 		return none, e
 	}
 	if s.reclaim == nil {
-		return workspacereclaim.Outcome{Workspace: workspacereclaim.OutcomePending}, nil
+		// Recorded in the default mode only (a discard was refused above): a start with an Agent
+		// runtime judges it like any other.
+		return workspacereclaim.Outcome{Workspace: workspacereclaim.OutcomePending, Reason: workspacereclaim.ReasonReclaimUnavailable}, nil
 	}
 	// The deletion has committed; the reclaim no longer depends on the request staying open.
 	budget, cancel := context.WithTimeout(context.WithoutCancel(ctx), reclaimBudget)
@@ -347,8 +367,12 @@ func (s *Service) Delete(ctx context.Context, scope execution.Scope, conversatio
 // DeletionPreview tells the person what deleting the conversation does to its checkout.
 func (s *Service) DeletionPreview(ctx context.Context, scope execution.Scope, conversationID string) (workspacereclaim.Verdict, error) {
 	if s.reclaim == nil {
-		if _, e := s.store.ChatConversation(ctx, scope.TenantID, scope.UserID, conversationID); e != nil {
+		checkout, e := s.store.ChatCheckout(ctx, scope.TenantID, scope.UserID, conversationID)
+		if e != nil {
 			return workspacereclaim.Verdict{}, e
+		}
+		if checkout.Registered {
+			return workspacereclaim.Verdict{}, ErrReclaimUnavailable
 		}
 		return workspacereclaim.Verdict{Workspace: workspacereclaim.WorkspaceNone, Reason: workspacereclaim.ReasonNoWorkspace}, nil
 	}

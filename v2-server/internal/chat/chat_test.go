@@ -443,3 +443,47 @@ func TestDeleteRecordsAndExecutesTheCheckoutReclaim(t *testing.T) {
 		t.Fatalf("recorded reclaim = %+v, %v", got, e)
 	}
 }
+
+// A server without an Agent runtime cannot judge a checkout recorded by an earlier one: it
+// refuses the preview and a discard before anything changes, and a default deletion leaves the
+// reclaim pending for a start that can judge it.
+func TestWithoutReclaimerAnExistingCheckoutIsNeverDiscarded(t *testing.T) {
+	s := storetest.Open(t)
+	user, tenant := storetest.Login(t, s, "chat-no-reclaimer")
+	scope := execution.Scope{TenantID: tenant, UserID: user}
+	stub := &executiontest.Stub{}
+	svc := chat.New(s, stub, stub, chat.Options{})
+	ctx := context.Background()
+	c := storetest.ChatWithCheckout(t, s, scope, "/checkouts/earlier-runtime", storetest.TurnDelivered)
+	c.End(t, s)
+	if e := s.EndChatSession(ctx, c.SessionID, store.EndStopped, time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := svc.DeletionPreview(ctx, scope, c.ConversationID); !errors.Is(e, chat.ErrReclaimUnavailable) {
+		t.Fatalf("preview = %v, want ErrReclaimUnavailable", e)
+	}
+	if _, e := svc.Delete(ctx, scope, c.ConversationID, store.ReclaimDiscard, "stale-revision"); !errors.Is(e, chat.ErrReclaimUnavailable) {
+		t.Fatalf("discard = %v, want ErrReclaimUnavailable", e)
+	}
+	if _, e := s.ChatConversation(ctx, tenant, user, c.ConversationID); e != nil {
+		t.Fatalf("a refused discard removed the conversation: %v", e)
+	}
+	if list, e := s.WorkspaceReclaims(ctx); e != nil || len(list) != 0 {
+		t.Fatalf("a refused discard recorded a reclaim: %+v, %v", list, e)
+	}
+	out, e := svc.Delete(ctx, scope, c.ConversationID, store.ReclaimRecoverable, "")
+	if e != nil || out.Workspace != workspacereclaim.OutcomePending || out.Reason != workspacereclaim.ReasonReclaimUnavailable {
+		t.Fatalf("default delete = %+v, %v", out, e)
+	}
+	if got, e := s.WorkspaceReclaim(ctx, c.WorkspaceID); e != nil || got.Mode != store.ReclaimRecoverable || got.Status != store.ReclaimPending {
+		t.Fatalf("recorded reclaim = %+v, %v", got, e)
+	}
+	// A conversation without a checkout still previews as none.
+	bare, e := s.CreateChatConversation(ctx, store.NewChatConversation{TenantID: tenant, UserID: user, CreateKey: "bare", ProjectID: "p", ExecutorID: "fixture", Title: "bare"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if v, e := svc.DeletionPreview(ctx, scope, bare.ID); e != nil || v.Workspace != workspacereclaim.WorkspaceNone {
+		t.Fatalf("preview without checkout = %+v, %v", v, e)
+	}
+}
