@@ -227,7 +227,7 @@ func (s *Service) Start(ctx context.Context, scope execution.Scope, req executio
 		return execution.Ref{}, err
 	}
 	// Controller generation admission and lifecycle events are not implemented yet. Reject
-	// before copying packages, stopping an idle predecessor, or persisting a Session/Turn.
+	// before copying packages or persisting a Session/Turn.
 	// The driver's independent Node capability gate remains defense in depth.
 	if req.MCP != nil && len(req.MCP.Bindings) != 0 {
 		return execution.Ref{}, &execution.MCPFailure{Code: "mcp_lifecycle_not_ready"}
