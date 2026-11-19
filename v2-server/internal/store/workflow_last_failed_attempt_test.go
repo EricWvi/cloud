@@ -78,7 +78,7 @@ func TestLastFailedNodeAttemptIgnoresAFailureARetryRecovered(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Resuming soft-deletes the recovering success together with the failure; it still counts.
-	if err := s.ResumeWorkflowEngineRun(ctx, run.ID, func(store.WorkflowResumeState) ([]string, error) {
+	if err := s.ResumeWorkflowEngineRun(ctx, run.ID, user, func(store.WorkflowResumeState) ([]string, error) {
 		return []string{"agent-recovered"}, nil
 	}, func(payload []byte, _ []string) ([]byte, error) {
 		return payload, nil
@@ -128,7 +128,7 @@ func TestLastFailedNodeAttemptIgnoresAFailureThatNeverStarted(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Resuming clears the run's live attempts, so the failed wait is soft-deleted like history.
-	if err := s.ResumeWorkflowEngineRun(ctx, run.ID, func(store.WorkflowResumeState) ([]string, error) {
+	if err := s.ResumeWorkflowEngineRun(ctx, run.ID, user, func(store.WorkflowResumeState) ([]string, error) {
 		return []string{"agent-restart"}, nil
 	}, func(payload []byte, _ []string) ([]byte, error) {
 		return payload, nil

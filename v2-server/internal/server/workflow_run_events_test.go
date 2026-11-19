@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
+	"github.com/wanglongan587/cloud/v2-server/internal/workflowhost"
 )
 
 // fakeRunEvents is a run invalidation hub a test publishes on by hand.
@@ -390,4 +392,191 @@ func TestWorkflowNodeEventsReadableByTenantMember(t *testing.T) {
 	if detail.StartedBy != starter || detail.Run.StartedByName != "Owner" {
 		t.Fatalf("member run detail starter = %+v started by %v", detail.Run, detail.StartedBy)
 	}
+}
+
+func TestWorkflowNodeEventsRemainReadableAfterMemberResumesLegacyRun(t *testing.T) {
+	rt, _ := chatRuntime()
+	s := storetest.Open(t)
+	starter, tenant := storetest.Login(t, s, "legacy-events-owner")
+	starterScope := execution.Scope{TenantID: tenant, UserID: starter}
+
+	var mu sync.Mutex
+	var seen []execution.Scope
+	replay := rt.SubscribeFunc
+	rt.SubscribeFunc = func(ctx context.Context, scope execution.Scope, sid string, after uint64) (execution.Stream, error) {
+		mu.Lock()
+		seen = append(seen, scope)
+		mu.Unlock()
+		if scope != starterScope {
+			return nil, execution.ErrNotFound
+		}
+		return replay(ctx, scope, sid, after)
+	}
+	readTurns := rt.ReadTurnsFunc
+	rt.ReadTurnsFunc = func(ctx context.Context, scope execution.Scope, sid, cursor string, limit int) (execution.TurnPage, error) {
+		mu.Lock()
+		seen = append(seen, scope)
+		mu.Unlock()
+		if scope != starterScope {
+			return execution.TurnPage{}, execution.ErrNotFound
+		}
+		return readTurns(ctx, scope, sid, cursor, limit)
+	}
+
+	wfHost, err := workflowhost.NewHost(workflowhost.Config{Store: s, Execution: rt, Catalog: rt, StopTimeout: time.Second, BusyRetry: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(wfHost.Close)
+	srv := httptest.NewServer(server.New(s, server.Options{
+		SessionTTL:        time.Hour,
+		WorkflowRuns:      wfHost,
+		WorkflowRunEvents: wfHost.Hub(),
+		Execution:         rt,
+		Catalog:           rt,
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx := context.Background()
+	project := workflowRunProject(t, s, starter, tenant)
+	const graph = `{"nodes":[
+		{"id":"start","data":{"kind":"start","title":"开始"}},
+		{"id":"a","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"初稿"}}},
+		{"id":"b","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"复核"}}}
+	],"edges":[{"source":"start","target":"a"},{"source":"a","target":"b"}]}`
+	w, _, err := s.CreateWorkflow(ctx, tenant, "遗留事件可读", graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PublishWorkflow(ctx, tenant, w.ID, "v1", nil); err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.CreateWorkflowRun(ctx, tenant, w.ID, "", store.WorkflowRunInput{ProjectID: project.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Start via store without SetWorkflowStarter to replicate a pre-#380 run with started_by IS NULL.
+	if _, err := s.StartWorkflowRun(ctx, tenant, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	nodeA, err := s.CreateWorkflowNodeRun(ctx, tenant, run.ID, store.WorkflowNodeRunInput{NodeID: "a", NodeType: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateExecutionSession(ctx, starterScope, execution.Session{
+		ID: "s-node", Model: execution.Model{ID: "fixture", Name: "Fixture", BindingVersion: "v1"},
+	}, execution.Turn{
+		Ref:    execution.Ref{SessionID: "s-node", TurnID: "t-1"},
+		Caller: execution.Caller{Kind: execution.CallerWorkflow, ID: run.ID, NodeID: "a", AttemptID: nodeA.ID},
+		Prompt: execution.TextPrompt("你好"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.BindWorkflowNodeSession(ctx, tenant, run.ID, nodeA.ID, "s-node"); err != nil {
+		t.Fatal(err)
+	}
+	okOut := "初稿"
+	if _, err := s.CompleteWorkflowNodeRun(ctx, tenant, run.ID, nodeA.ID, store.WorkflowNodeResult{Output: &okOut}); err != nil {
+		t.Fatal(err)
+	}
+	// Leave nodeB running first so member's resume is refused by the idle gate.
+	nodeB, err := s.CreateWorkflowNodeRun(ctx, tenant, run.ID, store.WorkflowNodeRunInput{NodeID: "b", NodeType: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := "暂停"
+	if _, err := s.FinishWorkflowRun(ctx, tenant, run.ID, store.WorkflowStatusFailed, nil, &msg); err != nil {
+		t.Fatal(err)
+	}
+
+	starterToken := storetest.SignIn(t, s, "legacy-events-owner", "发起人", store.RoleOwner)
+	memberToken := storetest.SignIn(t, s, "legacy-events-member", "鲍勃", store.RoleMember)
+	doAs := func(token, method, path string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(method, srv.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.AddCookie(&http.Cookie{Name: server.SessionCookie, Value: token})
+		res, err := (&http.Client{}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	assertReadsSession := func(token, label string) {
+		t.Helper()
+		res := doAs(token, "GET", "/api/v2/tenants/"+tenant+"/workflow-runs/"+run.ID+"/nodes/"+nodeA.ID+"/events")
+		defer res.Body.Close()
+		if res.StatusCode != 200 || res.Header.Get("Content-Type") != "text/event-stream" {
+			t.Fatalf("%s events = %d %s", label, res.StatusCode, res.Header.Get("Content-Type"))
+		}
+		var lines []string
+		for l := range sseLines(t, res.Body) {
+			lines = append(lines, l)
+		}
+		if len(lines) != 8 || lines[6] != "event: end" {
+			t.Fatalf("%s stream = %q", label, lines)
+		}
+	}
+
+	resumePath := "/api/v2/tenants/" + tenant + "/workflow-runs/" + run.ID + "/resume"
+	refusedRes := doAs(memberToken, "POST", resumePath)
+	refusedRes.Body.Close()
+	if refusedRes.StatusCode != 409 {
+		t.Fatalf("refused resume status = %d, want 409", refusedRes.StatusCode)
+	}
+	if got, err := s.WorkflowStarter(ctx, run.ID); err != nil || got != "" {
+		t.Fatalf("starter mutated on refused resume: %q %v", got, err)
+	}
+	// Original starter still reads their legacy session while started_by remains NULL.
+	assertReadsSession(starterToken, "starter after refused resume")
+
+	// Mark nodeB failed so member's resume succeeds and recovers starter as started_by.
+	if _, err := s.FailWorkflowNodeRun(ctx, tenant, run.ID, nodeB.ID, store.WorkflowNodeFailure{Error: "需要续跑"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	okRes := doAs(memberToken, "POST", resumePath)
+	defer okRes.Body.Close()
+	if okRes.StatusCode != 200 {
+		t.Fatalf("resume status = %d", okRes.StatusCode)
+	}
+	var resumedBody struct {
+		Run struct {
+			StartedByName string `json:"startedByName"`
+		} `json:"run"`
+	}
+	if err := json.NewDecoder(okRes.Body).Decode(&resumedBody); err != nil {
+		t.Fatal(err)
+	}
+	if resumedBody.Run.StartedByName != "发起人" {
+		t.Fatalf("resumed startedByName = %q, want 发起人", resumedBody.Run.StartedByName)
+	}
+	detailRes := doAs(memberToken, "GET", "/api/v2/tenants/"+tenant+"/workflow-runs/"+run.ID)
+	defer detailRes.Body.Close()
+	if detailRes.StatusCode != 200 {
+		t.Fatalf("detail status = %d", detailRes.StatusCode)
+	}
+	var detailBody struct {
+		StartedBy string `json:"startedBy"`
+		Run       struct {
+			StartedByName string `json:"startedByName"`
+		} `json:"run"`
+	}
+	if err := json.NewDecoder(detailRes.Body).Decode(&detailBody); err != nil {
+		t.Fatal(err)
+	}
+	if detailBody.StartedBy != starter || detailBody.Run.StartedByName != "发起人" {
+		t.Fatalf("detail starter = (%q, %q), want (%q, 发起人)", detailBody.StartedBy, detailBody.Run.StartedByName, starter)
+	}
+	assertReadsSession(starterToken, "starter after successful resume")
+	assertReadsSession(memberToken, "member after successful resume")
+
+	mu.Lock()
+	for _, scope := range seen {
+		if scope != starterScope {
+			t.Errorf("read session under %+v, want %+v", scope, starterScope)
+		}
+	}
+	mu.Unlock()
 }

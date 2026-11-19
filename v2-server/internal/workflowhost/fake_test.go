@@ -2,12 +2,17 @@ package workflowhost
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/execution/executiontest"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
@@ -294,7 +299,57 @@ const reviewerContent = "# 代码审查\n\n先复述改动目标和影响范围�
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	s := storetest.Open(t)
+	return newFixtureOnStore(t, storetest.Open(t))
+}
+
+// newFixtureWithAdmin opens an isolated PostgreSQL schema and returns both the workflow host
+// fixture and the admin connection for tests that seed legacy rows or fault schema state.
+func newFixtureWithAdmin(t *testing.T) (*fixture, *pgx.Conn) {
+	t.Helper()
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	admin, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw [6]byte
+	_, _ = rand.Read(raw[:])
+	schema := "v2test_" + hex.EncodeToString(raw[:])
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		admin.Close(ctx)
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, "SET search_path TO "+pgx.Identifier{schema}.Sanitize()+",public"); err != nil {
+		_, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
+		admin.Close(ctx)
+		t.Fatal(err)
+	}
+	config, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		_, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
+		admin.Close(ctx)
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	s, err := store.OpenConfig(ctx, config)
+	if err != nil {
+		_, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
+		admin.Close(ctx)
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		s.Close()
+		_, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
+		admin.Close(ctx)
+	})
+	return newFixtureOnStore(t, s), admin
+}
+
+func newFixtureOnStore(t *testing.T, s *store.Store) *fixture {
+	t.Helper()
 	user, tenant := storetest.Login(t, s, "workflow-host")
 	scope := server.WorkflowRunScope{TenantID: tenant, UserID: user}
 	project, err := s.CreateProject(context.Background(), execution.Scope{TenantID: tenant, UserID: user}, store.Project{
