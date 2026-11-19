@@ -132,7 +132,7 @@ func TestDriverIPCStoppedTurnKeepsTheSessionForTheNextTurn(t *testing.T) {
 		t.Fatalf("acknowledged %s, want the settlement", ack.Type)
 	}
 	got := receiveIPC(t, done)
-	if got.err != nil || got.result.Status != execution.StatusCancelled || !got.result.SessionKept || got.result.AgentLost || got.result.FailureCode != "" {
+	if got.err != nil || got.result.Status != execution.StatusCancelled || !got.result.SessionKept || got.result.AgentLost || got.result.FailureCode != "" || got.result.NotDelivered {
 		t.Fatalf("stopped turn = %+v", got)
 	}
 	second := startIPCRun(h, ctx, session, "second", emit)
@@ -242,8 +242,8 @@ func TestDriverIPCStopOfATurnNotStartedKeepsTheSession(t *testing.T) {
 	if event := receiveIPC(t, events); event.Result == nil || event.Result.Status != execution.StatusCancelled {
 		t.Fatalf("dropped turn publication = %+v", event)
 	}
-	if got := receiveIPC(t, done); got.err != nil || got.result.Status != execution.StatusCancelled || !got.result.SessionKept {
-		t.Fatalf("dropped turn = %+v", got)
+	if got := receiveIPC(t, done); got.err != nil || got.result.Status != execution.StatusCancelled || !got.result.SessionKept || !got.result.NotDelivered {
+		t.Fatalf("dropped turn = %+v, want a kept stop that never reached the Agent", got)
 	}
 	second := startIPCRun(h, ctx, session, "second", emit)
 	f.finishTurn(t, nextIPCCommand(t, f, "submit_user_turn"), "second", "answer")
@@ -583,8 +583,8 @@ func TestDriverIPCStopOfARefusedSubmissionKeepsTheSession(t *testing.T) {
 	receiveIPC(t, failedRead) // the driver waits for the refresh
 	stopTurn(t, h, session, "refused")
 	got := receiveIPC(t, refused)
-	if got.err != nil || got.result.Status != execution.StatusCancelled || !got.result.SessionKept {
-		t.Fatalf("stop of a refused submission = %+v", got)
+	if got.err != nil || got.result.Status != execution.StatusCancelled || !got.result.SessionKept || !got.result.NotDelivered {
+		t.Fatalf("stop of a refused submission = %+v, want a kept stop that never reached the Agent", got)
 	}
 	refuse.Store(false)
 	next := run("next")

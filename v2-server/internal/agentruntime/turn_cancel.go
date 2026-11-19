@@ -53,7 +53,7 @@ func (a *agentSession) stopTurn(call *activeTurn) turnStop {
 	}
 	if call.refused {
 		a.mu.Unlock()
-		result := execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled", SessionKept: true}
+		result := execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled", SessionKept: true, NotDelivered: true}
 		if a.publish(execution.Event{Ref: execution.Ref{TurnID: call.id}, Kind: execution.EventTurnEnded, Result: &result}) != nil {
 			a.fail("agent_event_write_failed", errEventStore)
 			a.requestEnd()
@@ -140,7 +140,7 @@ func (a *agentSession) settleCancel(call *activeTurn, outcome string, stopped *n
 		return result, false, true
 	case "not_started":
 		// Node dropped the turn before its Agent received it; the session is untouched.
-		return execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled", SessionKept: true}, false, true
+		return execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled", SessionKept: true, NotDelivered: true}, false, true
 	case "already_ended":
 		if stopped == nil {
 			return execution.Result{}, false, false

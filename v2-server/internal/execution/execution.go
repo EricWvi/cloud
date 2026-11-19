@@ -158,7 +158,9 @@ type Result struct {
 	// project could not be resolved, or the turn did not start), or Node refused the command
 	// without running it (its session had already ended, or the MCP generation it waited for
 	// never came). AgentLost still says whether the session can take another turn. A turn whose
-	// sending failed midway may have arrived, so it is not marked.
+	// sending failed midway may have arrived, so it is not marked. A cancelled turn carries it
+	// too when the caller stopped it before its prompt reached the Agent (Node dropped it before
+	// admission, or never held its refused submission): it answered nothing.
 	NotDelivered bool `json:",omitempty"`
 	// SessionKept tells the execution service that the Agent session outlives this turn although
 	// it did not complete: the caller stopped it (a driver's StopTurn) and Node kept the session.

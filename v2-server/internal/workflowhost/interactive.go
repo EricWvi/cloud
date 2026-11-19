@@ -116,6 +116,13 @@ func delivered(r execution.Result) bool {
 	return !r.NotDelivered
 }
 
+// stoppedBeforeDelivery reports whether a settled turn is one the starter stopped before its
+// prompt reached the Agent (Node dropped it, or never held a refused submission). It is a stopped
+// turn of the conversation, not a lost message, but it answered nothing.
+func stoppedBeforeDelivery(r execution.Result) bool {
+	return r.NotDelivered && r.Status == execution.StatusCancelled
+}
+
 // endedNormally is the end_turn rule: only a complete EndTurn answer completes without force.
 func endedNormally(r execution.Result) bool {
 	return r.Status == execution.StatusCompleted && r.AnswerComplete && r.StopReason == "end_turn"
@@ -243,6 +250,24 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 			h.endLingering(st, n.d.RunID, n.session)
 		}
 		h.fail(n.d, workflow.Failure{Kind: workflow.FailureInteractiveSession, Message: message})
+		return
+	}
+	if err == nil && seq > 0 && stoppedBeforeDelivery(result) {
+		// The starter stopped the message before the Agent got it. It counts as a turn, the stopped
+		// one the conversation shows, but it answered nothing: the node keeps the turn it last
+		// answered, so the answer it would complete with, and whether it can, stay as they were.
+		// The stop kept the session unless the result says it is lost.
+		n.turns++
+		ended := result.AgentLost
+		n.stopping = false
+		if ended {
+			n.sessionEnded = true
+		}
+		st.mu.Unlock()
+		if ended {
+			h.endInteractive(st, n)
+		}
+		h.park(st, n)
 		return
 	}
 	if err == nil && seq > 0 && !delivered(result) {
