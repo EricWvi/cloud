@@ -2,8 +2,11 @@ package workspacefs
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -147,12 +150,15 @@ func TestRemoveCheckoutRefusesADirectorySwappedAfterTheCheck(t *testing.T) {
 	checkout := filepath.Join(root, "c")
 	elsewhere := filepath.Join(root, "other")
 	writeTree(t, map[string]string{filepath.Join(checkout, "f"): "mine", filepath.Join(elsewhere, "f"): "keep"})
-	defer SetBeforeOpenCheckout(func(path string) {
-		// Between the Lstat walk and the open, the checkout is replaced by another directory.
-		if err := os.Rename(path, path+".moved"); err != nil {
+	defer SetBetweenLstatAndOpen(func(name string) {
+		if name != "c" {
+			return
+		}
+		// Between the Lstat and the open, the checkout is replaced by another directory.
+		if err := os.Rename(checkout, checkout+".moved"); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Rename(elsewhere, path); err != nil {
+		if err := os.Rename(elsewhere, checkout); err != nil {
 			t.Fatal(err)
 		}
 	})()
@@ -161,5 +167,76 @@ func TestRemoveCheckoutRefusesADirectorySwappedAfterTheCheck(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(checkout, "f")); err != nil || string(got) != "keep" {
 		t.Fatalf("the swapped-in directory was touched: %q, %v", got, err)
+	}
+}
+
+// A parent of the checkout is moved out of the root and a link to it put in its place: the
+// removal must not follow the link out of the root, whether the swap lands before the walk
+// reaches the parent or between the parent's Lstat and its open.
+func TestRemoveCheckoutRefusesAParentSwappedForALinkOutOfTheRoot(t *testing.T) {
+	for name, set := range map[string]func(func()) func(){
+		"before the walk": func(swap func()) func() { return SetBeforeOpenCheckout(func(string) { swap() }) },
+		"between Lstat and open": func(swap func()) func() {
+			return SetBetweenLstatAndOpen(func(n string) {
+				if n == "nested" {
+					swap()
+				}
+			})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			root := filepath.Join(base, "w", "r")
+			nested := filepath.Join(root, "nested")
+			checkout := filepath.Join(nested, "c")
+			writeTree(t, map[string]string{filepath.Join(checkout, "f"): "precious"})
+			moved := filepath.Join(base, "outside")
+			defer set(func() {
+				if err := os.Rename(nested, moved); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(moved, nested); err != nil {
+					t.Fatal(err)
+				}
+			})()
+			if _, err := RemoveCheckout(root, checkout); !errors.Is(err, ErrUnsafeCheckout) {
+				t.Fatalf("err = %v, want ErrUnsafeCheckout", err)
+			}
+			if got, err := os.ReadFile(filepath.Join(moved, "c", "f")); err != nil || string(got) != "precious" {
+				t.Fatalf("a file outside the root was touched: %q, %v", got, err)
+			}
+		})
+	}
+}
+
+// A file that cannot be measured fails the removal with its path, so it is retried; one that
+// vanished since it was listed is skipped.
+func TestRemoveCheckoutFailsWhenAnEntryCannotBeMeasured(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "w", "r")
+	checkout := filepath.Join(root, "c")
+	writeTree(t, map[string]string{filepath.Join(checkout, "a"): "12", filepath.Join(checkout, "b"): "345"})
+	restore := SetEntryInfo(func(p string, d fs.DirEntry) (fs.FileInfo, error) {
+		if p == "b" {
+			return nil, syscall.EIO
+		}
+		return d.Info()
+	})
+	_, err := RemoveCheckout(root, checkout)
+	restore()
+	if !errors.Is(err, syscall.EIO) || !strings.Contains(err.Error(), "measure b") {
+		t.Fatalf("err = %v, want EIO naming b", err)
+	}
+	if _, err := os.Stat(filepath.Join(checkout, "a")); err != nil {
+		t.Fatalf("the checkout was removed although it could not be measured: %v", err)
+	}
+	defer SetEntryInfo(func(p string, d fs.DirEntry) (fs.FileInfo, error) {
+		if p == "b" {
+			return nil, fs.ErrNotExist
+		}
+		return d.Info()
+	})()
+	usage, err := RemoveCheckout(root, checkout)
+	if err != nil || usage != (Usage{Bytes: 2, Files: 1}) {
+		t.Fatalf("with a vanished entry: %+v, %v", usage, err)
 	}
 }
