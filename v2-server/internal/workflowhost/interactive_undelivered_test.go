@@ -264,3 +264,69 @@ func TestARestartDoesNotCountAFollowUpTheDriverRefused(t *testing.T) {
 		t.Fatalf("recorded turns = %d %v, want the first turn, the undelivered message and the new one", len(turns.Items), err)
 	}
 }
+
+// The starter stops a follow-up that then turns out never to have reached the Agent, with a
+// refusal that would have kept the session. The pinned Node stops a turn only by ending its
+// session, so the stop still ends it, and the message is still reported not delivered.
+func TestStoppingAFollowUpThatWasNotDeliveredEndsTheSession(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	runID, a := f.startParked(t, interactiveChain, "初稿一")
+	f.awaitClaimable(t, runID, "a")
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.awaitAppend(t)
+	// The stop reaches the turn, but its confirmation does not come back before the turn ends.
+	f.exec.onCancel = func(execution.Ref) error { return execution.ErrStopUnconfirmed }
+	if _, err := f.host.StopNodeTurn(ctx, f.scope, runID, "a"); !errors.Is(err, server.ErrWorkflowRunStopUnconfirmed) {
+		t.Fatalf("stop = %v, want it unconfirmed", err)
+	}
+	f.exec.finish(a, execution.Result{Status: execution.StatusFailed, FailureCode: "mcp_refresh_wait_timeout", NotDelivered: true})
+	_, nodes := f.await(t, runID, func(run store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return undelivered(t)(run, n) && interactivePayload(t, node(n, "a"))["session_ended"] == true
+	})
+	if p := interactivePayload(t, node(nodes, "a")); p["turns"] != float64(1) || p["sent"] != float64(1) || p["answer"] != "初稿一" {
+		t.Fatalf("summary = %v, want the first turn's node with the session ended and the notice", p)
+	}
+	f.awaitClaimable(t, runID, "a")
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); !errors.Is(err, server.ErrWorkflowNodeSessionEnded) {
+		t.Fatalf("a message after the stop = %v, want %v", err, server.ErrWorkflowNodeSessionEnded)
+	}
+}
+
+// A follow-up recorded before NotDelivered existed carries NotStarted alone (a new Agent that
+// could not start after a restart or a lost Node). Its node counted it as a turn, blocked as
+// turn_unknown, and never said the message was lost, so a restart after the upgrade rebuilds the
+// node as it was instead of quietly dropping that turn and its blocker.
+func TestARestartStillCountsALegacyUnstartedFollowUp(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	runID, a := f.startParked(t, interactiveChain, "初稿一")
+	f.awaitClaimable(t, runID, "a")
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再改一版"); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.awaitAppend(t)
+	legacy := execution.Result{Status: execution.StatusFailed, FailureCode: "agent_prepare_failed", NotStarted: true}
+	f.exec.finish(a, legacy)
+	_, nodes := f.await(t, runID, func(run store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return awaitingInput("a")(run, n) && interactivePayload(t, node(n, "a"))["turns"] == float64(2)
+	})
+	before := interactivePayload(t, node(nodes, "a"))
+	if before["last_turn_error"] != nil || !reflect.DeepEqual(blockerKinds(before), []string{blockerTurnUnknown}) {
+		t.Fatalf("summary before the restart = %v, want the turn counted as main recorded it", before)
+	}
+	f.awaitClaimable(t, runID, "a")
+	f.exec.recordedTurns(a, node(nodes, "a").ID, completed("初稿一"), legacy)
+	f.restart(t)
+
+	after := interactivePayload(t, f.nodeRow(t, runID, "a"))
+	if after["turns"] != float64(2) || after["sent"] != float64(1) || after["last_turn_error"] != nil || after["session_ended"] != false ||
+		!reflect.DeepEqual(blockerKinds(after), []string{blockerTurnUnknown}) {
+		t.Fatalf("summary after the restart = %v, want the legacy turn still counted and blocking", after)
+	}
+	if accepted, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再试一次"); err != nil || accepted.Sent != 2 {
+		t.Fatalf("the next message = %+v %v, want message 2", accepted.Sent, err)
+	}
+}

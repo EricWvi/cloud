@@ -109,7 +109,8 @@ func TestDriverIPCFollowUpRefusedBeforeItsAgentGotItIsNotDelivered(t *testing.T)
 }
 
 // What may have reached the Agent is never reported undelivered: a command whose write failed as
-// its Node died, and a turn whose session Node ended while the turn was with it.
+// its Node died, a turn whose session Node ended while the turn was with it, and a turn whose
+// session failed for a refusal of some other command.
 func TestDriverIPCFollowUpThatMayHaveArrivedIsNotUndelivered(t *testing.T) {
 	t.Run("write failed as the Node died", func(t *testing.T) {
 		h := newIPCHarness(t, nil)
@@ -142,4 +143,51 @@ func TestDriverIPCFollowUpThatMayHaveArrivedIsNotUndelivered(t *testing.T) {
 			t.Fatalf("turn lost with its session = %+v, want the Agent lost and the turn not undelivered", got)
 		}
 	})
+	t.Run("Node refused another command", func(t *testing.T) {
+		h := newIPCHarness(t, nil)
+		ctx := ipcContext(t)
+		session := h.session("held", "run-workspace")
+		f, _ := startedSession(t, h, ctx, session)
+		second := runWorkflowTurn(h, ctx, session, "second")
+		// The rejection names a command other than this turn's, so it says nothing about whether
+		// this turn's command was taken; the session fails as before.
+		f.reply(nextIPCCommand(t, f, "submit_user_turn"), "session_command_rejected", map[string]string{"command_id": "turn-other", "reason": "session_ended"})
+		got := receiveIPC(t, second)
+		if got.err == nil || got.result.FailureCode != "agent_session_ended" || got.result.NotDelivered {
+			t.Fatalf("turn after a rejection of another command = %+v, want it failed and not undelivered", got)
+		}
+	})
+}
+
+// A new Agent's first turn travels in start_agent_session: once that command is sent, Node may
+// have run the turn, so a session Node then ends is a lost turn, never an undelivered one. This
+// holds for a session's first turn and for a recovered session's follow-up, which starts a new
+// Agent after a restart or a lost Node; resending that message would run it a second time.
+func TestDriverIPCTurnThatStartedItsAgentIsNotUndelivered(t *testing.T) {
+	for name, recovered := range map[string]bool{"first turn": false, "recovered follow-up": true} {
+		t.Run(name, func(t *testing.T) {
+			h := newIPCHarness(t, nil)
+			ctx := ipcContext(t)
+			session := h.session("held", "run-workspace")
+			var f *fakeNodeIPC
+			if recovered {
+				f, _ = startedSession(t, h, ctx, session)
+				h.driver.mu.Lock()
+				old := h.driver.sessions[session.ID]
+				h.driver.mu.Unlock()
+				// The session's Agent breaks on its live Node; the caller brings it back.
+				old.fail("agent_identity_mismatch", execution.ErrUnavailable)
+				session.Recovery = &execution.Recovery{Handoff: "<ora_previous_conversation>…</ora_previous_conversation>"}
+			}
+			done := runWorkflowTurn(h, ctx, session, "second")
+			if f == nil {
+				f = receiveIPC(t, h.created)
+			}
+			f.terminalAs(nextIPCCommand(t, f, "start_agent_session"), "agent_failed", "")
+			got := receiveIPC(t, done)
+			if !errors.Is(got.err, execution.ErrSessionEnded) || !got.result.AgentLost || got.result.NotDelivered || got.result.NotStarted {
+				t.Fatalf("turn whose Agent start was sent = %+v, want the Agent lost and the turn neither undelivered nor unstarted", got)
+			}
+		})
+	}
 }

@@ -107,11 +107,12 @@ type followUp struct {
 	seq int
 }
 
-// delivered reports whether a settled turn's prompt reached the Agent. The execution service
-// marks NotStarted turns NotDelivered too; turns recorded before NotDelivered existed carry only
-// NotStarted.
+// delivered reports whether a settled turn's prompt reached the Agent. Only NotDelivered says it
+// did not: the execution service sets it on NotStarted turns too, while a turn recorded before
+// the flag existed carries NotStarted alone and was counted as a turn, so it still is (its
+// summary never said the message was lost, and a rebuild must not change that silently).
 func delivered(r execution.Result) bool {
-	return !r.NotDelivered && !r.NotStarted
+	return !r.NotDelivered
 }
 
 // endedNormally is the end_turn rule: only a complete EndTurn answer completes without force.
