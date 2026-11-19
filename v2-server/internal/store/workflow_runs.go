@@ -33,6 +33,10 @@ var (
 	// ErrTaskDecompositionRun reports a reopening of a task decomposition's run, which only a new
 	// decomposition from the task may replace (owner decision D32).
 	ErrTaskDecompositionRun = errors.New("workflow run is a task decomposition's run")
+	// ErrStarterUnavailable reports a reopening of a run whose recorded starter, whose identity its
+	// Agents execute under, can no longer act in the workspace (removed, account disabled), so
+	// everything the reopened run executed would be refused under that identity.
+	ErrStarterUnavailable = errors.New("workflow run starter is unavailable")
 	// ErrWorkflowSnapshotInUse reports a snapshot a live run froze.
 	ErrWorkflowSnapshotInUse = errors.New("workflow snapshot is in use")
 	// ErrWorkflowActiveRuns reports a definition a live run still references.

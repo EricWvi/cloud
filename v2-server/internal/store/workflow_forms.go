@@ -289,7 +289,10 @@ func (s *Store) WorkflowResumeStarter(ctx context.Context, runID string) (string
 // tasks, cancelled runs and failures in evidence collection cannot be replayed, and neither can a
 // task's handling run (ErrTaskHandlingRun, owner decision D30) or a task decomposition's run
 // (ErrTaskDecompositionRun, D32): its task link settled when the run failed, so the task starts
-// handling or decomposing again instead.
+// handling or decomposing again instead. A run whose recorded starter can no longer act in the
+// workspace is refused too (ErrStarterUnavailable), as its resume is: the reopened run would
+// execute under that identity and be refused. Every refusal leaves the run, its form and its rows
+// unchanged.
 func (s *Store) RetryWorkflowFormTasks(ctx context.Context, a Access, runID string) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := lockWorkflowRun(ctx, tx, a.TenantID, runID); err != nil {
@@ -319,6 +322,9 @@ func (s *Store) RetryWorkflowFormTasks(ctx context.Context, a Access, runID stri
 			return ErrTaskHandlingRun
 		case link == TaskLinkDecomposition:
 			return ErrTaskDecompositionRun
+		}
+		if err := requireRunStarter(ctx, tx, a.TenantID, runID); err != nil {
+			return err
 		}
 		var nodeID string
 		err = tx.QueryRow(ctx, `UPDATE v2_workflow_node_runs SET status='running',error=NULL,finished_at=NULL WHERE run_id=$1 AND node_type='createTasks' AND status='failed' AND deleted_at IS NULL RETURNING node_id`, runID).Scan(&nodeID)
@@ -357,4 +363,23 @@ func (s *Store) RecoverableFormRuns(ctx context.Context) ([]string, error) {
 // Task writes independently authorize the durable human submitter.
 func (s *Store) WorkflowFormForEngine(ctx context.Context, runID string) (WorkflowForm, error) {
 	return scanForm(s.pool.QueryRow(ctx, `SELECT `+formColumns+` FROM v2_workflow_forms WHERE run_id=$1`, runID))
+}
+
+// requireRunStarter refuses a run whose recorded starter no longer has access to the tenant, by
+// the same rule as every request and execution start (tenantAccess). A run without a recorded
+// starter passes: it has no identity to be refused under.
+func requireRunStarter(ctx context.Context, tx pgx.Tx, tenant, runID string) error {
+	var starter string
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(started_by::text,'') FROM v2_workflow_runs WHERE id=$1`, runID).Scan(&starter); err != nil {
+		return err
+	}
+	if starter == "" {
+		return nil
+	}
+	if _, err := tenantAccess(ctx, tx, tenant, starter); errors.Is(err, ErrNotFound) {
+		return ErrStarterUnavailable
+	} else if err != nil {
+		return err
+	}
+	return nil
 }

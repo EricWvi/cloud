@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
 	"github.com/wanglongan587/cloud/v2-server/internal/taskworkflow"
@@ -239,5 +240,62 @@ func TestFormRetryKeepsAnUnlinkedRunRetryable(t *testing.T) {
 	after, rows := f.await(t, id, terminal)
 	if after.Status != store.WorkflowStatusFailed || node(rows, "tasks").ID != node(before, "tasks").ID {
 		t.Fatalf("after the replays: run %s, createTasks %+v", after.Status, node(rows, "tasks"))
+	}
+}
+
+// A form retry reopens the run under its recorded starter, as a resume does. When that starter
+// left the workspace (removed, or the account disabled), the retry is refused as
+// ErrStarterUnavailable before anything changes: the run stays failed, its createTasks row and
+// started_by stay as they were. Once the starter is back, the same run retries.
+func TestFormRetryRefusedWhenTheStarterLeft(t *testing.T) {
+	for _, exit := range starterExits {
+		t.Run(exit.name, func(t *testing.T) {
+			f, admin := newFixtureWithAdmin(t)
+			ctx := context.Background()
+			starter := signInMember(t, f, "form-retry-left-starter-"+exit.name, "发起人")
+			id := f.run(t, formGraph, str("Evidence"))
+			if _, err := f.host.StartRun(ctx, server.WorkflowRunScope{TenantID: f.scope.TenantID, UserID: starter}, id); err != nil {
+				t.Fatal(err)
+			}
+			failFormTasks(t, f, id)
+			before, rowsBefore := f.await(t, id, terminal)
+			if before.StartedBy != starter {
+				t.Fatalf("setup: started_by = %q, want %s", before.StartedBy, starter)
+			}
+
+			exit.leave(t, f, admin, starter)
+
+			access := storetest.Access(t, f.s, f.scope.TenantID, f.scope.UserID)
+			if _, err := f.host.RetryForm(ctx, access, id); !errors.Is(err, store.ErrStarterUnavailable) {
+				t.Fatalf("form retry after the starter left = %v, want ErrStarterUnavailable", err)
+			}
+			after, rows := f.await(t, id, terminal)
+			tasks := node(rows, "tasks")
+			if after.Status != store.WorkflowStatusFailed || after.StartedBy != starter || tasks.Status != store.WorkflowStatusFailed || tasks.ID != node(rowsBefore, "tasks").ID {
+				t.Fatalf("a refused form retry changed the run: run %s started by %s, createTasks %+v", after.Status, after.StartedBy, tasks)
+			}
+
+			switch exit.name {
+			case "removed":
+				if _, err := admin.Exec(ctx, `INSERT INTO memberships (tenant_id, user_id, role) VALUES ($1, $2, 'member')`, f.scope.TenantID, starter); err != nil {
+					t.Fatal(err)
+				}
+			case "disabled":
+				if _, err := admin.Exec(ctx, `UPDATE users SET status = 'active' WHERE id = $1`, starter); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := f.s.RetryWorkflowFormTasks(ctx, access, id); err != nil {
+				t.Fatalf("form retry once the starter is back = %v", err)
+			}
+			reopened, rows := f.await(t, id, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return true })
+			if reopened.Status != store.WorkflowStatusRunning || node(rows, "tasks").Status != store.WorkflowStatusRunning {
+				t.Fatalf("form retry did not reopen the run: run %s, createTasks %s", reopened.Status, node(rows, "tasks").Status)
+			}
+			// The replay fails again only because the confirmed finding's assignee stays retired.
+			if err := f.host.resumeReviewRun(ctx, id); !errors.Is(err, store.ErrUserUnavailable) {
+				t.Fatalf("replayed task creation = %v, want the retired assignee's refusal", err)
+			}
+		})
 	}
 }
