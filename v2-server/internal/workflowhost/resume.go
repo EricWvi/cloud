@@ -43,8 +43,16 @@ func (h *Host) PreviewRunResume(ctx context.Context, scope server.WorkflowRunSco
 	if err != nil {
 		return server.WorkflowRunResumePreview{}, err
 	}
-	// The rows allow it, but this process still starts or ends a turn of the run: say so now
-	// rather than let the resume be refused after the user confirmed it.
+	// The rows allow it, but the Agents would execute under a starter who has left the workspace,
+	// or this process still starts or ends a turn of the run: say so now rather than let the
+	// resume be refused, or its Agents fail, after the user confirmed it.
+	if plan.Refusal == "" {
+		if _, available, err := h.resumeStarter(ctx, scope, runID); err != nil {
+			return server.WorkflowRunResumePreview{}, err
+		} else if !available {
+			plan.Refusal = workflow.ResumeRefusedStarterUnavailable
+		}
+	}
 	if plan.Refusal == "" && h.settling(runID) {
 		plan.Refusal = workflow.ResumeRefusedSettling
 	}
@@ -61,13 +69,15 @@ func (h *Host) PreviewRunResume(ctx context.Context, scope server.WorkflowRunSco
 // ResumeRun resumes a failed or cancelled run of the caller's tenant from its failed nodes, as
 // desktop's resume_from_failure with the keep-files mode: the workspace is left as it is. The
 // permission is the cancellation's. The resumed Agents execute under the run's persisted starter,
-// who owns every earlier session of the run, so the run's sessions keep one owner; when the run
-// has no recorded starter yet, an active tenant member who already owns a bound node session is
-// preferred, otherwise the caller is used, and the starter is persisted only inside the resume
-// transaction if the resume commits. A run whose resume this process already admitted keeps that
-// admission's owner: a resume that failed before committing leaves its state behind, and the later
-// caller then backfills that owner, so the recorded starter is the user the resumed sessions run
-// under.
+// who owns every earlier session of the run, so the run's sessions keep one owner. A starter who
+// is no longer an active member of the workspace refuses the resume as starter_unavailable rather
+// than let every resumed Agent fail under their identity. When the run has no recorded starter
+// yet, an active tenant member who already owns a bound node session is preferred, otherwise the
+// caller is used, and the starter is persisted only inside the resume transaction if the resume
+// commits. A run whose resume this process already admitted keeps that admission's owner while
+// that owner is still an active member: a resume that failed before committing leaves its state
+// behind, and the later caller then backfills that owner, so the recorded starter is the user the
+// resumed sessions run under.
 func (h *Host) ResumeRun(ctx context.Context, scope server.WorkflowRunScope, runID string) (store.WorkflowRun, error) {
 	run, err := h.store.WorkflowRun(ctx, scope.TenantID, runID)
 	if err != nil {
@@ -82,12 +92,12 @@ func (h *Host) ResumeRun(ctx context.Context, scope server.WorkflowRunScope, run
 		return store.WorkflowRun{}, &server.WorkflowRunNotResumable{Reason: workflow.ResumeRefusedSettling, RunningNodeIDs: []string{}}
 	}
 	defer unlock()
-	owner, err := h.store.WorkflowResumeStarter(ctx, runID)
+	owner, available, err := h.resumeStarter(ctx, scope, runID)
 	if err != nil {
-		return store.WorkflowRun{}, fmt.Errorf("read workflow run starter: %w", err)
+		return store.WorkflowRun{}, err
 	}
-	if owner == "" {
-		owner = scope.UserID
+	if !available {
+		return store.WorkflowRun{}, &server.WorkflowRunNotResumable{Reason: workflow.ResumeRefusedStarterUnavailable, RunningNodeIDs: []string{}}
 	}
 	// A run that a sibling failed may still have interactive nodes parked in this process, their
 	// rows pending and their sessions open. Close them before planning, so the resume restarts
@@ -96,7 +106,24 @@ func (h *Host) ResumeRun(ctx context.Context, scope server.WorkflowRunScope, run
 	if st := h.state(runID); st != nil {
 		h.releaseOrphans(st, runID)
 	}
-	st, ok := h.admitResume(runID, execution.Scope{TenantID: scope.TenantID, UserID: owner})
+	// A state an earlier admitted resume left behind keeps its owner only while that owner may
+	// still act in the workspace; one who left is replaced by this resume's owner (admitResume).
+	stale := ""
+	if left := h.state(runID); left != nil {
+		left.mu.Lock()
+		leftOwner := left.scope.UserID
+		left.mu.Unlock()
+		if leftOwner != owner {
+			active, err := h.activeMember(ctx, scope.TenantID, leftOwner)
+			if err != nil {
+				return store.WorkflowRun{}, fmt.Errorf("check the execution owner of workflow run %s: %w", runID, err)
+			}
+			if !active {
+				stale = leftOwner
+			}
+		}
+	}
+	st, ok := h.admitResume(runID, execution.Scope{TenantID: scope.TenantID, UserID: owner}, stale)
 	if !ok {
 		// The rows may name a rule that refuses anyway; otherwise the bridge is still settling a
 		// turn (for example a cancelled turn that has not finished ending) and the user retries.
@@ -159,7 +186,13 @@ func (h *Host) settling(runID string) bool {
 // its generation advanced: a dispatch made before the resume carries the old
 // generation, so neither its attempt goroutine nor beginStart lets it start a turn, even when it was already past its abandon check and resolving
 // its executor while the run was cancelled and resumed.
-func (h *Host) admitResume(runID string, scope execution.Scope) (*runState, bool) {
+//
+// stale names a leftover owner who is no longer an active member of the workspace. Executing under
+// that owner would fail every Agent of the resumed run and record a starter nobody can resume
+// under, so an idle leftover state (no attempt goroutine and no unconfirmed session End under the
+// old owner) takes scope's owner instead; one that is not idle yet is refused, and the user retries
+// once it settled.
+func (h *Host) admitResume(runID string, scope execution.Scope, stale string) (*runState, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	st := h.runs[runID]
@@ -172,8 +205,33 @@ func (h *Host) admitResume(runID string, scope execution.Scope) (*runState, bool
 	if len(st.attempts) != 0 || st.starters != 0 || len(st.interactive) != 0 {
 		return nil, false
 	}
+	if stale != "" && st.scope.UserID == stale {
+		if st.dispatched != 0 || len(st.unended) != 0 {
+			return nil, false
+		}
+		st.scope = scope
+	}
 	st.cancelling = false
 	st.generation++
 	st.starters++
 	return st, true
+}
+
+// resumeStarter returns who a resume of the run would execute under, and whether that user may
+// still act in the caller's workspace. A recorded starter is kept even after they left (the
+// resume is then refused, never moved to someone else); a legacy run without one prefers an
+// active member owning an earlier node session, otherwise the caller.
+func (h *Host) resumeStarter(ctx context.Context, scope server.WorkflowRunScope, runID string) (string, bool, error) {
+	owner, err := h.store.WorkflowResumeStarter(ctx, runID)
+	if err != nil {
+		return "", false, fmt.Errorf("read workflow run starter: %w", err)
+	}
+	if owner == "" {
+		return scope.UserID, true, nil
+	}
+	active, err := h.activeMember(ctx, scope.TenantID, owner)
+	if err != nil {
+		return "", false, fmt.Errorf("check workflow run starter: %w", err)
+	}
+	return owner, active, nil
 }

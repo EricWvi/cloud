@@ -33,12 +33,20 @@ const (
 	// so its failures must not read as auto-retryable; desktop has no such kind because its
 	// retry policy excludes interactive attempts instead.
 	FailureInteractiveSession FailureKind = "interactive_session"
+	// FailureStarterUnavailable is v2's own kind for an Agent the execution bridge or the catalog
+	// refused because the run's starter, whose identity its Agents execute under, is no longer an
+	// active member of the workspace (removed, or the account disabled). Retrying under the same
+	// identity can only fail again, so it never retries automatically; a resume stays possible
+	// once the starter is back, and until then the resume preview refuses it as
+	// ResumeRefusedStarterUnavailable.
+	FailureStarterUnavailable FailureKind = "starter_unavailable"
 )
 
 func (k FailureKind) resumable() bool {
 	switch k {
 	case FailureWorkflowModelNotFound, FailureWorkflowRoleNotFound, FailureMissingAgentConfig, FailureSession, FailureSessionEndedWithoutReason,
-		FailureSessionBindingRejected, FailureInterruptedByRestart, FailureRepository, FailureInteractiveSession:
+		FailureSessionBindingRejected, FailureInterruptedByRestart, FailureRepository, FailureInteractiveSession,
+		FailureStarterUnavailable:
 		return true
 	}
 	return false
