@@ -46,6 +46,13 @@ func (s *Service) recovery(ctx context.Context, session execution.Session, turn 
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: %w", execution.ErrUnavailable, err)
 	}
+	if bound := s.clones[session.ID]; bound != "" && at.CloneExecution != bound {
+		// The workspace's record moved on to another clone: Node no longer knew the one this
+		// conversation ran in, which was forgotten, and a later node of the run cloned again. The
+		// conversation's edits are not in the new clone, and continuing there would lose them
+		// silently, so its checkout is gone.
+		return nil, true, errWorkspaceMissing
+	}
 	if _, err := os.Stat(at.Path); errors.Is(err, fs.ErrNotExist) {
 		return nil, true, errWorkspaceMissing
 	} else if err != nil {
