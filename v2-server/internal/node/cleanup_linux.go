@@ -23,6 +23,11 @@ var ownedExecutables = []string{"nb", "rb", "hb", "gb"}
 
 // cleanOwned signals only executables copied into this private root. pidfds prevent PID-reuse
 // signals; remaining unclassified processes in the root block cleanup instead of being killed.
+//
+// Names are handled in ownedExecutables order. The reaper comes after Node because Node's exit
+// closes the reaper's pipe, which is what makes it kill the Git process groups Node registered
+// and then exit on its own; it comes before the wait for unowned processes because those Git
+// processes are exactly what that wait would otherwise report as leftovers.
 func cleanOwned(ctx context.Context, paths Paths, grace time.Duration) error {
 	for _, name := range ownedExecutables {
 		entries, err := os.ReadDir("/proc")
@@ -59,7 +64,11 @@ func cleanOwned(ctx context.Context, paths Paths, grace time.Duration) error {
 				unix.Close(fd)
 				continue
 			}
-			err = stopPID(ctx, fd, grace)
+			if name == "rb" {
+				err = stopReaper(ctx, fd, grace)
+			} else {
+				err = stopPID(ctx, fd, grace)
+			}
 			unix.Close(fd)
 			if err != nil {
 				return err
@@ -163,29 +172,53 @@ func processStart(proc string) (string, error) {
 	return fields[19], nil // field 22, counting from state (field 3).
 }
 
+// stopReaper first gives the reaper grace to exit on its own. A reaper whose Node has gone is
+// SIGKILLing the process groups Node registered and does not handle SIGTERM, so signalling it at
+// once can end it halfway and strand those Git processes in the root. One still running after
+// the grace (its parent survived, or it hangs) is stopped like any other owned process.
+func stopReaper(ctx context.Context, fd int, grace time.Duration) error {
+	if exited, err := awaitPID(ctx, fd, grace); err != nil || exited {
+		return err
+	}
+	return stopPID(ctx, fd, grace)
+}
+
+// stopPID sends SIGTERM, then SIGKILL if the process outlives grace, and waits for it to exit
+// for as long as ctx allows.
 func stopPID(ctx context.Context, fd int, grace time.Duration) error {
 	if err := unix.PidfdSendSignal(fd, unix.SIGTERM, nil, 0); err != nil && !errors.Is(err, unix.ESRCH) {
 		return err
 	}
+	if exited, err := awaitPID(ctx, fd, grace); err != nil || exited {
+		return err
+	}
+	if err := unix.PidfdSendSignal(fd, unix.SIGKILL, nil, 0); err != nil && !errors.Is(err, unix.ESRCH) {
+		return err
+	}
+	for {
+		if exited, err := awaitPID(ctx, fd, grace); err != nil || exited {
+			return err
+		}
+	}
+}
+
+// awaitPID reports whether the process behind pidfd fd exits within grace; ctx ends it early.
+func awaitPID(ctx context.Context, fd int, grace time.Duration) (bool, error) {
 	deadline := time.Now().Add(grace)
-	killed := false
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return false, err
 		}
 		poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
 		n, err := unix.Poll(poll, 20)
 		if err != nil && !errors.Is(err, unix.EINTR) {
-			return err
+			return false, err
 		}
 		if n > 0 && poll[0].Revents&unix.POLLIN != 0 {
-			return nil
+			return true, nil
 		}
-		if !killed && time.Now().After(deadline) {
-			if err := unix.PidfdSendSignal(fd, unix.SIGKILL, nil, 0); err != nil && !errors.Is(err, unix.ESRCH) {
-				return err
-			}
-			killed = true
+		if time.Now().After(deadline) {
+			return false, nil
 		}
 	}
 }
