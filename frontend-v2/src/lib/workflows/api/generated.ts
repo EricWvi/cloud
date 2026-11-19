@@ -907,7 +907,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     }
 
 /**
- * v2 only, candidate for Cloud. Retries the failed task creation of a failed run's submitted review form. 409 workflow_form_closed when the run is not failed or the form was not submitted; 409 task_handling for a task's handling run (owner decision D30) and 409 task_decomposition for a task decomposition's run (D32), which the task starts again instead.
+ * v2 only, candidate for Cloud. Retries the failed task creation of a failed run's submitted review form. 409 workflow_form_closed when the run is not failed or the form was not submitted; 409 task_handling for a task's handling run (owner decision D30) and 409 task_decomposition for a task decomposition's run (D32), which the task starts again instead; 409 starter_unavailable when the run's recorded starter can no longer act in the workspace (removed or account disabled), as for resume, leaving the run unchanged.
  */
 export const retryWorkflowFormTasks = (
     tid: string,
