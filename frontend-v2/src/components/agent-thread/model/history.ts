@@ -23,6 +23,13 @@ export interface SessionView {
   results: ChatResult[]
   /** What each ended turn was asked, aligned with `results`. */
   prompts: string[]
+  /** Which turn each ended turn's result is for, aligned with `results`. */
+  resultTurns: string[]
+  /**
+   * Which turn first recorded each user message record of the history, by record sequence: the
+   * turn the history snapshot or preview that first held the record was published for.
+   */
+  recordTurns: Record<number, string>
   ended: boolean
   /** Why chat ended the session; empty when it ended outside chat (a restart) or is live. */
   endReason: ChatSessionEndReason
@@ -31,7 +38,20 @@ export interface SessionView {
 }
 
 /** A session before any event has arrived. */
-export const emptySessionView = (id: string): SessionView => ({ id, records: [], thoughtTimings: {}, incomplete: false, results: [], prompts: [], ended: false, endReason: '', cursor: 0 })
+export const emptySessionView = (id: string): SessionView => ({ id, records: [], thoughtTimings: {}, incomplete: false, results: [], prompts: [], resultTurns: [], recordTurns: {}, ended: false, endReason: '', cursor: 0 })
+
+/** Remembers the turn of each user message record a snapshot or preview holds for the first time. */
+function recordTurnsOf(known: Record<number, string>, records: ChatHistoryRecord[], turnId: string): Record<number, string> {
+  if (!turnId) return known
+  let turns = known
+  for (const record of records) {
+    const line = record.data as HistoryLine
+    if (line.type !== 'update' || line.update?.sessionUpdate !== 'user_message_chunk' || record.sequence in turns) continue
+    if (turns === known) turns = { ...known }
+    turns[record.sequence] = turnId
+  }
+  return turns
+}
 
 /**
  * Folds one event-stream message into a session. A history snapshot replaces the whole history,
@@ -43,11 +63,17 @@ export function applySessionEvent(base: SessionView, event: ChatEvent): SessionV
   const view = { ...base, cursor: event.sequence, thoughtTimings: observeThoughts(base.thoughtTimings, event, base.records) }
   switch (event.kind) {
     case 'history_snapshot':
-      return event.history ? { ...view, records: event.history.records, incomplete: event.history.incomplete } : view
+      return event.history
+        ? { ...view, records: event.history.records, incomplete: event.history.incomplete, recordTurns: recordTurnsOf(view.recordTurns, event.history.records, event.turnId) }
+        : view
     case 'history_preview':
-      return event.history ? { ...view, records: withPending(view.records, event.history.records), incomplete: event.history.incomplete } : view
+      return event.history
+        ? { ...view, records: withPending(view.records, event.history.records), incomplete: event.history.incomplete, recordTurns: recordTurnsOf(view.recordTurns, event.history.records, event.turnId) }
+        : view
     case 'turn_ended':
-      return event.result ? { ...view, results: [...view.results, event.result], prompts: [...view.prompts, event.prompt ?? ''] } : view
+      return event.result
+        ? { ...view, results: [...view.results, event.result], prompts: [...view.prompts, event.prompt ?? ''], resultTurns: [...view.resultTurns, event.turnId] }
+        : view
     case 'session_ended':
       return { ...view, ended: true }
     case 'preparation':
@@ -108,36 +134,46 @@ interface Placement {
 }
 
 /**
- * Pairs the history's turns with the session's results. A turn the Agent never received has a
- * result and no history: one stopped before its Agent started, or one Node dropped when it was
- * stopped while still queued, which leaves the session open, so later turns follow it. Results
- * and history turns otherwise come in the same order, so a result is set aside as unrecorded only
- * when it is cancelled, was asked something else, and a later result was asked exactly this
- * turn's prompt; anything less certain pairs by position, as before.
+ * Pairs the history's turns with the session's results by turn: each history turn knows the turn
+ * it was recorded for (`historyTurns`), each result the turn it ended (`resultTurns`). A turn the
+ * Agent never received has a result and no history: one stopped before its Agent started, one
+ * Node dropped when it was stopped while still queued (the session stays, so later turns follow
+ * it), or one that was never delivered. It is shown before the first history turn that ended after
+ * it. Without a usable identity for every turn (views from before turns were known, or ones that
+ * repeat a turn) results pair by position, the history's turns first.
  */
-function place(prompts: string[], results: ChatResult[], asked: string[]): Placement {
-  const placement: Placement = { recorded: [], unrecorded: prompts.map(() => []) }
-  let r = 0
-  prompts.forEach((prompt, k) => {
-    while (r < results.length && results[r].status === 'cancelled' && asked[r] && asked[r] !== prompt && asked.slice(r + 1, results.length).includes(prompt)) {
-      placement.unrecorded[k].push(r++)
-    }
-    placement.recorded.push(r < results.length ? r++ : undefined)
+function place(historyTurns: string[], resultTurns: string[], results: number): Placement {
+  const placement: Placement = { recorded: [], unrecorded: historyTurns.map(() => []) }
+  const unique = (ids: string[]) => ids.every((id) => id !== '') && new Set(ids).size === ids.length
+  if (resultTurns.length !== results || !unique(historyTurns) || !unique(resultTurns)) {
+    historyTurns.forEach((_, k) => placement.recorded.push(k < results ? k : undefined))
+    placement.unrecorded.push(Array.from({ length: Math.max(0, results - historyTurns.length) }, (_, i) => historyTurns.length + i))
+    return placement
+  }
+  const ended = new Map(resultTurns.map((turn, r) => [turn, r]))
+  historyTurns.forEach((turn) => placement.recorded.push(ended.get(turn)))
+  placement.unrecorded.push([])
+  const recorded = new Set(historyTurns)
+  resultTurns.forEach((turn, r) => {
+    if (recorded.has(turn)) return
+    const k = placement.recorded.findIndex((later) => later !== undefined && later > r)
+    placement.unrecorded[k === -1 ? historyTurns.length : k].push(r)
   })
-  const trailing: number[] = []
-  for (; r < results.length; r++) trailing.push(r)
-  placement.unrecorded.push(trailing)
   return placement
 }
 
 function appendSession(base: Conversation, session: SessionView): Conversation {
-  // The history's own turns first, to know what each was asked; then the turns with their results.
-  const prompts = buildSession(base, session).turns.slice(base.turns.length).map((t) => t.prompt.text)
-  return buildSession(base, session, place(prompts, session.results, session.prompts))
+  // The history's own turns first, to learn which turn each was recorded for; then all turns.
+  const historyTurns: string[] = []
+  buildSession(base, session, undefined, historyTurns)
+  return buildSession(base, session, place(historyTurns, session.resultTurns, session.results.length))
 }
 
-/** Builds a session's turns from its history; with a placement, also from its results. */
-function buildSession(base: Conversation, session: SessionView, placement?: Placement): Conversation {
+/**
+ * Builds a session's turns from its history; with a placement, also from its results. Without
+ * one it collects, into historyTurns, the turn each history turn was recorded for.
+ */
+function buildSession(base: Conversation, session: SessionView, placement?: Placement, historyTurns?: string[]): Conversation {
   const records = [...session.records].sort((a, b) => a.sequence - b.sequence)
   let conversation = base
   let index = -1 // this session's history turn being built
@@ -186,6 +222,7 @@ function buildSession(base: Conversation, session: SessionView, placement?: Plac
       }
       close(at)
       index++
+      historyTurns?.push(session.recordTurns[record.sequence] ?? '')
       unrecorded(index)
       conversation = applyEvent(conversation, { type: 'prompt', turnId: `${session.id}:${record.sequence}`, text }, at)
       const r = placement?.recorded[index]

@@ -231,27 +231,69 @@ describe('conversationOf', () => {
     expect(recorded.turns).toHaveLength(1)
   })
 
-  it('places a turn Node dropped before its Agent got it among the turns that followed it', () => {
+  describe('pairs results with the history by turn', () => {
     const cancelled: ChatResult = { ...done, status: 'cancelled', stopReason: 'cancelled' }
-    const failed: ChatResult = { status: 'failed', answer: '', answerComplete: false, stopReason: 'cancelled', failureCode: 'model_idle_timeout' }
-    // The stop kept the session: the dropped first turn never reached the history, the next ones did.
-    const c = conversationOf([view({
-      records: [user(1, '第二问'), say(2, '答二'), ended(3), user(4, '第三问'), ended(5, 'cancelled')],
-      results: [cancelled, done, failed], prompts: ['第一问', '第二问', '第三问'],
-    })])
-    expect(c.turns.map((t) => [t.prompt.text, t.status])).toEqual([['第一问', 'cancelled'], ['第二问', 'completed'], ['第三问', 'failed']])
-    expect(c.markers).toEqual([])
-    // A dropped turn after the recorded ones, and one whose session is still preparing its first.
-    const later = conversationOf([view({ records: [user(1, '第一问'), ended(2)], results: [done, cancelled], prompts: ['第一问', '第二问'] })])
-    expect(later.turns.map((t) => [t.prompt.text, t.status])).toEqual([['第一问', 'completed'], ['第二问', 'cancelled']])
-    const first = conversationOf([view({ results: [cancelled], prompts: ['停下来'], preparingPrompt: '停下来' })])
-    expect(first.turns.map((t) => [t.prompt.text, t.status])).toEqual([['停下来', 'cancelled']])
-  })
+    const undelivered: ChatResult = { status: 'failed', answer: '', answerComplete: false, stopReason: '', failureCode: 'agent_dispatch_failed' }
+    const shown = (patch: Partial<SessionView>) => conversationOf([view(patch)]).turns.map((t) => [t.prompt.text, t.status])
 
-  it('pairs results with the history by position when their prompts cannot tell', () => {
-    const cancelled: ChatResult = { ...done, status: 'cancelled', stopReason: 'cancelled' }
-    const c = conversationOf([view({ records: [user(1, 'a'), ended(2, 'cancelled'), user(3, 'b'), ended(4)], results: [cancelled, done], prompts: ['', 'b'] })])
-    expect(c.turns.map((t) => [t.prompt.text, t.status])).toEqual([['a', 'cancelled'], ['b', 'completed']])
+    it('places a turn Node dropped before its Agent got it before the turns that followed it', () => {
+      // The stop kept the session: the dropped first turn never reached the history.
+      expect(shown({
+        records: [user(1, '第二问'), say(2, '答二'), ended(3), user(4, '第三问'), ended(5, 'cancelled')], recordTurns: { 1: 't2', 4: 't3' },
+        results: [cancelled, done, cancelled], prompts: ['第一问', '第二问', '第三问'], resultTurns: ['t1', 't2', 't3'],
+      })).toEqual([['第一问', 'cancelled'], ['第二问', 'completed'], ['第三问', 'cancelled']])
+    })
+
+    it('tells a resent identical prompt from the stopped one', () => {
+      expect(shown({
+        records: [user(1, '同一问'), say(2, '答'), ended(3)], recordTurns: { 1: 't2' },
+        results: [cancelled, done], prompts: ['同一问', '同一问'], resultTurns: ['t1', 't2'],
+      })).toEqual([['同一问', 'cancelled'], ['同一问', 'completed']])
+    })
+
+    it('pairs turns whose prompt could not be read', () => {
+      expect(shown({
+        records: [user(1, 'B'), ended(2)], recordTurns: { 1: 't2' },
+        results: [cancelled, done], prompts: ['', ''], resultTurns: ['t1', 't2'],
+      })).toEqual([['', 'cancelled'], ['B', 'completed']])
+    })
+
+    it('keeps a later turn with its own result after one that was never delivered', () => {
+      const [lost, answered] = conversationOf([view({
+        records: [user(1, '第二条'), say(2, '好'), ended(3)], recordTurns: { 1: 't2' },
+        results: [undelivered, done], prompts: ['第一条', '第二条'], resultTurns: ['t1', 't2'],
+      })]).turns
+      expect([lost.prompt.text, lost.status, answered.prompt.text, answered.status]).toEqual(['第一条', 'failed', '第二条', 'completed'])
+    })
+
+    it('moves no result that has its turn in the history, whatever its status', () => {
+      expect(shown({
+        records: [user(1, 'a'), ended(2, 'cancelled'), user(3, 'b'), ended(4)], recordTurns: { 1: 't1', 3: 't2' },
+        results: [cancelled, done, cancelled], prompts: ['a', 'b', 'c'], resultTurns: ['t1', 't2', 't3'],
+      })).toEqual([['a', 'cancelled'], ['b', 'completed'], ['c', 'cancelled']])
+    })
+
+    it('pairs by position when the turns are not all known', () => {
+      expect(shown({
+        records: [user(1, 'a'), ended(2, 'cancelled'), user(3, 'b'), ended(4)],
+        results: [cancelled, done], prompts: ['a', 'b'], resultTurns: ['t', 't'],
+      })).toEqual([['a', 'cancelled'], ['b', 'completed']])
+    })
+
+    it('learns each turn from the events that first recorded it', () => {
+      let v = emptySessionView('s1')
+      const fold = (event: Partial<ChatEvent> & Pick<ChatEvent, 'kind' | 'turnId'>) => {
+        v = applySessionEvent(v, { sequence: v.cursor + 1, occurredAt: at(0), ...event } as ChatEvent)
+      }
+      fold({ kind: 'turn_ended', turnId: 't1', result: cancelled, prompt: '同一问' })
+      fold({ kind: 'history_preview', turnId: 't2', history: { records: [{ ...user(1, '同一问'), preview: true }], incomplete: false } })
+      fold({ kind: 'history_snapshot', turnId: 't2', history: { records: [user(1, '同一问'), say(2, '答'), ended(3)], incomplete: false } })
+      fold({ kind: 'turn_ended', turnId: 't2', result: done, prompt: '同一问' })
+      // A later snapshot published for another turn does not take the record over.
+      fold({ kind: 'history_snapshot', turnId: 't3', history: { records: [user(1, '同一问'), say(2, '答'), ended(3)], incomplete: false } })
+      expect(v.recordTurns).toEqual({ 1: 't2' })
+      expect(conversationOf([v]).turns.map((t) => [t.prompt.text, t.status])).toEqual([['同一问', 'cancelled'], ['同一问', 'completed']])
+    })
   })
 
   it('joins a prompt sent as several blocks', () => {
