@@ -231,6 +231,29 @@ describe('conversationOf', () => {
     expect(recorded.turns).toHaveLength(1)
   })
 
+  it('places a turn Node dropped before its Agent got it among the turns that followed it', () => {
+    const cancelled: ChatResult = { ...done, status: 'cancelled', stopReason: 'cancelled' }
+    const failed: ChatResult = { status: 'failed', answer: '', answerComplete: false, stopReason: 'cancelled', failureCode: 'model_idle_timeout' }
+    // The stop kept the session: the dropped first turn never reached the history, the next ones did.
+    const c = conversationOf([view({
+      records: [user(1, '第二问'), say(2, '答二'), ended(3), user(4, '第三问'), ended(5, 'cancelled')],
+      results: [cancelled, done, failed], prompts: ['第一问', '第二问', '第三问'],
+    })])
+    expect(c.turns.map((t) => [t.prompt.text, t.status])).toEqual([['第一问', 'cancelled'], ['第二问', 'completed'], ['第三问', 'failed']])
+    expect(c.markers).toEqual([])
+    // A dropped turn after the recorded ones, and one whose session is still preparing its first.
+    const later = conversationOf([view({ records: [user(1, '第一问'), ended(2)], results: [done, cancelled], prompts: ['第一问', '第二问'] })])
+    expect(later.turns.map((t) => [t.prompt.text, t.status])).toEqual([['第一问', 'completed'], ['第二问', 'cancelled']])
+    const first = conversationOf([view({ results: [cancelled], prompts: ['停下来'], preparingPrompt: '停下来' })])
+    expect(first.turns.map((t) => [t.prompt.text, t.status])).toEqual([['停下来', 'cancelled']])
+  })
+
+  it('pairs results with the history by position when their prompts cannot tell', () => {
+    const cancelled: ChatResult = { ...done, status: 'cancelled', stopReason: 'cancelled' }
+    const c = conversationOf([view({ records: [user(1, 'a'), ended(2, 'cancelled'), user(3, 'b'), ended(4)], results: [cancelled, done], prompts: ['', 'b'] })])
+    expect(c.turns.map((t) => [t.prompt.text, t.status])).toEqual([['a', 'cancelled'], ['b', 'completed']])
+  })
+
   it('joins a prompt sent as several blocks', () => {
     const [turn] = conversationOf([view({ records: [user(1, '第一行'), user(2, '第二行')] })]).turns
     expect(turn.prompt.text).toBe('第一行第二行')
