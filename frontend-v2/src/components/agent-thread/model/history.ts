@@ -139,7 +139,7 @@ interface Placement {
  * Agent never received has a result and no history: one stopped before its Agent started, one
  * Node dropped when it was stopped while still queued (the session stays, so later turns follow
  * it), or one that was never delivered. It is shown before the first history turn that ended after
- * it. Without a usable identity for every turn (views from before turns were known, or ones that
+ * it, or that has not ended yet (only the latest turn can still be answering). Without a usable identity for every turn (views from before turns were known, or ones that
  * repeat a turn) results pair by position, the history's turns first.
  */
 function place(historyTurns: string[], resultTurns: string[], results: number): Placement {
@@ -156,7 +156,7 @@ function place(historyTurns: string[], resultTurns: string[], results: number): 
   const recorded = new Set(historyTurns)
   resultTurns.forEach((turn, r) => {
     if (recorded.has(turn)) return
-    const k = placement.recorded.findIndex((later) => later !== undefined && later > r)
+    const k = placement.recorded.findIndex((later) => later === undefined || later > r)
     placement.unrecorded[k === -1 ? historyTurns.length : k].push(r)
   })
   return placement

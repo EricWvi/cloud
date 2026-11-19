@@ -244,6 +244,18 @@ describe('conversationOf', () => {
       })).toEqual([['第一问', 'cancelled'], ['第二问', 'completed'], ['第三问', 'cancelled']])
     })
 
+    it('keeps a dropped turn in its place while the turn after it is still answering', () => {
+      // Stopped while its Agent started (Node: not_started), then the next message, still running.
+      expect(shown({
+        records: [user(1, '二'), say(2, '正在答')], recordTurns: { 1: 't2' },
+        results: [cancelled], prompts: ['一'], resultTurns: ['t1'],
+      })).toEqual([['一', 'cancelled'], ['二', 'streaming']])
+      expect(shown({
+        records: [user(1, '一'), say(2, '答一'), ended(3), user(4, '三'), say(5, '正在答')], recordTurns: { 1: 't1', 4: 't3' },
+        results: [done, cancelled], prompts: ['一', '二'], resultTurns: ['t1', 't2'],
+      })).toEqual([['一', 'completed'], ['二', 'cancelled'], ['三', 'streaming']])
+    })
+
     it('tells a resent identical prompt from the stopped one', () => {
       expect(shown({
         records: [user(1, '同一问'), say(2, '答'), ended(3)], recordTurns: { 1: 't2' },
