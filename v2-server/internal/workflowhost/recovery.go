@@ -96,7 +96,9 @@ func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDis
 	var payload struct {
 		Task        string `json:"task"`
 		Interactive struct {
-			SessionEnded bool `json:"session_ended"`
+			SessionEnded  bool   `json:"session_ended"`
+			Sent          int    `json:"sent"`
+			LastTurnError string `json:"last_turn_error"`
 		} `json:"interactive"`
 	}
 	if err := json.Unmarshal(row.Payload, &payload); err != nil {
@@ -114,6 +116,11 @@ func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDis
 	// still lets the node complete with the last normal answer, as it did before.
 	n.sessionGone = session.EndedAt != nil
 	n.sessionEnded = n.sessionGone || payload.Interactive.SessionEnded
+	// The summary is the only record of a message the execution service refused at Append: it
+	// left no turn, so the turns below neither count its number nor tell that it was lost. Keep
+	// both, or rewriting the summary after the recovery would hide the notice and reuse its number.
+	n.undelivered = payload.Interactive.LastTurnError == turnErrorNotDelivered
+	n.seq = payload.Interactive.Sent
 	prefix := d.NodeRunID + "/turn-"
 	for cursor := ""; ; {
 		page, err := h.exec.ReadTurns(ctx, st.scope, n.session, cursor, 100)

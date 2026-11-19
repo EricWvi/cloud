@@ -170,6 +170,38 @@ func TestMissingWorkspaceFailsTheRecoveredNode(t *testing.T) {
 	if run.Status != store.WorkflowStatusFailed || errorKind(t, node(nodes, "a")) != "interactive_session" {
 		t.Fatalf("run %s node %+v, want the node to fail once its directory is gone", run.Status, node(nodes, "a"))
 	}
+	// A later turn lost the node's conversation: only a first turn is told a resume clones again.
+	if msg := errorMessage(t, node(nodes, "a")); strings.Contains(msg, "fresh clone") {
+		t.Fatalf("message %q, want the lost conversation rather than the first-turn hint", msg)
+	}
+}
+
+// A message the execution service refused before the restart left no turn behind: the summary is
+// its only record. Rewriting the summary on recovery keeps the notice and the message's number,
+// so the page still offers it back and the next message does not reuse it.
+func TestARestartKeepsTheUndeliveredNotice(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	runID, a := f.startParked(t, interactiveChain, "初稿一")
+	_, nodes := f.await(t, runID, parked("a"))
+	accept := f.refuseAppendsOf(a, execution.ErrUnavailable)
+	if accepted, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); err != nil || accepted.Sent != 1 {
+		t.Fatalf("the turn = %+v %v, want message 1", accepted.Sent, err)
+	}
+	f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["last_turn_error"] == turnErrorNotDelivered
+	})
+	f.exec.recordedTurns(a, node(nodes, "a").ID, completed("初稿一"))
+	f.restart(t)
+
+	f.await(t, runID, awaitingInput("a"))
+	if p := interactivePayload(t, f.nodeRow(t, runID, "a")); p["last_turn_error"] != turnErrorNotDelivered || p["sent"] != float64(1) || p["answer"] != "初稿一" {
+		t.Fatalf("summary after the restart = %v, want the notice about message 1 kept", p)
+	}
+	accept()
+	if accepted, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); err != nil || accepted.Sent != 2 {
+		t.Fatalf("the resent message = %+v %v, want message 2", accepted.Sent, err)
+	}
 }
 
 func TestUnstartedRecoveryKeepsTheNodeWaiting(t *testing.T) {
