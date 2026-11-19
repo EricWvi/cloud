@@ -207,12 +207,19 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 		// unknown to Node): nothing can continue the conversation or produce what it was asked for.
 		// As for a first turn that could not be set up, the session keeps its slot until its End
 		// is confirmed (the execution service has ended it, so End is idempotent).
+		message := "the run's checkout no longer exists, so the node's conversation cannot continue"
+		if n.turns == 0 {
+			// Only a reattached checkout Node no longer knows fails a first turn this way, such
+			// as the successor of a node completed after the restart: it never had a conversation
+			// to lose, and the record was dropped with it, so a resume from the failure clones.
+			message = "Node no longer knows the run's checkout; resuming from the failure starts the node on a fresh clone"
+		}
 		lingering := st.dropInteractive(n)
 		st.mu.Unlock()
 		if lingering {
 			h.endLingering(st, n.d.RunID, n.session)
 		}
-		h.fail(n.d, workflow.Failure{Kind: workflow.FailureInteractiveSession, Message: "the run's checkout no longer exists, so the node's conversation cannot continue"})
+		h.fail(n.d, workflow.Failure{Kind: workflow.FailureInteractiveSession, Message: message})
 		return
 	}
 	if err == nil {

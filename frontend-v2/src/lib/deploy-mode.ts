@@ -2,17 +2,12 @@ import { useQuery } from '@tanstack/react-query'
 import { getProviders } from './auth-api'
 
 /**
- * The single provider a deployment offers. The login decision (A6) fixes it: `V2_LOGIN=idaas`
- * is a deployed install, `email` is development, and the two never coexist. `GET /auth/providers`
- * therefore returns exactly one of them.
+ * Whether a provider list marks a deployed install. `V2_LOGIN` names the login methods a server
+ * offers; `email` signs in by address alone and exists only for development and demos, so a server
+ * that offers login methods but not `email` is a deployment.
  */
-export const deployedProviders = ['idaas'] as const
-
-/** Whether a provider list marks this build as the deployed (IDaaS) install. */
 export function isDeployedProviders(providers: string[] | undefined): boolean {
-  return (providers ?? []).some((provider) =>
-    (deployedProviders as readonly string[]).includes(provider),
-  )
+  return (providers ?? []).length > 0 && !(providers ?? []).includes('email')
 }
 
 /**
@@ -27,4 +22,17 @@ export function useDeployedVersion() {
     retry: false,
   })
   return isDeployedProviders(query.data?.providers)
+}
+
+/**
+ * Whether the server offers the email login, which is also what lets an owner invite by address.
+ * Like `useDeployedVersion`, an unknown answer keeps the development behavior.
+ */
+export function useEmailLogin() {
+  const query = useQuery({
+    queryKey: ['auth', 'providers'],
+    queryFn: getProviders,
+    retry: false,
+  })
+  return !isDeployedProviders(query.data?.providers)
 }

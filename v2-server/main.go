@@ -25,6 +25,8 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/boot"
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/executionruntime"
+	"github.com/wanglongan587/cloud/v2-server/internal/idaas"
+	loginpkg "github.com/wanglongan587/cloud/v2-server/internal/login"
 	"github.com/wanglongan587/cloud/v2-server/internal/nodeservices"
 	"github.com/wanglongan587/cloud/v2-server/internal/pluginmarket"
 	"github.com/wanglongan587/cloud/v2-server/internal/preparedassets"
@@ -45,6 +47,13 @@ import (
 const defaultDatabase = "postgres://ora:ora-local@127.0.0.1:55432/ora_v2?sslmode=disable"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "admin-invite" {
+		if e := adminInvite(os.Args[2:], os.Stdout); e != nil {
+			slog.Error("admin-invite", "error", e)
+			os.Exit(1)
+		}
+		return
+	}
 	addr := flag.String("addr", envOr("V2_ADDR", "127.0.0.1:8090"), "listen address")
 	dbURL := flag.String("db", envOr("V2_DATABASE_URL", defaultDatabase), "PostgreSQL URL")
 	cleanup := flag.Bool("cleanup", false, "stop and remove owned conversation directories; retain repository mirrors and database history")
@@ -63,9 +72,29 @@ func run(addr, dbURL string, cleanup, fixture, testFixtures bool) error {
 }
 
 func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, listen func(*http.Server) error) (resultErr error) {
-	login := os.Getenv("V2_LOGIN")
-	if e := validateLogin(login, fixture || testFixtures || cleanup); e != nil {
+	login, e := parseLogin(os.Getenv("V2_LOGIN"), fixture || testFixtures)
+	if e != nil {
 		return e
+	}
+	publicURL, e := parsePublicURL(os.Getenv("V2_PUBLIC_URL"))
+	if e != nil {
+		return e
+	}
+	// -cleanup only removes Node directories and serves nothing, so it needs no login configuration.
+	var redirects map[string]loginpkg.Provider
+	if !cleanup {
+		if redirects, e = loginRedirects(login, publicURL, os.Getenv); e != nil {
+			return e
+		}
+	}
+	slog.Info("login methods", "V2_LOGIN", strings.Join(login, ","))
+	if c, ok := redirects[server.LoginProviderHuaweiIDaaS].(*idaas.Client); ok {
+		authorize, token, userinfo := c.Endpoints()
+		// The callback is what the IDaaS application must have registered, character for character.
+		slog.Info("huawei-idaas", "callback", publicURL.String()+"/auth/callback/"+server.LoginProviderHuaweiIDaaS, "authorize", authorize, "token", token, "userinfo", userinfo)
+	}
+	if login.has(server.LoginProviderEmail) && publicURL != nil && publicURL.Scheme == "https" {
+		slog.Warn("email login is on at an https address: knowing a member's address is enough to sign in as them; a deployment sets V2_LOGIN without email")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -110,9 +139,13 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	for _, m := range db.AppliedMigrations() {
 		slog.Info("applied database migration", "version", m.Version, "name", m.Name)
 	}
+	if e := db.ClaimProfile(ctx, databaseProfile(login)); e != nil {
+		db.Close()
+		return e
+	}
 	db.DisableOfficialMarket(envDefault("V2_PLUGIN_MARKETPLACE_URL", "https://github.com/ora-space/marketplace") == "")
 	var preset store.Preset
-	if login == "email" {
+	if login.has(server.LoginProviderEmail) {
 		preset, e = store.LoadPreset(envOr("V2_USERS_FILE", "users.json"))
 		if e != nil {
 			db.Close()
@@ -241,7 +274,7 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	}
 	var scope execution.Scope
 	var demo store.Project
-	if login == "email" {
+	if login.has(server.LoginProviderEmail) {
 		scope, demo, e = prepareDemo(ctx, db, projects, bootstrap)
 		if e != nil {
 			return e
@@ -318,12 +351,15 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	}); e != nil {
 		return e
 	}
-	if login == "email" && driver != nil {
+	if login.has(server.LoginProviderEmail) && driver != nil {
 		go driver.WarmDemo(ctx, demo.ID, agentruntime.Project{MirrorPath: demo.MirrorPath, Commit: demo.Commit, SnapshotRef: demo.SnapshotRef})
 	}
 	options := withWorkflowDomain(server.Options{
 		RefreshOfficial:    refreshOfficial,
 		SessionTTL:         7 * 24 * time.Hour,
+		LoginProviders:     login,
+		LoginRedirects:     redirects,
+		PublicURL:          publicURL,
 		Projects:           projects,
 		Execution:          runtime,
 		Catalog:            runtime,
@@ -446,7 +482,7 @@ func lockDirectory(root string) (*os.File, error) {
 func prepareDemo(ctx context.Context, db *store.Store, projects *projectrepos.Service, email string) (execution.Scope, store.Project, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	user, e := db.UserByEmail(ctx, email)
+	user, e := db.DemoMemberByEmail(ctx, email)
 	if e != nil {
 		return execution.Scope{}, store.Project{}, e
 	}

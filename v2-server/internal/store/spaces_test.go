@@ -55,11 +55,11 @@ func TestSpaceAgentPlugins(t *testing.T) {
 		t.Fatal(e)
 	}
 	// Listed by name: Claude Code, then OpenCode.
-	if len(items) != 2 || items[0].Identifier != store.DemoAgents[1].Identifier || items[1].Identifier != store.DemoAgents[0].Identifier {
+	if len(items) != 2 || items[0].Identifier != store.BundledAgents[1].Identifier || items[1].Identifier != store.BundledAgents[0].Identifier {
 		t.Fatalf("plugins = %+v", items)
 	}
 	for i, p := range items {
-		want := store.DemoAgents[1-i]
+		want := store.BundledAgents[1-i]
 		if p.SpaceID != space || p.TenantID != f.tenant || p.Kind != "agent" {
 			t.Fatalf("plugin scope = %+v", p)
 		}

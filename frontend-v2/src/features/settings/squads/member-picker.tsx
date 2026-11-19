@@ -17,13 +17,13 @@ const ROLE_LABELS: Record<string, string> = { owner: '管理员', admin: '管理
 /**
  * Picks an existing workspace member or an installed Space Agent to add to one squad. Both lists
  * come from contract routes, so the picker can never offer an account outside this workspace or an
- * agent that is not installed in its space. The workspace owner can also invite someone new, who
- * joins this squad directly.
+ * agent that is not installed in its space. Where addresses sign in (email login), the workspace
+ * owner can also invite someone new by address, who joins this squad directly.
  */
 export function MemberPicker({ squad, tenantId, canInvite, adding, error, onAdd, onAddAgent, onClose }: {
   squad: SquadDetail
   tenantId: string
-  /** The caller is the workspace owner, the only one who may invite. */
+  /** The caller may invite by address: the workspace owner, where the server offers email login. */
   canInvite: boolean
   /** A member is being added right now. */
   adding: boolean

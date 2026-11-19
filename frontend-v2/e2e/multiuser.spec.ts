@@ -70,3 +70,42 @@ test('a member is refused by the server even without the invitation entry', asyn
   expect(refused.status()).toBe(403)
   expect((await refused.json()).code).toBe('forbidden')
 })
+
+test('a removed member rejoins through a one-time invitation link', async ({ page }) => {
+  const email = newAddress()
+  await page.goto('/settings/squads')
+  await signIn(page)
+  const tenants = await (await page.request.get('/api/v1/me/tenants')).json()
+  const tenantId = tenants.items[0].id
+  const invited = await (await page.request.post(`/api/v2/tenants/${tenantId}/members`, { data: { email } })).json()
+  const removed = await page.request.delete(`/api/v2/tenants/${tenantId}/members/${invited.userId}`)
+  expect(removed.status()).toBe(204)
+
+  // The owner generates a link in 设置 / 小队 / 成员与邀请; its address is shown once.
+  await page.getByRole('button', { name: '成员与邀请' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', { name: '生成邀请链接' }).click()
+  const link = (await dialog.getByLabel('邀请链接', { exact: true }).textContent()) ?? ''
+  expect(link).toContain('/invite/')
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: '退出登录' }).click()
+  await expect(page.getByRole('heading', { name: '登录 Ora' })).toBeVisible()
+
+  // Signed in without a workspace, the account is told to ask for a link.
+  await page.goto('/workflows')
+  await signIn(page, email)
+  await expect(page.getByRole('heading', { name: '还没有加入团队' })).toBeVisible()
+  await page.getByRole('button', { name: '退出登录' }).click()
+  await expect(page.getByRole('heading', { name: '登录 Ora' })).toBeVisible()
+
+  // Opening the link signs in first, comes back to it, and joins on 「加入」.
+  await page.goto(new URL(link).pathname)
+  await signIn(page, email)
+  await expect(page.getByText(/你被邀请以成员身份加入/)).toBeVisible()
+  await page.getByRole('button', { name: '加入' }).click()
+  await expect(page.getByRole('link', { name: '设置' })).toBeVisible()
+
+  // Reopening it as the member who used it just returns the workspace.
+  const again = await page.request.post('/api/v1/invites/accept', { data: { token: new URL(link).pathname.split('/').pop() } })
+  expect(again.status()).toBe(200)
+})

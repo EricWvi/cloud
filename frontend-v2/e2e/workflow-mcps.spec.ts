@@ -50,7 +50,7 @@ test('the deployed UI installs a real MCP and preserves its workflow binding aft
   await page.goto('/settings/plugins')
   await signIn(page)
   // Only the deployment-mode signal is stubbed; authentication, installation and settings use the real server.
-  await page.route('**/auth/providers', (route) => route.fulfill({ json: { providers: ['idaas'], default: 'idaas' } }))
+  await page.route('**/auth/providers', (route) => route.fulfill({ json: { providers: ['huawei-idaas'] } }))
   const plugin = page.getByRole('article', { name: 'Tavily', exact: true }).filter({ has: page.getByText('official/ora-space.tavily-search', { exact: true }) })
   const tid = (await (await page.request.get('/api/v1/me/tenants')).json()).items[0].id
   const sid = (await (await page.request.get(`/api/v1/tenants/${tid}/spaces`)).json()).items[0].id
