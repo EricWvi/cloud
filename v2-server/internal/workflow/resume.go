@@ -99,11 +99,11 @@ func (e *ResumeRefusal) Error() string {
 // ResumeRepository is the persistence a resume needs beyond Repository. ResumeState reads without
 // locking, for the preview; ResumeRun locks the run, hands the locked state to plan, and when plan
 // returns node ids soft-deletes their attempts (and the rounds of every cleared Loop), applies
-// clear to the run payload and returns the run to running, all in one transaction. An error
-// from plan aborts the transaction unchanged.
+// clear to the run payload, backfills starter when unset and returns the run to running, all in one
+// transaction. An error from plan aborts the transaction unchanged.
 type ResumeRepository interface {
 	ResumeState(ctx context.Context, runID string) (ResumeState, error)
-	ResumeRun(ctx context.Context, runID string, plan func(ResumeState) ([]string, error), clear func(payload []byte, cleared []string) ([]byte, error)) error
+	ResumeRun(ctx context.Context, runID, actor string, plan func(ResumeState) ([]string, error), clear func(payload []byte, cleared []string) ([]byte, error)) error
 }
 
 // errNoResume reports a repository that cannot resume runs.
@@ -133,10 +133,10 @@ func (e *Engine) PreviewResume(ctx context.Context, runID string) (ResumePlan, e
 // ResumeFromFailure is desktop's resume_from_failure (desktop@ebd5b725
 // crates/application/src/workflow_run/engine/engine.rs:179-211): under the run gate it replans
 // from the locked rows, clears the failed or cancelled nodes with every descendant and every
-// restarting container, returns the same run to running and reschedules it through the normal
-// scheduling pass. Succeeded nodes keep their attempts and pool values. A refused plan returns a
-// *ResumeRefusal.
-func (e *Engine) ResumeFromFailure(ctx context.Context, runID string) error {
+// restarting container, backfills starter via actor if still unset, returns the same run to
+// running and reschedules it through the normal scheduling pass. Succeeded nodes keep their
+// attempts and pool values. A refused plan returns a *ResumeRefusal.
+func (e *Engine) ResumeFromFailure(ctx context.Context, runID, actor string) error {
 	defer e.gate(runID)()
 	repo, ok := e.repo.(ResumeRepository)
 	if !ok {
@@ -150,7 +150,7 @@ func (e *Engine) ResumeFromFailure(ctx context.Context, runID string) error {
 	if err != nil {
 		return err
 	}
-	err = repo.ResumeRun(ctx, runID, func(st ResumeState) ([]string, error) {
+	err = repo.ResumeRun(ctx, runID, actor, func(st ResumeState) ([]string, error) {
 		plan := planResume(g, st)
 		if plan.Refusal != "" {
 			return nil, &ResumeRefusal{Reason: plan.Refusal, Running: plan.Running}

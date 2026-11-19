@@ -80,13 +80,6 @@ func (s *Store) SetWorkflowStarter(ctx context.Context, tenant, runID, user stri
 	return err
 }
 
-// EnsureWorkflowStarter records a starter on a legacy run that predated started_by so team
-// members can read resumed sessions under one consistent starter identity.
-func (s *Store) EnsureWorkflowStarter(ctx context.Context, runID, user string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE v2_workflow_runs SET started_by=$2::uuid WHERE id=$1 AND started_by IS NULL`, runID, user)
-	return err
-}
-
 // OpenWorkflowForm freezes evidence and parks its node in one transaction.
 func (s *Store) OpenWorkflowForm(ctx context.Context, runID, nodeRunID string, in WorkflowForm) (WorkflowForm, error) {
 	var out WorkflowForm
@@ -265,6 +258,30 @@ func (s *Store) SaveWorkflowForm(ctx context.Context, a Access, runID string, ve
 func (s *Store) WorkflowStarter(ctx context.Context, runID string) (string, error) {
 	var id string
 	err := s.pool.QueryRow(ctx, `SELECT COALESCE(started_by::text,'') FROM v2_workflow_runs WHERE id=$1`, runID).Scan(&id)
+	return id, err
+}
+
+// WorkflowResumeStarter returns who a resumed run should execute under: the run's persisted
+// starter when recorded, otherwise the active tenant member who owns an existing node session of a
+// legacy pre-started_by run so earlier and resumed sessions stay under one readable owner.
+func (s *Store) WorkflowResumeStarter(ctx context.Context, runID string) (string, error) {
+	var id string
+	err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(
+			r.started_by::text,
+			(SELECT e.user_id::text
+			 FROM v2_workflow_node_runs n
+			 JOIN v2_execution_sessions e ON e.id = n.session_id AND e.tenant_id = r.tenant_id
+			 JOIN memberships m ON m.tenant_id = r.tenant_id AND m.user_id = e.user_id
+			 JOIN users u ON u.id = m.user_id
+			 WHERE n.run_id = r.id AND n.session_id IS NOT NULL
+			   AND u.status = 'active' AND u.deleted_at IS NULL
+			 ORDER BY n.created_at, n.id
+			 LIMIT 1),
+			''
+		)
+		FROM v2_workflow_runs r
+		WHERE r.id = $1`, runID).Scan(&id)
 	return id, err
 }
 

@@ -213,10 +213,10 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 		role, err := h.store.ResolveWorkflowRole(h.ctx, st.scope.TenantID, cfg.RoleID)
 		switch {
 		case errors.Is(err, store.ErrRoleNotFound):
-			h.fail(d, workflow.Failure{Kind: workflow.FailureWorkflowRoleNotFound, Message: fmt.Sprintf("role %q is not available in this workspace", cfg.RoleID)})
+			fail(workflow.Failure{Kind: workflow.FailureWorkflowRoleNotFound, Message: fmt.Sprintf("role %q is not available in this workspace", cfg.RoleID)})
 			return
 		case err != nil:
-			h.fail(d, workflow.Failure{Kind: workflow.FailureMissingAgentConfig, Message: err.Error()})
+			fail(workflow.Failure{Kind: workflow.FailureMissingAgentConfig, Message: err.Error()})
 			return
 		}
 		roleContent = role.Content

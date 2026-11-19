@@ -165,7 +165,7 @@ func (r gatedResumeRepo) ResumeState(context.Context, string) (ResumeState, erro
 	return ResumeState{Status: r.run.Status}, nil
 }
 
-func (r gatedResumeRepo) ResumeRun(context.Context, string, func(ResumeState) ([]string, error), func([]byte, []string) ([]byte, error)) error {
+func (r gatedResumeRepo) ResumeRun(context.Context, string, string, func(ResumeState) ([]string, error), func([]byte, []string) ([]byte, error)) error {
 	r.began <- struct{}{}
 	return nil
 }
@@ -178,7 +178,7 @@ func TestResumeFromFailureHoldsTheRunGate(t *testing.T) {
 	e := NewEngine(repo, nil, nil, time.Now)
 	unlock := e.gate("run")
 	done := make(chan error, 1)
-	go func() { done <- e.ResumeFromFailure(context.Background(), "run") }()
+	go func() { done <- e.ResumeFromFailure(context.Background(), "run", "actor") }()
 	select {
 	case <-repo.began:
 		t.Fatal("the resume began while another holder had the run gate")
