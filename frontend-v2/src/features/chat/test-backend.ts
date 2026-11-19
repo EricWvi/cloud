@@ -101,7 +101,7 @@ export interface ChatBackend {
   /** When the repository token was last set or cleared. */
   tokenSetAt?: string
   /** What the deletion preview answers (a status fails it); no checkout when unset. */
-  deletion?: Partial<ChatDeletionPreview> | { status: number }
+  deletion?: Partial<ChatDeletionPreview> | { status: number; code?: string }
   /** Makes the next discard answer 409 deletion_preview_stale and delete nothing. */
   staleDiscard?: boolean
   /** The query each delete carried, by conversation. */
@@ -219,7 +219,10 @@ export function chatBackend(options: { unavailable?: boolean } = {}): ChatBacken
     }
     if (action === 'deletion') {
       const preview = state.deletion
-      if (preview && 'status' in preview) return { status: preview.status, data: { code: 'execution_unavailable', params: {}, requestId: 'r' } }
+      if (preview && 'status' in preview) {
+        const code = preview.status === 503 && 'code' in preview ? (preview as { code: string }).code : 'internal'
+        return { status: preview.status, data: { code, params: {}, requestId: 'r' } }
+      }
       return { status: 200, data: { workspace: 'none', reason: 'no_workspace', ignored: false, undeliveredChanges: [], undeliveredTotal: 0, revision: 'rev-1', ...preview } }
     }
     if (action.startsWith('workspace/deliveries/') && action.endsWith('/patch')) return { status: 200, data: new Blob(['diff --git']) }

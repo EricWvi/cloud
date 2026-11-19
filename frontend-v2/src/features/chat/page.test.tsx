@@ -414,12 +414,27 @@ describe('chat page', () => {
     expect('c-main' in backend.deletedWith).toBe(false)
   })
 
-  it('keeps the working directory when the preview cannot be read', async () => {
-    backend.deletion = { status: 503 }
+  it('does not let a deletion through while the preview cannot be read, and retries it', async () => {
+    backend.deletion = { status: 500 }
     await renderReady()
     const dialog = await openDelete('梳理 v2 接口缺口')
-    expect(await dialog.findByText(/无法确认工作目录里的改动是否已交付，删除后保留工作目录/)).toBeInTheDocument()
+    expect(await dialog.findByText(/暂时读不到工作目录的情况，读到之前不能删除/)).toBeInTheDocument()
+    expect(dialog.getByRole('button', { name: '删除' })).toBeDisabled()
+    backend.deletion = { workspace: 'recoverable' }
+    await userEvent.click(dialog.getByRole('button', { name: '重试' }))
+    expect(await dialog.findByText(/工作目录会一起删除/)).toBeInTheDocument()
+    await userEvent.click(dialog.getByRole('button', { name: '删除' }))
+    await waitFor(() => expect(backend.deletedWith['c-main']).toEqual({}))
+  })
+
+  it('deletes without discarding when the server cannot judge the working directory', async () => {
+    backend.deletion = { status: 503, code: 'workspace_reclaim_unavailable' }
+    await renderReady()
+    const dialog = await openDelete('梳理 v2 接口缺口')
+    expect(await dialog.findByText(/删除后先保留，等能检查时再按交付情况决定是否回收/)).toBeInTheDocument()
     expect(dialog.queryByRole('checkbox')).not.toBeInTheDocument()
+    await userEvent.click(dialog.getByRole('button', { name: '删除' }))
+    await waitFor(() => expect(backend.deletedWith['c-main']).toEqual({}))
   })
 
   const openProjectSettings = async (name = 'ora-space/cloud') => {

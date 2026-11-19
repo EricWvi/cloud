@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { savePatch } from '@/components/workspace-panel/delivery'
+import { codeOf } from '@/lib/api-client'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -76,7 +77,8 @@ export function DeleteSessionDialog({ session, open, onOpenChange }: { session: 
   )
 }
 
-type Preview = ChatDeletionPreview | 'loading' | 'unknown'
+/** The preview, or why there is none: still asking, unreadable (retry), or a server that cannot judge. */
+type Preview = ChatDeletionPreview | 'loading' | 'unknown' | 'unavailable'
 
 /** The dialog's content; it mounts each time the dialog opens, so every opening asks afresh. */
 function DeleteSessionConfirm({ session, close }: { session: Session; close: () => void }) {
@@ -91,7 +93,7 @@ function DeleteSessionConfirm({ session, close }: { session: Session; close: () 
     let live = true
     deletionPreview(session.id).then(
       (p) => live && setPreview(p),
-      () => live && setPreview('unknown'),
+      (error) => live && setPreview(codeOf(error) === 'workspace_reclaim_unavailable' ? 'unavailable' : 'unknown'),
     )
     return () => {
       live = false
@@ -129,7 +131,17 @@ function DeleteSessionConfirm({ session, close }: { session: Session; close: () 
       </DialogHeader>
       {stale && <p className="text-sm text-destructive">工作目录在你确认前有了变化，请看过下面的情况后重新确认。</p>}
       {preview === 'loading' && <p className="text-sm text-muted-foreground">正在检查工作目录…</p>}
-      {preview === 'unknown' && <p className="text-sm text-muted-foreground">无法确认工作目录里的改动是否已交付，删除后保留工作目录。</p>}
+      {preview === 'unknown' && (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <p>暂时读不到工作目录的情况，读到之前不能删除。</p>
+          <Button variant="outline" size="sm" onClick={() => (setPreview('loading'), setAsked((n) => n + 1))}>
+            重试
+          </Button>
+        </div>
+      )}
+      {preview === 'unavailable' && (
+        <p className="text-sm text-muted-foreground">服务器现在无法检查工作目录：删除后先保留，等能检查时再按交付情况决定是否回收。</p>
+      )}
       {known && <WorkspaceNote preview={known} discard={discard} setDiscard={setDiscard} />}
       {known?.latestDelivery && known.workspace !== 'none' && (
         <div>
@@ -141,7 +153,7 @@ function DeleteSessionConfirm({ session, close }: { session: Session; close: () 
       {error && <p className="text-sm text-destructive">{error}</p>}
       <DialogFooter>
         <DialogClose render={<Button variant="outline" />}>取消</DialogClose>
-        <Button variant="destructive" disabled={busy || preview === 'loading'} onClick={() => void confirm()}>
+        <Button variant="destructive" disabled={busy || preview === 'loading' || preview === 'unknown'} onClick={() => void confirm()}>
           删除
         </Button>
       </DialogFooter>
