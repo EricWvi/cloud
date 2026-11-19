@@ -153,6 +153,51 @@ func TestDriverIPCUnknownReattachedCheckoutIsForgotten(t *testing.T) {
 	}
 }
 
+// Only a reattached checkout can be unknown to the Node starting on it. Node refusing a checkout
+// this incarnation cloned itself as checkout_unavailable is an ordinary lost session: it is not
+// reported as a gone checkout, nothing is forgotten, and the workspace's next session starts on
+// the same checkout without cloning again.
+func TestDriverIPCUnavailableFreshCheckoutIsAnOrdinaryFailure(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	var mu sync.Mutex
+	var forgotten [][2]string
+	h.driver.opts.ForgetCheckout = func(_ context.Context, workspace, clone string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		forgotten = append(forgotten, [2]string{workspace, clone})
+		return nil
+	}
+
+	done := runWorkflowTurn(h, ctx, h.session("fresh", "run-workspace"), "first")
+	f := receiveIPC(t, h.created)
+	clone := nextIPCCommand(t, f, "clone_repository")
+	start := nextIPCCommand(t, f, "start_agent_session")
+	if !commandUsesCheckout(t, start, clone.ExecutionID) {
+		t.Fatal("the session did not start on the checkout it cloned")
+	}
+	f.terminalAs(start, "agent_failed", nodeCheckoutUnavailable)
+	got := receiveIPC(t, done)
+	if !errors.Is(got.err, execution.ErrSessionEnded) || !got.result.AgentLost || got.result.FailureCode != "agent_ended_before_turn" {
+		t.Fatalf("fresh checkout refused as unavailable = %+v, want an ordinary agent_ended_before_turn, not %s", got, execution.FailureWorkspaceMissing)
+	}
+	mu.Lock()
+	if len(forgotten) != 0 {
+		t.Fatalf("forgotten = %v, want a checkout this Node cloned kept", forgotten)
+	}
+	mu.Unlock()
+
+	done = runWorkflowTurn(h, ctx, h.session("sibling", "run-workspace"), "first")
+	start = nextIPCCommand(t, f, "start_agent_session")
+	if !commandUsesCheckout(t, start, clone.ExecutionID) {
+		t.Fatal("the workspace's next session left the checkout it cloned")
+	}
+	f.finishTurn(t, start, "first", "same checkout")
+	if got := receiveIPC(t, done); got.err != nil || got.result.Answer != "same checkout" {
+		t.Fatalf("sibling on the same checkout: %+v", got)
+	}
+}
+
 // commandUsesCheckout reports whether a start_agent_session command names the clone execution.
 func commandUsesCheckout(t *testing.T, command node.Message, clone string) bool {
 	t.Helper()

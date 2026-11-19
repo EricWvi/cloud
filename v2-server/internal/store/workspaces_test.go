@@ -69,3 +69,42 @@ func TestWorkflowRunWorkspaceUsesItsAgentNodes(t *testing.T) {
 		t.Fatalf("run workspace = %+v, %v", got, err)
 	}
 }
+
+// Forgetting a clone execution Node no longer knows clears only that one: a checkout recorded for
+// the workspace since (a fresh clone after an earlier forget) is left for the next restart to
+// reattach, and other workspaces are untouched.
+func TestForgetCloneExecutionClearsOnlyTheForgottenClone(t *testing.T) {
+	f := executionDatabase(t)
+	ctx := t.Context()
+	record := func(id, clone string) {
+		t.Helper()
+		if err := f.s.RecordWorkspace(ctx, id, store.WorkspaceLocation{Path: "/data/" + id, BaseCommit: "c", CloneExecution: clone}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clone := func(id string) string {
+		t.Helper()
+		at, err := f.s.ExecutionWorkspace(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return at.CloneExecution
+	}
+	record("run-w", "c-fresh")
+	record("other-w", "c-old")
+	if err := f.s.ForgetCloneExecution(ctx, "run-w", "c-old"); err != nil {
+		t.Fatal(err)
+	}
+	if got := clone("run-w"); got != "c-fresh" {
+		t.Fatalf("after forgetting another clone the workspace records %q, want the fresh clone kept", got)
+	}
+	if err := f.s.ForgetCloneExecution(ctx, "run-w", "c-fresh"); err != nil {
+		t.Fatal(err)
+	}
+	if got := clone("run-w"); got != "" {
+		t.Fatalf("after forgetting its clone the workspace records %q, want none", got)
+	}
+	if got := clone("other-w"); got != "c-old" {
+		t.Fatalf("another workspace records %q, want its clone untouched", got)
+	}
+}
