@@ -1,4 +1,5 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { focusManager } from '@tanstack/react-query'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -20,6 +21,8 @@ describe('notification bell', () => {
   let items: Notification[]
   let reads: unknown[]
   let seen: string[]
+  let inboxStatus: number
+  let pageSize: number
 
   beforeEach(() => {
     items = [
@@ -28,13 +31,23 @@ describe('notification bell', () => {
       notice({ id: 'n3', kind: 'review', taskId: 't3', taskTitle: '旧任务', actorId: null, actorName: null, readAt: '2026-11-18T00:00:00Z' }),
     ]
     reads = []
+    inboxStatus = 200
+    pageSize = 30
     const unread = () => items.filter(n => !n.readAt).length
     seen = fakeBackend((c) => {
       if (c.url === '/api/v1/me') return { status: 200, data: demoUser }
       if (c.url === '/api/v1/me/tenants') {
         return { status: 200, data: { items: [{ id: tenantId, name: '演示团队', status: 'active', role: 'member' }], nextCursor: '' } }
       }
-      if (c.url === inbox && c.method === 'get') return { status: 200, data: { items, unread: unread() } }
+      if (c.url === inbox && c.method === 'get') {
+        if (inboxStatus !== 200) return { status: inboxStatus, data: { code: 'not_found', params: {}, requestId: 'r' } }
+        // The cursor is opaque to the page; the fake uses the index of the next item.
+        const params = c.params as { cursor?: string } | undefined
+        const start = Number(params?.cursor ?? 0)
+        const page = items.slice(start, start + pageSize)
+        const nextCursor = start + pageSize < items.length ? String(start + pageSize) : ''
+        return { status: 200, data: { items: page, unread: unread(), nextCursor } }
+      }
       if (c.url === `${inbox}/read`) {
         const body = JSON.parse(c.data as string) as { ids?: string[]; all?: boolean }
         reads.push(body)
@@ -91,6 +104,39 @@ describe('notification bell', () => {
     expect(reads).toEqual([{ all: true }])
     expect(screen.queryAllByLabelText('未读')).toHaveLength(0)
     expect(screen.getByRole('button', { name: '全部已读' })).toBeDisabled()
+  })
+
+  it('reaches an unread notification beyond the first page', async () => {
+    pageSize = 2
+    items = [
+      notice({ id: 'r1', readAt: '2026-11-18T00:00:00Z', taskTitle: '已读一' }),
+      notice({ id: 'r2', readAt: '2026-11-18T00:00:00Z', taskTitle: '已读二' }),
+      notice({ id: 'old', taskId: 't9', taskTitle: '很早的未读' }),
+    ]
+    const router = renderAt('/')
+    await userEvent.click(await screen.findByRole('button', { name: '提醒，1 条未读' }))
+    const list = await screen.findByRole('list', { name: '提醒列表' })
+    expect(within(list).queryByText('很早的未读')).not.toBeInTheDocument()
+    await userEvent.click(within(list).getByRole('button', { name: '加载更多' }))
+    await userEvent.click(await within(list).findByRole('button', { name: /很早的未读/ }))
+    await waitFor(() => expect(router.state.location.pathname).toBe('/collaboration/tasks/t9'))
+    expect(reads).toEqual([{ ids: ['old'] }])
+  })
+
+  it('hides the bell and its cached list once access to the workspace is lost', async () => {
+    renderAt('/')
+    await userEvent.click(await screen.findByRole('button', { name: '提醒，2 条未读' }))
+    expect(await screen.findByRole('list', { name: '提醒列表' })).toBeInTheDocument()
+    // Removed from the team: the next poll answers 404, and nothing cached may stay on screen.
+    inboxStatus = 404
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await waitFor(() => expect(screen.queryByRole('button', { name: /^提醒/ })).not.toBeInTheDocument())
+    expect(screen.queryByRole('list', { name: '提醒列表' })).not.toBeInTheDocument()
+    expect(screen.queryByText('修登录页')).not.toBeInTheDocument()
+    act(() => focusManager.setFocused(undefined))
   })
 
   it('says so when there is nothing', async () => {

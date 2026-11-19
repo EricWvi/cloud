@@ -499,8 +499,13 @@ export interface Notification {
 
 export interface NotificationList {
   items: Notification[];
-  /** @minimum 0 */
+  /**
+     * Unread notifications in all, not only this page's; following nextCursor reaches every one.
+     * @minimum 0
+     */
   unread: number;
+  /** Cursor of the next, older page; empty on the last page. */
+  nextCursor: string;
 }
 
 export interface NotificationReadRequest {
@@ -527,6 +532,10 @@ export type ListNotificationsParams = {
  * @maximum 100
  */
 limit?: number;
+/**
+ * nextCursor from the previous page; omitted for the newest page.
+ */
+cursor?: string;
 };
 
 type SecondParameter<T extends (...args: never) => unknown> = Parameters<T>[1];
@@ -1854,7 +1863,7 @@ export function useListMySquadTasks<TData = Awaited<ReturnType<typeof listMySqua
 
 
 /**
- * The caller's in-app notifications in this workspace, newest first, with how many are unread: a task was assigned to them (directly or through a squad they belong to), a comment @-mentioned them, or a task they created reached review. Only current members receive and read them; removing a member deletes theirs.
+ * The caller's in-app notifications in this workspace, newest first, one page at a time, with how many are unread in all: a task was assigned to them (directly or through a squad they belong to), a comment @-mentioned them, or a task they created reached review. Only current members receive and read them; removing a member deletes theirs.
  */
 export const listNotifications = (
     tid: string,
