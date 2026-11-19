@@ -64,7 +64,10 @@ func (h *Host) PreviewRunResume(ctx context.Context, scope server.WorkflowRunSco
 // who owns every earlier session of the run, so the run's sessions keep one owner; when the run
 // has no recorded starter yet, an active tenant member who already owns a bound node session is
 // preferred, otherwise the caller is used, and the starter is persisted only inside the resume
-// transaction if the resume commits.
+// transaction if the resume commits. A run whose resume this process already admitted keeps that
+// admission's owner: a resume that failed before committing leaves its state behind, and the later
+// caller then backfills that owner, so the recorded starter is the user the resumed sessions run
+// under.
 func (h *Host) ResumeRun(ctx context.Context, scope server.WorkflowRunScope, runID string) (store.WorkflowRun, error) {
 	run, err := h.store.WorkflowRun(ctx, scope.TenantID, runID)
 	if err != nil {
@@ -106,8 +109,11 @@ func (h *Host) ResumeRun(ctx context.Context, scope server.WorkflowRunScope, run
 	if h.resuming != nil {
 		h.resuming(runID)
 	}
-	// Like a start, the resumed run outlives the request.
-	err = h.engine.ResumeFromFailure(context.WithoutCancel(ctx), runID, owner)
+	// Like a start, the resumed run outlives the request. The Agents execute under this process's
+	// state, whose owner an earlier admitted resume may have left behind: backfill that owner, not
+	// this caller, or the recorded starter and the sessions the resumed Agents open disagree and
+	// the run's earlier sessions become unreadable.
+	err = h.engine.ResumeFromFailure(context.WithoutCancel(ctx), runID, st.scope.UserID)
 	st.started()
 	h.forgetFinished(runID, st)
 	if err != nil {
@@ -149,7 +155,8 @@ func (h *Host) settling(runID string) bool {
 // one that still tracks an interactive node: a completion is settling it (ResumeRun released the
 // parked ones just before). A leftover
 // state is reused with its cancellation request cleared, because the run it belonged to has
-// closed, and its generation advanced: a dispatch made before the resume carries the old
+// closed, with its owner kept, because its Agents and sessions belong to that identity, and with
+// its generation advanced: a dispatch made before the resume carries the old
 // generation, so neither its attempt goroutine nor beginStart lets it start a turn, even when it was already past its abandon check and resolving
 // its executor while the run was cancelled and resumed.
 func (h *Host) admitResume(runID string, scope execution.Scope) (*runState, bool) {

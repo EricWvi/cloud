@@ -547,6 +547,9 @@ func TestRefusedResumeDoesNotPersistWorkflowStarter(t *testing.T) {
 	}
 	f.exec.finish(expectAgent(t, f, "a"), sessionFailed)
 	f.await(t, legacyID, terminal)
+	// Wait until the failed start's state is gone: a resume that reused it would execute under the
+	// fixture's owner instead of the caller this step asserts.
+	waitUntil(t, func() bool { return f.host.state(legacyID) == nil })
 	if _, err := admin.Exec(ctx, `UPDATE v2_workflow_runs SET started_by = NULL WHERE id = $1`, legacyID); err != nil {
 		t.Fatal(err)
 	}
@@ -613,6 +616,82 @@ func TestResumeOfLegacyRunPreservesOriginalSessionOwner(t *testing.T) {
 	}
 	f.exec.finish(resumedSession, completed("已通过"))
 	if doneRun, _ := f.await(t, id, terminal); doneRun.Status != "succeeded" {
+		t.Fatalf("run = %+v", doneRun)
+	}
+}
+
+// TestResumeBackfillsTheOwnerOfAnAdmittedExecutionState covers a resume that was admitted but
+// failed before its transaction committed: its execution state stays in the process while
+// started_by stays empty. Another member then resumes, and the run must execute under, and
+// backfill, the leftover state's owner. Recording the later caller instead would leave the resumed
+// Agent's sessions under the first member, while the node event routes look them up by the
+// recorded starter and find none.
+func TestResumeBackfillsTheOwnerOfAnAdmittedExecutionState(t *testing.T) {
+	f, admin := newFixtureWithAdmin(t)
+	ctx := context.Background()
+	firstToken := storetest.SignIn(t, f.s, "resume-leftover-first", "先续跑的人", store.RoleMember)
+	first, err := f.s.SessionUser(ctx, firstToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondToken := storetest.SignIn(t, f.s, "resume-leftover-second", "后到的人", store.RoleMember)
+	second, err := f.s.SessionUser(ctx, secondToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A legacy run: failed, no recorded starter and no bound session to recover one from.
+	noAutoRetry := strings.Replace(twoAgents, `"roleId":"reviewer"`,
+		`"roleId":"reviewer","retry":{"enabled":false,"maxRetries":0,"initialDelaySeconds":10}`, 1)
+	legacyID := f.run(t, noAutoRetry, str("遗留运行"))
+	if _, err := f.host.StartRun(ctx, f.scope, legacyID); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.finish(expectAgent(t, f, "a"), sessionFailed)
+	f.await(t, legacyID, terminal)
+	waitUntil(t, func() bool { return f.host.state(legacyID) == nil })
+	if _, err := admin.Exec(ctx, `UPDATE v2_workflow_runs SET started_by = NULL WHERE id = $1`, legacyID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The first member's resume is admitted, then both its transaction and the cleanup after it
+	// fail to read v2_workflow_runs: its state stays behind, still owned by the first member.
+	f.host.resuming = func(string) {
+		if _, err := admin.Exec(ctx, `ALTER TABLE v2_workflow_runs RENAME COLUMN status TO broken_status`); err != nil {
+			t.Fatalf("break v2_workflow_runs: %v", err)
+		}
+	}
+	_, err = f.host.ResumeRun(ctx, server.WorkflowRunScope{TenantID: f.scope.TenantID, UserID: first.ID}, legacyID)
+	f.host.resuming = nil
+	var refused *server.WorkflowRunNotResumable
+	if err == nil || errors.As(err, &refused) {
+		t.Fatalf("resume against a broken v2_workflow_runs = %v, want a storage error", err)
+	}
+	if _, err := admin.Exec(ctx, `ALTER TABLE v2_workflow_runs RENAME COLUMN broken_status TO status`); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.s.WorkflowStarter(ctx, legacyID); err != nil || got != "" {
+		t.Fatalf("starter after the failed resume = %q %v, want empty", got, err)
+	}
+	if leftover := f.host.state(legacyID); leftover == nil || leftover.scope.UserID != first.ID {
+		t.Fatalf("leftover state = %+v, want one owned by %s", leftover, first.ID)
+	}
+
+	resumed, err := f.host.ResumeRun(ctx, server.WorkflowRunScope{TenantID: f.scope.TenantID, UserID: second.ID}, legacyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.StartedBy != first.ID || resumed.StartedByName != "先续跑的人" {
+		t.Fatalf("resumed starter = (%q, %q), want the leftover state's owner (%q, 先续跑的人)",
+			resumed.StartedBy, resumed.StartedByName, first.ID)
+	}
+	session := expectAgent(t, f, "a")
+	if gotScope := f.exec.scope(session); gotScope.UserID != first.ID {
+		t.Fatalf("resumed Agent ran as %s, want the recorded starter %s", gotScope.UserID, first.ID)
+	}
+	f.exec.finish(session, completed("初稿"))
+	f.exec.finish(expectAgent(t, f, "b"), completed("已通过"))
+	if doneRun, _ := f.await(t, legacyID, terminal); doneRun.Status != "succeeded" {
 		t.Fatalf("run = %+v", doneRun)
 	}
 }
