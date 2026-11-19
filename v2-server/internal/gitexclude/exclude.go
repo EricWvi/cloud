@@ -221,3 +221,7 @@ func openRegular(root, rel string, flags int) (*os.File, error) {
 	}
 	return f, nil
 }
+
+// CommonDir is the repository's common Git directory: the Git directory itself, or for a linked
+// worktree the main repository's. Submodule repositories live under its modules/.
+func (l Layout) CommonDir() string { return l.common }

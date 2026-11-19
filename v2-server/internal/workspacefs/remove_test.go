@@ -1,6 +1,7 @@
 package workspacefs
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -38,7 +39,7 @@ func TestRemoveCheckoutMeasuresAndRemovesOnlyTheCheckout(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(checkout, "link")); err != nil {
 		t.Fatal(err)
 	}
-	usage, err := RemoveCheckout(root, checkout)
+	usage, err := RemoveCheckout(t.Context(), root, checkout)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +56,7 @@ func TestRemoveCheckoutMeasuresAndRemovesOnlyTheCheckout(t *testing.T) {
 		}
 	}
 	// Removing again is a no-op: the checkout counts as already reclaimed.
-	if usage, err := RemoveCheckout(root, checkout); err != nil || usage != (Usage{}) {
+	if usage, err := RemoveCheckout(t.Context(), root, checkout); err != nil || usage != (Usage{}) {
 		t.Fatalf("second removal = %+v, %v", usage, err)
 	}
 }
@@ -66,7 +67,7 @@ func TestRemoveCheckoutRefusesPathsOutsideTheRoot(t *testing.T) {
 	victim := filepath.Join(base, "victim")
 	writeTree(t, map[string]string{filepath.Join(victim, "f"): "keep", filepath.Join(root, "c", "f"): "x"})
 	for _, path := range []string{root, victim, filepath.Join(root, "..", "victim"), "relative/c", base} {
-		if _, err := RemoveCheckout(root, path); !errors.Is(err, ErrUnsafeCheckout) {
+		if _, err := RemoveCheckout(t.Context(), root, path); !errors.Is(err, ErrUnsafeCheckout) {
 			t.Fatalf("RemoveCheckout(%q) = %v, want ErrUnsafeCheckout", path, err)
 		}
 	}
@@ -110,7 +111,7 @@ func TestRemoveCheckoutRefusesSymlinks(t *testing.T) {
 				t.Fatal(err)
 			}
 			path := setup(t, base, root, victim)
-			if _, err := RemoveCheckout(root, path); !errors.Is(err, ErrUnsafeCheckout) {
+			if _, err := RemoveCheckout(t.Context(), root, path); !errors.Is(err, ErrUnsafeCheckout) {
 				t.Fatalf("err = %v, want ErrUnsafeCheckout", err)
 			}
 			if _, err := os.Stat(filepath.Join(victim, "f")); err != nil {
@@ -122,7 +123,7 @@ func TestRemoveCheckoutRefusesSymlinks(t *testing.T) {
 
 func TestRemoveCheckoutMissingRootCountsAsRemoved(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "w", "r")
-	if usage, err := RemoveCheckout(root, filepath.Join(root, "c")); err != nil || usage != (Usage{}) {
+	if usage, err := RemoveCheckout(t.Context(), root, filepath.Join(root, "c")); err != nil || usage != (Usage{}) {
 		t.Fatalf("got %+v, %v", usage, err)
 	}
 }
@@ -136,7 +137,7 @@ func TestRemoveCheckoutRemovesReadOnlyDirectories(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := RemoveCheckout(root, checkout); err != nil {
+	if _, err := RemoveCheckout(t.Context(), root, checkout); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(checkout); !errors.Is(err, os.ErrNotExist) {
@@ -162,7 +163,7 @@ func TestRemoveCheckoutRefusesADirectorySwappedAfterTheCheck(t *testing.T) {
 			t.Fatal(err)
 		}
 	})()
-	if _, err := RemoveCheckout(root, checkout); !errors.Is(err, ErrUnsafeCheckout) {
+	if _, err := RemoveCheckout(t.Context(), root, checkout); !errors.Is(err, ErrUnsafeCheckout) {
 		t.Fatalf("err = %v, want ErrUnsafeCheckout", err)
 	}
 	if got, err := os.ReadFile(filepath.Join(checkout, "f")); err != nil || string(got) != "keep" {
@@ -199,7 +200,7 @@ func TestRemoveCheckoutRefusesAParentSwappedForALinkOutOfTheRoot(t *testing.T) {
 					t.Fatal(err)
 				}
 			})()
-			if _, err := RemoveCheckout(root, checkout); !errors.Is(err, ErrUnsafeCheckout) {
+			if _, err := RemoveCheckout(t.Context(), root, checkout); !errors.Is(err, ErrUnsafeCheckout) {
 				t.Fatalf("err = %v, want ErrUnsafeCheckout", err)
 			}
 			if got, err := os.ReadFile(filepath.Join(moved, "c", "f")); err != nil || string(got) != "precious" {
@@ -221,7 +222,7 @@ func TestRemoveCheckoutFailsWhenAnEntryCannotBeMeasured(t *testing.T) {
 		}
 		return d.Info()
 	})
-	_, err := RemoveCheckout(root, checkout)
+	_, err := RemoveCheckout(t.Context(), root, checkout)
 	restore()
 	if !errors.Is(err, syscall.EIO) || !strings.Contains(err.Error(), "measure b") {
 		t.Fatalf("err = %v, want EIO naming b", err)
@@ -235,8 +236,22 @@ func TestRemoveCheckoutFailsWhenAnEntryCannotBeMeasured(t *testing.T) {
 		}
 		return d.Info()
 	})()
-	usage, err := RemoveCheckout(root, checkout)
+	usage, err := RemoveCheckout(t.Context(), root, checkout)
 	if err != nil || usage != (Usage{Bytes: 2, Files: 1}) {
 		t.Fatalf("with a vanished entry: %+v, %v", usage, err)
+	}
+}
+
+func TestRemoveCheckoutStopsWhenCancelled(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "w", "r")
+	checkout := filepath.Join(root, "c")
+	writeTree(t, map[string]string{filepath.Join(checkout, "a"): "1", filepath.Join(checkout, "b"): "2"})
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := RemoveCheckout(ctx, root, checkout); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if _, err := os.Stat(checkout); err != nil {
+		t.Fatalf("a cancelled removal took the checkout: %v", err)
 	}
 }

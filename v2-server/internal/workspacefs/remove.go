@@ -1,6 +1,7 @@
 package workspacefs
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -75,7 +76,10 @@ func openDir(parent *os.Root, name string) (*os.Root, fs.FileInfo, error) {
 // moving a parent away and putting a link in its place cannot redirect the removal. A checkout
 // or root that no longer exists counts as removed, with zero usage. The caller makes sure nothing
 // else uses the checkout any more.
-func RemoveCheckout(root, path string) (Usage, error) {
+//
+// ctx is checked between the checkout's top-level entries and before the checkout itself goes:
+// a cancelled removal leaves part of the checkout for a later attempt and returns ctx's error.
+func RemoveCheckout(ctx context.Context, root, path string) (Usage, error) {
 	if !filepath.IsAbs(root) || !filepath.IsAbs(path) {
 		return Usage{}, ErrUnsafeCheckout
 	}
@@ -174,12 +178,18 @@ func RemoveCheckout(root, path string) (Usage, error) {
 		return Usage{}, fmt.Errorf("list checkout %s: %w", path, err)
 	}
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return Usage{}, fmt.Errorf("remove checkout %s: %w", path, err)
+		}
 		if err := checkout.RemoveAll(e.Name()); err != nil {
 			return Usage{}, fmt.Errorf("remove checkout %s: %w", path, err)
 		}
 	}
 	// The emptied checkout itself, through the parent handle the walk opened: it must still be the
-	// directory that was emptied. A name swapped to a link meanwhile loses only the link.
+	// directory that was emptied; a name swapped for anything else (a link included) is refused.
+	if err := ctx.Err(); err != nil {
+		return Usage{}, fmt.Errorf("remove checkout %s: %w", path, err)
+	}
 	if again, err := parent.Lstat(name); err != nil || !os.SameFile(info, again) {
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return Usage{}, fmt.Errorf("remove checkout %s: %w", path, err)

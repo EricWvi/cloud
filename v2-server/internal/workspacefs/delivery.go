@@ -270,7 +270,8 @@ func (s *DeliveryFS) stage(ctx context.Context, ws Workspace, mirrorPath string,
 	}
 	exclude, withoutGit, err := copyDeliveryExclude(root, scratch)
 	if err != nil {
-		if !errors.Is(err, ErrGone) && !isIOError(err) {
+		// A .git pointing nowhere is broken metadata like any other, not a passing disk error.
+		if !errors.Is(err, ErrGone) && (!isIOError(err) || errors.Is(err, fs.ErrNotExist)) {
 			// Git metadata Ora may not read (an exclude outside the checkout, an oversized or
 			// irregular file): what the checkout holds cannot be told, now or on a retry.
 			err = fmt.Errorf("%w: %w", ErrUnverifiable, err)

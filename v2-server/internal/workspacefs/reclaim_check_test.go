@@ -1,8 +1,10 @@
 package workspacefs_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/workspacefs"
@@ -30,7 +32,7 @@ func TestInspectReclaimComparesWithTheDeliveryWithoutWritingTheMirror(t *testing
 	}
 	refsBefore := deliveryGit(t, req.MirrorPath, "for-each-ref")
 	got := inspect(t, f, req, snap.Commit)
-	if !got.Unchanged || got.GitState != "" || got.Total != 0 {
+	if !got.Unchanged || !got.Git.Empty() || got.Total != 0 || got.Tree == "" {
 		t.Fatalf("right after delivery: %+v", got)
 	}
 	// debug.log is ignored by .gitignore: it is in no delivery, and the person is told.
@@ -65,41 +67,107 @@ func TestInspectReclaimWithoutIgnoredFiles(t *testing.T) {
 func TestInspectReclaimFindsWorkOnlyTheRepositoryHolds(t *testing.T) {
 	cases := map[string]struct {
 		setup func(t *testing.T, root string)
-		want  string
+		want  workspacefs.GitFindings
 	}{
-		"stash": {func(t *testing.T, root string) {
-			deliveryWrite(t, root, "README.md", "stashed\n")
+		"two stashes": {func(t *testing.T, root string) {
+			deliveryWrite(t, root, "README.md", "stashed once\n")
 			deliveryGit(t, root, "stash", "push", "-q")
-		}, workspacefs.GitStateStash},
+			deliveryWrite(t, root, "README.md", "stashed twice\n")
+			deliveryGit(t, root, "stash", "push", "-q")
+		}, workspacefs.GitFindings{Stashes: 2}},
 		"branch beyond base and HEAD": {func(t *testing.T, root string) {
+			deliveryGit(t, root, "stash", "push", "-q", "-u")
 			deliveryGit(t, root, "checkout", "-q", "-b", "side")
-			deliveryWrite(t, root, "side.txt", "only on side\n")
-			deliveryGit(t, root, "add", "side.txt")
-			deliveryGit(t, root, "commit", "-qm", "side")
+			for _, n := range []string{"1", "2"} {
+				deliveryWrite(t, root, "side"+n+".txt", n)
+				deliveryGit(t, root, "add", "side"+n+".txt")
+				deliveryGit(t, root, "commit", "-qm", "side "+n)
+			}
 			deliveryGit(t, root, "checkout", "-q", "-")
-		}, workspacefs.GitStateRef},
-		"commit on HEAD is fine": {func(t *testing.T, root string) {
+			deliveryGit(t, root, "stash", "pop", "-q")
+		}, workspacefs.GitFindings{Refs: []workspacefs.RefFinding{{Name: "refs/heads/side", Commits: 2}}}},
+		"ref to a blob": {func(t *testing.T, root string) {
+			blob := deliveryGit(t, root, "hash-object", "-w", "README.md")
+			deliveryGit(t, root, "update-ref", "refs/odd/blob", blob)
+		}, workspacefs.GitFindings{Refs: []workspacefs.RefFinding{{Name: "refs/odd/blob", NotCommit: true}}}},
+		"commit on HEAD and pseudo refs are fine": {func(t *testing.T, root string) {
 			deliveryGit(t, root, "add", "-A")
 			deliveryGit(t, root, "commit", "-qm", "agent commit")
-		}, ""},
+			deliveryGit(t, root, "update-ref", "ORIG_HEAD", "HEAD~1")
+		}, workspacefs.GitFindings{}},
 		"gitlink": {func(t *testing.T, root string) {
 			sub := filepath.Join(root, "vendor", "lib")
 			deliveryWrite(t, sub, "lib.go", "package lib\n")
 			deliveryGit(t, sub, "init", "-q", ".")
 			deliveryGit(t, sub, "add", ".")
 			deliveryGit(t, sub, "commit", "-qm", "lib")
-		}, workspacefs.GitStateGitlink},
-		"nested .git": {func(t *testing.T, root string) {
-			deliveryWrite(t, root, "data/.git", "gitdir: /nowhere\n")
-		}, workspacefs.GitStateNestedGit},
+		}, workspacefs.GitFindings{Repositories: []string{"vendor/lib"}}},
+		"gitfile in an ignored directory": {func(t *testing.T, root string) {
+			deliveryWrite(t, root, ".gitignore", "*.log\ncache/\n")
+			deliveryWrite(t, root, "cache/wt/.git", "gitdir: /elsewhere\n")
+		}, workspacefs.GitFindings{Repositories: []string{"cache/wt"}}},
+		"initialized submodule with changes": {func(t *testing.T, root string) {
+			lib := t.TempDir()
+			deliveryWrite(t, lib, "lib.go", "package lib\n")
+			deliveryGit(t, lib, "init", "-q", ".")
+			deliveryGit(t, lib, "add", ".")
+			deliveryGit(t, lib, "commit", "-qm", "lib")
+			deliveryGit(t, root, "-c", "protocol.file.allow=always", "submodule", "add", "-q", lib, "mod")
+			deliveryGit(t, root, "commit", "-qm", "submodule")
+			deliveryWrite(t, root, "mod/lib.go", "package lib // edited\n")
+		}, workspacefs.GitFindings{Repositories: []string{"mod", ".git/modules/mod"}}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			f, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
 			tc.setup(t, req.Workspace.Root)
-			if got := inspect(t, f, req, ""); got.GitState != tc.want {
-				t.Fatalf("git state = %q, want %q", got.GitState, tc.want)
+			got := inspect(t, f, req, "").Git
+			want := tc.want
+			if want.Refs == nil {
+				want.Refs = []workspacefs.RefFinding{}
+			}
+			if want.Repositories == nil {
+				want.Repositories = []string{}
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("git findings = %+v, want %+v", got, want)
 			}
 		})
+	}
+}
+
+// Ignored files and Ora's materialized skills written after a delivery are in no delivery by
+// definition: they do not make the checkout differ from it.
+func TestInspectReclaimIgnoresIgnoredFilesAndMaterializedSkills(t *testing.T) {
+	f, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
+	root := req.Workspace.Root
+	deliveryWrite(t, root, ".git/info/exclude", "# Skills Ora materialized for the Agent; not part of the project.\n/.claude/skills/lint\n")
+	snap, err := deliver(t, f, req)
+	if err != nil || snap.Commit == "" {
+		t.Fatalf("deliver = %+v, %v", snap, err)
+	}
+	deliveryWrite(t, root, "later.log", "ignored by .gitignore\n")
+	deliveryWrite(t, root, ".claude/skills/lint/SKILL.md", "# materialized\n")
+	if got := inspect(t, f, req, snap.Commit); !got.Unchanged || got.Total != 0 {
+		t.Fatalf("ignored or materialized writes changed the checkout: %+v", got)
+	}
+}
+
+// A .git that points nowhere is broken metadata: the checkout cannot be verified (it is not taken
+// as a checkout without a repository).
+func TestInspectReclaimCannotVerifyAnUnresolvableGit(t *testing.T) {
+	f, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
+	root := req.Workspace.Root
+	if err := os.RemoveAll(filepath.Join(root, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	deliveryWrite(t, root, ".git", "gitdir: "+filepath.Join(t.TempDir(), "missing")+"\n")
+	unlock, err := f.LockWorkspace(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if _, err := f.InspectReclaim(t.Context(), req.Workspace, req.MirrorPath, ""); !errors.Is(err, workspacefs.ErrUnverifiable) {
+		t.Fatalf("err = %v, want ErrUnverifiable", err)
 	}
 }
