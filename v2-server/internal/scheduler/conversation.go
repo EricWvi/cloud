@@ -339,7 +339,8 @@ func (a *ConversationAdapter) end(ctx context.Context, scope execution.Scope, o 
 	return err
 }
 
-// Cancel follows the shared mode semantics: Agent ends its session, model-only stops its turn.
+// Cancel follows the shared mode semantics: an Agent turn stops (its session ends unless the
+// Node keeps it), a model-only turn stops; the occurrence ends the session afterwards either way.
 // A schedule always ends its dedicated session afterward; End preserves history and directory.
 // Unbound occurrences must be reconciled first, never replaced.
 func (a *ConversationAdapter) Cancel(ctx context.Context, scope execution.Scope, occurrence store.Occurrence) error {

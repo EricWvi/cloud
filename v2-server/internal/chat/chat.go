@@ -4,8 +4,9 @@
 //
 // A conversation runs in exactly one execution session, in a directory the port makes for it, so
 // conversations never contend with each other, with schedules or with workflows. The session stays
-// live between turns until the person stops a turn (the fixed Node then ends the whole session),
-// deletes the conversation, or the server restarts. After that the conversation is read-only:
+// live between turns, also after the person stops a turn when the Node keeps the session through
+// the stop, until a stop the Node cannot keep it through, deleting the conversation, or a server
+// restart ends it. After that the conversation is read-only:
 // chat never starts a replacement session or replays history, and the page offers a new chat.
 package chat
 

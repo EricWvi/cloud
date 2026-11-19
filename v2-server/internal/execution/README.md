@@ -72,7 +72,7 @@ StopReason 与 FailureCode 分别保留，清理失败不能改写已持久化�
 
 ## Cancel、End 与重启
 
-- 有项目的 Agent：`Cancel(ref)` 以 `ErrStopTurn` 停这一轮。会话的 Node 能在取消后保留会话（`turn_cancel`）时只停这一轮，会话照常 Append；
+- 有项目的 Agent：`Cancel(ref)` 经 driver 的 `StopTurn` 停这一轮（最多等 `TurnStopSettleLimit` 让 Node 结算，给停止定时限的调用方要把它加上）。会话的 Node 能在取消后保留会话（`turn_cancel`）时只停这一轮，会话照常 Append；
   否则，或者 Node 判定不能保留，就结束整个活动会话，等待停止确认并保存真实终态，结果带 `AgentLost`，
   后续 Append 返回 `ErrSessionEnded`，页面提示新开对话。不重放历史，不悄悄另起 Agent 冒充原会话。
 - 无项目模型直连：`Cancel(ref)` 只停止本轮 provider 请求，确认后会话仍可 Append。

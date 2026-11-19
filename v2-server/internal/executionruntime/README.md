@@ -27,7 +27,7 @@ Start/StartModel/Append 以当前租户授权（`TenantAccess`，store 在记录
 有序事件、完整结果和最终停止原因由 PostgreSQL 保留；Node 的历史快照/轮次终态先写库再 ACK。
 Subscribe 从持久 cursor 轮询，关闭观察者不停止 worker；会话结束后仍可按原序号读完再 EOF。
 
-Agent Cancel 以 `execution.ErrStopTurn` 取消 worker：driver 能保留会话（Node 协商了 `turn_cancel`）时只停这一轮，结果带 `SessionKept`，worker 不结束会话，之后照常 Append；不能保留时 worker 和其他没完成的轮次一样结束会话，Cancel 再 End 确认。worker 退出前一直占着这个会话的轮次，所以停止的结论出来之前不会有新的一轮进来。纯模型 Cancel 仅取消指定轮。
+Agent Cancel 先问 driver 能不能只停这一轮（`AgentDriver.StopTurn`）：能（Node 协商了 `turn_cancel`）时 worker 的 context 不取消，结果带 `SessionKept`，worker 不结束会话，之后照常 Append；End、Close 和关停仍取消 worker，等结论时也立刻结束会话。不能时 Cancel 像以前一样取消 worker，worker 和其他没完成的轮次一样结束会话，Cancel 再 End 确认。worker 退出前一直占着这个会话的轮次，所以停止的结论出来之前不会有新的一轮进来。纯模型 Cancel 仅取消指定轮。
 取消旧的已完成 Ref 只返回原结果。End 等 worker 与物理停止确认后再写 session_ended；
 停止或终态写入无法确认时保留目录、阻止该会话后续接收，返回 StopUnconfirmed 或 Unavailable。
 
