@@ -88,14 +88,6 @@ func randomToken() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-// publicPath is the path prefix of V2_PUBLIC_URL, "" at the root.
-func (h *handler) publicPath() string {
-	if h.opts.PublicURL == nil {
-		return ""
-	}
-	return h.opts.PublicURL.Path
-}
-
 // attemptCookie is the attempt cookie's name and path at this address.
 func (h *handler) attemptCookie(provider string) (name, path string) {
 	if h.secure() {
@@ -105,7 +97,7 @@ func (h *handler) attemptCookie(provider string) (name, path string) {
 }
 
 func (h *handler) callbackPath(provider string) string {
-	return h.publicPath() + "/auth/callback/" + provider
+	return "/auth/callback/" + provider
 }
 
 // callbackURL is the redirect URI a provider is registered with. It comes from V2_PUBLIC_URL only,
@@ -159,7 +151,7 @@ func (h *handler) callback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: cookie, Path: path, HttpOnly: true, Secure: h.secure(), SameSite: http.SameSiteLaxMode, MaxAge: -1})
 	fail := func(category, step string, err error) {
 		slog.Warn("login callback", "provider", name, "step", step, "error", err)
-		http.Redirect(w, r, h.publicPath()+"/?login_error="+category, http.StatusSeeOther)
+		http.Redirect(w, r, "/?login_error="+category, http.StatusSeeOther)
 	}
 	c, e := r.Cookie(cookie)
 	if e != nil {

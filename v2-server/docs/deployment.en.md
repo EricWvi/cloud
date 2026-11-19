@@ -105,7 +105,8 @@ It connects to the database, makes sure the team exists, writes a one-time admin
 (`<V2_PUBLIC_URL>/invite/<token>`) and exits without starting the server. The first person to open it, sign in with their Huawei
 account and click 加入 becomes the administrator, who then generates member links in Settings → Squads → 成员与邀请. `-team` may
 be omitted when exactly one team exists. Use the same command to recover when the only administrator has left. No HTTP route can
-create an administrator link.
+create an administrator link. Like a server start, it first applies any pending database migrations, so run it with the
+same build as the server; after an upgrade, its first run upgrades the schema too.
 
 Install enterprise CAs in the host system trust store using your distribution's enterprise process.
 Git and Go HTTPS use system CAs. Never disable certificate verification.

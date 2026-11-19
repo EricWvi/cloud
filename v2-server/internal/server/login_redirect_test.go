@@ -91,7 +91,7 @@ func (f *redirectFixture) back(query url.Values, attempt *http.Cookie) *http.Res
 }
 
 func TestRedirectLoginSignsInAndCreatesTheAccount(t *testing.T) {
-	f := newRedirectFixture(t, "https://ora.example.com/ora")
+	f := newRedirectFixture(t, "https://ora.example.com")
 	state, attempt := f.start("/workflows?x=1")
 	// At an https address the attempt cookie is host-only and __Host- prefixed, so a sibling
 	// subdomain cannot plant one.
@@ -102,7 +102,7 @@ func TestRedirectLoginSignsInAndCreatesTheAccount(t *testing.T) {
 	if res.StatusCode != http.StatusSeeOther || res.Header.Get("Location") != "/workflows?x=1" {
 		t.Fatalf("callback = %d %s", res.StatusCode, res.Header.Get("Location"))
 	}
-	if fmt.Sprint(f.provider.redirects) != "[https://ora.example.com/ora/auth/callback/huawei-idaas]" || fmt.Sprint(f.provider.codes) != "[c1]" {
+	if fmt.Sprint(f.provider.redirects) != "[https://ora.example.com/auth/callback/huawei-idaas]" || fmt.Sprint(f.provider.codes) != "[c1]" {
 		t.Fatalf("exchange got %v %v", f.provider.codes, f.provider.redirects)
 	}
 	session := sessionCookie(t, res)
@@ -189,9 +189,9 @@ func TestRedirectLoginOnlyForOfferedMethods(t *testing.T) {
 
 // Over plain http (a local stand-in) the attempt cookie keeps its plain name, scoped to the callback.
 func TestRedirectLoginAttemptCookieOverHTTP(t *testing.T) {
-	f := newRedirectFixture(t, "http://127.0.0.1:8090/ora")
+	f := newRedirectFixture(t, "http://127.0.0.1:8090")
 	state, attempt := f.start("/")
-	if attempt.Name != server.LoginAttemptCookie || attempt.Path != "/ora/auth/callback/huawei-idaas" || attempt.Secure {
+	if attempt.Name != server.LoginAttemptCookie || attempt.Path != "/auth/callback/huawei-idaas" || attempt.Secure {
 		t.Fatalf("attempt cookie = %+v", attempt)
 	}
 	if res := f.back(url.Values{"code": {"c"}, "state": {state}}, attempt); res.Header.Get("Location") != "/" {
