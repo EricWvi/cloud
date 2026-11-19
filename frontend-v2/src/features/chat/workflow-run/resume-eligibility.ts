@@ -36,7 +36,7 @@ export interface ResumeRefusal {
 }
 
 const refusalReasons: ReadonlySet<string> = new Set([
-  'run_not_ended', 'node_running', 'node_stuck', 'no_failed_node', 'review_form', 'review_form_retry', 'review_form_submitted', 'task_handling', 'task_decomposition', 'run_settling',
+  'run_not_ended', 'node_running', 'node_stuck', 'no_failed_node', 'review_form', 'review_form_retry', 'review_form_submitted', 'task_handling', 'task_decomposition', 'run_settling', 'starter_unavailable',
 ])
 
 /** Reads a `workflow_run_not_resumable` refusal's params; an unknown reason reads as none. */

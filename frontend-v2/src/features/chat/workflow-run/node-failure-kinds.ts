@@ -20,6 +20,9 @@ export const NODE_FAILURE_KINDS = [
   "condition_evaluation",
   // v2 only: an interactive Agent node whose session could not be set up, never auto-retried.
   "interactive_session",
+  // v2 only: the run's starter left the workspace (removed, or the account disabled), so the Agent
+  // was refused under their identity; never auto-retried.
+  "starter_unavailable",
 ] as const;
 
 /**

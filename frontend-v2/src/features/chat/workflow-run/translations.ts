@@ -131,6 +131,8 @@ export const workflowRunTranslations = {
       "这次运行停在确认表单上，表单还没有提交，不能从失败处继续；请用「再跑一次」重新运行。",
     "workflowRun.resume.refused.run_settling":
       "上一次执行还在收尾（例如刚停止的节点还没完全结束），请稍后再试。",
+    "workflowRun.resume.refused.starter_unavailable":
+      "这次运行的发起人已不在团队中或账号已停用，智能体都以发起人的身份执行，无法从失败处继续；请用「再跑一次」以你的身份重新运行。",
     "workflowRun.resume.refused.review_form_retry":
       "要重跑的节点包含已经提交的确认表单，不能从失败处继续；任务创建失败了，请在确认页点击「重试任务创建」重新创建任务。",
     "workflowRun.resume.refused.review_form_submitted":
@@ -457,6 +459,9 @@ export const workflowRunTranslations = {
     "workflowRun.errorKind.interactive_session": "交互会话未能建立",
     "workflowRun.errorHint.interactive_session":
       "交互节点不会自动重试；检查智能体进程与网络后续跑",
+    "workflowRun.errorKind.starter_unavailable": "运行的发起人已不可用",
+    "workflowRun.errorHint.starter_unavailable":
+      "发起人已不在团队中或账号已停用，智能体以发起人的身份执行，不会自动重试；请用「再跑一次」重新运行",
     "workflowRun.errorKind.agent_refusal": "智能体拒绝了请求",
     "workflowRun.errorHint.agent_refusal":
       "智能体拒绝了请求；可直接续跑让它带着失败信息重试，或调整提示词后发布新版本",
@@ -717,6 +722,8 @@ export const workflowRunTranslations = {
       "This run stopped at a review form that was never submitted, so it cannot resume; use “Run again” to run it anew.",
     "workflowRun.resume.refused.run_settling":
       "The previous execution is still winding down (a stopped node has not finished ending); try again shortly.",
+    "workflowRun.resume.refused.starter_unavailable":
+      "The member who started this run has left the workspace or their account was disabled. Its agents run as that member, so it cannot resume; use “Run again” to run it as yourself.",
     "workflowRun.resume.refused.review_form_retry":
       "The nodes to rerun include a submitted review form, so this run cannot resume; its task creation failed, so use “Retry task creation” on the review page to create the tasks again.",
     "workflowRun.resume.refused.review_form_submitted":
@@ -1071,6 +1078,10 @@ export const workflowRunTranslations = {
       "Interactive session could not start",
     "workflowRun.errorHint.interactive_session":
       "Interactive nodes never retry automatically; check the agent process and network, then resume",
+    "workflowRun.errorKind.starter_unavailable":
+      "Run starter unavailable",
+    "workflowRun.errorHint.starter_unavailable":
+      "The member who started this run left the workspace or their account was disabled; agents run as that member, so this never retries automatically. Use “Run again” to run it anew",
     "workflowRun.errorKind.agent_refusal": "Agent refused the request",
     "workflowRun.errorHint.agent_refusal":
       "The agent refused; resume to let it retry with the failure context, or adjust the prompt and publish a new version",
