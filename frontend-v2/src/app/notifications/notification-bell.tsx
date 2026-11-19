@@ -16,12 +16,28 @@ const PAGE_SIZE = 30
 
 const notificationsKey = (tenantId: string) => ['notifications', tenantId] as const
 
+/** One page of the inbox, or the record that the server refused it. */
+type InboxPage = NotificationList & { denied?: true }
+type Inbox = InfiniteData<InboxPage, string>
+
+const deniedPage: InboxPage = { items: [], unread: 0, nextCursor: '', denied: true }
+
 /**
- * The server no longer lets the caller read this workspace's inbox (removed from the team). What
- * was cached must not stay on screen: a failed refetch keeps the last data.
+ * The server no longer lets the caller read this workspace's inbox (removed from the team). The
+ * refusal becomes the cached data instead of an error, so it replaces every page read before and
+ * a later failure (503, network) cannot bring them back; only a successful read replaces it.
  */
 const lostAccess = (error: unknown) =>
   isAxiosError(error) && (error.response?.status === 403 || error.response?.status === 404)
+
+async function readPage(tenantId: string, cursor: string, signal: AbortSignal): Promise<InboxPage> {
+  try {
+    return await listNotifications(tenantId, cursor ? { limit: PAGE_SIZE, cursor } : { limit: PAGE_SIZE }, undefined, signal)
+  } catch (error) {
+    if (lostAccess(error)) return deniedPage
+    throw error
+  }
+}
 
 const formatTime = (iso: string): string =>
   new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(iso))
@@ -39,20 +55,26 @@ export function NotificationBell() {
   const client = useQueryClient()
   const inbox = useInfiniteQuery({
     queryKey: notificationsKey(tenantId),
-    queryFn: ({ pageParam, signal }) =>
-      listNotifications(tenantId, pageParam ? { limit: PAGE_SIZE, cursor: pageParam } : { limit: PAGE_SIZE }, undefined, signal),
+    queryFn: ({ pageParam, signal }) => readPage(tenantId, pageParam, signal),
     initialPageParam: '',
     getNextPageParam: last => last.nextCursor || undefined,
     enabled: !!tenantId,
     refetchInterval: POLL_MS,
-    retry: (failures, error) => !lostAccess(error) && failures < 3,
   })
-  const lost = lostAccess(inbox.error)
+  const lost = inbox.data?.pages[0]?.denied === true
+  // A refetch reads every loaded page again. Closing the list keeps only the newest page, so the
+  // badge's poll costs one request; reopening can load older pages again.
+  const setListOpen = (next: boolean) => {
+    setOpen(next)
+    if (next) return
+    client.setQueryData<Inbox>(notificationsKey(tenantId), prev =>
+      prev && prev.pages.length > 1 ? { pages: prev.pages.slice(0, 1), pageParams: prev.pageParams.slice(0, 1) } : prev)
+  }
   const markRead = useMutation({
     mutationFn: (body: { ids?: string[]; all?: boolean }) => readNotifications(tenantId, body),
     onSuccess: ({ unread }, body) => {
       const now = new Date().toISOString()
-      client.setQueryData<InfiniteData<NotificationList, string>>(notificationsKey(tenantId), prev => prev && {
+      client.setQueryData<Inbox>(notificationsKey(tenantId), prev => prev && {
         ...prev,
         pages: prev.pages.map((page, i) => ({
           ...page,
@@ -71,12 +93,12 @@ export function NotificationBell() {
 
   const openTask = (n: Notification) => {
     if (!n.readAt) markRead.mutate({ ids: [n.id] })
-    setOpen(false)
+    setListOpen(false)
     void navigate(`/collaboration/tasks/${n.taskId}`)
   }
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={setListOpen}>
       <PopoverTrigger
         aria-label={label}
         title="提醒"

@@ -23,6 +23,7 @@ describe('notification bell', () => {
   let seen: string[]
   let inboxStatus: number
   let pageSize: number
+  let inboxReads: string[]
 
   beforeEach(() => {
     items = [
@@ -33,6 +34,7 @@ describe('notification bell', () => {
     reads = []
     inboxStatus = 200
     pageSize = 30
+    inboxReads = []
     const unread = () => items.filter(n => !n.readAt).length
     seen = fakeBackend((c) => {
       if (c.url === '/api/v1/me') return { status: 200, data: demoUser }
@@ -40,9 +42,10 @@ describe('notification bell', () => {
         return { status: 200, data: { items: [{ id: tenantId, name: '演示团队', status: 'active', role: 'member' }], nextCursor: '' } }
       }
       if (c.url === inbox && c.method === 'get') {
-        if (inboxStatus !== 200) return { status: inboxStatus, data: { code: 'not_found', params: {}, requestId: 'r' } }
         // The cursor is opaque to the page; the fake uses the index of the next item.
         const params = c.params as { cursor?: string } | undefined
+        inboxReads.push(params?.cursor ?? 'first')
+        if (inboxStatus !== 200) return { status: inboxStatus, data: { code: 'not_found', params: {}, requestId: 'r' } }
         const start = Number(params?.cursor ?? 0)
         const page = items.slice(start, start + pageSize)
         const nextCursor = start + pageSize < items.length ? String(start + pageSize) : ''
@@ -136,6 +139,58 @@ describe('notification bell', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: /^提醒/ })).not.toBeInTheDocument())
     expect(screen.queryByRole('list', { name: '提醒列表' })).not.toBeInTheDocument()
     expect(screen.queryByText('修登录页')).not.toBeInTheDocument()
+
+    // A later failure of another kind must not bring the old notifications back.
+    inboxStatus = 503
+    const before = inboxReads.length
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    // The refetch fails for good only after the default three retries (1 s, 2 s, 4 s); until then
+    // the previous state stands, so look only once the last attempt has answered.
+    await waitFor(() => expect(inboxReads.length).toBe(before + 4), { timeout: 12_000 })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(screen.queryByRole('button', { name: /^提醒/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('修登录页')).not.toBeInTheDocument()
+
+    // Only a successful read shows the bell again.
+    inboxStatus = 200
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    expect(await screen.findByRole('button', { name: '提醒，2 条未读' })).toBeInTheDocument()
+    act(() => focusManager.setFocused(undefined))
+  }, 20_000)
+
+  it('polls only the newest page once the list is closed', async () => {
+    pageSize = 1
+    renderAt('/')
+    const bell = await screen.findByRole('button', { name: '提醒，2 条未读' })
+    await userEvent.click(bell)
+    const list = await screen.findByRole('list', { name: '提醒列表' })
+    await userEvent.click(within(list).getByRole('button', { name: '加载更多' }))
+    await userEvent.click(await within(list).findByRole('button', { name: '加载更多' }))
+    await within(list).findByText('旧任务')
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('list', { name: '提醒列表' })).not.toBeInTheDocument())
+
+    inboxReads = []
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await waitFor(() => expect(inboxReads).toEqual(['first']))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(inboxReads).toEqual(['first'])
+
+    // Reopened, the older pages can still be loaded.
+    await userEvent.click(screen.getByRole('button', { name: '提醒，2 条未读' }))
+    const reopened = await screen.findByRole('list', { name: '提醒列表' })
+    expect(within(reopened).queryByText('旧任务')).not.toBeInTheDocument()
+    await userEvent.click(within(reopened).getByRole('button', { name: '加载更多' }))
+    expect(await within(reopened).findByText('修登录页')).toBeInTheDocument()
     act(() => focusManager.setFocused(undefined))
   })
 
