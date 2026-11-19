@@ -394,42 +394,58 @@ func TestDriverIPCLateSettlementAfterTheWaitNeverKeepsTheSession(t *testing.T) {
 // backlog that is still being delivered is not a Node that does not settle), but never runs past
 // its limit.
 func TestDriverIPCSettlementWaitFollowsDeliveryProgress(t *testing.T) {
+	// The window is ten event intervals long, so a slow, loaded runner never misses a restart;
+	// the session keeps delivering for four windows.
+	const window, every = 500 * time.Millisecond, 50 * time.Millisecond
 	for _, tc := range []struct {
 		name  string
 		limit time.Duration
 		kept  bool
 	}{
 		{name: "events keep the wait going", limit: time.Minute, kept: true},
-		{name: "the limit ends it", limit: 300 * time.Millisecond},
+		{name: "the limit ends it", limit: 2 * window},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newIPCHarness(t, nil)
-			h.driver.turnCancelWait = 150 * time.Millisecond
+			h.driver.turnCancelWait = window
 			h.driver.turnCancelLimit = tc.limit
-			ctx := ipcContext(t)
+			// Longer than the waits below, so only the driver's own limit can end this wait.
+			ctx, stop := context.WithTimeout(context.Background(), 30*time.Second)
+			t.Cleanup(stop)
 			session := h.session("session", "workspace")
 			done, f, start, cancel := startStoppable(t, h, ctx, session, discardIPCEvent)
 			accepted, _ := json.Marshal(map[string]string{"command_id": cancel.CommandID})
-			ended := false
-			for deadline := time.Now().Add(600 * time.Millisecond); time.Now().Before(deadline) && !ended; {
+			deliver := func() bool {
 				f.in <- node.Message{Type: "session_command_accepted", Version: 1, OperationID: start.OperationID, ExecutionID: start.ExecutionID, Payload: accepted}
-				ended = slices.Contains(sentIPC(f), "end_session")
-				time.Sleep(50 * time.Millisecond)
+				time.Sleep(every)
+				return slices.Contains(sentIPC(f), "end_session")
 			}
-			if ended == tc.kept {
-				t.Fatalf("EndSession sent = %v while the session kept delivering, want %v", ended, !tc.kept)
-			}
-			if !tc.kept {
-				f.terminal(start)
-				if got := receiveIPC(t, done); got.err == nil || got.result.SessionKept {
-					t.Fatalf("stop past the limit = %+v", got)
+			if tc.kept {
+				for deadline := time.Now().Add(4 * window); time.Now().Before(deadline); {
+					if deliver() {
+						t.Fatal("EndSession sent while the session kept delivering")
+					}
+				}
+				f.finishTurnAs(t, start, "first", "", "cancelled")
+				f.settleCancel(start, cancel, "stopped")
+				if got := receiveIPC(t, done); got.err != nil || !got.result.SessionKept {
+					t.Fatalf("stop settled after a long delivery = %+v", got)
 				}
 				return
 			}
-			f.finishTurnAs(t, start, "first", "", "cancelled")
-			f.settleCancel(start, cancel, "stopped")
-			if got := receiveIPC(t, done); got.err != nil || !got.result.SessionKept {
-				t.Fatalf("stop settled after a long delivery = %+v", got)
+			// Delivery never pauses, so only the limit can end the wait: wait for its EndSession.
+			began := time.Now()
+			for !deliver() {
+				if time.Since(began) > 10*tc.limit {
+					t.Fatal("the limit never ended a wait the session kept restarting")
+				}
+			}
+			if waited := time.Since(began); waited < tc.limit-every || waited > 5*tc.limit {
+				t.Fatalf("EndSession after %v, want it at the limit of %v", waited, tc.limit)
+			}
+			f.terminal(start)
+			if got := receiveIPC(t, done); got.err == nil || got.result.SessionKept {
+				t.Fatalf("stop past the limit = %+v", got)
 			}
 		})
 	}
@@ -463,6 +479,26 @@ func TestDriverIPCStoppedTurnEndedByAnyTerminalIsCancelled(t *testing.T) {
 	f.terminalAs(nextIPCCommand(t, f, "end_session"), "agent_failed", "turn_cancel_unanswered")
 	if got := receiveIPC(t, done); got.result.Status != execution.StatusCancelled || got.result.FailureCode != "" || !got.result.AgentLost || got.err == nil {
 		t.Fatalf("stopped turn ended by an agent_failed terminal = %+v", got)
+	}
+}
+
+// A terminal that ends the session under a stopped turn hands the turn its published outcome
+// before the session reads as stopped: the turn's fall-back End, which waits for that stop, must
+// find it rather than make up a result of its own. The ACK of the terminal is held, so the receive
+// loop's own hand-over after the ACK cannot come first.
+func TestDriverIPCTerminalHandsItsOutcomeOverBeforeTheStop(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	h.driver.turnCancelWait = 50 * time.Millisecond
+	ctx := ipcContext(t)
+	session := h.session("session", "workspace")
+	done, f, _, _ := startStoppable(t, h, ctx, session, discardIPCEvent)
+	end := nextIPCCommand(t, f, "end_session")
+	gate := make(chan struct{})
+	t.Cleanup(func() { close(gate) })
+	f.holdAck.Store(&map[string]chan struct{}{"agent_session_ended": gate})
+	f.terminalAs(end, "agent_failed", "turn_cancel_unanswered")
+	if got := receiveIPC(t, done); got.result.Status != execution.StatusCancelled || !got.result.AgentLost || !errors.Is(got.err, execution.ErrSessionEnded) {
+		t.Fatalf("stopped turn whose terminal is not yet acknowledged = %+v, want the published outcome", got)
 	}
 }
 

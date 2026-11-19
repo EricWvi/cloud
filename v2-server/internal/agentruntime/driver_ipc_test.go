@@ -43,6 +43,8 @@ type fakeNodeIPC struct {
 	missingCapability atomic.Pointer[string]
 	// turnCancel is the harness's: whether this Node negotiated turn_cancel.
 	turnCancel *atomic.Bool
+	// holdAck, when set, holds the ACK of the message types it names until the channel closes.
+	holdAck atomic.Pointer[map[string]chan struct{}]
 	// failSend, when set, fails the write of the commands it returns an error for.
 	failSend atomic.Pointer[func(node.Message) error]
 }
@@ -77,6 +79,15 @@ func (f *fakeNodeIPC) Receive(ctx context.Context) (node.Message, error) {
 	}
 }
 func (f *fakeNodeIPC) Ack(ctx context.Context, m node.Message) error {
+	if held := f.holdAck.Load(); held != nil {
+		if gate, ok := (*held)[m.Type]; ok {
+			select {
+			case <-gate:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
 	select {
 	case f.acked <- m:
 		return nil

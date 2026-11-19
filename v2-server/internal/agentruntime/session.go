@@ -718,8 +718,15 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 				publicationFailed = true
 			}
 		}
+		if outcome != nil {
+			// Hand the turn its outcome before the session reads as stopped. End, and a turn that
+			// fell back to End, wait for the stop and then take the turn's outcome: they must find
+			// this published one, not substitute a result of their own, which the receive loop's
+			// hand-over after the ACK would leave room for.
+			a.complete(*outcome)
+		}
 		a.markStopped()
-		return outcome, !publicationFailed
+		return nil, !publicationFailed
 	}
 	if message.Type == "session_command_rejected" {
 		var rejection struct {
