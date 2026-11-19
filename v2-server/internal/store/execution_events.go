@@ -285,9 +285,12 @@ func (s *Store) recoverExecutions(ctx context.Context, deliver bool) ([]Recovere
 			if err := json.Unmarshal(caller, &kept[i].Caller); err != nil {
 				return fmt.Errorf("read recovered session caller: %w", err)
 			}
-			// The first restart a session survives binds it to its workspace's current clone. Until
-			// then the record cannot have moved under it: only a clone Node no longer knows is
-			// forgotten and cloned again, and a session cannot have started on such a clone.
+			// The first restart a session survives binds it to its workspace's current clone. That is
+			// the clone its conversation ran in unless the record moved before this restart: Node lost
+			// its ledger while this server kept running, a later node found the clone unknown, and the
+			// run cloned again. The session is then bound to the new clone and continues there without
+			// its earlier edits, and nothing corrects the binding later. Binding when the session's
+			// Agent first starts on a checkout would close that gap; it is a known limit (README).
 			if err := tx.QueryRow(ctx, `UPDATE v2_execution_sessions s SET clone_execution = CASE WHEN s.clone_execution <> '' THEN s.clone_execution
 					ELSE COALESCE((SELECT w.clone_execution FROM v2_workspaces w WHERE w.id = s.data->>'WorkspaceID'), '') END
 				WHERE s.id = $1 RETURNING s.clone_execution`, kept[i].Session.ID).Scan(&kept[i].CloneExecution); err != nil {
