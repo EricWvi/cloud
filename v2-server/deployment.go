@@ -58,8 +58,8 @@ func parseLogin(value string, fixtures bool) (loginMethods, error) {
 }
 
 // parsePublicURL reads V2_PUBLIC_URL, the address browsers use for this server. Empty leaves it
-// unset. It must be an absolute http or https URL without query or fragment; a path prefix is kept
-// for addresses derived from it later.
+// unset. It must be the root of an absolute http or https URL: routes, the frontend's API paths and
+// the __Host- cookies (Path=/) all live at the root, so a path prefix could never work.
 func parsePublicURL(value string) (*url.URL, error) {
 	if value == "" {
 		return nil, nil
@@ -78,6 +78,9 @@ func parsePublicURL(value string) (*url.URL, error) {
 		host = "[" + host + "]"
 	}
 	u.Host = host
-	u.Path = strings.TrimSuffix(u.Path, "/")
+	if u.Path != "" && u.Path != "/" {
+		return nil, fmt.Errorf("V2_PUBLIC_URL %q must be a root address without a path: Ora serves its pages, /api and /auth only at the root", value)
+	}
+	u.Path = ""
 	return u, nil
 }

@@ -49,10 +49,10 @@ func TestLoginMustBeSet(t *testing.T) {
 
 func TestPublicURL(t *testing.T) {
 	for value, want := range map[string]string{
-		"":                             "",
-		"https://ora.example.com":      "https://ora.example.com",
-		"https://ora.example.com/ora/": "https://ora.example.com/ora",
-		"http://127.0.0.1:8090":        "http://127.0.0.1:8090",
+		"":                         "",
+		"https://ora.example.com":  "https://ora.example.com",
+		"https://ora.example.com/": "https://ora.example.com",
+		"http://127.0.0.1:8090":    "http://127.0.0.1:8090",
 		// Stored the way browsers write Origin: lowercase host, no default port.
 		"https://Ora.Example.COM:443/": "https://ora.example.com",
 		"http://Ora.Example.com:80":    "http://ora.example.com",
@@ -65,7 +65,7 @@ func TestPublicURL(t *testing.T) {
 			t.Fatalf("parsePublicURL(%q) = %v, %v; want %q", value, got, err, want)
 		}
 	}
-	for _, value := range []string{"ora.example.com", "ftp://ora.example.com", "https://ora.example.com/?a=1", "https://ora.example.com/#x", "https://user@ora.example.com", "https://"} {
+	for _, value := range []string{"ora.example.com", "ftp://ora.example.com", "https://ora.example.com/?a=1", "https://ora.example.com/#x", "https://user@ora.example.com", "https://", "https://ora.example.com/ora", "https://ora.example.com/ora/"} {
 		if _, err := parsePublicURL(value); err == nil {
 			t.Fatalf("parsePublicURL(%q) accepted", value)
 		}
