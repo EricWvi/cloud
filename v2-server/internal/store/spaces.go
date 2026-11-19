@@ -8,21 +8,25 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// DemoSpaceName and DemoSpaceSlug identify the one collaboration space every demo tenant gets.
+// DemoSpaceName and DemoSpaceSlug identify the one collaboration space every tenant gets. The
+// slug is fixed for every tenant (projects fall back to it); the name says "演示" only in the demo
+// tenant, while a workspace an owner invitation created gets WorkspaceSpaceName.
 const (
-	DemoSpaceName = "演示空间"
-	DemoSpaceSlug = "demo"
+	DemoSpaceName      = "演示空间"
+	DemoSpaceSlug      = "demo"
+	WorkspaceSpaceName = "协作空间"
 )
 
-// DemoAgent is a real Agent plugin this demo installs in that space. Each artifact is one
-// scripts/prepare-node.sh downloads and verifies by SHA-256, and the same one the chat, workflow
-// and schedule runtimes load, so the space lists installed plugins rather than made-up Agents.
-type DemoAgent struct {
+// BundledAgent is a real Agent plugin this build ships and registers in every tenant's space. Each
+// artifact is one scripts/prepare-node.sh downloads and verifies by SHA-256, which the offline
+// package bundles and the chat, workflow and schedule runtimes load, so the versions here are
+// always the installed ones rather than demo data.
+type BundledAgent struct {
 	Name, Namespace, Identifier, Version string
 }
 
-// DemoAgents lists the demo space's plugins; the space lists them by name.
-var DemoAgents = []DemoAgent{
+// BundledAgents lists the space's plugins; the space lists them by name.
+var BundledAgents = []BundledAgent{
 	{Name: "OpenCode", Namespace: "official", Identifier: "ora-space.opencode", Version: "0.6.11"},
 	{Name: "Claude Code", Namespace: "official", Identifier: "ora-space.claude", Version: "0.4.5"},
 }
@@ -107,31 +111,42 @@ func (s *Store) SpaceAgentPlugins(ctx context.Context, tenant, space string) ([]
 	return querySpacePlugins(ctx, s.pool, space, true)
 }
 
-// ensureDemoSpace gives a demo tenant its space and the installed agent plugins the runtimes use.
-// It runs inside the login transaction and is idempotent, so repeated logins keep one space and
-// one row per plugin, and a database seeded before a plugin existed gains its row. A conflicting
-// insert keeps the existing row, which is what a real install would leave behind.
+// ensureDemoSpace gives the demo tenant its space and the bundled agent plugins the runtimes use.
 func ensureDemoSpace(ctx context.Context, tx pgx.Tx, tenant, user string) error {
+	return ensureSpace(ctx, tx, tenant, user, DemoSpaceName, "演示工作区的协作空间。")
+}
+
+// ensureWorkspaceSpace gives a workspace created for real use (by an owner invitation) its space,
+// named without any demo wording.
+func ensureWorkspaceSpace(ctx context.Context, tx pgx.Tx, tenant, user string) error {
+	return ensureSpace(ctx, tx, tenant, user, WorkspaceSpaceName, "工作区的默认协作空间。")
+}
+
+// ensureSpace runs inside the login or join transaction and is idempotent, so repeated calls keep
+// one space and one row per plugin, and a database seeded before a plugin existed gains its row. A
+// conflicting insert keeps the existing row, name included, which is what a real install would
+// leave behind.
+func ensureSpace(ctx context.Context, tx pgx.Tx, tenant, user, name, description string) error {
 	if _, e := tx.Exec(ctx, `
 		INSERT INTO v2_spaces (tenant_id, name, slug, description, created_by)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (tenant_id, slug) DO NOTHING`,
-		tenant, DemoSpaceName, DemoSpaceSlug, "演示工作区的协作空间。", user); e != nil {
-		return fmt.Errorf("ensure demo space: %w", e)
+		tenant, name, DemoSpaceSlug, description, user); e != nil {
+		return fmt.Errorf("ensure space: %w", e)
 	}
 	var space string
 	if e := tx.QueryRow(ctx, `
 		SELECT id FROM v2_spaces WHERE tenant_id = $1 AND slug = $2`, tenant, DemoSpaceSlug).Scan(&space); e != nil {
-		return fmt.Errorf("read demo space: %w", e)
+		return fmt.Errorf("read space: %w", e)
 	}
-	for _, a := range DemoAgents {
+	for _, a := range BundledAgents {
 		if _, e := tx.Exec(ctx, `
 			INSERT INTO v2_space_agents (tenant_id, space_id, name, source_namespace, identifier,
 				desired_version, observed_version)
 			VALUES ($1, $2, $3, $4, $5, $6, $6)
 			ON CONFLICT (space_id, source_namespace, identifier) DO NOTHING`,
 			tenant, space, a.Name, a.Namespace, a.Identifier, a.Version); e != nil {
-			return fmt.Errorf("register demo agent %s: %w", a.Identifier, e)
+			return fmt.Errorf("register agent %s: %w", a.Identifier, e)
 		}
 	}
 	return nil

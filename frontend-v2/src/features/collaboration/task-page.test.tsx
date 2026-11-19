@@ -921,3 +921,76 @@ it('disables @ workflow options when the task is closed', async () => {
   expect(opt).toBeDisabled()
   expect(opt).toHaveTextContent('任务已结束，不能启动工作流')
 })
+
+it('shows the missing role message when @ workflow comment returns workflow_role_not_found', async () => {
+  targets.items.push(workflowTarget)
+  forms.byRef['wf-check'] = workflowForm
+  vi.mocked(api.createTaskComment).mockRejectedValueOnce(httpFault(400, 'workflow_role_not_found'))
+
+  renderPage('?tab=discussion')
+  const box = await screen.findByLabelText('评论或给 Agent 的消息')
+  await userEvent.type(box, '@')
+  await userEvent.click(await screen.findByRole('option', { name: /发布检查/ }))
+  await userEvent.type(screen.getByLabelText(/目标分支/), 'main')
+  await userEvent.click(screen.getByRole('button', { name: '发送并运行' }))
+
+  expect(await screen.findByText('工作流引用的角色在工作区角色目录里不存在，请先在设置的角色页新建同名角色再启动。')).toBeInTheDocument()
+  expect(screen.getByLabelText('评论或给 Agent 的消息')).toHaveValue('@发布检查 ')
+})
+
+it('shows the missing role message in TaskWorkflowDialog when workflow handling returns workflow_role_not_found', async () => {
+  const user = userEvent.setup()
+  const human = { type: 'human' as const, id: 'user-me', displayName: '演示用户', identifier: '' }
+  vi.mocked(api.getTask).mockResolvedValue(task({ assignee: human }))
+  vi.mocked(workflowsApi.listWorkflows).mockResolvedValue({
+    workflows: [{ id: 'wf-dev', namespace: 'team', name: '需求开发', publishedVersion: 'v1', createdAt: 1, updatedAt: 1 }],
+  })
+  vi.mocked(taskWorkflows.startTaskWorkflow).mockRejectedValueOnce(httpFault(400, 'workflow_role_not_found'))
+
+  renderPage()
+  await user.click(await screen.findByRole('button', { name: '用工作流处理' }))
+  const dialog = screen.getByRole('dialog')
+  await screen.findByRole('option', { name: '需求开发（v1）' })
+  await user.selectOptions(within(dialog).getByLabelText('工作流'), 'wf-dev')
+  await user.click(await within(dialog).findByRole('button', { name: '启动工作流' }))
+
+  expect(await within(dialog).findByText('工作流引用的角色在工作区角色目录里不存在，请先在设置的角色页新建同名角色再启动。')).toBeInTheDocument()
+})
+
+it('falls back to the workflow start failure message on unknown errors in TaskWorkflowDialog', async () => {
+  const user = userEvent.setup()
+  const human = { type: 'human' as const, id: 'user-me', displayName: '演示用户', identifier: '' }
+  vi.mocked(api.getTask).mockResolvedValue(task({ assignee: human }))
+  vi.mocked(workflowsApi.listWorkflows).mockResolvedValue({
+    workflows: [{ id: 'wf-dev', namespace: 'team', name: '需求开发', publishedVersion: 'v1', createdAt: 1, updatedAt: 1 }],
+  })
+  vi.mocked(taskWorkflows.startTaskWorkflow).mockRejectedValueOnce(httpFault(500, 'unexpected_error'))
+
+  renderPage()
+  await user.click(await screen.findByRole('button', { name: '用工作流处理' }))
+  const dialog = screen.getByRole('dialog')
+  await screen.findByRole('option', { name: '需求开发（v1）' })
+  await user.selectOptions(within(dialog).getByLabelText('工作流'), 'wf-dev')
+  await user.click(await within(dialog).findByRole('button', { name: '启动工作流' }))
+
+  expect(await within(dialog).findByText('工作流启动失败，请检查输入后重试。')).toBeInTheDocument()
+})
+
+it('shows workflow assignee guidance on not_assignee errors in TaskWorkflowDialog', async () => {
+  const user = userEvent.setup()
+  const human = { type: 'human' as const, id: 'user-me', displayName: '演示用户', identifier: '' }
+  vi.mocked(api.getTask).mockResolvedValue(task({ assignee: human }))
+  vi.mocked(workflowsApi.listWorkflows).mockResolvedValue({
+    workflows: [{ id: 'wf-dev', namespace: 'team', name: '需求开发', publishedVersion: 'v1', createdAt: 1, updatedAt: 1 }],
+  })
+  vi.mocked(taskWorkflows.startTaskWorkflow).mockRejectedValueOnce(httpFault(409, 'not_assignee'))
+
+  renderPage()
+  await user.click(await screen.findByRole('button', { name: '用工作流处理' }))
+  const dialog = screen.getByRole('dialog')
+  await screen.findByRole('option', { name: '需求开发（v1）' })
+  await user.selectOptions(within(dialog).getByLabelText('工作流'), 'wf-dev')
+  await user.click(await within(dialog).findByRole('button', { name: '启动工作流' }))
+
+  expect(await within(dialog).findByText('任务派给了别人，只有负责人本人或所属小队成员能用工作流处理。')).toBeInTheDocument()
+})

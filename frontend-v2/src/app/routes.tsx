@@ -1,8 +1,16 @@
-import { Navigate, type RouteObject } from 'react-router'
+import { Navigate, Outlet, type RouteObject } from 'react-router'
 import { features } from './features'
 import { Layout } from './layout'
+import { SessionGate } from './auth/session'
 
 export const routes: RouteObject[] = [
+  // An invitation needs a signed-in account but no workspace yet, so it sits outside the shell.
+  {
+    path: '/invite/:token',
+    element: <SessionGate><Outlet /></SessionGate>,
+    hydrateFallbackElement: <p className="p-4 text-sm text-muted-foreground">加载中…</p>,
+    children: [{ index: true, lazy: async () => ({ Component: (await import('@/features/invite/page')).default }) }],
+  },
   {
     path: '/',
     element: <Layout />,

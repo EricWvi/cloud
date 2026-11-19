@@ -142,7 +142,7 @@ func spaceAgents(ctx context.Context, s *Seeder, scope execution.Scope) (map[str
 			out[p.Identifier] = p.ID
 		}
 	}
-	for _, a := range store.DemoAgents {
+	for _, a := range store.BundledAgents {
 		if out[a.Identifier] == "" {
 			return nil, fmt.Errorf("demo space has no %s Agent", a.Name)
 		}

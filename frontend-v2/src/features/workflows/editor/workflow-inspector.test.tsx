@@ -1003,7 +1003,7 @@ describe("WorkflowInspector unapplied-setting hints", () => {
 function serveProviders(providers: string[]) {
   fakeBackend((c) =>
     c.url === "/auth/providers"
-      ? { status: 200, data: { providers, default: providers[0] } }
+      ? { status: 200, data: { providers } }
       : undefined,
   );
 }
@@ -1011,9 +1011,9 @@ function serveProviders(providers: string[]) {
 describe("WorkflowInspector deployed install", () => {
   // Roles live in the workspace's server catalog, so the picker stays available in a deployed
   // install; only browser-local settings are hidden there.
-  it("keeps the role field for idaas and preserves the stored roleId when editing", async () => {
+  it("keeps the role field in a deployed install and preserves the stored roleId when editing", async () => {
     await appI18n.changeLanguage("zh-CN");
-    serveProviders(["idaas"]);
+    serveProviders(["huawei-idaas"]);
     const user = userEvent.setup();
     const updates: string[] = [];
     render(
