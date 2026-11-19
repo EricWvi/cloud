@@ -79,8 +79,8 @@ type Verdict struct {
 	LatestDelivery string
 	// Revision identifies the state this verdict rests on; a discard must present it.
 	Revision string
-	// Discardable is false when the revision cannot vouch for everything a discard would drop
-	// (a nested repository too large to digest): a discard is refused until it is dealt with.
+	// Discardable is true only when the revision binds every Git-related byte a discard would drop
+	// (see seal); otherwise a discard is refused.
 	Discardable bool
 
 	basis store.ReclaimBasis
@@ -213,7 +213,7 @@ func (r *Reclaimer) Preview(ctx context.Context, tenant, user, conversationID st
 		return Verdict{}, err
 	}
 	if !c.Registered {
-		return seal(Verdict{Workspace: WorkspaceNone, Reason: ReasonNoWorkspace}, c.Checkout, ""), nil
+		return seal(Verdict{Workspace: WorkspaceNone, Reason: ReasonNoWorkspace}, c.Checkout, "", false), nil
 	}
 	v, unlock, err := r.judge(ctx, c.Checkout)
 	if unlock != nil {
@@ -227,12 +227,12 @@ func (r *Reclaimer) Preview(ctx context.Context, tenant, user, conversationID st
 func (r *Reclaimer) judge(ctx context.Context, c store.Checkout) (Verdict, func(), error) {
 	d := c.Delivery
 	if _, err := os.Lstat(c.Path); errors.Is(err, fs.ErrNotExist) {
-		return seal(Verdict{Workspace: WorkspaceNone, Reason: ReasonMissing}, c, ""), nil, nil
+		return seal(Verdict{Workspace: WorkspaceNone, Reason: ReasonMissing}, c, "", false), nil, nil
 	} else if err != nil {
 		return Verdict{}, nil, fmt.Errorf("inspect checkout: %w", err)
 	}
 	if d.Busy {
-		return seal(Verdict{Workspace: WorkspaceUndelivered, Reason: ReasonDelivering}, c, ""), nil, nil
+		return seal(Verdict{Workspace: WorkspaceUndelivered, Reason: ReasonDelivering}, c, "", false), nil, nil
 	}
 	lastGood := d.LastStatus == store.DeliveryDelivered || d.LastStatus == store.DeliveryEmpty
 	against := d.GoodCommit // undelivered changes are listed against the newest good delivery
@@ -249,7 +249,7 @@ func (r *Reclaimer) judge(ctx context.Context, c store.Checkout) (Verdict, func(
 	switch {
 	case errors.Is(err, workspacefs.ErrGone):
 		unlock()
-		return seal(Verdict{Workspace: WorkspaceNone, Reason: ReasonMissing}, c, ""), nil, nil
+		return seal(Verdict{Workspace: WorkspaceNone, Reason: ReasonMissing}, c, "", false), nil, nil
 	case errors.Is(err, workspacefs.ErrUnverifiable):
 		// What the checkout holds cannot be told, now or later.
 		reason := ReasonUnverifiable
@@ -258,13 +258,13 @@ func (r *Reclaimer) judge(ctx context.Context, c store.Checkout) (Verdict, func(
 		} else if !lastGood {
 			reason = ReasonLastUndelivered
 		}
-		return seal(Verdict{Workspace: WorkspaceUndelivered, Reason: reason}, c, ""), unlock, nil
+		return seal(Verdict{Workspace: WorkspaceUndelivered, Reason: reason}, c, "", false), unlock, nil
 	case err != nil:
 		// The disk, the mirror or Git failed: nothing is concluded, a later attempt retries.
 		unlock()
 		return Verdict{}, nil, fmt.Errorf("inspect checkout: %w", err)
 	}
-	v := Verdict{Workspace: WorkspaceUndelivered, Changes: in.Changes, Total: in.Total, Git: in.Git, Discardable: in.GitIdentityComplete}
+	v := Verdict{Workspace: WorkspaceUndelivered, Changes: in.Changes, Total: in.Total, Git: in.Git}
 	switch {
 	case !d.Delivered:
 		v.Reason = ReasonLegacy
@@ -285,19 +285,18 @@ func (r *Reclaimer) judge(ctx context.Context, c store.Checkout) (Verdict, func(
 	}
 	// The counts show what is held; the identity digest binds the actual stash entries, ref
 	// targets and nested repositories, which the counts alone would not.
-	return seal(v, c, in.Tree+"\x00"+string(git)+"\x00"+in.GitIdentity), unlock, nil
+	return seal(v, c, in.Tree+"\x00"+string(git)+"\x00"+in.GitIdentity, in.GitIdentityComplete), unlock, nil
 }
 
 // seal fills in what every verdict carries: the newest good delivery and the revision, a digest
 // of the last turn, the deliveries, the verdict and content: the checkout's snapshot tree and
 // Git state when it was inspected, which change whenever a file the snapshot takes changes.
-func seal(v Verdict, c store.Checkout, content string) Verdict {
+func seal(v Verdict, c store.Checkout, content string, complete bool) Verdict {
 	v.LatestDelivery = c.Delivery.GoodDeliveryID
-	if v.Workspace != WorkspaceUndelivered || v.Reason == ReasonDelivering {
-		v.Discardable = false // nothing to discard, or not yet
-	} else if content == "" {
-		v.Discardable = true // not inspected (unverifiable): what is shown is all there is to show
-	}
+	// A discard deletes the whole checkout, so it is offered only when the revision binds every
+	// byte it would drop: an undelivered checkout that was inspected, completely. No inspection
+	// (delivering, unverifiable, missing) or an incomplete one never allows it.
+	v.Discardable = v.Workspace == WorkspaceUndelivered && v.Reason != ReasonDelivering && content != "" && complete
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00", c.WorkspaceID, c.Delivery.LastTurnID, c.Delivery.LastStatus,
 		c.Delivery.GoodDeliveryID, c.Delivery.LastDeliveryID, v.Workspace, v.Reason, v.Total, content)

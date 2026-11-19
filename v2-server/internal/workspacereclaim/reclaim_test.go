@@ -717,3 +717,173 @@ func TestDiscardIsRefusedWhenANestedRepositoryIsTooLarge(t *testing.T) {
 		t.Fatalf("a refused discard changed something: %v", err)
 	}
 }
+
+// staleAfter previews the deleted-to-be conversation (any undelivered reason), lets change alter
+// Git-related bytes the shown preview does not reflect, and checks that a discard with the earlier
+// revision is stale and leaves the conversation and its checkout.
+func staleAfter(t *testing.T, f *fixture, c st.ChatCheckout, change func()) {
+	t.Helper()
+	ctx := context.Background()
+	c.End(t, f.s)
+	if err := f.s.EndChatSession(ctx, c.SessionID, store.EndStopped, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	stub := &executiontest.Stub{}
+	svc := chat.New(f.s, stub, stub, chat.Options{Reclaims: f.r})
+	seen, err := svc.DeletionPreview(ctx, f.scope, c.ConversationID)
+	if err != nil || seen.Workspace != wr.WorkspaceUndelivered || !seen.Discardable {
+		t.Fatalf("preview = %+v, %v", seen, err)
+	}
+	change()
+	now, err := svc.DeletionPreview(ctx, f.scope, c.ConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if now.Reason != seen.Reason || now.Total != seen.Total || !reflect.DeepEqual(now.Changes, seen.Changes) || !reflect.DeepEqual(now.Git, seen.Git) {
+		t.Fatalf("the shown preview differs, so this case proves nothing:\n%+v\n%+v", seen, now)
+	}
+	if _, err := svc.Delete(ctx, f.scope, c.ConversationID, store.ReclaimDiscard, seen.Revision); !errors.Is(err, chat.ErrDeletionPreviewStale) {
+		t.Fatalf("discard with the earlier revision = %v", err)
+	}
+	if _, err := f.s.ChatConversation(ctx, f.scope.TenantID, f.scope.UserID, c.ConversationID); err != nil {
+		t.Fatalf("the conversation went: %v", err)
+	}
+	if !exists(t, filepath.Join(c.Path, ".git")) {
+		t.Fatal("the checkout went")
+	}
+}
+
+// restoreTimes puts a file's modification time back, as an Agent could.
+func restoreTimes(t *testing.T, path string, info os.FileInfo) {
+	t.Helper()
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A repository kept in an ignored directory, checked out as a worktree (gitfile) or reached
+// through a .git link: a branch committed and left keeps the worktree and its HEAD as they were,
+// and only the repository the pointer leads to records it.
+func TestDiscardIsStaleWhenARepositoryBehindAPointerChanges(t *testing.T) {
+	for name, setup := range map[string]func(t *testing.T, root string) string{
+		"worktree gitfile": func(t *testing.T, root string) string {
+			store := filepath.Join(root, "store.git")
+			lib := t.TempDir()
+			write(t, lib, "lib.txt", "lib\n")
+			git(t, lib, "init", "-q", ".")
+			git(t, lib, "add", ".")
+			git(t, lib, "commit", "-qm", "lib")
+			git(t, root, "clone", "-q", "--bare", lib, store)
+			git(t, store, "worktree", "add", "-q", "--detach", filepath.Join(root, "wt"))
+			return filepath.Join(root, "wt")
+		},
+		"link": func(t *testing.T, root string) string {
+			wt := filepath.Join(root, "wt")
+			write(t, wt, "lib.txt", "lib\n")
+			git(t, wt, "init", "-q", ".")
+			git(t, wt, "add", ".")
+			git(t, wt, "commit", "-qm", "lib")
+			if err := os.Rename(filepath.Join(wt, ".git"), filepath.Join(root, "store.git")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("../store.git", filepath.Join(wt, ".git")); err != nil {
+				t.Fatal(err)
+			}
+			return wt
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			c := f.chat(t, st.TurnDelivered)
+			write(t, c.Path, ".gitignore", "*.log\nstore.git/\n")
+			wt := setup(t, c.Path)
+			staleAfter(t, f, c, func() {
+				git(t, wt, "checkout", "-q", "-b", "feature")
+				write(t, wt, "feature.txt", "new work\n")
+				git(t, wt, "add", "feature.txt")
+				git(t, wt, "commit", "-qm", "feature")
+				git(t, wt, "checkout", "-q", "--detach", "HEAD~1")
+			})
+		})
+	}
+}
+
+// A staged blob replaced by another of the same size, with the index's time put back: the
+// working tree, the counts and the index's size and time are all as previewed.
+func TestDiscardIsStaleWhenAStagedBlobIsReplaced(t *testing.T) {
+	stage := func(t *testing.T, repo, name, staged, kept string) {
+		file := filepath.Join(repo, name)
+		info, err := os.Stat(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		index := filepath.Join(repo, ".git", "index")
+		indexInfo, err := os.Stat(index)
+		if err != nil {
+			t.Fatal(err)
+		}
+		write(t, repo, name, staged)
+		git(t, repo, "add", name)
+		write(t, repo, name, kept)
+		restoreTimes(t, file, info)
+		restoreTimes(t, index, indexInfo)
+	}
+	t.Run("nested repository", func(t *testing.T) {
+		f := newFixture(t)
+		c := f.chat(t, st.TurnDelivered)
+		sub := nestedRepository(t, c.Path, "aaaa\n")
+		stage(t, sub, "lib.txt", "bbbb\n", "aaaa\n")
+		staleAfter(t, f, c, func() { stage(t, sub, "lib.txt", "cccc\n", "aaaa\n") })
+	})
+	t.Run("checkout repository", func(t *testing.T) {
+		f := newFixture(t)
+		c := f.chat(t, st.TurnDelivered)
+		write(t, c.Path, "staged.txt", "1111\n")
+		git(t, c.Path, "add", "staged.txt")
+		stage(t, c.Path, "staged.txt", "2222\n", "1111\n")
+		staleAfter(t, f, c, func() { stage(t, c.Path, "staged.txt", "3333\n", "1111\n") })
+	})
+}
+
+// Two nested repositories exhaust the digest's shared byte budget between them: the second one
+// cannot be bound, so a discard is refused even with the current revision.
+func TestDiscardIsRefusedWhenNestedRepositoriesExhaustTheBudget(t *testing.T) {
+	s := st.Open(t)
+	user, tenant := st.Login(t, s, "reclaim-owner")
+	const budget = 64 << 10
+	fs, err := workspacefs.NewDeliveryFS(t.TempDir(), budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fixture{s: s, scope: execution.Scope{TenantID: tenant, UserID: user}, fs: fs, remover: &diskRemover{root: filepath.Join(t.TempDir(), "w", "r")}}
+	f.r = wr.New(s, fs, f.remover)
+	c := f.chat(t, st.TurnDelivered)
+	// The first takes nearly all of it: its HEAD and branch ref (62 bytes) and one large file.
+	for _, n := range []struct {
+		dir  string
+		size int
+	}{{"a-big", budget - 62 - 10}, {"b-lib", 4}} {
+		sub := filepath.Join(c.Path, n.dir)
+		write(t, sub, "lib.txt", strings.Repeat("x", n.size))
+		git(t, sub, "init", "-q", ".")
+		git(t, sub, "add", ".")
+		git(t, sub, "commit", "-qm", "lib")
+	}
+	c.End(t, f.s)
+	ctx := context.Background()
+	if err := f.s.EndChatSession(ctx, c.SessionID, store.EndStopped, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	stub := &executiontest.Stub{}
+	svc := chat.New(f.s, stub, stub, chat.Options{Reclaims: f.r})
+	v, err := svc.DeletionPreview(ctx, f.scope, c.ConversationID)
+	if err != nil || v.Workspace != wr.WorkspaceUndelivered || v.Discardable {
+		t.Fatalf("preview = %+v, %v", v, err)
+	}
+	if _, err := svc.Delete(ctx, f.scope, c.ConversationID, store.ReclaimDiscard, v.Revision); !errors.Is(err, chat.ErrDiscardUnverifiable) {
+		t.Fatalf("discard = %v, want ErrDiscardUnverifiable", err)
+	}
+	if _, err := f.s.ChatConversation(ctx, f.scope.TenantID, f.scope.UserID, c.ConversationID); err != nil {
+		t.Fatalf("a refused discard removed the conversation: %v", err)
+	}
+}
