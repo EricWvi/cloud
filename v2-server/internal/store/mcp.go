@@ -156,7 +156,10 @@ func (s *Store) InstallTenantMCP(ctx context.Context, access Access, space strin
 			return err
 		}
 		out, err = readTenantMCP(ctx, tx, access.TenantID, entry.ID)
-		return err
+		if err != nil {
+			return err
+		}
+		return advanceInstalledMCP(ctx, tx, access.TenantID, out)
 	})
 	return out, err
 }
@@ -178,6 +181,9 @@ func allocateMCPRevision(ctx context.Context, tx pgx.Tx, tenant, id string, curr
 	 ON CONFLICT(tenant_id,plugin_id) DO UPDATE
 	 SET revision=GREATEST(v2_tenant_mcp_revisions.revision,$3)+1
 	 RETURNING revision`, tenant, id, current).Scan(&revision)
+	if err == nil && revision > execution.MaxMCPCounter {
+		return 0, ErrConflict
+	}
 	return revision, err
 }
 
@@ -245,7 +251,10 @@ func (s *Store) SetTenantMCPSettings(ctx context.Context, access Access, space, 
 			return err
 		}
 		out, err = readTenantMCP(ctx, tx, access.TenantID, id)
-		return err
+		if err != nil {
+			return err
+		}
+		return advanceInstalledMCP(ctx, tx, access.TenantID, out)
 	})
 	return out, err
 }
@@ -258,11 +267,16 @@ func (s *Store) RemoveTenantMCP(ctx context.Context, access Access, space, id st
 	if err := requireSpace(ctx, s.pool, access.TenantID, space); err != nil {
 		return err
 	}
-	tag, err := s.pool.Exec(ctx, `DELETE FROM v2_tenant_mcps WHERE tenant_id=$1 AND plugin_id=$2 AND revision=$3`, access.TenantID, id, revision)
-	if err == nil && tag.RowsAffected() != 1 {
-		return ErrConflict
-	}
-	return err
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM v2_tenant_mcps WHERE tenant_id=$1 AND plugin_id=$2 AND revision=$3`, access.TenantID, id, revision)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return ErrConflict
+		}
+		return advanceMCPTargets(ctx, tx, access.TenantID, id, mcpTargetMember{State: "unavailable", Code: "mcp_plugin_missing"})
+	})
 }
 
 // ResolveWorkflowMCP freezes tenant-owned metadata and memory-only overrides for one node.
@@ -290,9 +304,10 @@ func (s *Store) ResolveWorkflowMCP(ctx context.Context, scope execution.Scope, p
 	defer tx.Rollback(ctx)
 	for _, id := range ordered {
 		var pkg execution.MCPPackage
+		var revision int64
 		var raw, sealed []byte
 		pkg.PluginID = id
-		err := tx.QueryRow(ctx, `SELECT plugin_version,digest,target,declaration,settings FROM v2_tenant_mcps WHERE tenant_id=$1 AND plugin_id=$2`, scope.TenantID, id).Scan(&pkg.PluginVersion, &pkg.Digest, &pkg.Target, &raw, &sealed)
+		err := tx.QueryRow(ctx, `SELECT plugin_version,revision,digest,target,declaration,settings FROM v2_tenant_mcps WHERE tenant_id=$1 AND plugin_id=$2`, scope.TenantID, id).Scan(&pkg.PluginVersion, &revision, &pkg.Digest, &pkg.Target, &raw, &sealed)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, &execution.MCPFailure{Code: "mcp_plugin_missing", PluginID: id}
 		}
@@ -310,7 +325,7 @@ func (s *Store) ResolveWorkflowMCP(ctx context.Context, scope execution.Scope, p
 		if missing := missingMCPSettings(declaration, values); len(missing) > 0 {
 			return nil, &execution.MCPFailure{Code: "mcp_setting_missing", PluginID: id, SettingID: missing[0], Transport: declaration.Transport}
 		}
-		result.Bindings = append(result.Bindings, execution.MCPBinding{PluginID: id, PluginVersion: pkg.PluginVersion, Settings: values})
+		result.Bindings = append(result.Bindings, execution.MCPBinding{PluginID: id, PluginVersion: pkg.PluginVersion, Revision: revision, Settings: values})
 		result.Packages = append(result.Packages, pkg)
 	}
 	if err := result.Validate(); err != nil {

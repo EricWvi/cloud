@@ -22,10 +22,15 @@ type MCPSelection struct {
 
 // MCPBinding is an exact MCP identity. WireSettings is constructed only at the Node boundary.
 type MCPBinding struct {
-	PluginID      string         `json:"plugin_id"`
-	PluginVersion string         `json:"plugin_version"`
-	Settings      map[string]any `json:"-"`
+	PluginID      string `json:"plugin_id"`
+	PluginVersion string `json:"plugin_version"`
+	// Revision identifies the tenant settings read with this package, without retaining values.
+	Revision int64          `json:"configuration_revision,omitempty"`
+	Settings map[string]any `json:"-"`
 }
+
+// MaxMCPCounter is the largest integer shared exactly by Node and JSON clients.
+const MaxMCPCounter int64 = 1<<53 - 1
 
 // MCPPackage contains verified package bytes, never downloaded using session credentials.
 type MCPPackage struct {
@@ -125,7 +130,7 @@ func (s *MCPSelection) Validate() error {
 	}
 	total, previous := 0, ""
 	for _, b := range s.Bindings {
-		if !ValidMCPPluginID(b.PluginID) || previous >= b.PluginID || !ValidMCPVersion(b.PluginVersion) || b.Settings == nil {
+		if !ValidMCPPluginID(b.PluginID) || previous >= b.PluginID || !ValidMCPVersion(b.PluginVersion) || b.Settings == nil || b.Revision < 0 || b.Revision > MaxMCPCounter {
 			return invalid
 		}
 		previous = b.PluginID

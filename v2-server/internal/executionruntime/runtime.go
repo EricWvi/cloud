@@ -226,9 +226,8 @@ func (s *Service) Start(ctx context.Context, scope execution.Scope, req executio
 	if err := req.MCP.Validate(); err != nil {
 		return execution.Ref{}, err
 	}
-	// Controller generation admission and lifecycle events are not implemented yet. Reject
-	// before copying packages, stopping an idle predecessor, or persisting a Session/Turn.
-	// The driver's independent Node capability gate remains defense in depth.
+	// Do not admit lifecycle sessions until the Controller can deliver newer targets,
+	// reconcile a refused command and observe host health. Reject before persisting a turn.
 	if req.MCP != nil && len(req.MCP.Bindings) != 0 {
 		return execution.Ref{}, &execution.MCPFailure{Code: "mcp_lifecycle_not_ready"}
 	}
@@ -322,11 +321,8 @@ func (s *Service) start(ctx context.Context, scope execution.Scope, caller execu
 		}
 	}
 	turn := execution.Turn{Ref: execution.Ref{SessionID: session.ID, TurnID: newID()}, Caller: caller, Prompt: copyPrompt(prompt), StartedAt: time.Now().UTC()}
-	create := s.db.CreateExecutionSession
-	if s.delivery != nil {
-		create = s.db.CreateDeliveryExecutionSession
-	}
-	if err := create(ctx, scope, session, turn); err != nil {
+	turn, err := s.db.AdmitExecutionSession(ctx, scope, session, turn, s.delivery != nil)
+	if err != nil {
 		return execution.Ref{}, publicError(err)
 	}
 	if lifetime == execution.LifetimeHeld {
@@ -456,11 +452,8 @@ func (s *Service) Append(ctx context.Context, scope execution.Scope, req executi
 			continue
 		}
 		turn := execution.Turn{Ref: execution.Ref{SessionID: session.ID, TurnID: newID()}, Caller: req.Caller, Prompt: copyPrompt(req.Prompt), StartedAt: time.Now().UTC()}
-		appendTurn := s.db.AppendExecutionTurn
-		if s.delivery != nil {
-			appendTurn = s.db.AppendDeliveryExecutionTurn
-		}
-		if err := appendTurn(ctx, scope, session.ID, turn); err != nil {
+		turn, err = s.db.AdmitExecutionTurn(ctx, scope, session.ID, turn, s.delivery != nil)
+		if err != nil {
 			return execution.Ref{}, publicError(err)
 		}
 		s.launch(scope, session, turn, group)
