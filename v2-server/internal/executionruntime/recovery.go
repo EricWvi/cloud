@@ -20,8 +20,9 @@ import (
 // recorded conversation, as desktop's rebuild_provider_session does when session/load is
 // unavailable: the pinned Node cannot load a provider session, and it removes the Agent's own
 // session store with the session. The new Agent learns the conversation only from the handoff,
-// which names tool calls and their outcome but not their inputs or outputs, and its first turn has
-// no prompt cache.
+// which names tool calls by title and outcome: no output, and an input only as far as a title
+// shows it (OpenCode titles a shell call with its full command, as the page history shows). Its
+// first turn has no prompt cache.
 
 // maxTurnText is the pinned Node's limit on the text of one user turn, all blocks together
 // (node-protocol MAX_USER_TURN_TEXT_BYTES). The handoff and the prompt share it.
@@ -158,7 +159,7 @@ func renderHandoff(records []execution.HistoryRecord, budget int) string {
 		rendered[i] = b.String()
 	}
 	header := func(omitted int) string {
-		h := handoffOpen + "\nThis conversation's earlier Agent session was lost when its server or Node restarted. The transcript below is its history, and the work it describes has already been done in this workspace: build on it instead of repeating it. Tool calls are listed by name and outcome only; their inputs and outputs are not included. Continue from where the conversation left off. The user's new message follows this block.\n"
+		h := handoffOpen + "\nThis conversation's earlier Agent session was lost when its server or Node restarted. The transcript below is its history, and the work it describes has already been done in this workspace: build on it instead of repeating it. Tool calls are listed by title and outcome only; their outputs are not included. Continue from where the conversation left off. The user's new message follows this block.\n"
 		if len(rendered) == 0 {
 			h = handoffOpen + "\nThis conversation's earlier Agent session was lost when its server or Node restarted, and it left no readable history. Work it may have done is in this workspace. The user's new message follows this block.\n"
 		}
