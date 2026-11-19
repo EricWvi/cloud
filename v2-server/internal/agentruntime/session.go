@@ -32,9 +32,10 @@ type turnOutcome struct {
 }
 
 type activeTurn struct {
-	id        string
-	commandID string
-	done      chan turnOutcome
+	id             string
+	commandID      string
+	done           chan turnOutcome
+	updateRequired chan struct{}
 	// guard limits the Agent's re-sends of model calls cut off at a limit during this turn.
 	guard retryGuard
 }
@@ -69,7 +70,11 @@ type agentSession struct {
 	timing        *preparation
 	// recovered continues a held session whose Agent the previous server process lost: the new
 	// Agent starts with the handoff block (see execution.Recovery).
-	recovered *recoveredHistory
+	recovered    *recoveredHistory
+	mcpRequests  map[string]chan mcpReply // protected by mu
+	mcpWake      chan struct{}            // coalesces committed changes for this selection
+	mcpSync      sync.Mutex               // serializes desired delivery and refused-command reconciliation
+	mcpDelivered int64                    // last desired generation confirmed by this Node incarnation
 }
 
 // recoveredHistory joins a recovered session's new Node history to the one the page showed
@@ -182,7 +187,7 @@ func (d *Driver) session(ctx context.Context, scope execution.Scope, session exe
 				a.prepareErr = execution.ErrUnavailable
 				return
 			}
-			if a.prepareErr = p.prepareMCP(session.MCP); a.prepareErr != nil {
+			if a.prepareErr = a.prepareMCP(prepare, session.MCP); a.prepareErr != nil {
 				return
 			}
 			p.mu.Lock()
@@ -300,6 +305,9 @@ func (a *agentSession) begin(turn string, selection *execution.MCPSelection, emi
 		return nil, false, execution.ErrWorkspaceBusy
 	}
 	call := &activeTurn{id: turn, done: make(chan turnOutcome, 1)}
+	if a.started && selection != nil && len(selection.Bindings) > 0 {
+		call.updateRequired = make(chan struct{}, 1)
+	}
 	if a.started {
 		call.commandID = "turn-" + digest(turn)
 	}
@@ -365,7 +373,21 @@ func (a *agentSession) submit(admitted execution.Turn, text string, fresh bool) 
 			spec["mcp"] = mcpSpec(a.frozen.MCP)
 			spec["mcp_lifecycle"] = true
 		}
-		return a.project.send("start_agent_session", a.execution, map[string]any{"spec": spec})
+		err = a.project.send("start_agent_session", a.execution, map[string]any{"spec": spec})
+		if err == nil && lifecycle && a.project.driver.opts.ReadMCPTarget != nil {
+			// The watcher needs only the original authorization identities.
+			ids := &execution.MCPSelection{Bindings: make([]execution.MCPBinding, len(a.frozen.MCP.Bindings))}
+			for i, b := range a.frozen.MCP.Bindings {
+				ids.Bindings[i].PluginID = b.PluginID
+			}
+			a.mu.Lock()
+			a.frozen.MCP = ids
+			a.mcpWake = make(chan struct{}, 1)
+			a.mcpWake <- struct{}{}
+			a.mu.Unlock()
+			go a.followMCP(ids)
+		}
+		return err
 	}
 	command := map[string]any{"node_id": a.project.nodeID(), "command_id": "turn-" + digest(turn), "turn": map[string]any{"turn_id": turn, "content": content}}
 	if lifecycle {
@@ -571,6 +593,19 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 		return outcome, !publicationFailed
 	}
 	if message.Type == "session_command_rejected" {
+		var rejection struct {
+			CommandID string `json:"command_id"`
+			Reason    string `json:"reason"`
+		}
+		if json.Unmarshal(message.Payload, &rejection) == nil && rejection.Reason == "mcp_update_required" {
+			if message.Sequence == nil && call != nil && call.updateRequired != nil && call.commandID == rejection.CommandID {
+				select {
+				case call.updateRequired <- struct{}{}:
+				default:
+				}
+			}
+			return nil, false
+		}
 		a.fail("agent_session_ended", execution.ErrSessionEnded)
 		return nil, true
 	}

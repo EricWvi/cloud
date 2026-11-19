@@ -79,6 +79,17 @@ func TestMCPTargetAndTurnGeneration(t *testing.T) {
 		}
 	}
 	assertTarget(0, "configured", "")
+	target, err := f.store.ReadSessionMCPTarget(f.ctx, scope, session.ID, selection, -1)
+	if err != nil || target == nil || target.Generation != 0 || len(target.Configured.Bindings) != 1 ||
+		target.Configured.Bindings[0].Settings["apiKey"] != secret || !bytes.Equal(target.Configured.Packages[0].Archive, archive) {
+		t.Fatal("initial delivery did not resolve the authorized archive and settings", err)
+	}
+	if same, err := f.store.ReadSessionMCPTarget(f.ctx, scope, session.ID, selection, 0); err != nil || same != nil {
+		t.Fatal("unchanged target loaded a second snapshot", err)
+	}
+	if _, err := f.store.ReadSessionMCPTarget(f.ctx, scope, session.ID, nil, 0); err == nil {
+		t.Fatal("missing selection accepted on unchanged generation")
+	}
 	assertFloor(first, 0)
 	plain := execution.Session{ID: "plain", Target: session.Target}
 	plainTurn := turn(plain.ID, "ordinary")
@@ -115,6 +126,10 @@ func TestMCPTargetAndTurnGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertTarget(2, "unavailable", "mcp_plugin_missing")
+	target, err = f.store.ReadSessionMCPTarget(f.ctx, scope, session.ID, selection, 0)
+	if err != nil || target.Generation != 2 || target.Unavailable[item.ID] != "mcp_plugin_missing" || len(target.Configured.Packages) != 0 {
+		t.Fatal("delivery lost a removed member or recovered old material", err)
+	}
 	reloaded, err := f.store.ReadExecutionSession(f.ctx, scope, session.ID)
 	if err != nil || reloaded.MCP == nil || len(reloaded.MCP.Bindings) != 1 ||
 		reloaded.MCP.Bindings[0].PluginID != item.ID || reloaded.MCP.Bindings[0].Settings != nil || len(reloaded.MCP.Packages) != 0 {
@@ -130,6 +145,10 @@ func TestMCPTargetAndTurnGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertTarget(4, "configured", "")
+	target, err = f.store.ReadSessionMCPTarget(f.ctx, scope, session.ID, selection, 2)
+	if err != nil || target.Generation != 4 || target.Configured.Bindings[0].Revision != item.Revision {
+		t.Fatal("delivery did not resolve the reinstalled revision", err)
+	}
 	var ordinaryUnchanged bool
 	if err := f.db.QueryRow(f.ctx, `SELECT mcp_target IS NULL AND mcp_generation IS NULL FROM v2_execution_sessions WHERE id=$1`, plain.ID).Scan(&ordinaryUnchanged); err != nil || !ordinaryUnchanged {
 		t.Fatal("tenant configuration widened a session with no selection", err)

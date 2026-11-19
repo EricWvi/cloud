@@ -20,6 +20,14 @@ type MCPSelection struct {
 	Packages []MCPPackage `json:"-"`
 }
 
+// MCPTarget is a single committed generation. Configured bindings and package bytes
+// are transient. Removed or incomplete members still occupy their authorized slots.
+type MCPTarget struct {
+	Generation  int64
+	Configured  MCPSelection `json:"-"`
+	Unavailable map[string]string
+}
+
 // MCPBinding is an exact MCP identity. WireSettings is constructed only at the Node boundary.
 type MCPBinding struct {
 	PluginID      string `json:"plugin_id"`

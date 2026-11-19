@@ -226,10 +226,13 @@ func (s *Service) Start(ctx context.Context, scope execution.Scope, req executio
 	if err := req.MCP.Validate(); err != nil {
 		return execution.Ref{}, err
 	}
-	// Do not admit lifecycle sessions until the Controller can deliver newer targets,
-	// reconcile a refused command and observe host health. Reject before persisting a turn.
+	// Drivers without a lifecycle configuration source cannot consume admitted targets.
+	// The real driver checks the connected Node's capabilities before any Agent preparation.
 	if req.MCP != nil && len(req.MCP.Bindings) != 0 {
-		return execution.Ref{}, &execution.MCPFailure{Code: "mcp_lifecycle_not_ready"}
+		live, ok := s.agent.(interface{ SupportsMCPLifecycle() bool })
+		if !ok || !live.SupportsMCPLifecycle() {
+			return execution.Ref{}, &execution.MCPFailure{Code: "mcp_lifecycle_not_ready"}
+		}
 	}
 	req.MCP = req.MCP.Clone()
 	return s.start(ctx, scope, req.Caller, req.Prompt, &req.Target, req.ExecutorID, req.AgentID, req.ModelID, req.Skills, req.MCP, req.Lifetime)
@@ -500,6 +503,7 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		var result execution.Result
 		var agentErr error
 		var recovered, nodeLost bool
+		lifecycle := turn.MCPGeneration != nil || session.MCP != nil && len(session.MCP.Bindings) != 0
 		if session.Target != nil {
 			for attempt := 0; ; attempt++ {
 				s.mu.Lock()
@@ -531,7 +535,7 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 				}
 				// A held session outlives its Node: like a restart, the Agent's loss leaves the
 				// conversation recorded, and a new Agent continues it on the same checkout.
-				nodeLost = held && result.FailureCode == execution.FailureNodeLost && !s.firstTurn(ctx, scope, turn)
+				nodeLost = held && !lifecycle && result.FailureCode == execution.FailureNodeLost && !s.firstTurn(ctx, scope, turn)
 				if !nodeLost {
 					break
 				}
@@ -560,7 +564,8 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		// A recovered session whose new Agent could not be started keeps waiting for another
 		// turn: nothing ran, and the conversation is still recorded. Only a missing checkout
 		// ends it.
-		retry := nodeLost || (recovered && result.NotStarted && result.FailureCode != execution.FailureWorkspaceMissing)
+		canRecover := result.FailureCode != execution.FailureWorkspaceMissing && !(lifecycle && result.FailureCode == execution.FailureNodeLost)
+		retry := nodeLost || recovered && result.NotStarted && canRecover
 		// An Agent error means the session is gone; the driver marks the results it publishes
 		// itself, and this marks the ones only the runtime writes.
 		result.AgentLost = !retry && (result.AgentLost || agentErr != nil)
