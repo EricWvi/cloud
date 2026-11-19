@@ -1404,7 +1404,7 @@ func TestDriverIPCFirstTurnLostBeforeItsStartIsNotStarted(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the closed transport never failed the project")
 	}
-	err = a.submit("first", "prompt", true)
+	err = a.submit(execution.Turn{Ref: execution.Ref{TurnID: "first"}}, "prompt", true)
 	a.commandMu.Unlock()
 	if !errors.Is(err, execution.ErrUnavailable) {
 		t.Fatalf("submit on a dead Node = %v, want ErrUnavailable", err)
@@ -1450,7 +1450,7 @@ func TestDriverIPCFirstTurnDoesNotStartAnAgentAfterEnd(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	err = a.submit("first", "prompt", true)
+	err = a.submit(execution.Turn{Ref: execution.Ref{TurnID: "first"}}, "prompt", true)
 	a.commandMu.Unlock()
 	if !errors.Is(err, execution.ErrSessionEnded) {
 		t.Fatalf("submit after End = %v, want ErrSessionEnded", err)

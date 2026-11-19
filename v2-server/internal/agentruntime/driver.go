@@ -221,7 +221,7 @@ func (d *Driver) run(ctx context.Context, scope execution.Scope, session executi
 		a.timing = timing
 		a.mu.Unlock()
 	}
-	err = a.submit(turn.Ref.TurnID, text, fresh)
+	err = a.submit(turn, text, fresh)
 	a.commandMu.Unlock()
 	if err != nil {
 		code := "agent_dispatch_failed"

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
@@ -23,8 +24,7 @@ func ipcMCP() *execution.MCPSelection {
 }
 
 func TestMCPSpecSerializesOnlyTheSelectedBindings(t *testing.T) {
-	// This tests only construction. Cloud must not start MCP sessions until lifecycle
-	// admission and reliable turn failures are supported by both ends.
+	// Package settings are restricted to the explicit startup bindings.
 	selection := ipcMCP()
 	data, err := json.Marshal(mcpSpec(selection))
 	if err != nil {
@@ -66,6 +66,64 @@ func TestMCPPackageInstallationKeepsSettingsOutOfControlFrames(t *testing.T) {
 	invalid.Digest = "incorrect"
 	if err := f.project.installMCP(ctx, invalid); err == nil {
 		t.Fatal("invalid package digest accepted")
+	}
+}
+
+// Exercise dispatch after preparation. Normal admission stays gated until updates and
+// observations are also wired; this fixture supplies the already-authorized selection.
+func TestMCPDispatchRequiresCommittedGeneration(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	session := h.session("dispatch", "workspace")
+	a, err := h.driver.session(ipcContext(t), h.scope, session, h.config, execution.CallerWorkflow, newPreparation(execution.Ref{}, discardIPCEvent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := receiveIPC(t, h.created)
+	sentIPC(f)
+	a.commandMu.Lock()
+	defer a.commandMu.Unlock()
+	a.frozen.MCP = ipcMCP()
+	turn := execution.Turn{Ref: execution.Ref{SessionID: session.ID, TurnID: "first"}}
+	for _, gen := range []*int64{nil, new(int64(-1)), new(int64(1)), new(execution.MaxMCPCounter + 1)} {
+		turn.MCPGeneration = gen
+		if err := a.submit(turn, "first", true); !errors.Is(err, execution.ErrInvalidRequest) {
+			t.Fatalf("invalid start generation accepted: %v", err)
+		}
+	}
+	if len(sentIPC(f)) != 0 {
+		t.Fatal("invalid generation reached the Node")
+	}
+	turn.MCPGeneration = new(int64)
+	if err := a.submit(turn, "first", true); err != nil {
+		t.Fatal(err)
+	}
+	start := nextIPCCommand(t, f, "start_agent_session")
+	var payload struct {
+		Spec struct {
+			Lifecycle bool `json:"mcp_lifecycle"`
+			MCP       []struct {
+				ID string `json:"plugin_id"`
+			} `json:"mcp"`
+		}
+	}
+	if json.Unmarshal(start.Payload, &payload) != nil || !payload.Spec.Lifecycle || len(payload.Spec.MCP) != 1 || payload.Spec.MCP[0].ID != "official/acme.tools" {
+		t.Fatal("start omitted the lifecycle flag or explicit selection")
+	}
+	turn.Ref.TurnID = "next"
+	turn.MCPGeneration = nil
+	if err := a.submit(turn, "next", false); !errors.Is(err, execution.ErrInvalidRequest) || len(sentIPC(f)) != 0 {
+		t.Fatal("follow-up without an admission generation was sent")
+	}
+	turn.MCPGeneration = new(int64(23))
+	if err := a.submit(turn, "next", false); err != nil {
+		t.Fatal(err)
+	}
+	followup := nextIPCCommand(t, f, "submit_user_turn")
+	var cmd struct {
+		Generation *int64 `json:"mcp_generation"`
+	}
+	if json.Unmarshal(followup.Payload, &cmd) != nil || cmd.Generation == nil || *cmd.Generation != 23 || bytes.Contains(followup.Payload, []byte("MCP_SECRET_MARKER")) {
+		t.Fatal("follow-up must send exactly the admitted generation and no settings")
 	}
 }
 

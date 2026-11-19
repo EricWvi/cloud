@@ -25,9 +25,8 @@ func (p *projectRuntime) prepareMCP(selected *execution.MCPSelection) error {
 	if !ok || !capable.Supports("session_mcp") || !capable.Supports("agent_session") || !capable.Supports("session_mcp_lifecycle") {
 		return &execution.MCPFailure{Code: "mcp_node_capability_missing"}
 	}
-	// Lifecycle startup also requires generation admission and reliable SessionTurnFailed
-	// consumption. Until that Controller integration is available, even a newer Node must
-	// not receive a frozen setup as an implicit fallback.
+	// Generation-aware turn frames alone cannot deliver later configuration changes.
+	// Keep this boundary closed until target delivery and reply reconciliation are wired.
 	return &execution.MCPFailure{Code: "mcp_lifecycle_not_ready"}
 }
 

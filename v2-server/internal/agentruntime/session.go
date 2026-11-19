@@ -302,7 +302,13 @@ func (a *agentSession) begin(turn string, emit Emit) (*activeTurn, bool, error) 
 	return call, !a.started, nil
 }
 
-func (a *agentSession) submit(turn, text string, fresh bool) error {
+func (a *agentSession) submit(admitted execution.Turn, text string, fresh bool) error {
+	turn := admitted.Ref.TurnID
+	lifecycle := a.frozen.MCP != nil && len(a.frozen.MCP.Bindings) > 0
+	floor := admitted.MCPGeneration
+	if lifecycle != (floor != nil) || floor != nil && (*floor < 0 || *floor > execution.MaxMCPCounter || fresh && *floor != 0) {
+		return execution.ErrInvalidRequest
+	}
 	content := []any{map[string]string{"type": "text", "text": text}}
 	if fresh && a.recovered != nil {
 		// The recorded conversation goes first, as its own block, so the page can leave it out.
@@ -349,12 +355,17 @@ func (a *agentSession) submit(turn, text string, fresh bool) error {
 		if configuration != nil {
 			spec["agent_configuration"] = configuration
 		}
-		if a.frozen.MCP != nil && len(a.frozen.MCP.Bindings) > 0 {
+		if lifecycle {
 			spec["mcp"] = mcpSpec(a.frozen.MCP)
+			spec["mcp_lifecycle"] = true
 		}
 		return a.project.send("start_agent_session", a.execution, map[string]any{"spec": spec})
 	}
-	return a.project.send("submit_user_turn", a.execution, map[string]any{"node_id": a.project.nodeID(), "command_id": "turn-" + digest(turn), "turn": map[string]any{"turn_id": turn, "content": content}})
+	command := map[string]any{"node_id": a.project.nodeID(), "command_id": "turn-" + digest(turn), "turn": map[string]any{"turn_id": turn, "content": content}}
+	if lifecycle {
+		command["mcp_generation"] = *floor
+	}
+	return a.project.send("submit_user_turn", a.execution, command)
 }
 
 // requestEnd never takes down the project's shared Node. The Driver owns process-tree retirement.
