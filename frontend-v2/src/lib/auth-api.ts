@@ -1,11 +1,11 @@
 import { http } from './api-client'
 
 // The Gateway's browser login routes. They are not part of api/openapi.json, so they are written by
-// hand; v2-server serves the same shapes with only the development provider.
+// hand; v2-server serves the same shapes with the login methods its V2_LOGIN names.
 
+/** The offered login methods, in the order the login screen shows them. */
 export interface Providers {
   providers: string[]
-  default?: string
 }
 
 export const getProviders = () => http.get<Providers>('/auth/providers').then((r) => r.data)

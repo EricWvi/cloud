@@ -23,7 +23,8 @@ V2_LOGIN=email go run .                # 开发模式，监听 127.0.0.1:8090
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `V2_LOGIN` | 必填 | `email` 仅开发；`idaas` 为部署模式，当前构建不提供 IDaaS 登录并拒绝启动 |
+| `V2_LOGIN` | 必填 | 开放的登录方式，逗号分隔，登录页按这个顺序显示；不设或为空拒绝启动（没有默认值，忘了配置的部署不会开出无密码的邮箱登录），开发写 `email`，`task v2:demo` 等入口已设好。本构建只提供 `email`（只凭邮箱登录，仅用于开发和演示）；写了未知、重复或空的项在任何数据操作前拒绝启动。`-fixture-check`、`-test-fixtures` 要求开了 `email` |
+| `V2_PUBLIC_URL` | 未设置 | 浏览器访问本服务的地址（`http`/`https`，只能是根地址，不带路径、查询串）。设置后，带会话 Cookie 的写请求只接受这个 origin；未设置时 `Origin` 须与请求的 Host 相同。是 `https` 时会话 Cookie 改名为 `__Host-ora_session` 并加 `Secure`。在会改写 Host 的反向代理后面必须设置它，否则 `Origin` 与 Host 对不上，所有写请求都会 `403`。开了 `email` 又是 `https` 时启动日志会警告 |
 | `V2_FRONTEND_DIR` | 未设置 | 前端构建目录；未设置保留 API-only |
 | `V2_ADDR` | `127.0.0.1:8090` | 监听地址 |
 | `V2_DATABASE_URL` | `postgres://ora:ora-local@127.0.0.1:55432/ora_v2?sslmode=disable` | PostgreSQL |
@@ -109,9 +110,9 @@ seed 在 [`demo/`](demo/README.md)：`env.go` 是上表和重置、准备本地 
 | 路由 | 来源 | 说明 |
 |---|---|---|
 | `GET /healthz` | 契约 | 数据库可达即 `ok` |
-| `GET /auth/providers` | Gateway | 只有 `email` |
-| `POST /auth/login` | Gateway | 邮箱登录：`email` 必须是预置文件或 owner 邀请过的账号，否则 `403 email_not_invited`，不会自动建用户；成功后设置 `ora_session` Cookie，`authorizationUrl` 即 `returnTo`（只接受站内路径）。只凭邮箱就能登录等于谁都能冒充谁，**仅用于演示环境** |
-| `POST /auth/logout` | Gateway | 吊销会话，`204` |
+| `GET /auth/providers` | Gateway | `{"providers": [...]}`：`V2_LOGIN` 开放的登录方式，按配置顺序 |
+| `POST /auth/login` | Gateway | 邮箱登录：`email` 必须是预置文件或 owner 邀请过的账号，否则 `403 email_not_invited`，不会自动建用户；成功后设置会话 Cookie（`ora_session`，`V2_PUBLIC_URL` 为 https 时 `__Host-ora_session`），`authorizationUrl` 即 `returnTo`（只接受站内路径）。`V2_LOGIN` 没开的方式返回 `400 unknown_provider`；`Origin` 是别的站点时 `403 origin_mismatch`。只凭邮箱就能登录等于谁都能冒充谁，**仅用于演示环境** |
+| `POST /auth/logout` | Gateway | 吊销会话，`204`；`Origin` 是别的站点时 `403 origin_mismatch` |
 | `GET /api/v1/me` | 契约 | 当前用户；无会话 `401 unauthenticated`。契约禁止额外字段，当前用户的角色从 `GET /api/v1/me/tenants` 的 `role` 读取 |
 | `GET /api/v1/me/tenants` | 契约 | 当前用户所在租户，一页返回全部，`nextCursor` 为空 |
 | `GET /api/v1/tenants/{tid}/members` | 契约 | 当前用户所在工作区成员，一页返回全部，按显示名排序；非成员与非法租户 id 都是 `404 not_found` |
@@ -120,6 +121,8 @@ seed 在 [`demo/`](demo/README.md)：`env.go` 是上表和重置、准备本地 
 | `GET /api/v1/tenants/{tid}/spaces/{sid}/plugins` | 契约 | 当前空间的全部活动插件选择，包括显式移除的行；空间不属于调用者的工作区时 `403 forbidden` |
 | `POST /api/v1/tenants/{tid}/spaces/{sid}/plugins` | 契约 | owner 安装目录中的 Skill 或工作流插件；其他类型（市场 Agent、Hook、合集等）在此接口只读；MCP 使用独立租户接口，返回 `400 plugin_kind_not_installable`（已有市场 Agent 选择的更新同样拒绝；预装 Agent 返回 `409 plugin_runtime_managed`）。工作流包由服务端按来源自己的 `Retrieval`/`Credentials` 下载并校验 `.orax`，导入其中的工作流并发布 `v1`；已有同名工作流时自动改名为「名称（插件）」并递增序号，不改动已有定义。重复安装幂等，卸载不删除已导入工作流。升级工作流包时，仍保持导入原样（草稿和生效版本都未改动）的工作流会更新草稿并发布新的顺序版本；用户已保存或发布过编辑的定义保持原样。Skill 安装同样按来源下载并校验 `.orax`，把包内 `assets/<name>/SKILL.md` 的技能名记录到目录条目（`packMembers`，设置页同名提示用），再立即记录为空间选择，不等项目 Node 确认。支持版本保护与 `Idempotency-Key` 重放。官方市场包的下载默认走直连 HTTPS；设了 `V2_MARKET_SOCKS_PROXY` 时走该 SOCKS 代理（demo 主机直连不到市场主机时靠它下载）。
 | `DELETE /api/v1/tenants/{tid}/spaces/{sid}/plugins` | 契约 | owner 移除 Skill 或工作流选择。Skill 删除整条选择行，立即不再出现在设置页和工作流节点的技能候选里；工作流选择保留 `desiredState=removed` 行；工作流及其历史保留为用户数据。预装 Agent 返回 `409 plugin_runtime_managed`；要求版本与幂等键 |
+
+所有带会话 Cookie 的非 GET/HEAD/OPTIONS 请求先核对 `Origin`（规则见 `V2_PUBLIC_URL`），不符返回 `403 origin_mismatch`；没有 `Origin` 的请求不是页面发出的，照常处理。账号被停用或删除后，它的会话在下一个请求就失效（`401 unauthenticated`）。
 
 ## 契约之外
 
@@ -933,8 +936,7 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 ## 内网部署
 
 首次部署构建和长期安装/升级步骤见 [部署说明](docs/deployment.md)（[English](docs/deployment.en.md)）。
-直接开发启动须显式设置 `V2_LOGIN=email`；demo/开发 task 已设置。部署选择 `V2_LOGIN=idaas`，
-当前构建不提供 IDaaS 登录，在任何数据操作前明确拒绝启动，不得回落 email。`V2_FRONTEND_DIR` 指向前端构建目录，空值保留 API-only。
+开发启动设 `V2_LOGIN=email`，demo 与开发 task 已设置。本构建还不提供 IDaaS 登录，部署所需的 `V2_LOGIN` 取值在任何数据操作前拒绝启动，不会回落 email。`V2_FRONTEND_DIR` 指向前端构建目录，空值保留 API-only。
 `V2_PLUGIN_MARKETPLACE_URL` 未设置保留开发默认，显式空字符串关闭官方同步和目录，保留自定义源；`V2_MARKET_CREDENTIAL_KEY` 同步保护自定义市场 S3/Git 凭据、租户 MCP 设置与私有项目仓库令牌。
 
 部署边界依据：[Cloud 单进程（A1）](https://github.com/ora-space/specs/blob/main/decisions/cloud/lifecycle/0-single-process-cloud-on-enterprise-intranet.md) 和[登录与会话（A6）](https://github.com/ora-space/specs/blob/main/decisions/cloud/login/0-idaas-or-email-login-with-shared-web-and-desktop-sessions.md)。

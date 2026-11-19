@@ -10,7 +10,7 @@ function serveProviders(providers?: string[]) {
     if (c.url === '/auth/providers')
       return providers === undefined
         ? undefined
-        : { status: 200, data: { providers, default: providers[0] } }
+        : { status: 200, data: { providers } }
     if (c.url === '/api/v1/me/tenants')
       return {
         status: 200,
@@ -20,15 +20,17 @@ function serveProviders(providers?: string[]) {
   })
 }
 
-it('recognizes a deployed install only when idaas is offered', () => {
+it('recognizes a deployed install when login methods are offered without email', () => {
   expect(isDeployedProviders(['email'])).toBe(false)
-  expect(isDeployedProviders(['idaas'])).toBe(true)
+  expect(isDeployedProviders(['huawei-idaas'])).toBe(true)
+  expect(isDeployedProviders(['huawei-idaas', 'email'])).toBe(false)
+  expect(isDeployedProviders(['github'])).toBe(true)
   expect(isDeployedProviders(undefined)).toBe(false)
   expect(isDeployedProviders([])).toBe(false)
 })
 
 it('hides only the browser-local model connections in a deployed install', async () => {
-  serveProviders(['idaas'])
+  serveProviders(['huawei-idaas'])
   renderSettingsPage(<SettingsPage />, '/settings/squads')
   await waitFor(() => expect(screen.getByRole('navigation', { name: '设置导航' })).toBeInTheDocument())
   await waitFor(() =>

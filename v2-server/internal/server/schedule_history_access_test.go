@@ -149,8 +149,9 @@ func TestHistoryRevocationAndUnavailable(t *testing.T) {
 	}
 	defer s.Close()
 	check(s, 200)
+	// A disabled account's session ends at once, before any tenant decision.
 	exec("UPDATE users SET status='disabled' WHERE id=$1", user.ID)
-	check(s, 404)
+	check(s, 401)
 	exec("UPDATE users SET status='active' WHERE id=$1", user.ID)
 	// Read current states through HTTP twice with pool reopening.
 	for _, tc := range []struct {
