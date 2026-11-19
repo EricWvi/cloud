@@ -480,3 +480,81 @@ func nodeProcesses(t *testing.T, root string) []int {
 	}
 	return pids
 }
+
+// realTwoParked parks A and B side by side on the run's one checkout; C follows A and retries.
+const realTwoParked = `{"nodes":[
+ {"id":"start","data":{"kind":"start"}},
+ {"id":"a","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"Inspect README and save the fixture result.","interactive":true}}},
+ {"id":"b","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"Inspect README and save the fixture result.","interactive":true}}},
+ {"id":"c","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"Review: {{#a.output#}}","retry":{"enabled":true,"maxRetries":2,"initialDelaySeconds":0}}}}
+],"edges":[{"source":"start","target":"a"},{"source":"start","target":"b"},{"source":"a","target":"c"}]}`
+
+// TestRealSecondParkedNodeDoesNotContinueOnAFreshClone parks two nodes on one checkout, loses the
+// Node's ledger and restarts. Completing A sends its successor to the unknown checkout, which is
+// forgotten, and the successor's retry clones again. B's conversation ran in the forgotten clone:
+// its follow-up fails B as interactive_session instead of continuing on the fresh clone without
+// B's edits, which stay in the old directory.
+func TestRealSecondParkedNodeDoesNotContinueOnAFreshClone(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+	defer cancel()
+	r := newRealInteractive(t, ctx)
+	rid := r.f.run(t, realTwoParked, nil)
+	if _, err := r.current.host.StartRun(ctx, r.f.scope, rid); err != nil {
+		t.Fatal(err)
+	}
+	_, nodes := r.awaitRun(rid, func(_ store.WorkflowRun, rows []store.WorkflowNodeRun) bool {
+		for _, id := range []string{"a", "b"} {
+			if row := node(rows, id); row.Status != store.WorkflowStatusPending || interactivePayload(t, row)["turns"] != float64(1) {
+				return false
+			}
+		}
+		return true
+	})
+	b, err := r.current.service.ReadSession(ctx, r.scope, *node(nodes, "b").SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := r.db.ExecutionWorkspace(ctx, b.WorkspaceID)
+	if err != nil || old.CloneExecution == "" {
+		t.Fatalf("checkout = %+v %v", old, err)
+	}
+	if err := os.WriteFile(filepath.Join(old.Path, "b-edit.txt"), []byte("uncommitted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r.current.close(t)
+	ledgers, err := filepath.Glob(filepath.Join(r.root, "n", "*", "w", "n"))
+	if err != nil || len(ledgers) != 1 {
+		t.Fatalf("Node homes = %v %v, want the project's one", ledgers, err)
+	}
+	if err := os.RemoveAll(ledgers[0]); err != nil {
+		t.Fatal(err)
+	}
+	r.current = r.start()
+	r.f.host = r.current.host
+	r.awaitRun(rid, awaitingInput("b"))
+
+	if _, err := r.current.host.CompleteNode(ctx, r.f.scope, rid, "a", confirm); err != nil {
+		t.Fatalf("complete A: %v", err)
+	}
+	r.awaitRun(rid, func(_ store.WorkflowRun, rows []store.WorkflowNodeRun) bool {
+		return lastAttempt(rows, "c").Status == store.WorkflowStatusSucceeded
+	})
+	fresh, err := r.db.ExecutionWorkspace(ctx, b.WorkspaceID)
+	if err != nil || fresh.CloneExecution == "" || fresh.CloneExecution == old.CloneExecution {
+		t.Fatalf("workspace after C = %+v %v, want C's fresh clone recorded (was %+v)", fresh, err, old)
+	}
+
+	if _, err := r.current.host.SendNodeTurn(ctx, r.f.scope, rid, "b", "Inspect README and save the fixture result again."); err != nil {
+		t.Fatalf("follow-up on B: %v", err)
+	}
+	run, nodes := r.awaitRun(rid, func(run store.WorkflowRun, rows []store.WorkflowNodeRun) bool {
+		return terminal(run, rows) || interactivePayload(t, node(rows, "b"))["turns"] == float64(2)
+	})
+	if run.Status != store.WorkflowStatusFailed || errorKind(t, node(nodes, "b")) != "interactive_session" {
+		t.Fatalf("run %s B %s, want B failed as interactive_session rather than continued on the fresh clone", run.Status, node(nodes, "b").Payload)
+	}
+	if _, err := os.Stat(filepath.Join(old.Path, "b-edit.txt")); err != nil {
+		t.Fatalf("B's edit must stay in the old directory: %v", err)
+	}
+}

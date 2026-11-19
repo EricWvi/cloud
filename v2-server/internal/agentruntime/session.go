@@ -19,6 +19,14 @@ var errEventStore = errors.New("agent_event_write_failed")
 
 // nodeCheckoutUnavailable is the detail Node ends a session with when it does not know the
 // session's checkout_execution_id (apps/ora-node/src/session/driver.rs).
+//
+// It is ambiguous: Node also reports it when it cannot read its ledger. Desktop's ledger.rs reads
+// the checkout as cloned_checkout(...).ok().flatten(), and branch_heads.rs returns None for a
+// SQLite, JSON or lock error and for unknown progress as for a missing row, so a transient read
+// error after a restart looks like a checkout Node never had. Mapping it only for a reattached
+// checkout is as precise as v2 can be; such a read error still fails the parked node, drops the
+// record and lets the run's later nodes clone again away from the directory's uncommitted edits.
+// A distinct code for a read error belongs to Node (circus#1230).
 const nodeCheckoutUnavailable = "checkout_unavailable"
 
 // previewInterval bounds how often Node previews become retained history_preview events. Node

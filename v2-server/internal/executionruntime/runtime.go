@@ -108,7 +108,11 @@ type Service struct {
 	held map[string]bool
 	// recovering lists the held sessions recovery kept whose Agent was lost with the previous
 	// process and has not been started again; their next turn starts it (see recovery).
-	recovering        map[string]bool
+	recovering map[string]bool
+	// clones are the clone executions the held sessions recovery kept are bound to (see
+	// store.RecoveredSession), so a session whose checkout was replaced is not continued on the
+	// replacement. Only New writes it, before any turn runs, so readers need no lock.
+	clones            map[string]string
 	ending            map[string]bool
 	unsaved           map[string]pending
 	stops             map[string]*stopCall
@@ -158,30 +162,48 @@ func New(ctx context.Context, cfg Config) (*Service, error) {
 	s := &Service{db: cfg.Store, models: models, agent: cfg.Agent, ctx: owned, cancel: cancel, delivery: cfg.Delivery, finishTurn: cfg.Store.FinishExecutionTurn,
 		readDeliveryWork: cfg.Store.DeliveryWork, commitDelivery: cfg.Store.CommitTurnDelivery,
 		finishRetryDelays: defaultFinishRetryDelays, concludeInterval: defaultConcludeInterval, stopTimeout: defaultStopTimeout,
-		workers: map[string]*worker{}, groups: map[string]string{}, workspaces: map[string]string{}, held: map[string]bool{}, recovering: map[string]bool{}, ending: map[string]bool{}, unsaved: map[string]pending{}, stops: map[string]*stopCall{}}
+		workers: map[string]*worker{}, groups: map[string]string{}, workspaces: map[string]string{}, held: map[string]bool{}, recovering: map[string]bool{}, clones: map[string]string{}, ending: map[string]bool{}, unsaved: map[string]pending{}, stops: map[string]*stopCall{}}
 	for _, r := range kept {
 		// The kept session is still held; its Agent went with the old process, so its next turn
 		// starts a new one (see recovery).
 		s.held[r.Session.ID] = true
 		s.recovering[r.Session.ID] = true
+		if r.CloneExecution != "" {
+			s.clones[r.Session.ID] = r.CloneExecution
+		}
 	}
 	// Every parked node's run keeps its directory, also when the node's own session ended before
 	// the restart and it can only be completed: the run's later sessions, a successor of a node
 	// completed right after the restart included, share the workspace (which only this process's
-	// map remembers) and start on the recorded checkout with its edits.
+	// map remembers) and start on the recorded checkout with its edits. So does every other run
+	// still running and not a task's (see store.RunningWorkflowSessions), which the sweep may
+	// absorb and resume (an interrupted Iteration, a pending LoopExit cleanup) with no parked node.
+	// A running run the sweep fails instead keeps the mapping too: resuming it from the failure
+	// continues on its checkout, as it does without a restart.
 	parked, err := cfg.Store.ParkedWorkflowSessions(ctx)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	for _, r := range parked {
+	running, err := cfg.Store.RunningWorkflowSessions(ctx)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	reattached := map[string]bool{}
+	for _, r := range append(parked, running...) {
 		if r.Caller.Kind != execution.CallerWorkflow {
 			continue
 		}
-		s.workspaces[groupKey(r.Scope, r.Caller)+"/"+r.Session.Target.ProjectID] = r.Session.WorkspaceID
-		if s.agent == nil {
+		// A parked node's workspace comes first; every workspace listed reattaches its checkout once.
+		key := groupKey(r.Scope, r.Caller) + "/" + r.Session.Target.ProjectID
+		if _, mapped := s.workspaces[key]; !mapped {
+			s.workspaces[key] = r.Session.WorkspaceID
+		}
+		if s.agent == nil || reattached[r.Session.WorkspaceID] {
 			continue
 		}
+		reattached[r.Session.WorkspaceID] = true
 		at, err := cfg.Store.ExecutionWorkspace(ctx, r.Session.WorkspaceID)
 		if errors.Is(err, store.ErrNotFound) {
 			continue // the recovered session's turn reports it (see recovery)

@@ -301,23 +301,35 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 }
 
 // refreshSummary rewrites payload.interactive of n's row, which has status, in place: the run
-// page reads the node as an interactive session from it, from its first turn on.
+// page reads the node as an interactive session from it, from its first turn on. A failed write
+// is only logged: the next write of the node records the summary again. It is not retried like a
+// park, which would hold a completion's request for as long as storage is out.
 func (h *Host) refreshSummary(st *runState, n *interactiveNode, status string) {
+	if err := h.writeSummary(h.ctx, st, n, status); err != nil {
+		h.log.Error("record the session summary of an interactive workflow node", "run", n.d.RunID, "node_run", n.d.NodeRunID, "error", err)
+	}
+	h.hub.Publish(n.d.RunID)
+}
+
+// writeSummary is refreshSummary's write, returning its error to callers that cannot go on
+// without it.
+func (h *Host) writeSummary(ctx context.Context, st *runState, n *interactiveNode, status string) error {
 	st.mu.Lock()
 	keys := n.summaryKeys()
 	st.mu.Unlock()
-	if _, err := h.store.MoveWorkflowEngineNode(h.ctx, n.d.RunID, n.d.NodeRunID, status, status,
+	if _, err := h.moveEngineNode(ctx, n.d.RunID, n.d.NodeRunID, status, status,
 		func(node []byte) ([]byte, error) { return workflow.MergePayload(node, keys) }); err != nil {
 		if _, ok := keys["completion_baseline"]; ok {
 			st.mu.Lock()
 			n.baselineUnwritten = true // the next write records it
 			st.mu.Unlock()
 		}
-		h.log.Error("record the session summary of an interactive workflow node", "run", n.d.RunID, "node_run", n.d.NodeRunID, "error", err)
+		return fmt.Errorf("record the session summary of node run %s: %w", n.d.NodeRunID, err)
 	}
-	h.hub.Publish(n.d.RunID)
+	return nil
 }
 
+// moveEngineNode is store.MoveWorkflowEngineNode, or moveNode where a test replaces it.
 func (h *Host) moveEngineNode(ctx context.Context, runID, nodeRunID, from, to string, merge func(node []byte) ([]byte, error)) (bool, error) {
 	if h.moveNode != nil {
 		return h.moveNode(ctx, runID, nodeRunID, from, to, merge)

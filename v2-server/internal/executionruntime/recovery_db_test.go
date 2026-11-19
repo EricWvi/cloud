@@ -88,6 +88,13 @@ const recoveryGraph = `{"nodes":[{"id":"start","data":{"kind":"start"}},{"id":"a
 // checkout at dir and a page history, and restarts the service over the same database.
 func parkedSession(t *testing.T, f *runtimeFixture, agent *recoveryAgent, dir string) (execution.Ref, store.WorkflowNodeRun) {
 	t.Helper()
+	return parkedSessionOn(t, f, agent, dir, "c-old-incarnation")
+}
+
+// parkedSessionOn is parkedSession with the checkout recorded under clone, empty for one recorded
+// before clone executions were kept.
+func parkedSessionOn(t *testing.T, f *runtimeFixture, agent *recoveryAgent, dir, clone string) (execution.Ref, store.WorkflowNodeRun) {
+	t.Helper()
 	ctx := f.ctx
 	if err := f.service.Close(ctx); err != nil {
 		t.Fatal(err)
@@ -128,7 +135,7 @@ func parkedSession(t *testing.T, f *runtimeFixture, agent *recoveryAgent, dir st
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.db.RecordWorkspace(ctx, session.WorkspaceID, store.WorkspaceLocation{Path: dir, BaseCommit: "fixed", CloneExecution: "c-old-incarnation"}); err != nil {
+	if err := f.db.RecordWorkspace(ctx, session.WorkspaceID, store.WorkspaceLocation{Path: dir, BaseCommit: "fixed", CloneExecution: clone}); err != nil {
 		t.Fatal(err)
 	}
 	history := &execution.HistorySnapshot{Records: []execution.HistoryRecord{historyRecord(t, 1, chunk("user_message_chunk", "起草方案")), historyRecord(t, 2, chunk("agent_message_chunk", "答复：起草方案")), historyRecord(t, 3, turnEnded())}}
@@ -575,5 +582,64 @@ func TestARetriedEndOfASessionLostWithItsNodeNeverRevivesIt(t *testing.T) {
 	defer agent.mu.Unlock()
 	if len(agent.runs) != runs || recovering(f, first.SessionID) {
 		t.Fatalf("runs %d -> %d, recovering %v: the ended session was continued", runs, len(agent.runs), recovering(f, first.SessionID))
+	}
+}
+
+// The handoff and this turn's message share Node's limit on one user turn: a long message leaves
+// the conversation less room, and the earliest turns are left out to fit beside it.
+func TestRecoveryHandoffLeavesRoomForThePrompt(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	agent := &recoveryAgent{}
+	first, _ := parkedSession(t, f, agent, t.TempDir())
+	var records []execution.HistoryRecord
+	for i := range 3 {
+		base := uint32(i * 3)
+		records = append(records,
+			historyRecord(t, base+1, chunk("user_message_chunk", "第 "+strconv.Itoa(i+1)+" 轮")),
+			historyRecord(t, base+2, chunk("agent_message_chunk", strings.Repeat("答", 8*1024))),
+			historyRecord(t, base+3, turnEnded()))
+	}
+	if _, err := f.db.AppendExecutionEvent(f.ctx, f.scope, execution.Event{Ref: first, Kind: execution.EventHistorySnapshot, History: &execution.HistorySnapshot{Records: records}}); err != nil {
+		t.Fatal(err)
+	}
+	session, err := f.db.ReadExecutionSession(f.ctx, f.scope, first.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := strings.Repeat("p", 30*1024)
+	recovery, gone, err := f.service.recovery(f.ctx, session, execution.Turn{Prompt: execution.TextPrompt(prompt)})
+	if err != nil || gone || recovery == nil {
+		t.Fatalf("recovery = %+v %v %v", recovery, gone, err)
+	}
+	if size := len(recovery.Handoff) + len(prompt); size > maxTurnText {
+		t.Fatalf("handoff %d bytes + prompt %d bytes = %d, over Node's %d-byte turn limit", len(recovery.Handoff), len(prompt), size, maxTurnText)
+	}
+	if !strings.Contains(recovery.Handoff, "earliest turns are left out") || !strings.Contains(recovery.Handoff, "第 3 轮") {
+		t.Fatalf("handoff = %.200q…, want the latest turn kept and the earliest left out", recovery.Handoff)
+	}
+}
+
+// A checkout recorded before clone executions were kept has no clone execution: Node cannot be
+// asked for it, and a fresh clone would silently lose its edits, so it counts as gone although
+// its directory is still there.
+func TestRecoveredSessionOnACheckoutWithoutACloneExecutionEnds(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	agent := &recoveryAgent{}
+	first, node := parkedSessionOn(t, f, agent, t.TempDir(), "")
+	agent.mu.Lock()
+	runs := len(agent.runs)
+	agent.mu.Unlock()
+
+	ref, err := followUp(t, f, first.SessionID, node, 1, "再改一版")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := awaitResult(t, f, ref); r.FailureCode != execution.FailureWorkspaceMissing || !r.AgentLost {
+		t.Fatalf("turn on a checkout without a clone execution = %+v, want %s", r, execution.FailureWorkspaceMissing)
+	}
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if len(agent.runs) != runs {
+		t.Fatal("an Agent was started on a checkout Node cannot resolve")
 	}
 }

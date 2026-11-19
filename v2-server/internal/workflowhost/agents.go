@@ -789,6 +789,40 @@ func (h *Host) resolveExecutor(scope execution.Scope, cfg workflow.AgentConfig) 
 		failure := h.sessionFailure(scope, "list executors: "+publicReason(err))
 		return resolvedExecutor{}, &failure
 	}
+	return matchExecutor(executors, cfg)
+}
+
+// recoveredExecutor is resolveExecutor for a node parked before a restart. Failing that node ends
+// a wait the starter can only replace by starting the node over, so a catalog that cannot be read
+// is no verdict on it: a transient error is retried within resultRetry's budget, and an error that
+// outlasts it, or any other error that says nothing about this node, is returned to abort startup
+// like a session that cannot be read, leaving the row for the next start. A verdict fails the node
+// as before the restart: an executor the catalog no longer offers, or a catalog that has nothing
+// for the run's scope (ErrNotFound; today's catalog ignores the scope and never returns it, the
+// branch is for a scoped catalog), which would otherwise abort every later start on the same row.
+func (h *Host) recoveredExecutor(ctx context.Context, scope execution.Scope, cfg workflow.AgentConfig) (resolvedExecutor, *workflow.Failure, error) {
+	if cfg.AgentCLI == "" {
+		return resolvedExecutor{}, &workflow.Failure{Kind: workflow.FailureMissingAgentRef, Message: "the node selects no Agent"}, nil
+	}
+	var executors []execution.Executor
+	err := h.resultRetry.Read(ctx, func(ctx context.Context) error {
+		var err error
+		executors, err = h.catalog.ListExecutors(ctx, scope)
+		return err
+	})
+	if errors.Is(err, execution.ErrNotFound) {
+		failure := h.sessionFailure(scope, "list executors: "+publicReason(err))
+		return resolvedExecutor{}, &failure, nil
+	}
+	if err != nil {
+		return resolvedExecutor{}, nil, fmt.Errorf("list executors: %w", err)
+	}
+	executor, failure := matchExecutor(executors, cfg)
+	return executor, failure, nil
+}
+
+// matchExecutor is resolveExecutor's choice among the catalog's executors.
+func matchExecutor(executors []execution.Executor, cfg workflow.AgentConfig) (resolvedExecutor, *workflow.Failure) {
 	var first *execution.Executor
 	for i := range executors {
 		e := executors[i]

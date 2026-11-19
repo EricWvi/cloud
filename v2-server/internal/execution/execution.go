@@ -228,7 +228,7 @@ type Session struct {
 
 // Recovery is what a driver needs to bring a held session back after its Agent was lost with the
 // server process. The new Agent is a new provider session: it learns the conversation from
-// Handoff, which lists tool calls by name and outcome only, and has no prompt cache.
+// Handoff, which lists tool calls by title and outcome only, and has no prompt cache.
 type Recovery struct {
 	// Handoff is sent ahead of the turn's prompt as its own block. It is context for the Agent
 	// only: the turn records the prompt alone, and the page never shows the block.
