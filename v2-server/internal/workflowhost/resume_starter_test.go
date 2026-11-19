@@ -3,6 +3,7 @@ package workflowhost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -67,6 +68,143 @@ func nodeFailure(t *testing.T, row store.WorkflowNodeRun) failureDetail {
 		t.Fatalf("node payload %s: %v", row.Payload, err)
 	}
 	return p.ErrorDetail
+}
+
+// TestResumeRefusedWhenTheStarterLeft is R2-2: the run records A as its starter, A fails it, then
+// leaves the workspace. Resuming would execute every Agent under A and fail it, so the preview
+// and the resume both refuse with starter_unavailable, the run stays failed with started_by A,
+// and no Agent starts. Once A is back the same run resumes under A.
+func TestResumeRefusedWhenTheStarterLeft(t *testing.T) {
+	for _, exit := range starterExits {
+		t.Run(exit.name, func(t *testing.T) {
+			f, admin := newFixtureWithAdmin(t)
+			ctx := context.Background()
+			starter := signInMember(t, f, "resume-left-starter-"+exit.name, "发起人")
+			asStarter := server.WorkflowRunScope{TenantID: f.scope.TenantID, UserID: starter}
+
+			id := f.run(t, noAutoRetryTwoAgents(), str("发起人离开"))
+			if _, err := f.host.StartRun(ctx, asStarter, id); err != nil {
+				t.Fatal(err)
+			}
+			f.exec.finish(expectAgent(t, f, "a"), sessionFailed)
+			if run, _ := f.await(t, id, terminal); run.Status != store.WorkflowStatusFailed || run.StartedBy != starter {
+				t.Fatalf("run before leaving = %+v", run)
+			}
+			waitUntil(t, func() bool { return f.host.state(id) == nil })
+
+			exit.leave(t, f, admin, starter)
+
+			preview, err := f.host.PreviewRunResume(ctx, f.scope, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if preview.Reason != workflow.ResumeRefusedStarterUnavailable {
+				t.Fatalf("preview reason = %q, want %q", preview.Reason, workflow.ResumeRefusedStarterUnavailable)
+			}
+			_, err = f.host.ResumeRun(ctx, f.scope, id)
+			if got := refusal(t, err); got != workflow.ResumeRefusedStarterUnavailable {
+				t.Fatalf("resume refusal = %q, want %q", got, workflow.ResumeRefusedStarterUnavailable)
+			}
+			run, err := f.s.WorkflowRun(ctx, f.scope.TenantID, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.Status != store.WorkflowStatusFailed || run.StartedBy != starter {
+				t.Fatalf("run after the refused resume = %+v, want failed and still started by %s", run, starter)
+			}
+			select {
+			case session := <-f.exec.startedCh:
+				t.Fatalf("a refused resume started Agent session %s", session)
+			default:
+			}
+			if st := f.host.state(id); st != nil {
+				t.Fatalf("a refused resume left execution state %+v", st)
+			}
+
+			// The starter is back: the run resumes under them.
+			switch exit.name {
+			case "removed":
+				if _, err := admin.Exec(ctx, `INSERT INTO memberships (tenant_id, user_id, role) VALUES ($1, $2, 'member')`, f.scope.TenantID, starter); err != nil {
+					t.Fatal(err)
+				}
+			case "disabled":
+				if _, err := admin.Exec(ctx, `UPDATE users SET status = 'active' WHERE id = $1`, starter); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := f.host.ResumeRun(ctx, f.scope, id); err != nil {
+				t.Fatalf("resume once the starter is back = %v", err)
+			}
+			session := expectAgent(t, f, "a")
+			if got := f.exec.scope(session); got.UserID != starter {
+				t.Fatalf("resumed Agent ran as %s, want the starter %s", got.UserID, starter)
+			}
+		})
+	}
+}
+
+// TestLeftoverStateOfALeftOwnerIsReplaced is R2-1: a legacy run's resume by A is admitted, then
+// its transaction and the cleanup after it fail, so A's execution state stays in the process.
+// A then leaves the workspace and B resumes. The leftover state must not pin the run to A (every
+// Agent refused, started_by A, every later resume picking A again): the run executes under, and
+// records, B.
+func TestLeftoverStateOfALeftOwnerIsReplaced(t *testing.T) {
+	for _, exit := range starterExits {
+		t.Run(exit.name, func(t *testing.T) {
+			f, admin := newFixtureWithAdmin(t)
+			ctx := context.Background()
+			first := signInMember(t, f, "resume-stale-first-"+exit.name, "先续跑的人")
+			second := signInMember(t, f, "resume-stale-second-"+exit.name, "后到的人")
+
+			id := f.run(t, noAutoRetryTwoAgents(), str("遗留运行"))
+			if _, err := f.host.StartRun(ctx, f.scope, id); err != nil {
+				t.Fatal(err)
+			}
+			f.exec.finish(expectAgent(t, f, "a"), sessionFailed)
+			f.await(t, id, terminal)
+			waitUntil(t, func() bool { return f.host.state(id) == nil })
+			if _, err := admin.Exec(ctx, `UPDATE v2_workflow_runs SET started_by = NULL WHERE id = $1`, id); err != nil {
+				t.Fatal(err)
+			}
+
+			f.host.resuming = func(string) {
+				if _, err := admin.Exec(ctx, `ALTER TABLE v2_workflow_runs RENAME COLUMN status TO broken_status`); err != nil {
+					t.Fatalf("break v2_workflow_runs: %v", err)
+				}
+			}
+			_, err := f.host.ResumeRun(ctx, server.WorkflowRunScope{TenantID: f.scope.TenantID, UserID: first}, id)
+			f.host.resuming = nil
+			var refused *server.WorkflowRunNotResumable
+			if err == nil || errors.As(err, &refused) {
+				t.Fatalf("resume against a broken v2_workflow_runs = %v, want a storage error", err)
+			}
+			if _, err := admin.Exec(ctx, `ALTER TABLE v2_workflow_runs RENAME COLUMN broken_status TO status`); err != nil {
+				t.Fatal(err)
+			}
+			if leftover := f.host.state(id); leftover == nil || leftover.scope.UserID != first {
+				t.Fatalf("leftover state = %+v, want one owned by %s", leftover, first)
+			}
+
+			exit.leave(t, f, admin, first)
+
+			resumed, err := f.host.ResumeRun(ctx, server.WorkflowRunScope{TenantID: f.scope.TenantID, UserID: second}, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resumed.StartedBy != second {
+				t.Fatalf("resumed starter = %q, want the resuming member %s, not the leftover owner %s who left", resumed.StartedBy, second, first)
+			}
+			session := expectAgent(t, f, "a")
+			if got := f.exec.scope(session); got.UserID != second {
+				t.Fatalf("resumed Agent ran as %s, want %s", got.UserID, second)
+			}
+			f.exec.finish(session, completed("初稿"))
+			f.exec.finish(expectAgent(t, f, "b"), completed("已通过"))
+			if done, _ := f.await(t, id, terminal); done.Status != store.WorkflowStatusSucceeded {
+				t.Fatalf("run = %+v", done)
+			}
+		})
+	}
 }
 
 // TestAgentRefusedForALeftStarterFailsWithoutRetry covers an Agent the execution bridge refuses
