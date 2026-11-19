@@ -1,6 +1,7 @@
 package workspacereclaim_test
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -9,8 +10,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/wanglongan587/cloud/v2-server/internal/chat"
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/execution/executiontest"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	st "github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
 	"github.com/wanglongan587/cloud/v2-server/internal/workspacefs"
@@ -427,5 +431,71 @@ func TestOperatorDiscardsAKeptCheckout(t *testing.T) {
 	}
 	if _, err := f.r.DiscardKept(t.Context(), c.WorkspaceID); err == nil {
 		t.Fatal("a reclaimed checkout was discarded again")
+	}
+}
+
+// A discard whose preview showed other content than the checkout now holds is stale even when
+// the listed path and line counts are the same, and nothing changes.
+func TestDiscardOfRewrittenContentIsStale(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	c := f.chat(t, st.TurnDelivered)
+	c.End(t, f.s)
+	if err := f.s.EndChatSession(ctx, c.SessionID, store.EndStopped, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	stub := &executiontest.Stub{}
+	svc := chat.New(f.s, stub, stub, chat.Options{Reclaims: f.r})
+	write(t, c.Path, "late.txt", "old\n")
+	seen, err := svc.DeletionPreview(ctx, f.scope, c.ConversationID)
+	if err != nil || seen.Reason != wr.ReasonChanged || seen.Total != 1 {
+		t.Fatalf("preview = %+v, %v", seen, err)
+	}
+	write(t, c.Path, "late.txt", "new\n") // same path, same one added line
+	now, err := svc.DeletionPreview(ctx, f.scope, c.ConversationID)
+	if err != nil || now.Revision == seen.Revision {
+		t.Fatalf("rewritten content kept the revision %q: %+v, %v", seen.Revision, now, err)
+	}
+	if _, err := svc.Delete(ctx, f.scope, c.ConversationID, store.ReclaimDiscard, seen.Revision); !errors.Is(err, chat.ErrDeletionPreviewStale) {
+		t.Fatalf("discard with the old revision = %v", err)
+	}
+	if _, err := f.s.ChatConversation(ctx, f.scope.TenantID, f.scope.UserID, c.ConversationID); err != nil {
+		t.Fatalf("the conversation went: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(c.Path, "late.txt")); err != nil || string(got) != "new\n" {
+		t.Fatalf("the checkout changed: %q, %v", got, err)
+	}
+	if list, err := f.s.WorkspaceReclaims(ctx); err != nil || len(list) != 0 {
+		t.Fatalf("a stale discard recorded a reclaim: %+v, %v", list, err)
+	}
+	if out, err := svc.Delete(ctx, f.scope, c.ConversationID, store.ReclaimDiscard, now.Revision); err != nil || out.Workspace != wr.OutcomeReclaimed {
+		t.Fatalf("discard with the current revision = %+v, %v", out, err)
+	}
+}
+
+// The mirror is unreachable at the first attempt: the reclaim stays pending with the error and a
+// later start, with the mirror back, reclaims it.
+func TestReclaimRetriesWhenTheCheckCannotRun(t *testing.T) {
+	f := newFixture(t)
+	c := f.chat(t, st.TurnDelivered)
+	f.deleteChat(t, c, store.ReclaimRecoverable)
+	away := c.Repository.Mirror + ".away"
+	if err := os.Rename(c.Repository.Mirror, away); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.run(t, c); got != (wr.Outcome{Workspace: wr.OutcomePending, Reason: wr.ReasonCheckFailed}) || !exists(t, c.Path) {
+		t.Fatalf("with the mirror away = %+v", got)
+	}
+	if got := f.reclaim(t, c); got.Status != store.ReclaimPending || got.Attempts != 1 || got.LastError == "" {
+		t.Fatalf("after the failed check: %+v", got)
+	}
+	if err := os.Rename(away, c.Repository.Mirror); err != nil {
+		t.Fatal(err)
+	}
+	if err := wr.New(f.s, f.fs, f.remover).Resume(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.reclaim(t, c); got.Status != store.ReclaimReclaimed || exists(t, c.Path) {
+		t.Fatalf("after the restart: %+v, checkout exists %v", got, exists(t, c.Path))
 	}
 }

@@ -51,12 +51,14 @@ const (
 	ReasonChanged         = "changed_after_delivery" // files changed after the last delivery
 	ReasonUnverifiable    = "unverifiable"           // the snapshot tree could not be built
 
-	ReasonShared           = "shared"            // kept: another session used the checkout
-	ReasonLive             = "session_live"      // kept: a session on the checkout is still live
-	ReasonUnsafe           = "unsafe_path"       // kept: outside the checkout root, a symlink, or swapped
-	ReasonIdentityMismatch = "identity_mismatch" // kept: v2_workspaces no longer records this path
-	ReasonRemovalFailed    = "removal_failed"    // pending: the removal failed and is retried at startup
-	ReasonOperatorDiscard  = "operator_discard"  // reclaimed: an operator discarded a kept checkout
+	ReasonShared             = "shared"              // kept: another session used the checkout
+	ReasonLive               = "session_live"        // kept: a session on the checkout is still live
+	ReasonUnsafe             = "unsafe_path"         // kept: outside the checkout root, a symlink, or swapped
+	ReasonIdentityMismatch   = "identity_mismatch"   // kept: v2_workspaces no longer records this path
+	ReasonRemovalFailed      = "removal_failed"      // pending: the removal failed and is retried at startup
+	ReasonReclaimUnavailable = "reclaim_unavailable" // pending: this server has no Agent runtime to judge it
+	ReasonCheckFailed        = "check_failed"        // pending: the checkout could not be inspected (disk, mirror, Git); retried
+	ReasonOperatorDiscard    = "operator_discard"    // reclaimed: an operator discarded a kept checkout
 )
 
 // Verdict is what deleting a conversation does to its checkout, as of now.
@@ -160,7 +162,7 @@ func (r *Reclaimer) Preview(ctx context.Context, tenant, user, conversationID st
 		return Verdict{}, err
 	}
 	if !c.Registered {
-		return seal(Verdict{Workspace: WorkspaceNone, Reason: ReasonNoWorkspace}, c.Checkout), nil
+		return seal(Verdict{Workspace: WorkspaceNone, Reason: ReasonNoWorkspace}, c.Checkout, ""), nil
 	}
 	v, unlock, err := r.judge(ctx, c.Checkout)
 	if unlock != nil {
@@ -174,44 +176,47 @@ func (r *Reclaimer) Preview(ctx context.Context, tenant, user, conversationID st
 func (r *Reclaimer) judge(ctx context.Context, c store.Checkout) (Verdict, func(), error) {
 	d := c.Delivery
 	if _, err := os.Lstat(c.Path); errors.Is(err, fs.ErrNotExist) {
-		return seal(Verdict{Workspace: WorkspaceNone, Reason: ReasonMissing}, c), nil, nil
+		return seal(Verdict{Workspace: WorkspaceNone, Reason: ReasonMissing}, c, ""), nil, nil
 	} else if err != nil {
 		return Verdict{}, nil, fmt.Errorf("inspect checkout: %w", err)
 	}
 	if d.Busy {
-		return seal(Verdict{Workspace: WorkspaceUndelivered, Reason: ReasonDelivering}, c), nil, nil
-	}
-	if !d.Delivered {
-		return seal(Verdict{Workspace: WorkspaceUndelivered, Reason: ReasonLegacy}, c), nil, nil
+		return seal(Verdict{Workspace: WorkspaceUndelivered, Reason: ReasonDelivering}, c, ""), nil, nil
 	}
 	lastGood := d.LastStatus == store.DeliveryDelivered || d.LastStatus == store.DeliveryEmpty
 	against := d.GoodCommit // undelivered changes are listed against the newest good delivery
 	if lastGood {
 		against = d.LastCommit // and compared with the last turn's; an empty one leaves the base
 	}
+	// Inspected also for a legacy session (against the base): the snapshot tree binds the
+	// revision to what the checkout holds, which is what a discard drops.
 	unlock, err := r.inspect.LockWorkspace(ctx, c.Path)
 	if err != nil {
 		return Verdict{}, nil, err
 	}
 	in, err := r.inspect.InspectReclaim(ctx, workspacefs.Workspace{Root: c.Path, BaseCommit: c.BaseCommit}, c.MirrorPath, against)
-	if errors.Is(err, workspacefs.ErrGone) {
+	switch {
+	case errors.Is(err, workspacefs.ErrGone):
 		unlock()
-		return seal(Verdict{Workspace: WorkspaceNone, Reason: ReasonMissing}, c), nil, nil
-	}
-	if err != nil {
-		if ctx.Err() != nil {
-			unlock()
-			return Verdict{}, nil, ctx.Err()
-		}
-		slog.Warn("could not build a reclaim snapshot", "workspace", c.WorkspaceID, "error", err)
+		return seal(Verdict{Workspace: WorkspaceNone, Reason: ReasonMissing}, c, ""), nil, nil
+	case errors.Is(err, workspacefs.ErrUnverifiable):
+		// What the checkout holds cannot be told, now or later.
 		reason := ReasonUnverifiable
-		if !lastGood {
+		if !d.Delivered {
+			reason = ReasonLegacy
+		} else if !lastGood {
 			reason = ReasonLastUndelivered
 		}
-		return seal(Verdict{Workspace: WorkspaceUndelivered, Reason: reason}, c), unlock, nil
+		return seal(Verdict{Workspace: WorkspaceUndelivered, Reason: reason}, c, ""), unlock, nil
+	case err != nil:
+		// The disk, the mirror or Git failed: nothing is concluded, a later attempt retries.
+		unlock()
+		return Verdict{}, nil, fmt.Errorf("inspect checkout: %w", err)
 	}
 	v := Verdict{Workspace: WorkspaceUndelivered, Changes: in.Changes, Total: in.Total}
 	switch {
+	case !d.Delivered:
+		v.Reason = ReasonLegacy
 	case !lastGood:
 		v.Reason = ReasonLastUndelivered
 	case in.GitState != "":
@@ -222,16 +227,17 @@ func (r *Reclaimer) judge(ctx context.Context, c store.Checkout) (Verdict, func(
 		v = Verdict{Workspace: WorkspaceRecoverable, Ignored: in.Ignored,
 			basis: store.ReclaimBasis{DeliveryID: d.LastDeliveryID, DeliveryCommit: d.LastCommit, BaseCommit: c.BaseCommit}}
 	}
-	return seal(v, c), unlock, nil
+	return seal(v, c, in.Tree+"\x00"+in.GitState), unlock, nil
 }
 
 // seal fills in what every verdict carries: the newest good delivery and the revision, a digest
-// of the last turn, the deliveries and the undelivered changes the verdict rests on.
-func seal(v Verdict, c store.Checkout) Verdict {
+// of the last turn, the deliveries, the verdict and content: the checkout's snapshot tree and
+// Git state when it was inspected, which change whenever a file the snapshot takes changes.
+func seal(v Verdict, c store.Checkout, content string) Verdict {
 	v.LatestDelivery = c.Delivery.GoodDeliveryID
 	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00", c.WorkspaceID, c.Delivery.LastTurnID, c.Delivery.LastStatus,
-		c.Delivery.GoodDeliveryID, c.Delivery.LastDeliveryID, v.Workspace, v.Reason, v.Total)
+	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00", c.WorkspaceID, c.Delivery.LastTurnID, c.Delivery.LastStatus,
+		c.Delivery.GoodDeliveryID, c.Delivery.LastDeliveryID, v.Workspace, v.Reason, v.Total, content)
 	for _, ch := range v.Changes {
 		fmt.Fprintf(h, "%s\x00%s\x00%d\x00%d\x00", ch.Path, ch.Status, ch.Additions, ch.Deletions)
 	}
@@ -286,7 +292,10 @@ func (r *Reclaimer) Reclaim(ctx context.Context, workspaceID string) (Outcome, e
 		if rec.Mode == store.ReclaimRecoverable {
 			var v Verdict
 			if v, unlock, err = r.judge(ctx, c); err != nil {
-				return Outcome{}, err
+				if ctx.Err() != nil {
+					return Outcome{}, ctx.Err()
+				}
+				return r.retry(ctx, rec, ReasonCheckFailed, err)
 			}
 			if v.Workspace == WorkspaceUndelivered {
 				if unlock != nil {
@@ -328,12 +337,7 @@ func (r *Reclaimer) remove(ctx context.Context, rec store.WorkspaceReclaim, basi
 	case errors.Is(err, workspacefs.ErrCheckoutInUse):
 		return r.keep(ctx, rec, ReasonLive)
 	case err != nil:
-		slog.Warn("workspace reclaim failed; retried at the next start", "workspace", rec.WorkspaceID,
-			"attempts", rec.Attempts+1, "error", err)
-		if note := r.store.NoteWorkspaceReclaimAttempt(ctx, rec.WorkspaceID, err.Error()); note != nil {
-			return Outcome{}, errors.Join(err, note)
-		}
-		return Outcome{Workspace: OutcomePending, Reason: ReasonRemovalFailed}, nil
+		return r.retry(ctx, rec, ReasonRemovalFailed, err)
 	}
 	basis.Bytes, basis.Files = usage.Bytes, usage.Files
 	if err := r.store.FinishWorkspaceReclaimed(ctx, rec.WorkspaceID, basis); err != nil {
@@ -342,6 +346,16 @@ func (r *Reclaimer) remove(ctx context.Context, rec store.WorkspaceReclaim, basi
 	slog.Info("reclaimed deleted conversation's workspace", "workspace", rec.WorkspaceID, "conversation", rec.ConversationID,
 		"mode", rec.Mode, "reason", basis.Reason, "bytes", usage.Bytes, "files", usage.Files)
 	return Outcome{Workspace: OutcomeReclaimed, Reason: basis.Reason, Bytes: usage.Bytes, Files: usage.Files}, nil
+}
+
+// retry records a failed attempt that a later start retries: the reclaim keeps its status.
+func (r *Reclaimer) retry(ctx context.Context, rec store.WorkspaceReclaim, reason string, cause error) (Outcome, error) {
+	slog.Warn("workspace reclaim failed; retried at the next start", "workspace", rec.WorkspaceID,
+		"attempts", rec.Attempts+1, "reason", reason, "error", cause)
+	if note := r.store.NoteWorkspaceReclaimAttempt(ctx, rec.WorkspaceID, cause.Error()); note != nil {
+		return Outcome{}, errors.Join(cause, note)
+	}
+	return Outcome{Workspace: OutcomePending, Reason: reason}, nil
 }
 
 func (r *Reclaimer) keep(ctx context.Context, rec store.WorkspaceReclaim, reason string) (Outcome, error) {

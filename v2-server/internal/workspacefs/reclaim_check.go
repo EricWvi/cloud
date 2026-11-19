@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path"
@@ -24,6 +25,9 @@ const MaxReclaimChanges = 200
 
 // ReclaimInspection is what a checkout still holds beyond one of its deliveries.
 type ReclaimInspection struct {
+	// Tree is the checkout's snapshot tree object, which binds its content (not counting ignored
+	// files) for a revision.
+	Tree string
 	// Unchanged reports that the checkout's snapshot tree, built by the delivery rules, equals
 	// the tree it was compared with.
 	Unchanged bool
@@ -43,12 +47,18 @@ type ReclaimInspection struct {
 // (the base commit when against is empty). It builds the snapshot tree as a delivery would, but
 // only in scratch space: nothing reaches the mirror or a delivery ref. Every check is read-only and
 // runs with the delivery's hardened Git configuration. The caller must hold the checkout lock.
+// ErrUnverifiable means what the checkout holds cannot be verified; any other error (the disk,
+// the mirror, Git) may pass on a later attempt.
 func (s *DeliveryFS) InspectReclaim(ctx context.Context, ws Workspace, mirrorPath, against string) (ReclaimInspection, error) {
 	var out ReclaimInspection
 	st, err := s.stage(ctx, ws, mirrorPath, time.Time{})
+	if errors.Is(err, ErrMaterializedUnknown) || errors.Is(err, ErrDeliveryTooLarge) || errors.Is(err, ErrTooLarge) {
+		err = fmt.Errorf("%w: %w", ErrUnverifiable, err)
+	}
 	if err != nil {
 		return out, err
 	}
+	out.Tree = st.tree
 	defer st.close()
 	target := st.baseTree
 	if against != "" {

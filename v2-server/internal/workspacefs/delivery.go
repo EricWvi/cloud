@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -202,6 +203,19 @@ func (s *DeliveryFS) mirrorGit(mirror string) (deliveryGit, error) {
 	return deliveryGit{binary: s.git, dir: mirror, env: []string{"GIT_DIR=" + mirror}}, nil
 }
 
+// ErrUnverifiable reports a checkout whose snapshot cannot be built because of what it holds
+// (unreadable Git metadata, changes too large, skills Ora cannot tell apart), not because of a
+// failing disk or mirror: retrying gives the same answer.
+var ErrUnverifiable = errors.New("checkout snapshot cannot be verified")
+
+// isIOError reports an operating system error, which a later attempt may not meet again.
+func isIOError(err error) bool {
+	var path *fs.PathError
+	var link *os.LinkError
+	var sys *os.SyscallError
+	return errors.As(err, &path) || errors.As(err, &link) || errors.As(err, &sys)
+}
+
 // staged is a checkout's snapshot tree written into a scratch repository whose objects fall back
 // to the mirror's. close removes the scratch repository.
 type staged struct {
@@ -256,6 +270,11 @@ func (s *DeliveryFS) stage(ctx context.Context, ws Workspace, mirrorPath string,
 	}
 	exclude, withoutGit, err := copyDeliveryExclude(root, scratch)
 	if err != nil {
+		if !errors.Is(err, ErrGone) && !isIOError(err) {
+			// Git metadata Ora may not read (an exclude outside the checkout, an oversized or
+			// irregular file): what the checkout holds cannot be told, now or on a retry.
+			err = fmt.Errorf("%w: %w", ErrUnverifiable, err)
+		}
 		return fail(err)
 	}
 	g.dir = root
