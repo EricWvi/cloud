@@ -250,9 +250,11 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 		// it before the Agent got it (the session had ended, broken or lost its Node and no new
 		// Agent could take it, or Node refused the command). It is not a turn: the node stays as
 		// its last delivered turn left it, and the summary says the message was lost, as for one
-		// refused at Append. A session the refusal ended (AgentLost) takes no further message.
+		// refused at Append. A session the refusal ended (AgentLost) takes no further message; a
+		// stop of the message does not end it by itself, the session outlives a stop the Node keeps
+		// it through, as for any stopped turn.
 		n.undelivered = true
-		ended := result.AgentLost || n.stopping
+		ended := result.AgentLost
 		n.stopping = false
 		if ended {
 			n.sessionEnded = true

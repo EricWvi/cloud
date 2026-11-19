@@ -267,9 +267,10 @@ func TestARestartDoesNotCountAFollowUpTheDriverRefused(t *testing.T) {
 }
 
 // The starter stops a follow-up that then turns out never to have reached the Agent, with a
-// refusal that would have kept the session. The pinned Node stops a turn only by ending its
-// session, so the stop still ends it, and the message is still reported not delivered.
-func TestStoppingAFollowUpThatWasNotDeliveredEndsTheSession(t *testing.T) {
+// refusal that kept the session. The stop alone does not end the session (it outlives a stop the
+// Node keeps it through, as any stopped turn does): the message is reported not delivered and the
+// starter sends it again in the same session.
+func TestStoppingAFollowUpThatWasNotDeliveredKeepsTheSession(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	runID, a := f.startParked(t, interactiveChain, "初稿一")
@@ -284,15 +285,17 @@ func TestStoppingAFollowUpThatWasNotDeliveredEndsTheSession(t *testing.T) {
 		t.Fatalf("stop = %v, want it unconfirmed", err)
 	}
 	f.exec.finish(a, execution.Result{Status: execution.StatusFailed, FailureCode: "mcp_refresh_wait_timeout", NotDelivered: true})
-	_, nodes := f.await(t, runID, func(run store.WorkflowRun, n []store.WorkflowNodeRun) bool {
-		return undelivered(t)(run, n) && interactivePayload(t, node(n, "a"))["session_ended"] == true
-	})
-	if p := interactivePayload(t, node(nodes, "a")); p["turns"] != float64(1) || p["sent"] != float64(1) || p["answer"] != "初稿一" {
-		t.Fatalf("summary = %v, want the first turn's node with the session ended and the notice", p)
+	_, nodes := f.await(t, runID, undelivered(t))
+	if p := interactivePayload(t, node(nodes, "a")); p["turns"] != float64(1) || p["sent"] != float64(1) || p["answer"] != "初稿一" || p["session_ended"] != false || f.exec.isClosed(a) {
+		t.Fatalf("summary = %v closed = %v, want the first turn's node with its session open and the notice", p, f.exec.isClosed(a))
 	}
 	f.awaitClaimable(t, runID, "a")
-	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); !errors.Is(err, server.ErrWorkflowNodeSessionEnded) {
-		t.Fatalf("a message after the stop = %v, want %v", err, server.ErrWorkflowNodeSessionEnded)
+	f.exec.onCancel = nil
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); err != nil {
+		t.Fatalf("resending the message after the stop = %v", err)
+	}
+	if id := f.exec.awaitAppend(t); id != a {
+		t.Fatalf("the resent message went to %s, want %s", id, a)
 	}
 }
 
