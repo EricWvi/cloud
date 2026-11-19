@@ -167,9 +167,9 @@ func (s *Store) UpsertUser(ctx context.Context, in PresetUser) (string, error) {
 	return userID, nil
 }
 
-// UserByEmail resolves an active account of the demo team by email. It never creates one: an
-// address nobody presetted or invited is exactly what login must reject.
-func (s *Store) UserByEmail(ctx context.Context, email string) (User, error) {
+// DemoMemberByEmail resolves an active account of the active demo team by email, for the startup
+// bootstrap and the demo seeder, which act inside that team and must stop when it is suspended.
+func (s *Store) DemoMemberByEmail(ctx context.Context, email string) (User, error) {
 	email, e := NormalizeEmail(email)
 	if e != nil {
 		return User{}, e
@@ -183,6 +183,31 @@ func (s *Store) UserByEmail(ctx context.Context, email string) (User, error) {
 		WHERE u.source = $1 AND u.subject = $2 AND t.name = $3
 			AND u.status = 'active' AND u.deleted_at IS NULL AND t.status = 'active'`,
 		EmailSource, email, DemoTenant).
+		Scan(&u.ID, &u.DisplayName, &u.Status, &u.Version, &u.CreatedAt, &u.DeletedAt)
+	if errors.Is(e, pgx.ErrNoRows) {
+		return User{}, ErrNotFound
+	}
+	if e != nil {
+		return User{}, fmt.Errorf("look up demo member by email: %w", e)
+	}
+	return u, nil
+}
+
+// UserByEmail resolves an active email account. It never creates one: an address nobody presetted
+// or invited has no account, which is exactly what login must reject. Membership is not required:
+// a member removed from every workspace still signs in and is told to ask for an invitation, as
+// with any other login method (A6 D4).
+func (s *Store) UserByEmail(ctx context.Context, email string) (User, error) {
+	email, e := NormalizeEmail(email)
+	if e != nil {
+		return User{}, e
+	}
+	var u User
+	e = s.pool.QueryRow(ctx, `
+		SELECT u.id, u.display_name, u.status, u.version, u.created_at, u.deleted_at
+		FROM users u
+		WHERE u.source = $1 AND u.subject = $2 AND u.status = 'active' AND u.deleted_at IS NULL`,
+		EmailSource, email).
 		Scan(&u.ID, &u.DisplayName, &u.Status, &u.Version, &u.CreatedAt, &u.DeletedAt)
 	if errors.Is(e, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
