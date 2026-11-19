@@ -1044,7 +1044,7 @@ export function useStreamChatConversationEvents<TData = Awaited<ReturnType<typeo
 
 
 /**
- * On the fixed Node this ends the whole session, and the conversation becomes read-only. 503 stop_unconfirmed means stopping is not confirmed yet.
+ * When the session outlives the stop (a Node that negotiated turn_cancel keeps it), only the turn stops and the conversation takes the next prompt. Otherwise the whole session ends and the conversation becomes read-only. 503 stop_unconfirmed means stopping is not confirmed yet.
  * @summary Cancel the latest turn
  */
 export const stopChatConversation = (

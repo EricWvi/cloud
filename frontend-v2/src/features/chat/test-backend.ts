@@ -106,6 +106,8 @@ export interface ChatBackend {
   staleDiscard?: boolean
   /** The query each delete carried, by conversation. */
   deletedWith: Record<string, { workspace?: string; revision?: string }>
+  /** Makes a stop cancel only the turn and keep the session, as a Node with turn_cancel does. */
+  keepOnStop?: boolean
   /** Requests seen, as "METHOD /path". */
   seen: string[]
   bodies: unknown[]
@@ -214,7 +216,7 @@ export function chatBackend(options: { unavailable?: boolean } = {}): ChatBacken
       return { status: 201, data: { conversation: c, turn: { sessionId: session.id, turnId: 't2' } } }
     }
     if (action === 'stop') {
-      Object.assign(session, { endedAt: at, endReason: 'stopped' })
+      if (!state.keepOnStop) Object.assign(session, { endedAt: at, endReason: 'stopped' })
       return { status: 200, data: { result: { status: 'cancelled', answer: '', answerComplete: false, stopReason: 'cancelled', failureCode: '' } } }
     }
     if (action === 'deletion') {

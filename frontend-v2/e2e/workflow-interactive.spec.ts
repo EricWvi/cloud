@@ -96,7 +96,7 @@ async function startRun(page: Page, graph: string, label: string) {
   return { tenantId, pane, row, runId }
 }
 
-const partialNote = 'Agent 完成信号暂未支持，由发起人确认完成。停止本轮会结束这个节点的会话，停止后不能继续对话。'
+const partialNote = 'Agent 完成信号暂未支持，由发起人确认完成。停止本轮后，会话还在就可以接着对话；没能保留会话时只能完成这一步。'
 
 async function screenshot(page: Page, path: string) {
   await page.waitForFunction(() =>

@@ -191,6 +191,21 @@ it('lets the assignee of a person\'s task pick an Agent to handle it, and nobody
   expect(api.listTaskExecutors).not.toHaveBeenCalled()
 })
 
+it('keeps the run for a follow-up when stopping its turn left the session live', async () => {
+  let stopped = false
+  const active = () => ({ id: 'run-1', state: stopped ? 'idle' as const : 'running' as const, startedBy: 'user-me', startedByName: '演示用户', executorName: 'Claude Code / Fixture' })
+  vi.mocked(api.getTask).mockImplementation(async () => task({ status: stopped ? 'pending' : 'running', activeRun: active() }))
+  vi.mocked(api.getTaskTimeline).mockImplementation(async () => ({ runs: [run({ state: stopped ? 'idle' : 'running', lastResult: stopped ? 'cancelled' : '' })], comments: [] }))
+  vi.mocked(api.stopTaskRun).mockImplementation(async () => { stopped = true; return run({ state: 'idle', lastResult: 'cancelled' }) })
+  renderPage()
+  await userEvent.click(await screen.findByRole('button', { name: '停止' }))
+  await waitFor(() => expect(api.stopTaskRun).toHaveBeenCalledWith('tenant', 'task-1', 'run-1'))
+  // The session waits for the starter's follow-up; ending it is now a separate step.
+  expect(await screen.findByRole('button', { name: '结束会话' })).toBeInTheDocument()
+  expect(screen.getByText('演示用户 的会话在等追问；重新执行会结束它，用你的身份开一次新运行。')).toBeInTheDocument()
+  expect(await screen.findByRole('switch', { name: '发给 Agent' })).toHaveAttribute('aria-checked', 'true')
+})
+
 it('sends to the Agent by default while it is reachable, and to the team once switched off', async () => {
   vi.mocked(api.getTask).mockResolvedValue(task({ status: 'review', activeRun: { id: 'run-1', state: 'idle', startedBy: 'user-me', startedByName: '演示用户', executorName: 'Claude Code / Fixture' } }))
   vi.mocked(api.getTaskTimeline).mockResolvedValue({ runs: [run({ state: 'idle', lastResult: 'completed' })], comments: [] })

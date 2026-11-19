@@ -1258,7 +1258,8 @@ export const useStartTaskRun = <TError = ErrorType<TaskError>,
     }
 
 /**
- * @summary End a live run; a running turn is cancelled
+ * A running turn is cancelled. When its session outlives the stop (a Node that negotiated turn_cancel keeps it), the run stays live and idle, awaiting a follow-up; when the stop ended the session, the run ends with endReason stopped. An idle run is ended with endReason stopped.
+ * @summary Stop a live run: cancel its running turn, or end it when idle
  */
 export const stopTaskRun = (
     tid: string,
@@ -1312,7 +1313,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type StopTaskRunMutationVariables = {tid: string;taskid: string;rid: string}
 
     /**
- * @summary End a live run; a running turn is cancelled
+ * @summary Stop a live run: cancel its running turn, or end it when idle
  */
 export const useStopTaskRun = <TError = ErrorType<TaskError>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof stopTaskRun>>, TError,StopTaskRunMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}

@@ -147,6 +147,21 @@ describe('chat page', () => {
     expect(screen.getByRole('textbox', { name: '消息' })).toBeInTheDocument()
   })
 
+  it('keeps a conversation usable when the stop ended only the turn', async () => {
+    backend.keepOnStop = true
+    await renderReady()
+    await userEvent.click(within(sidebar()).getByRole('button', { name: '梳理 v2 接口缺口' }))
+    const stream = FakeEventSource.of('c-main')
+    act(() => stream.emit({ kind: 'history_snapshot', history: { records: [line.user(1, '写长一点')], incomplete: false } }))
+    await userEvent.click(screen.getByRole('button', { name: '停止' }))
+    act(() => stream.emit({ kind: 'turn_ended', result: { status: 'cancelled', answer: '', answerComplete: false, stopReason: 'cancelled', failureCode: '' } }))
+    expect(await screen.findByText('已停止')).toBeInTheDocument()
+    expect(screen.queryByText(/这个对话已结束/)).not.toBeInTheDocument()
+    const input = screen.getByRole('textbox', { name: '消息' })
+    await userEvent.type(input, '接着写{Enter}')
+    await waitFor(() => expect(backend.bodies.at(-1)).toEqual({ prompt: '接着写' }))
+  })
+
   it('shows where a new chat runs; the cloud is the only mode on the web', async () => {
     await renderReady()
     await userEvent.click(screen.getByRole('button', { name: '选择启动模式' }))
