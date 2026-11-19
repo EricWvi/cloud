@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -46,14 +47,35 @@ type notice struct {
 }
 
 // notify records the notice for each recipient who may see the task now, by the same decision as
-// every tenant route: a recipient who is not a current active member gets nothing.
+// every tenant route: a recipient who is not a current active member gets nothing. Identifiers are
+// compared in canonical lower case, since a request may spell a UUID in upper case.
+//
+// The recipient's membership row is locked FOR KEY SHARE before the access check and held until
+// the change commits. A concurrent removal then either committed first, and the recipient is
+// skipped, or waits for this transaction; the notification's foreign key can never fail and roll
+// back the comment or status change that caused it.
 func notify(ctx context.Context, q dbTX, n notice, recipients ...string) error {
+	actor := strings.ToLower(n.actor)
+	n.actor = actor
 	seen := map[string]bool{}
 	for _, user := range recipients {
-		if user == "" || user == n.actor || seen[user] {
+		user = strings.ToLower(user)
+		if user == "" || user == actor || seen[user] {
 			continue
 		}
 		seen[user] = true
+		if !accessUUID.MatchString(user) {
+			continue
+		}
+		var held bool
+		if e := q.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM memberships WHERE tenant_id = $1 AND user_id = $2 FOR KEY SHARE)`,
+			n.tenant, user).Scan(&held); e != nil {
+			return fmt.Errorf("lock recipient membership: %w", e)
+		}
+		if !held {
+			continue
+		}
 		if _, e := tenantAccess(ctx, q, n.tenant, user); errors.Is(e, ErrNotFound) {
 			continue
 		} else if e != nil {
@@ -123,10 +145,35 @@ func notifyMentioned(ctx context.Context, q dbTX, tenant, task string, c TaskCom
 		comment: c.ID, source: "comment:" + c.ID}, recipients...)
 }
 
-// Notifications returns the caller's newest notifications in the tenant and how many are unread.
-func (s *Store) Notifications(ctx context.Context, tenant, user string, limit int) ([]Notification, int, error) {
+// NotificationCursor is the position after the last notification of a page: the next page starts
+// with older ones.
+type NotificationCursor struct {
+	CreatedAt time.Time
+	ID        string
+}
+
+// NotificationPage is one page of the caller's inbox, newest first. Next is nil on the last page;
+// Unread counts every unread notification, not only this page's.
+type NotificationPage struct {
+	Items  []Notification
+	Unread int
+	Next   *NotificationCursor
+}
+
+// Notifications returns one page of the caller's notifications in the tenant, newest first, after
+// the cursor when one is given, and how many are unread in all. Every notification can be reached
+// by following Next, so an unread count never points at one the inbox cannot show.
+func (s *Store) Notifications(ctx context.Context, tenant, user string, after *NotificationCursor, limit int) (NotificationPage, error) {
 	if limit < 1 || limit > MaxNotifications {
 		limit = MaxNotifications
+	}
+	var at *time.Time
+	var afterID *string
+	if after != nil {
+		if !accessUUID.MatchString(after.ID) {
+			return NotificationPage{}, ErrNotFound
+		}
+		at, afterID = &after.CreatedAt, &after.ID
 	}
 	rows, e := s.pool.Query(ctx, `
 		SELECT n.id::text, n.kind, n.task_id::text, t.title, t.status, n.actor_id::text, a.display_name,
@@ -136,25 +183,31 @@ func (s *Store) Notifications(ctx context.Context, tenant, user string, limit in
 		LEFT JOIN users a ON a.id = n.actor_id
 		LEFT JOIN v2_task_comments c ON c.id = n.comment_id
 		WHERE n.tenant_id = $1 AND n.user_id = $2
-		ORDER BY n.created_at DESC, n.id DESC LIMIT $3`, tenant, user, limit)
+			AND ($4::timestamptz IS NULL OR (n.created_at, n.id) < ($4::timestamptz, $5::uuid))
+		ORDER BY n.created_at DESC, n.id DESC LIMIT $3`, tenant, user, limit+1, at, afterID)
 	if e != nil {
-		return nil, 0, fmt.Errorf("list notifications: %w", e)
+		return NotificationPage{}, fmt.Errorf("list notifications: %w", e)
 	}
 	defer rows.Close()
-	out := []Notification{}
+	page := NotificationPage{Items: []Notification{}}
 	for rows.Next() {
 		var n Notification
 		if e := rows.Scan(&n.ID, &n.Kind, &n.TaskID, &n.TaskTitle, &n.TaskStatus, &n.ActorID, &n.ActorName,
 			&n.CommentID, &n.Excerpt, &n.CreatedAt, &n.ReadAt); e != nil {
-			return nil, 0, e
+			return NotificationPage{}, e
 		}
-		out = append(out, n)
+		page.Items = append(page.Items, n)
 	}
 	if e := rows.Err(); e != nil {
-		return nil, 0, e
+		return NotificationPage{}, e
 	}
-	unread, e := s.unreadNotifications(ctx, tenant, user)
-	return out, unread, e
+	if len(page.Items) > limit {
+		page.Items = page.Items[:limit]
+		last := page.Items[limit-1]
+		page.Next = &NotificationCursor{CreatedAt: last.CreatedAt, ID: last.ID}
+	}
+	page.Unread, e = s.unreadNotifications(ctx, tenant, user)
+	return page, e
 }
 
 // MarkNotificationsRead marks the caller's listed notifications read, or all of them when all is
@@ -166,10 +219,11 @@ func (s *Store) MarkNotificationsRead(ctx context.Context, tenant, user string, 
 	if !all && len(ids) == 0 {
 		return s.unreadNotifications(ctx, tenant, user)
 	}
-	for _, id := range ids {
+	for i, id := range ids {
 		if !accessUUID.MatchString(id) {
 			return 0, ErrNotFound
 		}
+		ids[i] = strings.ToLower(id)
 	}
 	if _, e := s.pool.Exec(ctx, `
 		UPDATE v2_notifications SET read_at = now()

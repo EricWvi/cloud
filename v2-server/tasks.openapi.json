@@ -1627,7 +1627,7 @@
         "tags": [
           "tasks"
         ],
-        "description": "The caller's in-app notifications in this workspace, newest first, with how many are unread: a task was assigned to them (directly or through a squad they belong to), a comment @-mentioned them, or a task they created reached review. Only current members receive and read them; removing a member deletes theirs.",
+        "description": "The caller's in-app notifications in this workspace, newest first, one page at a time, with how many are unread in all: a task was assigned to them (directly or through a squad they belong to), a comment @-mentioned them, or a task they created reached review. Only current members receive and read them; removing a member deletes theirs.",
         "parameters": [
           {
             "name": "tid",
@@ -1646,6 +1646,15 @@
               "minimum": 1,
               "maximum": 100
             }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "nextCursor from the previous page; omitted for the newest page."
           }
         ],
         "responses": {
@@ -2759,7 +2768,8 @@
         "additionalProperties": false,
         "required": [
           "items",
-          "unread"
+          "unread",
+          "nextCursor"
         ],
         "properties": {
           "items": {
@@ -2770,7 +2780,12 @@
           },
           "unread": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Unread notifications in all, not only this page's; following nextCursor reaches every one."
+          },
+          "nextCursor": {
+            "type": "string",
+            "description": "Cursor of the next, older page; empty on the last page."
           }
         }
       },

@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
@@ -57,10 +58,31 @@ func TestNotificationHTTP(t *testing.T) {
 		t.Fatalf("owner after review = %v", got)
 	}
 
-	// Bad limits and empty read requests are client errors.
+	// Pages follow nextCursor to the end; the last page has none.
+	if _, got := owner.do("GET", inbox+"?limit=1", nil); got["nextCursor"] != "" {
+		t.Fatalf("one notification has a next page: %v", got)
+	}
+	owner.do("POST", base+"/tasks", map[string]any{"title": "第二条", "projectId": taskProjectID, "assignee": map[string]any{"type": "human", "id": aliceID}})
+	_, page := alice.do("GET", inbox+"?limit=1", nil)
+	next, _ := page["nextCursor"].(string)
+	if next == "" || page["unread"] != float64(2) {
+		t.Fatalf("first page = %v", page)
+	}
+	_, page = alice.do("GET", inbox+"?limit=1&cursor="+next, nil)
+	items, _ = page["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["id"] != first["id"] || page["nextCursor"] != "" {
+		t.Fatalf("second page = %v", page)
+	}
+
+	// Bad limits, cursors and empty read requests are client errors.
 	for _, q := range []string{"?limit=0", "?limit=101", "?limit=x"} {
 		if status, body := alice.do("GET", inbox+q, nil); status != 400 || body["code"] != "invalid_limit" {
 			t.Fatalf("limit %s = %d %v", q, status, body)
+		}
+	}
+	for _, q := range []string{"?cursor=!!", "?cursor=bm90LWEtY3Vyc29y", "?cursor=MjAyNi0xMS0xOVQwMDowMDowMFp8bm9wZQ"} {
+		if status, body := alice.do("GET", inbox+q, nil); status != 400 || body["code"] != "invalid_cursor" {
+			t.Fatalf("cursor %s = %d %v", q, status, body)
 		}
 	}
 	for _, body := range []map[string]any{{}, {"ids": []string{}}, {"ids": []string{"nope"}}} {
@@ -74,10 +96,10 @@ func TestNotificationHTTP(t *testing.T) {
 	if status, got := owner.do("POST", inbox+"/read", map[string]any{"ids": []string{id}}); status != 200 || got["unread"] != float64(1) {
 		t.Fatalf("owner marking alice's = %d %v", status, got)
 	}
-	if _, got := alice.do("GET", inbox, nil); got["unread"] != float64(1) {
+	if _, got := alice.do("GET", inbox, nil); got["unread"] != float64(2) {
 		t.Fatalf("alice's was marked by someone else: %v", got)
 	}
-	if status, got := alice.do("POST", inbox+"/read", map[string]any{"ids": []string{id}}); status != 200 || got["unread"] != float64(0) {
+	if status, got := alice.do("POST", inbox+"/read", map[string]any{"ids": []string{strings.ToUpper(id)}}); status != 200 || got["unread"] != float64(1) {
 		t.Fatalf("mark read = %d %v", status, got)
 	}
 	if status, got := owner.do("POST", inbox+"/read", map[string]any{"all": true}); status != 200 || got["unread"] != float64(0) {

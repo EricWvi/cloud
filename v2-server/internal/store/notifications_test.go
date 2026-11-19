@@ -1,7 +1,13 @@
 package store_test
 
 import (
+	"context"
+	"os"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
@@ -10,11 +16,11 @@ import (
 // inbox reads a user's notifications and fails the test on error.
 func inbox(t *testing.T, f *squadFixture, user string) ([]store.Notification, int) {
 	t.Helper()
-	items, unread, e := f.store.Notifications(f.ctx, f.tenant, user, 0)
+	page, e := f.store.Notifications(f.ctx, f.tenant, user, nil, 0)
 	if e != nil {
 		t.Fatal(e)
 	}
-	return items, unread
+	return page.Items, page.Unread
 }
 
 func TestNotifyAssignment(t *testing.T) {
@@ -64,6 +70,27 @@ func TestNotifyAssignment(t *testing.T) {
 		}
 		if n := countFor(must(inbox(t, f, bob)), task.ID, store.NotifyAssigned); n != 1 {
 			t.Fatalf("bob notified %d times after agent and clear", n)
+		}
+	})
+
+	t.Run("upper-case UUIDs are the same person", func(t *testing.T) {
+		upper := strings.ToUpper(bob)
+		task := createTask(t, f, owner, store.TaskInput{Title: "大写改派"})
+		task, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, owner, &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: bob}, task.Version)
+		if e != nil {
+			t.Fatal(e)
+		}
+		// The same person spelled in upper case is not a new assignment.
+		if _, e = f.store.SetTaskAssignee(ctx, f.tenant, task.ID, owner, &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: upper}, task.Version); e != nil {
+			t.Fatal(e)
+		}
+		if n := countFor(must(inbox(t, f, bob)), task.ID, store.NotifyAssigned); n != 1 {
+			t.Fatalf("bob notified %d times", n)
+		}
+		// Assigning yourself in upper case is still your own act.
+		mine := createTask(t, f, bob, store.TaskInput{Title: "大写自派", Assignee: &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: upper}})
+		if n := countFor(must(inbox(t, f, bob)), mine.ID, store.NotifyAssigned); n != 0 {
+			t.Fatalf("self assignment in upper case notified %d times", n)
 		}
 	})
 
@@ -252,6 +279,110 @@ func TestNotificationsReadAndMembership(t *testing.T) {
 			t.Fatalf("re-joined member sees %+v", items)
 		}
 	})
+}
+
+func TestNotificationPages(t *testing.T) {
+	f := newSquadFixture(t)
+	owner := f.login(t, "owner", "owner")
+	alice := f.login(t, "alice", "member")
+	addProject(t, f, owner)
+	oldest := createTask(t, f, owner, store.TaskInput{Title: "最早", Assignee: &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: alice}})
+	for i := 0; i < 4; i++ {
+		createTask(t, f, owner, store.TaskInput{Title: "较新", Assignee: &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: alice}})
+	}
+	// Everything but the oldest is read: the one unread notice lies beyond the first page.
+	items, _ := inbox(t, f, alice)
+	ids := []string{}
+	for _, n := range items[:4] {
+		ids = append(ids, n.ID)
+	}
+	if _, e := f.store.MarkNotificationsRead(f.ctx, f.tenant, alice, ids, false); e != nil {
+		t.Fatal(e)
+	}
+	seen := []store.Notification{}
+	var after *store.NotificationCursor
+	for pages := 0; ; pages++ {
+		page, e := f.store.Notifications(f.ctx, f.tenant, alice, after, 2)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if page.Unread != 1 || len(page.Items) > 2 || pages > 3 {
+			t.Fatalf("page %d = %+v", pages, page)
+		}
+		seen = append(seen, page.Items...)
+		if page.Next == nil {
+			break
+		}
+		after = page.Next
+	}
+	if len(seen) != 5 || seen[4].TaskID != oldest.ID || seen[4].ReadAt != nil {
+		t.Fatalf("pages reached %+v", seen)
+	}
+	if _, e := f.store.Notifications(f.ctx, f.tenant, alice, &store.NotificationCursor{CreatedAt: time.Now(), ID: "nope"}, 2); e == nil {
+		t.Fatal("a cursor with a malformed id was accepted")
+	}
+}
+
+// A member removed while a comment that mentions them is being written must not roll the comment
+// back: the removal and the notification are ordered by the membership row lock.
+func TestNotifyRaceWithRemoval(t *testing.T) {
+	f := newSquadFixture(t)
+	ctx := f.ctx
+	owner := f.login(t, "owner", "owner")
+	alice := f.login(t, "alice", "member")
+	addProject(t, f, owner)
+	task := createTask(t, f, owner, store.TaskInput{Title: "并发移出"})
+
+	removal, e := f.db.Begin(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer func() { _ = removal.Rollback(ctx) }()
+	if _, e := removal.Exec(ctx, `DELETE FROM memberships WHERE tenant_id = $1 AND user_id = $2`, f.tenant, alice); e != nil {
+		t.Fatal(e)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, e := f.store.CreateTaskComment(ctx, store.NewTaskComment{TenantID: f.tenant, TaskID: task.ID, AuthorID: owner,
+			CreateKey: "race", Body: "看一下", Mentions: []store.TaskMention{{Type: "user", ID: alice}}})
+		done <- e
+	}()
+	// Wait until the comment's transaction is blocked behind the removal, then commit the removal.
+	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	watcher, e := pgx.Connect(waitCtx, os.Getenv("TEST_DATABASE_URL"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer func() { _ = watcher.Close(ctx) }()
+	for {
+		var waiting bool
+		if e := watcher.QueryRow(waitCtx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE wait_event_type = 'Lock' AND (query LIKE '%memberships%' OR query LIKE '%v2_notifications%'))`).Scan(&waiting); e != nil {
+			t.Fatal(e)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case e := <-done:
+			t.Fatalf("comment finished before the removal committed: %v", e)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if e := removal.Commit(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if e := <-done; e != nil {
+		t.Fatalf("the comment was rolled back by the concurrent removal: %v", e)
+	}
+	if _, e := f.store.TaskCommentByKey(ctx, f.tenant, task.ID, owner, "race"); e != nil {
+		t.Fatalf("comment missing: %v", e)
+	}
+	var n int
+	if e := f.db.QueryRow(ctx, `SELECT count(*) FROM v2_notifications WHERE user_id = $1`, alice).Scan(&n); e != nil || n != 0 {
+		t.Fatalf("removed member notified: %d %v", n, e)
+	}
 }
 
 func countFor(items []store.Notification, task, kind string) int {

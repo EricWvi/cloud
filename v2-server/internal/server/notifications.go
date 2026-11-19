@@ -2,16 +2,19 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 )
 
 // notificationStore is the part of the database the in-app notification inbox needs.
 type notificationStore interface {
-	Notifications(ctx context.Context, tenant, user string, limit int) ([]store.Notification, int, error)
+	Notifications(ctx context.Context, tenant, user string, after *store.NotificationCursor, limit int) (store.NotificationPage, error)
 	MarkNotificationsRead(ctx context.Context, tenant, user string, ids []string, all bool) (int, error)
 }
 
@@ -22,8 +25,9 @@ func (h *handler) notificationRoutes(rt *router) {
 	rt.tenant("POST /api/v2/tenants/{tid}/notifications/read", h.readNotifications)
 }
 
-// listNotifications returns the caller's newest notifications in the tenant with the unread count.
-// The route's tenant check is what keeps a removed member out; their rows went with the membership.
+// listNotifications returns a page of the caller's notifications in the tenant, newest first, with
+// the unread count and the cursor of the next page ("" on the last). The route's tenant check is
+// what keeps a removed member out; their rows went with the membership.
 func (h *handler) listNotifications(w http.ResponseWriter, r *http.Request, a access) {
 	s, ok := h.store.(notificationStore)
 	if !ok {
@@ -39,12 +43,50 @@ func (h *handler) listNotifications(w http.ResponseWriter, r *http.Request, a ac
 		}
 		limit = n
 	}
-	items, unread, e := s.Notifications(r.Context(), a.TenantID, a.UserID, limit)
+	var after *store.NotificationCursor
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		c, ok := decodeNotificationCursor(raw)
+		if !ok {
+			fault(w, http.StatusBadRequest, "invalid_cursor")
+			return
+		}
+		after = &c
+	}
+	page, e := s.Notifications(r.Context(), a.TenantID, a.UserID, after, limit)
+	if errors.Is(e, store.ErrNotFound) {
+		fault(w, http.StatusBadRequest, "invalid_cursor")
+		return
+	}
 	if e != nil {
 		internal(w, "list notifications", e)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "unread": unread})
+	next := ""
+	if page.Next != nil {
+		next = encodeNotificationCursor(*page.Next)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": page.Items, "unread": page.Unread, "nextCursor": next})
+}
+
+// A notification cursor is opaque to clients: the last item's creation time and id.
+func encodeNotificationCursor(c store.NotificationCursor) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(c.CreatedAt.UTC().Format(time.RFC3339Nano) + "|" + c.ID))
+}
+
+func decodeNotificationCursor(raw string) (store.NotificationCursor, bool) {
+	b, e := base64.RawURLEncoding.DecodeString(raw)
+	if e != nil {
+		return store.NotificationCursor{}, false
+	}
+	at, id, ok := strings.Cut(string(b), "|")
+	if !ok {
+		return store.NotificationCursor{}, false
+	}
+	t, e := time.Parse(time.RFC3339Nano, at)
+	if e != nil {
+		return store.NotificationCursor{}, false
+	}
+	return store.NotificationCursor{CreatedAt: t, ID: id}, true
 }
 
 type notificationReadRequest struct {

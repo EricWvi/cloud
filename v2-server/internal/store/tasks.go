@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -438,7 +439,7 @@ func (s *Store) SetTaskAssignee(ctx context.Context, tenant, id, actor string, r
 		}
 		task, e := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` `+taskJoins+` WHERE t.id = $1`, id))
 		out = task
-		if e != nil || ref == nil || (before.Assignee != nil && before.Assignee.Type == ref.Type && before.Assignee.ID == ref.ID) {
+		if e != nil || ref == nil || (before.Assignee != nil && before.Assignee.Type == ref.Type && strings.EqualFold(before.Assignee.ID, ref.ID)) {
 			return e
 		}
 		return notifyAssigned(ctx, tx, tenant, id, actor, *ref, task.Version)

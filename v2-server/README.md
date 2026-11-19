@@ -267,7 +267,7 @@ Agent 成员只引用 `v2_space_agents` 里由系统预装、可执行且观测�
 | `GET /api/v2/tenants/{tid}/tasks/{taskid}/decompositions` | 任务的拆分记录，最新在前；运行已结束但还没结算的先结算再返回 |
 | `POST /api/v2/tenants/{tid}/tasks/{taskid}/decompositions` | 必须带 `Idempotency-Key`；`{workflowId}` 用一个已发布的工作流拆分任务，返回 201。见下文「任务拆分」 |
 | `GET /api/v2/tenants/{tid}/task-mentions` | 调用者还没回复的 @：每个未结束任务一条，取别人最近一次 @ 调用者、且调用者此后没在该任务评论过的那条 |
-| `GET /api/v2/tenants/{tid}/notifications` | 调用者在本团队的应用内提醒，最新在前（`limit` 1–100，默认 100），带未读数 `unread`；每条带任务标题与状态、发起人、@ 评论摘要。见下文「应用内提醒」 |
+| `GET /api/v2/tenants/{tid}/notifications` | 调用者在本团队的应用内提醒，最新在前，分页（`limit` 1–100，默认 100；`cursor` 取上一页的 `nextCursor`，最后一页为空）；`unread` 是全部未读数，顺着 `nextCursor` 能翻到每一条。每条带任务标题与状态、发起人、@ 评论摘要。见下文「应用内提醒」 |
 | `POST /api/v2/tenants/{tid}/notifications/read` | `{ids}` 或 `{all: true}` 把调用者自己的提醒标为已读，返回剩余未读数；别人的 id 忽略 |
 
 任务归属于一个工作区项目，`projectId` 必须在同一工作区内，否则 400 `invalid_project`。指派人显式类型化，
@@ -324,7 +324,9 @@ Space Agent），写入时解析名字；正文里手打的「@名字」不路�
 | `review` | 任务进入 `review`：手动推进、Agent 运行一轮结束、处理工作流结算 | 任务创建人 |
 
 - 引起它的人自己不收（自己指派给自己、自己 @ 自己、创建人自己手动提交验收）；Agent 运行和工作流引起的没有发起人（`actorId` 为 null）。
-- 只发给有权看到任务的当前成员：写入前对收件人做与租户路由相同的 `TenantAccess` 判断，不通过就不写。
+- 只发给有权看到任务的当前成员：写入前对收件人做与租户路由相同的 `TenantAccess` 判断，不通过就不写。判断前先对收件人的成员行加 `FOR KEY SHARE` 锁并持有到提交，
+  并发移出成员要么先提交（这时跳过这个人），要么等这次写入提交后再删，提醒的外键不会失败、不会连带回滚评论或状态变更。
+- 身份比较统一用小写 UUID：请求里大写的同一个人不算改派，大写的自己也不会收到自己的提醒。
 - 提醒行外键挂在 `memberships` 上并级联删除：成员被移出团队时，他在该团队的提醒一并删除；读接口本身要求是当前成员，
   被移出的人读不到（404），重新加入也不会看到旧提醒。
 - 每个事件对每个收件人只记一条（`source` 唯一）：指派与待验收按任务版本，@ 按评论。
