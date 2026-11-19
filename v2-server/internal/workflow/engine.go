@@ -223,7 +223,7 @@ func (e *Engine) StartAs(ctx context.Context, runID, actor string) error {
 	if err != nil {
 		return err
 	}
-	payload, err := e.preparePayload(g, run.Payload, run.Input)
+	payload, err := e.startPayload(g, run.Payload, run.Input)
 	if err != nil {
 		return err
 	}
@@ -241,7 +241,7 @@ func (e *Engine) StartAs(ctx context.Context, runID, actor string) error {
 	}
 	entry := NodeStart{NodeID: start.ID, NodeType: start.Kind, Input: run.Input}
 	started, err := e.repo.StartRun(ctx, runID, entry, func(raw []byte) ([]byte, error) {
-		p, err := e.preparePayload(g, raw, run.Input)
+		p, err := e.startPayload(g, raw, run.Input)
 		if err != nil {
 			return nil, err
 		}
@@ -260,15 +260,56 @@ func (e *Engine) StartAs(ctx context.Context, runID, actor string) error {
 	return e.schedule(ctx, runID)
 }
 
-// preparePayload derives the run payload on first use (v2 creates runs before any graph-aware
-// step) and mirrors the kickoff input, as desktop does at deploy time.
-func (e *Engine) preparePayload(g *Graph, raw []byte, input *string) (RunPayload, error) {
+// decodeOrInitPayload decodes raw and reports whether it already holds graph metadata.
+// Unprepared or creation-time stub payloads (such as {"injectLastFailure":false}) are
+// initialized with NewRunPayload while preserving creation-time options.
+func (e *Engine) decodeOrInitPayload(g *Graph, raw []byte) (RunPayload, bool, error) {
 	p, ok, err := DecodeRunPayload(raw)
+	if err != nil {
+		return RunPayload{}, false, err
+	}
+	if ok && (p.StartNodeID != nil || p.Locale != "") {
+		return p, true, nil
+	}
+	inject := true
+	if ok {
+		inject = p.InjectLastFailure
+	}
+	p = NewRunPayload(g, e.locale)
+	p.InjectLastFailure = inject
+	return p, false, nil
+}
+
+// startPayload reads an already-prepared run payload or derives it on first use. When raw
+// already holds a prepared payload (from UpdateInput), an existing start.input or a nil run.Input
+// is preserved so StartAs never clobbers an explicit values["input"].
+func (e *Engine) startPayload(g *Graph, raw []byte, input *string) (RunPayload, error) {
+	p, prepared, err := e.decodeOrInitPayload(g, raw)
 	if err != nil {
 		return RunPayload{}, err
 	}
-	if !ok {
-		p = NewRunPayload(g, e.locale)
+	if !prepared {
+		if err := p.MirrorInput(input); err != nil {
+			return RunPayload{}, err
+		}
+		return p, nil
+	}
+	if input != nil && p.StartNodeID != nil {
+		if _, assigned := p.VariablePool.Values[*p.StartNodeID+".input"]; !assigned {
+			if err := p.MirrorInput(input); err != nil {
+				return RunPayload{}, err
+			}
+		}
+	}
+	return p, nil
+}
+
+// preparePayload derives the run payload on first use (v2 creates runs before any graph-aware
+// step) while preserving creation-time options such as injectLastFailure, and mirrors input.
+func (e *Engine) preparePayload(g *Graph, raw []byte, input *string) (RunPayload, error) {
+	p, _, err := e.decodeOrInitPayload(g, raw)
+	if err != nil {
+		return RunPayload{}, err
 	}
 	return p, p.MirrorInput(input)
 }

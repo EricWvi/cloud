@@ -388,6 +388,7 @@ export interface WorkflowRunCreate {
   name?: string;
   triggerKind?: WorkflowRunCreateTriggerKind;
   triggerRef?: string;
+  injectLastFailure?: boolean;
 }
 
 export interface WorkflowRunCreated {

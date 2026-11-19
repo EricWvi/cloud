@@ -1,14 +1,18 @@
 import { cdaseWorkspaceReader } from '@/lib/demo/cdase'
+import { DEMO_MOCK } from '@/lib/demo/flags'
 import {
   getChatWorkspaceChanges,
+  getChatWorkspaceDeliveryPatch,
   getChatWorkspaceDiff,
   getChatWorkspaceEntries,
   getChatWorkspaceFile,
   getTaskRunWorkspaceChanges,
+  getTaskRunWorkspaceDeliveryPatch,
   getTaskRunWorkspaceDiff,
   getTaskRunWorkspaceEntries,
   getTaskRunWorkspaceFile,
   getWorkflowRunWorkspaceChanges,
+  getWorkflowRunWorkspaceDeliveryPatch,
   getWorkflowRunWorkspaceDiff,
   getWorkflowRunWorkspaceEntries,
   getWorkflowRunWorkspaceFile,
@@ -25,14 +29,23 @@ export type WorkspaceSource =
   | { kind: 'run'; tenantId: string; runId: string }
   | { kind: 'task'; tenantId: string; taskId: string; runId: string }
 
-/** The four read-only views of one checkout, and the query-key prefix every one of them shares. */
+/**
+ * The read-only views of one source, and the query-key prefix every one of them shares: browsing
+ * reads the live checkout, changes and diffs read the source's latest delivery (or, for a source
+ * from before deliveries, the checkout), and a patch is one delivery's whole change.
+ */
 export interface WorkspaceReader {
   key: readonly string[]
   entries: (path: string) => Promise<WorkspaceDirectory>
   file: (path: string) => Promise<WorkspaceFile>
   changes: () => Promise<WorkspaceChanges>
-  diff: (path: string) => Promise<WorkspaceDiff>
+  /** One file's diff; a delivery ID pins it to the delivery the change list showed. */
+  diff: (path: string, deliveryId?: string) => Promise<WorkspaceDiff>
+  /** One delivery's patch; absent where the source offers no download. */
+  patch?: (deliveryId: string) => Promise<Blob>
 }
+
+const diffParams = (path: string, deliveryId?: string) => (deliveryId ? { path, deliveryId } : { path })
 
 /** Binds the generated client to one source. */
 export function workspaceReader(source: WorkspaceSource): WorkspaceReader {
@@ -43,7 +56,8 @@ export function workspaceReader(source: WorkspaceSource): WorkspaceReader {
       entries: (path) => getChatWorkspaceEntries(t, c, path ? { path } : undefined),
       file: (path) => getChatWorkspaceFile(t, c, { path }),
       changes: () => getChatWorkspaceChanges(t, c),
-      diff: (path) => getChatWorkspaceDiff(t, c, { path }),
+      diff: (path, id) => getChatWorkspaceDiff(t, c, diffParams(path, id)),
+      patch: (id) => getChatWorkspaceDeliveryPatch(t, c, id) as Promise<Blob>,
     }
   }
   if (source.kind === 'task') {
@@ -53,18 +67,20 @@ export function workspaceReader(source: WorkspaceSource): WorkspaceReader {
       entries: (path) => getTaskRunWorkspaceEntries(t, k, r, path ? { path } : undefined),
       file: (path) => getTaskRunWorkspaceFile(t, k, r, { path }),
       changes: () => getTaskRunWorkspaceChanges(t, k, r),
-      diff: (path) => getTaskRunWorkspaceDiff(t, k, r, { path }),
+      diff: (path, id) => getTaskRunWorkspaceDiff(t, k, r, diffParams(path, id)),
+      patch: (id) => getTaskRunWorkspaceDeliveryPatch(t, k, r, id) as Promise<Blob>,
     }
   }
   const { tenantId: t, runId: r } = source
-  const demo = cdaseWorkspaceReader(t, r)
+  const demo = DEMO_MOCK ? cdaseWorkspaceReader(t, r) : undefined
   if (demo) return demo
   return {
     key: ['workspace', 'run', t, r],
     entries: (path) => getWorkflowRunWorkspaceEntries(t, r, path ? { path } : undefined),
     file: (path) => getWorkflowRunWorkspaceFile(t, r, { path }),
     changes: () => getWorkflowRunWorkspaceChanges(t, r),
-    diff: (path) => getWorkflowRunWorkspaceDiff(t, r, { path }),
+    diff: (path, id) => getWorkflowRunWorkspaceDiff(t, r, diffParams(path, id)),
+    patch: (id) => getWorkflowRunWorkspaceDeliveryPatch(t, r, id) as Promise<Blob>,
   }
 }
 

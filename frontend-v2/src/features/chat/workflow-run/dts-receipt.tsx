@@ -5,12 +5,12 @@ import { Badge } from '@/components/ui/badge'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { simulateDtsSubmission } from '@/lib/demo/dts'
-import { demoMockEnabled } from '@/lib/demo/flags'
+import { DEMO_MOCK } from '@/lib/demo/flags'
 
 /** Presents simulation feedback independently of the real Cloud task outcome. */
 export function DtsReceipt({ taskId, title, description, severity, module, runId }: { taskId: string; title: string; description: string; severity: string; module: string; runId: string }) {
-  const receipt = useQuery({ queryKey: ['dts-demo', taskId], queryFn: () => simulateDtsSubmission(taskId), enabled: demoMockEnabled(), retry: false, staleTime: Infinity })
-  if (!demoMockEnabled()) return null
+  const receipt = useQuery({ queryKey: ['dts-demo', taskId], queryFn: () => simulateDtsSubmission(taskId), enabled: DEMO_MOCK, retry: false, staleTime: Infinity })
+  if (!DEMO_MOCK) return null
   if (receipt.isError) return <p role="alert">DTS 模拟提交失败，Cloud 任务已保留。<Button variant="outline" onClick={() => void receipt.refetch()}>重试模拟提交</Button></p>
   if (!receipt.data) return <p role="status">正在生成 DTS 模拟回执…</p>
   return <Dialog><DialogTrigger render={<Button size="xs" variant="outline" />}>DTS 演示 · {receipt.data.number}</DialogTrigger>

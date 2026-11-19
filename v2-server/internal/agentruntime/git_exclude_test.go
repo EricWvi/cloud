@@ -163,3 +163,60 @@ func TestProjectSkillsKeepsProjectOwnedNameConflict(t *testing.T) {
 		t.Fatalf("project-owned skill was removed: %v", statErr)
 	}
 }
+
+func TestMaterializerRecordsPrivateSkillInLinkedWorktree(t *testing.T) {
+	main := gitCheckout(t)
+	checkout := filepath.Join(t.TempDir(), "linked")
+	cmd := exec.Command("git", "-C", main, "worktree", "add", "--detach", checkout)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create linked worktree: %v: %s", err, out)
+	}
+	p := &projectRuntime{root: t.TempDir(), driver: &Driver{opts: Options{
+		UserSkills: func(context.Context, execution.Scope) ([]UserSkill, error) {
+			return []UserSkill{{Name: "private", Description: "Private", Content: "# Private"}}, nil
+		},
+	}}}
+	if err := p.attachUserSkills(t.Context(), checkout, execution.Scope{}); err != nil {
+		t.Fatal(err)
+	}
+	const skill = ".claude/skills/private"
+	if _, err := os.Stat(filepath.Join(checkout, skill, "SKILL.md")); err != nil {
+		t.Fatalf("skill was not materialized: %v", err)
+	}
+	root, err := os.OpenRoot(checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if !serviceExcludedPath(root, skill) || gitStatus(t, checkout) != "" {
+		t.Fatal("materialized skill is not registered in the linked worktree's common exclude")
+	}
+}
+
+// Git accepts .git as a symlink to the repository directory. The materializer records its skills in
+// that repository's exclude instead of failing the session.
+func TestMaterializerRecordsSkillThroughGitSymlink(t *testing.T) {
+	checkout := gitCheckout(t)
+	moved := filepath.Join(t.TempDir(), "repo.git")
+	if err := os.Rename(filepath.Join(checkout, ".git"), moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, filepath.Join(checkout, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	p := &projectRuntime{root: t.TempDir(), driver: &Driver{opts: Options{
+		UserSkills: func(context.Context, execution.Scope) ([]UserSkill, error) {
+			return []UserSkill{{Name: "private", Description: "Private", Content: "# Private"}}, nil
+		},
+	}}}
+	if err := p.attachUserSkills(t.Context(), checkout, execution.Scope{}); err != nil {
+		t.Fatalf("attach through a .git symlink: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(moved, "info", "exclude"))
+	if err != nil || !strings.Contains(string(raw), excludeHeader+"\n/.opencode/skills/private\n/.claude/skills/private\n") {
+		t.Fatalf("exclude behind the symlink = %q, %v", raw, err)
+	}
+	if status := gitStatus(t, checkout); status != "" {
+		t.Fatalf("materialized skill is visible to Git: %q", status)
+	}
+}

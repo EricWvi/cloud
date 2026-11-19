@@ -2,17 +2,20 @@ import { render, screen, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { SpaceUsageSection } from './space-usage'
 
-afterEach(() => vi.unstubAllEnvs())
+const demo = vi.hoisted(() => ({ on: false }))
+vi.mock('@/lib/demo/flags', () => ({ get DEMO_MOCK() { return demo.on } }))
 
-it.each(['', '0', 'true'])('does not expose synthetic workspace usage with flag %s', flag => {
-  vi.stubEnv('VITE_DEMO_MOCK', flag)
+afterEach(() => { demo.on = false })
+
+it('does not expose synthetic workspace usage without the flag', () => {
+  demo.on = false
   render(<SpaceUsageSection />)
   expect(screen.queryByRole('region', { name: '空间用量' })).not.toBeInTheDocument()
   expect(screen.queryByText('960,000')).not.toBeInTheDocument()
 })
 
 it('labels the mock and keeps aggregate tool calls equal to its category counts', () => {
-  vi.stubEnv('VITE_DEMO_MOCK', '1')
+  demo.on = true
   render(<SpaceUsageSection />)
   const usage = screen.getByRole('region', { name: '空间用量' })
   expect(within(usage).getByText('演示数据')).toBeInTheDocument()

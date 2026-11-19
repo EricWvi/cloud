@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 )
 
 // ScheduledTaskStartPrefix cannot occur in a client Idempotency-Key HTTP header.
@@ -366,7 +367,7 @@ func (s *Store) ClearTaskRunEnding(ctx context.Context, runID string) error {
 }
 
 // InterruptTaskRuns ends every run a previous process left live and returns those whose turn was
-// still running, so their tasks can leave 进行中.
+// still running. Their tasks return to pending in the same transaction.
 func (s *Store) InterruptTaskRuns(ctx context.Context) ([]TaskRun, error) {
 	var out []TaskRun
 	e := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -381,9 +382,19 @@ func (s *Store) InterruptTaskRuns(ctx context.Context) ([]TaskRun, error) {
 			return fmt.Errorf("interrupt task runs: %w", e)
 		}
 		for _, r := range live {
-			if r.turnActive {
-				out = append(out, r)
+			if !r.turnActive {
+				continue
 			}
+			var status string
+			if e := tx.QueryRow(ctx, `SELECT status FROM v2_tasks WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, r.TenantID, r.TaskID).Scan(&status); e != nil {
+				return e
+			}
+			if status == TaskRunning {
+				if _, e := writeTaskStatus(ctx, tx, r.TaskID, TaskPending); e != nil {
+					return e
+				}
+			}
+			out = append(out, r)
 		}
 		return nil
 	})
@@ -672,4 +683,65 @@ func (s *Store) MySquadTasks(ctx context.Context, tenant, caller string) ([]MySq
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// SettleDeliveredTaskTurn advances the task and releases the run's active turn atomically.
+// Only the owning active turn can change the task, and only after its delivery is durable.
+func (s *Store) SettleDeliveredTaskTurn(ctx context.Context, tenant, taskID, runID, turnID, result, failureCode string) (bool, error) {
+	var settled bool
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var from string
+		if err := tx.QueryRow(ctx, `SELECT status FROM v2_tasks WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, tenant, taskID).Scan(&from); err != nil {
+			return err
+		}
+		var ending, session string
+		err := tx.QueryRow(ctx, `SELECT end_reason,COALESCE(session_id,'') FROM v2_task_runs
+			WHERE id=$1 AND tenant_id=$2 AND task_id=$3 AND last_turn_id=$4 AND turn_active AND ended_at IS NULL
+			FOR UPDATE`, runID, tenant, taskID, turnID).Scan(&ending, &session)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var delivery DeliveryStatus
+		err = tx.QueryRow(ctx, `SELECT status FROM v2_turn_deliveries WHERE
+			tenant_id=$1 AND source_kind='task' AND source_id=$2 AND turn_id=$3 AND session_id=$4`,
+			tenant, runID, turnID, session).Scan(&delivery)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// The runtime can retain a terminal even when the delivery write itself fails.
+			// Only that failure may release a task without a delivery record.
+			if result != string(execution.StatusFailed) || failureCode != execution.FailureDeliveryUnavailable {
+				return ErrRunActive
+			}
+			var ended bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM v2_execution_turns
+				WHERE id=$1 AND session_id=$2 AND tenant_id=$3 AND ended_at IS NOT NULL
+				AND data#>>'{Result,Status}'=$4 AND data#>>'{Result,FailureCode}'=$5)`,
+				turnID, session, tenant, result, failureCode).Scan(&ended); err != nil {
+				return err
+			}
+			if !ended {
+				return ErrRunActive
+			}
+			delivery = DeliveryFailed
+		} else if err != nil {
+			return err
+		}
+		to := TaskReview
+		if delivery == DeliveryFailed || result == "cancelled" || result == "interrupted" || ending != "" {
+			to = TaskPending
+		}
+		if _, err := tx.Exec(ctx, `UPDATE v2_task_runs SET turn_active=false,last_result=$2,failure_code=$3 WHERE id=$1`, runID, result, failureCode); err != nil {
+			return err
+		}
+		if CanRunTransitionTask(from, to) {
+			if _, err := writeTaskStatus(ctx, tx, taskID, to); err != nil {
+				return err
+			}
+		}
+		settled = true
+		return nil
+	})
+	return settled, err
 }

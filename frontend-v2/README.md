@@ -19,10 +19,12 @@ task v2:e2e    # Playwright 端到端测试
 ```sh
 npm ci
 npm run dev           # /api、/auth、/healthz 代理到 v2-server（V2_SERVER，默认 :8090）
-npm run check         # 类型检查、lint、单元测试、构建；CI 的 v2 workflow 跑同一条
+npm run check         # 类型检查、lint、单元测试、构建、扫描构建产物里的演示 mock；CI 的 v2 workflow 跑同一条
 npm run api:generate  # api/openapi.json 变化后重新生成 src/api
 npm run e2e           # 端到端测试，自己拉起 v2-server（:8091）和前端（:5174）
 ```
+
+录屏用的演示 mock 都在 `src/lib/demo/`，只在 `VITE_DEMO_MOCK=1` 时打开（`task v2:demo` 等录屏命令会设上）。开关是 `flags.ts` 里的构建时常量 `DEMO_MOCK`，调用处要直接读它（`DEMO_MOCK && …`），不要包进函数，这样不带开关的构建会把 mock 的数据和文案整段剔除。`npm run demo:check` 扫描 `dist`，发现 `registry.ts` 里登记的任一 mock 标记就失败；CI 另外用 `VITE_DEMO_MOCK=1` 构建一次，确认每个标记都还能找到。新加 mock 时在 `registry.ts` 登记并给出标记。
 
 端到端测试默认连接 `task v2:db` 的 PostgreSQL（库 `ora_v2_e2e`，可用 `E2E_DATABASE_URL` 指定）。第一次运行前执行 `npx playwright install chromium`；本机已有 Chromium 时，也可以用 `PW_CHROMIUM_PATH` 指定可执行文件。
 
@@ -67,6 +69,7 @@ e2e/            Playwright 端到端测试
 - 停止会结束整个 session，服务重启也会。之后对话只读：线程末尾标出原因，输入框换成"新对话"按钮，不会在同一对话里重开 session。
 - 上一轮还没结束时发的消息进入排队；后端如果先一步拒绝（`turn_running`），消息回到队首，等这一轮的结束事件再发。
 - 只能发文字，对话不能换执行器；新建项目等后端支持后再开放（`backendSupports`）。
+- 顶栏的「工作区」打开右侧面板（`src/components/workspace-panel/`，对话、任务运行和工作流运行共用）。「文件」浏览沙盒里的现场；「变更」和单文件 diff 读这个对话最近一次成功的回合交付（见 `v2-server/README.md` 的「回合交付」「Agent 工作区查看」），diff 固定读列表显示的那次交付。一轮进行中时提示「本轮进行中，显示的是上一轮的交付」，这时描述所显示交付的文字都说「上一轮」（如「上一轮没有改动」「上一轮交付失败：原因」）。对话和任务运行只在服务端排序下最近一次结果（`latestDelivery`）是失败时提示「本轮交付失败：原因」，后来的成功交付会取代它；工作流运行的各 Agent 节点是各自的尝试，只要有 `latestFailedDelivery` 就提示「节点 <nodeId> 的交付失败：原因」，其他节点之后成功交付也不会隐藏它（ADR D5）。列表始终是最近一次成功的交付。成功交付有「下载 patch」（下载期间按钮禁用），保存为 `delivery-<id>.patch`，可以在起点提交上 `git apply`；没有改动的交付不提供下载；超过下载上限时显示服务端的「改动过大，无法在线下载」。功能上线前的旧对话（`mode: working_directory`）照旧读沙盒，没有下载。
 - 没有在看、也没有在等回复的对话会关掉事件流，再打开时从上次的序号接着读。
 
 后端还不能运行 Agent 时，新对话上方会提示。

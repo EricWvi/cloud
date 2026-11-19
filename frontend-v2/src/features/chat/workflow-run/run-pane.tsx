@@ -25,6 +25,7 @@ import { ShowSidebarButton } from '../components/sidebar'
 import { emptyDraft, newChatKey, useChatStore } from '../store'
 import { useRunInvalidations } from './run-events'
 import { isCdaseRun } from '@/lib/demo/cdase'
+import { DEMO_MOCK } from '@/lib/demo/flags'
 import { cancelRun, rerun, resumeRun, runKeys, runQuery, runSnapshotQuery, startRun, useRunStartPreflight, useRunUnappliedSettings } from './server-runs'
 import { isLoopHistoryNode } from './loop-round-state'
 import { resolveStageFocusNodeId, resolveTheaterFocus, shouldReleaseLivePinToFollow, shouldStealFocusForArtifactReveal, type TheaterFocusStatusSample } from './run-focus'
@@ -358,7 +359,7 @@ function RunWorkspace({ tenantId, run, readOnly, hostedWorkspace, leading, refre
               <span className="hidden sm:inline">停止</span>
             </Button>
           )}
-          {!readOnly && (run.status === 'failed' || run.status === 'cancelled') && hasResumableNode(run) && run.taskLink === undefined && !isCdaseRun(run.id) && (
+          {!readOnly && (run.status === 'failed' || run.status === 'cancelled') && hasResumableNode(run) && run.taskLink === undefined && !(DEMO_MOCK && isCdaseRun(run.id)) && (
             <Button variant="outline" size="sm" className="h-7 px-2.5 text-xs" aria-label="从失败处继续" title="在同一次运行里重跑失败的节点，保留已成功的结果和工作区文件" onClick={() => { setResumeRefusal(undefined); setResumeOpen(true) }} disabled={busy}>
               <StepForwardIcon />
               <span className="hidden sm:inline">从失败处继续</span>

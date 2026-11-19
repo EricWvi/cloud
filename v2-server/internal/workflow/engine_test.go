@@ -289,3 +289,108 @@ func TestRenderTemplate(t *testing.T) {
 		t.Error("a foreign writer set a variable")
 	}
 }
+
+func TestPreparePayloadPreservesInjectLastFailureBeforeStart(t *testing.T) {
+	for name, tc := range map[string]struct {
+		raw  []byte
+		want bool
+	}{
+		"omitted":       {nil, true},
+		"empty_object":  {[]byte(`{}`), true},
+		"disabled_stub": {[]byte(`{"injectLastFailure":false}`), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo := newMemoryRepo(chain, nil)
+			repo.run.Payload = tc.raw
+			e := NewEngine(repo, &recorder{}, nil, time.Now)
+			if err := e.UpdateInput(context.Background(), "run", str("主题"), map[string]json.RawMessage{"topic": json.RawMessage(`"支付"`)}); err != nil {
+				t.Fatal(err)
+			}
+			p, ok, err := DecodeRunPayload(repo.run.Payload)
+			if err != nil || !ok {
+				t.Fatalf("DecodeRunPayload = %+v %v %v", p, ok, err)
+			}
+			if p.StartNodeID == nil || *p.StartNodeID != "start" || p.Locale != LocaleZhCN {
+				t.Fatalf("prepared payload missing graph metadata: %+v", p)
+			}
+			if p.InjectLastFailure != tc.want {
+				t.Fatalf("InjectLastFailure = %v, want %v", p.InjectLastFailure, tc.want)
+			}
+			if got := p.VariablePool.Values["start.topic"]; got != "支付" {
+				t.Fatalf("start.topic = %v", got)
+			}
+		})
+	}
+}
+
+func TestEnginePreservesExplicitInputStartVariableAcrossStart(t *testing.T) {
+	graph := `{"nodes":[
+		{"id":"start","data":{"kind":"start","inputVariables":[{"name":"input","valueType":"string","required":true}]}},
+		{"id":"out","data":{"kind":"output","outputs":[{"name":"answer","variableSelector":["start","input"]}]}}
+	],"edges":[{"source":"start","target":"out"}]}`
+	ctx := context.Background()
+
+	t.Run("nil kickoff input does not wipe explicit Start variable named input", func(t *testing.T) {
+		repo := newMemoryRepo(graph, nil)
+		e := NewEngine(repo, &recorder{}, nil, time.Now)
+		if err := e.UpdateInput(ctx, "run", nil, map[string]json.RawMessage{"input": json.RawMessage(`"explicit"`)}); err != nil {
+			t.Fatalf("update input: %v", err)
+		}
+		if err := e.Start(ctx, "run"); err != nil {
+			t.Fatalf("start failed: %v", err)
+		}
+		if repo.run.Status != StatusSucceeded || repo.output == nil || *repo.output != `{"answer":"explicit"}` {
+			t.Fatalf("run = %s, output = %v", repo.run.Status, repo.output)
+		}
+	})
+
+	t.Run("non-nil kickoff input does not overwrite explicit Start variable named input", func(t *testing.T) {
+		repo := newMemoryRepo(graph, str("initial"))
+		e := NewEngine(repo, &recorder{}, nil, time.Now)
+		if err := e.UpdateInput(ctx, "run", str("kickoff"), map[string]json.RawMessage{"input": json.RawMessage(`"explicit"`)}); err != nil {
+			t.Fatalf("update input: %v", err)
+		}
+		if err := e.Start(ctx, "run"); err != nil {
+			t.Fatalf("start failed: %v", err)
+		}
+		if repo.run.Status != StatusSucceeded || repo.output == nil || *repo.output != `{"answer":"explicit"}` {
+			t.Fatalf("run = %s, output = %v", repo.run.Status, repo.output)
+		}
+	})
+
+	t.Run("subsequent UpdateInput without values.input still updates mirrored kickoff input", func(t *testing.T) {
+		repo := newMemoryRepo(graph, nil)
+		e := NewEngine(repo, &recorder{}, nil, time.Now)
+		if err := e.UpdateInput(ctx, "run", nil, map[string]json.RawMessage{"input": json.RawMessage(`"first"`)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.UpdateInput(ctx, "run", str("second"), map[string]json.RawMessage{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.Start(ctx, "run"); err != nil {
+			t.Fatalf("start failed: %v", err)
+		}
+		if repo.run.Status != StatusSucceeded || repo.output == nil || *repo.output != `{"answer":"second"}` {
+			t.Fatalf("run = %s, output = %v", repo.run.Status, repo.output)
+		}
+	})
+
+	t.Run("stub payload with injectLastFailure=false starts directly without UpdateInput", func(t *testing.T) {
+		repo := newMemoryRepo(graph, str("direct kickoff"))
+		repo.run.Payload = []byte(`{"injectLastFailure":false}`)
+		e := NewEngine(repo, &recorder{}, nil, time.Now)
+		if err := e.Start(ctx, "run"); err != nil {
+			t.Fatalf("start failed: %v", err)
+		}
+		if repo.run.Status != StatusSucceeded || repo.output == nil || *repo.output != `{"answer":"direct kickoff"}` {
+			t.Fatalf("run = %s, output = %v", repo.run.Status, repo.output)
+		}
+		p, ok, err := DecodeRunPayload(repo.run.Payload)
+		if err != nil || !ok {
+			t.Fatalf("DecodeRunPayload = %+v %v %v", p, ok, err)
+		}
+		if p.StartNodeID == nil || *p.StartNodeID != "start" || p.Locale != LocaleZhCN || p.InjectLastFailure {
+			t.Fatalf("started payload = %+v", p)
+		}
+	})
+}

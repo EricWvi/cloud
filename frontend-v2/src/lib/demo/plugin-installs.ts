@@ -1,7 +1,7 @@
 import type { PluginCatalogEntry } from '@/api/generated.schemas'
 import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
-import { demoMockEnabled } from './flags'
+import { DEMO_MOCK } from './flags'
 
 const EMPTY_SELECTION: string[] = []
 
@@ -76,7 +76,8 @@ function demoEntry(
   }
 }
 
-export const demoHookEntry = demoEntry(
+// Pure, so a build without the flag drops it along with withDemoCatalog's demo branch.
+export const demoHookEntry = /* @__PURE__ */ demoEntry(
   'sample-hooks',
   'hook',
   '示例 Hooks',
@@ -89,7 +90,7 @@ export const demoHookEntry = demoEntry(
  * actual package. Outside the demo (`VITE_DEMO_MOCK` unset) the catalog is returned unchanged.
  */
 export function withDemoCatalog(catalog: PluginCatalogEntry[]): PluginCatalogEntry[] {
-  if (!demoMockEnabled()) return catalog
+  if (!DEMO_MOCK) return catalog
   return [
     ...catalog,
     ...(catalog.some((entry) => entry.kind === 'hook') ? [] : [demoHookEntry]),
@@ -104,14 +105,14 @@ export function withDemoCatalog(catalog: PluginCatalogEntry[]): PluginCatalogEnt
  */
 export function demoInstallable(entry: Pick<PluginCatalogEntry, 'kind'>): boolean {
   return (
-    demoMockEnabled() &&
+    DEMO_MOCK &&
     (entry.kind === 'agent' || entry.kind === 'hook')
   )
 }
 
 /** A 3–5 second pause so the demo install feels like the real ones; none outside the demo. */
 export function demoInstallDelayMs(): number {
-  return demoMockEnabled() ? 3000 + Math.random() * 2000 : 0
+  return DEMO_MOCK ? 3000 + Math.random() * 2000 : 0
 }
 
 export function waitForDemoInstallDelay(ms: number): Promise<void> {

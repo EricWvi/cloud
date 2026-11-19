@@ -215,12 +215,13 @@ func (h *handler) createWorkflowRun(w http.ResponseWriter, r *http.Request, a ac
 		return
 	}
 	var in struct {
-		ProjectID   string  `json:"projectId"`
-		SnapshotID  string  `json:"snapshotId"`
-		Input       *string `json:"input"`
-		Name        string  `json:"name"`
-		TriggerKind string  `json:"triggerKind"`
-		TriggerRef  string  `json:"triggerRef"`
+		ProjectID         string  `json:"projectId"`
+		SnapshotID        string  `json:"snapshotId"`
+		Input             *string `json:"input"`
+		Name              string  `json:"name"`
+		TriggerKind       string  `json:"triggerKind"`
+		TriggerRef        string  `json:"triggerRef"`
+		InjectLastFailure *bool   `json:"injectLastFailure"`
 	}
 	if !decodeWorkflow(w, r, &in) {
 		return
@@ -238,11 +239,12 @@ func (h *handler) createWorkflowRun(w http.ResponseWriter, r *http.Request, a ac
 		return
 	}
 	run, err := s.CreateWorkflowRun(r.Context(), tenant, id, in.SnapshotID, store.WorkflowRunInput{
-		ProjectID:   in.ProjectID,
-		Name:        strings.TrimSpace(in.Name),
-		Input:       in.Input,
-		TriggerKind: in.TriggerKind,
-		TriggerRef:  in.TriggerRef,
+		ProjectID:         in.ProjectID,
+		Name:              strings.TrimSpace(in.Name),
+		Input:             in.Input,
+		TriggerKind:       in.TriggerKind,
+		TriggerRef:        in.TriggerRef,
+		InjectLastFailure: in.InjectLastFailure,
 	})
 	if err != nil {
 		workflowRunFault(w, err, "create workflow run")

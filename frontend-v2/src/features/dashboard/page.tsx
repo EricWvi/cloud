@@ -3,7 +3,7 @@ import { useLocation } from 'react-router'
 import SessionList from './analysis/list'
 import RealOverview from './real-overview'
 import { SpaceUsageSection } from './space-usage'
-import { demoMockEnabled } from '@/lib/demo/flags'
+import { DEMO_MOCK } from '@/lib/demo/flags'
 import './dashboard.css'
 
 /** A single page for real workspace progress and persisted session analysis. */
@@ -22,12 +22,12 @@ export default function Page() {
           <p>从团队协作进度，到每一次 Agent 会话的执行细节。</p>
         </div>
         <nav className="db-section-links" aria-label="Dashboard 分区">
-          {demoMockEnabled() && <a href="#space-usage">空间用量</a>}
+          {DEMO_MOCK && <a href="#space-usage">空间用量</a>}
           <a href="#team-overview">团队概览</a>
           <a href="#session-analysis">会话分析 ↓</a>
         </nav>
       </header>
-      <SpaceUsageSection />
+      {DEMO_MOCK && <SpaceUsageSection />}
       <section id="team-overview" aria-label="团队概览" className="db-team-section">
         <RealOverview />
       </section>

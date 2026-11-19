@@ -12,7 +12,7 @@ Cloud v2 的**临时**单体后端：一个进程、一个 PostgreSQL 库，实�
 
 ## 运行
 
-需要 Linux/WSL、Git、Go（版本见 `go.mod`）和 PostgreSQL。仓库根目录的 `compose.yaml` 提供本地 PostgreSQL（127.0.0.1:55432）。v2-server 默认连接其中的 `ora_v2` 库，库不存在时自动创建，启动时建表。Node 数据目录放在 Linux 原生文件系统。
+需要 Linux/WSL、Git、Go（版本见 `go.mod`）和 PostgreSQL。仓库根目录的 `compose.yaml` 提供本地 PostgreSQL（127.0.0.1:55432）。v2-server 默认连接其中的 `ora_v2` 库，库不存在时自动创建，启动时自动执行尚未应用的迁移（见下文「数据库迁移」）。Node 数据目录放在 Linux 原生文件系统。
 
 ```sh
 docker compose -p cloud up -d --wait   # 在仓库根目录
@@ -28,6 +28,8 @@ V2_LOGIN=email go run .                # 开发模式，监听 127.0.0.1:8090
 | `V2_ADDR` | `127.0.0.1:8090` | 监听地址 |
 | `V2_DATABASE_URL` | `postgres://ora:ora-local@127.0.0.1:55432/ora_v2?sslmode=disable` | PostgreSQL |
 | `V2_DATA_DIR` | `$HOME/.ora-v2` | 仓库 mirror、marketplace checkout、Node 与对话目录；同一目录只允许一个进程持有，使用短路径以满足 Unix socket 长度限制；用 release 构建的 Node 时，它和各级父目录都不能组可写或其他人可写（不能放在 `/tmp` 下），否则启动时报错退出 |
+| `V2_DELIVERY_MAX_OBJECT_BYTES` | `67108864`（64 MiB） | 每轮交付上限，分别检查变更和未跟踪文件的大小总数，以及相对起点新增的 Git 对象的未压缩字节总数，须为正整数；超限记录「改动过大」 |
+| `V2_DELIVERY_MAX_PATCH_BYTES` | `16777216`（16 MiB） | 在线下载一次交付的完整 patch 的字节上限，须为不超过 `268435456`（256 MiB）的正整数，否则启动时报错退出；超限返回 413 `patch_too_large`，交付本身保留 |
 | `V2_USERS_FILE` | `users.json` | 启动时预置的账号文件（相对进程工作目录）：`users` 里的 `email`、可选的 `displayName`、`role`（`owner` / `member`）；`retired` 里列出要从成员页移除的旧预置 `email`。`users` 幂等写入，已存在的账号只更新名字和角色；不在 `users` 里的账号默认保留，只有 `retired` 中的地址会在首次启动时软删除。文件缺失、没有 owner、邮箱重复或 `users` 与 `retired` 重叠时拒绝启动 |
 | `V2_PLUGIN_MARKETPLACE_URL` | `https://github.com/ora-space/marketplace` | 未设置使用开发默认，显式空字符串关闭官方源；插件市场 Git HTTPS 地址；禁止携带凭据、query 或 fragment。离线测试直接构造 Syncer 使用本地仓库 |
 | `V2_PLUGIN_MARKETPLACE_BRANCH` | `main` | 市场同步分支；启动时浅克隆并拉取，之后按间隔快进工作副本 |
@@ -44,6 +46,20 @@ V2_LOGIN=email go run .                # 开发模式，监听 127.0.0.1:8090
 ```sh
 TEST_DATABASE_URL='postgres://ora:ora-local@127.0.0.1:55432/ora?sslmode=disable' go test -race ./...
 ```
+
+### 数据库迁移
+
+表结构由 [`internal/store/migrations`](internal/store/migrations) 下按序编号的 SQL 文件定义（`NNNN_snake_name.sql`，从 `0001` 起连续），编译进 binary，`store.Open` 在启动时自动执行尚未应用的文件。每个文件在单独的事务里执行，并在同一事务里把版本、文件名和文件内容的 SHA-256 写进当前 schema 的 `v2_schema_migrations`；多个进程同时启动时由按 schema 加的事务级 advisory lock 串行，每个迁移只执行一次。`0001_initial.sql` 是迁移引入前 `schema.sql` 在空库上建出的最终结构。
+
+启动在执行任何迁移前先校验，不满足就报错退出并指出文件或版本：文件名不合规或编号不连续、已应用的迁移内容或文件名被改动、库里有本 binary 不认识的更新版本、已应用的最高版本以下还有未应用的文件，以及库里已有 v2-server 的表却没有 `v2_schema_migrations`（迁移引入前的库，须删除重建，不做衔接）。
+
+改表结构或修数据：
+
+- 新增下一个编号的文件，不要修改、改名或重新编号已合入 `main` 的文件；已应用文件的校验和不一致时服务拒绝启动。
+- 编号取 `main` 上最新编号的下一个；合入前 rebase 后再核对，不能使用等于或小于 `main` 最新编号的数字。按名字顺序执行"所有未应用文件"时，插在已有编号之下的文件在升级库上最后执行、在新库上却在中间执行，两边的结构会分叉，所以启动直接拒绝这种情况。
+- 数据修复也写成迁移，只执行一次，不再每次启动重跑。
+- 每个文件在一个事务里执行，所以文件里不能写 `BEGIN`/`COMMIT` 等事务控制语句，也不能用 PostgreSQL 禁止在事务块中执行的语句（`CREATE INDEX CONCURRENTLY`、`VACUUM`、`ALTER SYSTEM` 等）；以行首事务控制语句开头的文件启动时直接拒绝。
+- 迁移需要能在空库上从 `0001` 起建出同样的结构：`internal/store/migrate_test.go` 对每个 k 先应用 1..k 再升级到最新，与新建库比较表、列、约束、索引、函数、触发器、枚举值、视图定义和序列，必须完全一致。
 
 ### 录屏场景 seed
 
@@ -282,7 +298,8 @@ Agent 正在执行一轮时，人工推进返回 409 `run_active`。
 - **一个任务最多一个活着的运行**：与活工作流处理也互斥（409 `run_active`），空闲 Agent 会话必须先结束才能交给工作流。重新执行会先结束空闲的旧会话（`endReason = replaced`）；正在执行一轮时是 409 `run_active`，要先停。
   页面不排队，追问在一轮执行中同样是 409 `run_active`。
 - **停止即结束这次运行**：固定 Node 上取消一轮会结束整个会话，之后只能重新执行。任务完成或取消时结束空闲会话（`closed`）。
-- **重启**：进程启动前把上一个进程留下的活运行记为 `interrupted`，正在执行的任务回到 `pending`；不重放、不恢复。
+- **回合交付**：完成或执行失败的回合，在交付为 `delivered` 或 `empty` 后进入待验收。交付失败或停止回到待处理，交付失败的原因保存在交付记录中。交付期间任务仍为进行中，人工推进返回 409 `run_active`。
+- **重启**：进程启动前结束上一个进程留下的活运行，正在执行或交付的任务回到 `pending`。启动补交付只保存原工作目录的内容，不重放回合。
 - **派给人的任务**：负责人本人可以用自己选的 Agent 处理，执行器就决定了 Agent。只有负责人能开运行（包括重新执行和 `toAgent` 评论开的新运行），
   别人是 409 `not_assignee`；别人仍能看过程、停止。跑完、停止对任务状态的推进与 Agent 任务相同。
 - **执行器**：`executorId` 必须是上面 `executors` 列出的执行器，否则 400 `invalid_executor`；不填时选目录中的第一项，目录为空时不启动执行。
@@ -423,8 +440,8 @@ HTTP 集成测试按此候选 OpenAPI 校验每一次响应，并覆盖创建、
 - 可选查询参数 `issueId` 在 v2 被忽略，传其他租户或不存在的 `issueId` 仍返回 200（Cloud 对未知或跨租户 `issueId` 返回 404）。
 - 通过 `POST /api/v2/tenants/{tid}/tasks/{taskid}/comments` `@` 工作流提交时，对声明为 `object`、`array`、`array[...]`、`array[file]` 的文本输入在 `workflow.CheckStart` 前先按 JSON 解码（非法 JSON 返回 `400 workflow_run_input_invalid`、`reason: "type_mismatch"`）；直接传结构化 JSON 值也照常接受。
 - 普通评论与工作流评论共用 `(task_id, author_id, create_key)`：同一个 key 换内容仍返回原评论，不比较请求体；正式 Cloud 返回 `409 idempotency_conflict`。
-- 工作流评论在准备或启动被拒绝、且运行从未开始执行时，事务撤销评论、运行及初始 scope，释放 key；同 key 重试可重新启动。若 `Start` 已进入执行后才报错，则保留评论与运行，确认停止后标为已取消并记录安全的失败原因；同 key 重试返回这条记录，不重复执行。后一种情况与正式 Cloud 的失败请求不留记录约定不同，重新发起须使用新 key。
-- 已软删除运行的评论卡片只保留名称、版本和状态，时间线与同 key 重放均不返回其输出或错误，前端也不渲染这些内容。
+- 工作流评论在准备或启动被拒绝、且运行从未开始执行时（包括在提交评论后、运行开始前发生进程重启的场景，由 `taskworkflow.Host.Recover` 清理），事务撤销评论、运行及初始 scope，释放 key；同 key 重试可重新启动。若 `Start` 已进入执行后才报错，则保留评论与运行，确认停止后标为已取消并记录安全的失败原因；同 key 重试返回这条记录，不重复执行。后一种情况与正式 Cloud 的失败请求不留记录约定不同，重新发起须使用新 key。
+- 已软删除运行的评论卡片与 `GET /api/v2/tenants/{tid}/tasks/{taskid}/workflow-runs` 只保留名称、版本和状态，不返回其输出或失败原因，前端也不渲染这些内容。
 
 ### 项目仓库
 
@@ -585,12 +602,12 @@ not execute these kinds: `crates/application/src/workflow_run/engine/node_type.r
 - **交互节点接口不在正式契约里**：`api/openapi.json` 在节点级只有 `GET …/runs/{rid}/nodes/{nodeId}/session`，没有发消息和停止本轮，所以 `turns`、`stop` 只在 v2，是 Cloud 的候选接口。The interactive routes are v2-only: Cloud's `api/openapi.json` has only `GET …/runs/{rid}/nodes/{nodeId}/session` at node level, so `turns` and `stop` are candidates for Cloud.
 - **执行桥接缝**：`server.Options.WorkflowRuns`（`server.WorkflowRunHost`）由执行桥实现、在 `main` 注入；未注入时 start/cancel/input/complete 返回 `503 workflow_run_host_unavailable`，定义与历史读取照常。续跑是同一个执行桥上可选的 `server.WorkflowRunResumer`，没有实现它时 resume 与 resume-preview 同样返回 503；拒绝用 `*server.WorkflowRunNotResumable` 带出拒绝原因。HTTP 只做登录/成员校验、严格解码和错误码映射，派发、停止确认、会话与对话历史都留在执行桥；拒绝用 server 包的哨兵错误表达（`ErrWorkflowRunNotStartable`、`ErrWorkflowRunNotEditable`、`ErrWorkflowNodeNotAwaitingInput`、`ErrWorkflowNodeNotFound`、`ErrWorkflowRunStopUnconfirmed`、`WorkflowRunInputInvalid`）。
 - **进程内存储端口**：执行桥直接调用 store 上的状态转移，不经 HTTP——`StartWorkflowRun`、`CreateWorkflowNodeRun`、`BindWorkflowNodeSession`、`CompleteWorkflowNodeRun`、`FailWorkflowNodeRun`（失败 attempt 号在同一事务里分配，payload 由领域构造）、`RetryWorkflowNodeRun`（失败行软删 + 插入等待运行的下一 attempt，编号连续）、`WakeWorkflowNodeRun`（唤醒等待的重试，重复唤醒 no-op）、`ResumeWorkflowEngineRun`（从失败处继续：运行锁内按领域给出的计划软删节点行、关闭被清 Loop 的轮次、清 payload，运行回到 running）、`FinishWorkflowRun`（以失败结束时同一事务取消等待中的重试）、`AbandonWorkflowRetryWait`（运行已结束时收尾单个等待行）、`CancelWorkflowRun`（同一事务里收尾活动 Loop 轮次并去掉等待中重试的 `retry_wait`）、`StartWorkflowLoopRound`（同一 Loop 只允许一个活动轮）、`SettleWorkflowLoopRound`（重复结算同状态为 no-op）、`DeleteWorkflowRun`。节点完成对已终态尝试是 no-op，取消对已取消运行幂等。取消也接受 `pending` 运行（desktop 只接受 `running`，其余返回 `NotActive`）：v2 的取消是用户可重试的操作，执行桥确认停止前重复调用必须返回同一个已取消运行，排队中的运行也要能直接从页面撤掉。
-- **事件流与工作流节点会话**：运行事件流订阅 `server.Options.WorkflowRunEvents`，`main` 注入执行桥的 `workflowhost.Hub`。节点会话事件流以节点尝试为键（重试是新的尝试和新的会话）：公共执行服务把会话记在启动运行的人（`started_by`，定时触发时是任务的创建者）的 scope 下；服务端先校验调用者的租户成员身份和运行归属，再按运行记录的 `started_by` 身份向公共执行服务订阅会话和读取轮次提示，因此节点会话对整个租户可见（跨租户或未派发仍返回 404），包括 Agent 读取的文件内容和工具调用；在共享运行里选用个人 Skill，就等于把它的内容共享给能看到这次运行的所有成员（从任务评论里发起的运行同样适用，发起人就是评论人）。没有记录发起人的运行读取节点会话时回退为调用者；续跑这样的运行会把续跑的人记为发起人（`EnsureWorkflowStarter`）。运行详情的 `startedBy` 给出启动门禁记下的发起人，页面据此只给发起人显示交互节点的操作，运行详情和运行列表另带 `startedByName` 供显示。
+- **事件流与工作流节点会话**：运行事件流订阅 `server.Options.WorkflowRunEvents`，`main` 注入执行桥的 `workflowhost.Hub`。节点会话事件流以节点尝试为键（重试是新的尝试和新的会话）：公共执行服务把会话记在启动运行的人（`started_by`，定时触发时是任务的创建者）的 scope 下；服务端先校验调用者的租户成员身份和运行归属，再按运行记录的 `started_by` 身份向公共执行服务订阅会话和读取轮次提示，因此节点会话对整个租户可见（跨租户或未派发仍返回 404），包括 Agent 读取的文件内容和工具调用；在共享运行里选用个人 Skill，就等于把它的内容共享给能看到这次运行的所有成员（从任务评论里发起的运行同样适用，发起人就是评论人）；同样，若运行启用 `injectLastFailure` 把上次失败的文字注入 `agentPrompt`（`workflowhost/prompt.go`），同租户成员也都能在重跑或续跑尝试的 `turn_ended.prompt` 里看到这段内容。没有记录发起人的运行读取节点会话时回退为调用者；续跑这样的运行会把续跑的人记为发起人（`EnsureWorkflowStarter`）。运行详情的 `startedBy` 给出启动门禁记下的发起人，页面据此只给发起人显示交互节点的操作，运行详情和运行列表另带 `startedByName` 供显示。
 - **分支决策投影**：根 Condition 决策在 `conditionDecisions`，Iteration 决策在 `iterationConditionDecisions`（`nodeId#round`），Loop 决策留在每轮 `scope.state`。
 - **变量与失败尝试投影**：运行 payload 的其余部分不公开；除了 Condition 的 `conditionDecisions`，详情再投影 desktop `GetWorkflowRunResponse` 里的两项。`variables` 读 `variablePool` 的 catalog（`<节点>.<名字>`，按键排序），`sourceNodeId` 取 `writer`，没赋值的不带 `value`，赋了 `null` 的带 `null`；跳过旧的 `selected_branch_id` 路由项，键不合法的项跳过而不让整个详情失败（desktop 在这里报 payload 损坏）。运行开始前没有变量池，读出空列表。`failedAttempts` 是被软删的 `failed` 节点行（desktop 的 `list_failed_attempts`），取各行 `payload.error_detail`，没有的跳过；只有重试、续跑和整次重跑会软删失败行；v2 由自动重试（根作用域与 Loop / Iteration 成员）和「从失败处继续」软删（v2 没有整次重跑），其余情况下为空，当前失败的尝试就是节点自己的行。
 - **能力边界**：支持在同一次运行里「从失败处继续」（只保留现状，不回滚文件，见下文）；整次运行 restart、checkpoint 回滚和换用新发布版本续跑不在演示范围，顶栏“再跑一次”创建新运行。重启中断由执行桥提供，见下文“工作流执行”。
 
-运行页按选中的 Loop scope 或 Iteration 下标投影节点状态，并以该次尝试的 `nodeRunId` 订阅会话事件。该轮未执行的成员没有尝试身份，不继承前一轮的会话或执行元数据。启动输入和根变量只覆盖根 Start，不覆盖 Loop 的本轮入口。`failedAttempts` 按发生它的作用域归属：根作用域的尝试归根节点，Iteration 尝试归它的轮次，Loop 尝试归它的轮次 scope；前端按选中的轮次展示，跨轮不串。
+运行页按选中的 Loop scope 或 Iteration 下标投影节点状态，并以该次尝试的 `nodeRunId` 订阅会话事件。该轮未执行的成员没有尝试身份，不继承前一轮的会话或执行元数据。启动输入和根变量只覆盖根 Start，不覆盖 Loop 的本轮入口；当根 Start 声明了名为 `input` 的显式启动变量且已赋值时，`StartAs` 保留该显式值、不再用 kickoff `input` 覆盖（与 desktop 先写变量再镜像 kickoff 相反，按 `#1235` 有意保留）。`failedAttempts` 按发生它的作用域归属：根作用域的尝试归根节点，Iteration 尝试归它的轮次，Loop 尝试归它的轮次 scope；前端按选中的轮次展示，跨轮不串。
 
 ### 对话
 
@@ -617,7 +634,7 @@ not execute these kinds: `crates/application/src/workflow_run/engine/node_type.r
 
   session 结束后对话只读：再发消息返回 409 `conversation_ended`，页面提示新开对话。不会在同一对话里新开 session，也不重放上下文。
 - **幂等**：创建对话和发消息必须带 `Idempotency-Key`，它就是该轮的 attempt ID。用同一个 key 重试，返回原对话和原 Ref，不会重复执行；同一个 key 换了参数，返回 409 `idempotency_conflict`。结果未知时返回 503 `outcome_unknown`，要用同一个 key 重试。第一条消息被明确拒绝时不留下空对话。
-- **上一轮未结束**：返回 409 `turn_running`，由页面排队，上一轮结束后再发。
+- **上一轮未结束或正在交付**：返回 409 `turn_running`，由页面排队，交付有结果后再发。交付失败单独记录，不结束仍健康的 Agent 会话。
 - **事件流**：每条消息的 `id` 是 session 内序号，`Last-Event-ID`（或 `after`）从其后续上。`session_ended` 之后发 `end` 事件；读取失败发 `failure`，不会冒充正常结束。快照 `history` 每次整份替换，`records[].data` 是固定 Node 的 HistoryLine。关闭事件流只停止观察，不停止 Agent。
 - **简化**：同一对话的操作用进程内互斥串行，依赖 v2-server 是单进程；首版只接文本消息，必须选项目。
 
@@ -625,25 +642,44 @@ not execute these kinds: `crates/application/src/workflow_run/engine/node_type.r
 
 HTTP 集成测试按 `chat.openapi.json` 验证 JSON 响应，向注入点传入 `executiontest.Stub`，覆盖对话生命周期、停止后只读、事件流续传、项目顺序和执行不可用；`internal/chat` 的测试用真实 PostgreSQL 和执行端口替身，覆盖幂等重试、结果未知、上一轮未结束、停止与重启后只读和删除顺序。
 
+### 回合交付
+
+普通对话、任务 Agent 运行和工作流 Agent 节点的每一轮已接受消息在结束后交付，包含失败和停止。工作流节点完成操作和没有接受消息的尝试不产生交付。工作流共用目录的交付按顺序进行，其他仍在运行的节点可以继续写入。交付失败单独记录，工作流仍按执行结果推进。
+
+交付在项目镜像里新建 `refs/ora/deliveries/<projectId>/<deliveryId>`（两个 ID 都是 UUID）。提交的唯一父提交是工作区登记的起点，包含 Git 纳入的工作区内容，忽略规则和 Ora 物化的技能目录照常排除。交付提交使用固定的 Ora 身份。同步只更新该项目绑定分支的快照，已创建的交付 ref 不会重写或删除。
+
+先写 Git ref，再写 PostgreSQL 记录。起点和结果的树相同记为 `empty`，无 ref；大小超限或其他失败记为 `failed` 并保留原因。崩溃时写到镜像但未落库的 ref 不会从交付读接口发现。启动先结束未完成的执行，再补交付，之后才恢复工作流调度和接收请求。Agent 删掉 `.git` 的目录照常交付，但技能目录（`.opencode/skills`、`.claude/skills`）下有改动时记为 `delivery_unavailable`，因为已无法区分哪些是 Ora 物化的技能；`.git` 是指向仓库目录的符号链接时按 gitfile 指针处理。已清理的目录记录 `workspace_removed`；`-cleanup` 保留镜像与交付历史。
+
+变更视图、单文件 diff 和 patch 下载从镜像读取交付，路由见下节。
+
+如果交付失败记录也无法落库，轮次仍以 `delivery_unavailable` 结束，页面不再显示进行中。未落库的交付留待启动重试，当时工作目录可能已包含后续改动。
+
 ### Agent 工作区查看
 
-对话页和工作流运行页的右侧面板只读查看 Agent 的工作副本，使用独立候选契约 [`workspace.openapi.json`](workspace.openapi.json)。正式 Cloud 中 Node 运行在沙盒里，服务端读不到工作副本，届时要改为经 Node 读取；这里因为 v2-server 与 Node 同机，直接读本机目录。读取逻辑在 [`internal/workspacefs`](internal/workspacefs)。
+对话页、任务运行页和工作流运行页的右侧面板只读查看 Agent 的工作副本和它的回合交付，使用独立候选契约 [`workspace.openapi.json`](workspace.openapi.json)。浏览文件读工作副本：正式 Cloud 中 Node 运行在沙盒里，服务端读不到工作副本，届时要改为经 Node 读取；这里因为 v2-server 与 Node 同机，直接读本机目录。变更和 patch 读项目镜像里的交付（见上节）。读取逻辑在 [`internal/workspacefs`](internal/workspacefs)。
 
 | 路由 | 行为 |
 |---|---|
 | `GET …/chat/conversations/{cid}/workspace/entries?path=` | 对话工作副本的一层目录，目录在前；`path` 省略为根 |
 | `GET …/chat/conversations/{cid}/workspace/file?path=` | 一个文本文件的内容 |
-| `GET …/chat/conversations/{cid}/workspace/changes` | 相对克隆时 commit 的变更文件，含未跟踪且未忽略的文件，带增删行数 |
-| `GET …/chat/conversations/{cid}/workspace/diff?path=` | 一个文件相对克隆时 commit 的 unified diff；未变更时为空 |
-| `GET …/workflow-runs/{rid}/workspace/{entries,file,changes,diff}` | 同上，读取该运行各 Agent 节点共用的工作副本 |
+| `GET …/chat/conversations/{cid}/workspace/changes` | 最近一次 `delivered` 或 `empty` 交付相对起点的变更文件，带增删行数，并带 `deliveryState` |
+| `GET …/chat/conversations/{cid}/workspace/diff?path=&deliveryId=` | 一个文件在该交付里相对起点的 unified diff；未变更时为空。`deliveryId` 可选，固定读同一来源的某次成功交付 |
+| `GET …/chat/conversations/{cid}/workspace/deliveries/{deliveryId}/patch` | 下载一次交付相对起点的完整 patch（含新文件和二进制，`git apply` 可直接应用） |
+| `GET …/workflow-runs/{rid}/workspace/{entries,file,changes,diff,deliveries/{deliveryId}/patch}` | 同上，读取该运行各 Agent 节点共用的工作副本和该运行的交付 |
+| `GET …/tasks/{taskid}/runs/{rid}/workspace/{entries,file,changes,diff,deliveries/{deliveryId}/patch}` | 同上，读取这次任务运行的工作副本和交付 |
 
-`…` 是 `/api/v2/tenants/{tid}`。对话只能读本人的（他人的按 404 `not_found`），运行与运行详情一样对租户成员可见。
+`…` 是 `/api/v2/tenants/{tid}`。对话只能读本人的（他人的按 404 `not_found`，和不存在的对话相同），运行与运行详情一样对租户成员可见。交付的读取权限与此相同；来源被删除后（删除对话、删除工作流运行），它的交付不再可读，交付 ref 留在镜像里。交付 ID 只在当前来源内查找，别的来源的 ID 返回 404 `delivery_not_found`。
 
-- **位置落库**：Agent 运行时在工作副本克隆并物化技能后、Agent 启动前，把 `WorkspaceID → 目录、克隆时 commit` 写进 `v2_workspaces`，所以会话结束、服务重启后仍能查看。还没克隆好时返回 404 `workspace_not_ready`；目录已被 `-cleanup` 删除时返回 410 `workspace_removed`。
+- **变更视图**：`deliveryState.mode` 为 `delivery` 时，`viewDelivery` 是正在显示的成功交付（`empty` 也算，它取代之前的交付，文件列表为空），`latestDelivery` 是最近一次结果（含失败），`latestFailedDelivery` 是最近一次失败，`reasonCode`、`reason` 说明原因；`inProgress` 表示这个来源有一轮正在执行或正在交付，此时仍显示上一次交付。还没有成功交付时文件列表为空，`baseCommit` 取记录的起点。只要来源有一轮登记过交付，变更和 diff 就不再读工作副本，第一轮还在执行或第一次交付失败时也一样。
+- **旧会话**：本功能上线前的会话没有登记过交付，`mode` 为 `working_directory`，照旧读工作副本：相对克隆时 commit 的变更文件，含未跟踪且未忽略的文件；工作副本被删后返回 410 `workspace_removed`。不为它们补交付记录。
+- **固定某次交付的 diff**：`deliveryId` 格式不对返回 400 `invalid_delivery_id`，找不到返回 404 `delivery_not_found`，是失败的交付返回 409 `delivery_failed`（`params.reasonCode`、`params.reason`）；`viewDelivery` 是这次交付，其余字段反映来源当前状态。
+- **patch 下载**：200 为 `application/octet-stream`，`Content-Disposition: attachment; filename="delivery-<id>.patch"`；`empty` 交付返回 204；失败的交付 409 `delivery_failed`；超过 `V2_DELIVERY_MAX_PATCH_BYTES` 返回 413 `patch_too_large`（`params.message` 为「改动过大，无法在线下载」，`params.maxBytes` 为上限），交付保留；镜像或交付 ref 读不到返回 503 `workspace_unavailable`。patch 先在上限内完整生成再发送，出错时不会有部分内容。整个进程同时最多生成 4 份 patch，更多的下载排队等待，调用方断开时放弃等待；因此 patch 占用的内存约为 4 份上限（缓冲扩容时最多约两倍）。交付只能下载 patch，没有 `git fetch` 入口，也没有任何写入交付或 ref 的路由。
+- **缓存**：变更、diff 和 patch 的响应带 `Cache-Control: private, no-store`。
+- **位置落库**：Agent 运行时在工作副本克隆并物化技能后、Agent 启动前，把 `WorkspaceID → 目录、克隆时 commit` 写进 `v2_workspaces`，所以会话结束、服务重启后仍能浏览。还没克隆好时浏览（以及旧会话的变更）返回 404 `workspace_not_ready`；目录已被 `-cleanup` 删除时浏览返回 410 `workspace_removed`，变更、diff 和 patch 照常读交付。
 - **路径**：只接受相对路径，解析符号链接后必须仍在工作副本内，`.git` 不可见；越界返回 400 `invalid_path`。目录列表跳过指向工作副本外的符号链接。
 - **上限**：文件 2 MiB、diff 输出 4 MiB（413 `too_large`），含 NUL 或非 UTF-8 的文件返回 422 `binary_file`；目录最多 5000 项、变更最多 2000 个文件，超出时 `truncated`。
-- **不改 Agent 的 Git 状态**：变更和 diff 在 index 的临时副本里把未跟踪文件标为 intent-to-add 后计算，Agent 的 index 不变。git 调用关闭 hooks、fsmonitor、外部 diff 和 textconv。v2 的 Agent 本来就以同一用户在本机执行命令，这些读取不增加它的权限。
-- **简化**：不检测重命名（显示为删除加新增）；不做文件监听，页面在工具调用完成和一轮结束时刷新；工作流只到运行级，不区分节点各自改了哪些文件。Ora 物化进工作副本的技能不算变更，见「用户技能」。
+- **不改 Agent 的 Git 状态**：旧会话的变更和 diff 在 index 的临时副本里把未跟踪文件标为 intent-to-add 后计算，Agent 的 index 不变。git 调用关闭 hooks、fsmonitor、外部 diff 和 textconv。v2 的 Agent 本来就以同一用户在本机执行命令，这些读取不增加它的权限。
+- **简化**：不检测重命名（显示为删除加新增）；不做文件监听，页面在工具调用完成和一轮结束时刷新；工作流只到运行级，不区分节点各自改了哪些文件。没有交付历史列表，只能读最近的结果，或按已知 ID 固定 diff、下载 patch。Ora 物化进工作副本的技能不算变更，见「用户技能」。
 
 ## 进程内 Agent 执行接口
 
@@ -802,7 +838,7 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 与 desktop 的差异：
 
 - **同一运行的 Agent 并发执行**（与 desktop 相同，列在这里说明做法；Loop 轮次失败时的处理除外，见本条末尾）：同一波就绪的 Agent 各自启动（受下面的会话上限约束），每个尝试是一个独立的执行会话，共用运行的目录，轮次同时执行；交互节点的后续消息同样不等其他节点。同一目录最多 8 个未结束的会话（Node 的 `shared_checkout_sessions` 上限，等待输入的交互节点会话也算在内），执行桥按这个上限限流：运行的未结束会话已满时，新尝试在启动会话前等待，有会话结束（普通尝试结束会话、交互节点完成、停止或随运行关闭）再开始；取消运行或关闭它所在的 Loop 轮次时，等待中的尝试不再启动。会话等 End 得到确认（成功，或报会话不存在、已结束）才让出名额：运行还在执行时，没确认的会话继续占名额，后台从 1 秒起、翻倍到 30 秒重试 End；运行已失败、取消（包括停止未确认、运行还开着的取消）或结束时不再重试，名额直接让出，会话留给项目里的下一次 End——每次没得到停止证明的 End 都会让执行服务重建项目的 Node，连带结束同项目的其他会话，不该为一个用不上的名额提早触发。End 一直确认不了的会话在运行执行期间一直占着名额：8 个名额都被这样的会话占着时，新尝试一直显示「等待会话名额」，不报错；取消运行或重启进程可以解开（重启时先证明旧 Node 进程已停）。重启只保留合法的交互等待（见「交互等待跨重启」）：它们重启后继续占名额，新 Agent 要到下一轮才起，这样计数偏保守；重启前会话已结束、End 没确认的停住节点，恢复时再 End 一次，确认后让出名额。Node 仍拒绝某个会话时只有它自己失败，普通 Agent 节点以 `session` 失败并照常自动重试，交互节点首轮被拒以 `interactive_session` 失败（可从失败处继续）。每个尝试启动前、以及解析完执行器即将 `Start` 前各确认一次运行仍在执行：运行已经结束时它还没有启动任何东西，直接收为 `cancelled`。已经在执行的兄弟不受另一个节点让运行失败的影响，迟到结果照常记录（desktop 同样如此）；Loop 轮次因子节点失败关闭时，已在执行的同轮兄弟收为 `cancelled`，执行桥随即停掉它们的 turn（不等停止确认），迟到结果不再写入；desktop 让它们执行完本轮，这里有意偏离（见 `internal/workflow/README.md`）。代价是被停的 turn 可能在运行目录里留下写了一半的文件：续跑保留文件、从第 1 轮重开 Loop，就从这些文件开始。
-- **prompt**：按 desktop 的 `assemble_workflow_prompt` 组装 `workspace_root`、`current_workflow_step`、`workflow_context`，按运行冻结的 locale 选文案；选择角色且角色正文非空白时，按 desktop 的模板在 `workspace_root` 之后、`current_workflow_step` 之前插入 `<system_instructions>`（角色说明、引用名、正文），选择 Skill 时附加 `required_skills`，不带上次失败注入。节点 prompt 的 `{{#…#}}` 先按变量池渲染，渲染失败的节点以 `prompt_template` 失败，不启动 Agent。公共执行服务在接受 prompt 之后才在 Node 里克隆运行目录，也不暴露它的路径，所以 `workspace_root` 写 `.`（Agent 进程的工作目录就是运行目录），不写 desktop 的绝对路径。
+- **prompt**：按 desktop 的 `assemble_workflow_prompt` 组装 `workspace_root`、`current_workflow_step`、`workflow_context`，按运行冻结的 locale 选文案；选择角色且角色正文非空白时，按 desktop 的模板在 `workspace_root` 之后、`current_workflow_step` 之前插入 `<system_instructions>`（角色说明、引用名、正文），选择 Skill 时附加 `required_skills`；启用 `injectLastFailure`（默认开启）且同一节点、同一 Iteration 项存在可注入的上一次失败尝试（不区分 Loop 轮次：续跑从第 1 轮重放时，第 1 轮会拿到后面轮次的失败，和 desktop 一致）（`structured_output`、`agent_refusal`、`unknown_stop_reason`、`multiple_outputs`）时，在 `required_skills` 之后追加上次失败的文字说明（`structured_output` 另附截断的原输出），写入 `agentPrompt`（`workflowhost/prompt.go`），同一段文字也记在尝试的 `payload.injected_failure_context` 里、显示在节点详情中，同租户成员亦可在重跑或续跑尝试的 `turn_ended.prompt` 里看到。节点 prompt 的 `{{#…#}}` 先按变量池渲染，渲染失败的节点以 `prompt_template` 失败，不启动 Agent。公共执行服务在接受 prompt 之后才在 Node 里克隆运行目录，也不暴露它的路径，所以 `workspace_root` 写 `.`（Agent 进程的工作目录就是运行目录），不写 desktop 的绝对路径。
 - **会话绑定时机**：`Start` 返回 turn 引用即视为 prompt 已被接受，随后把 session 绑定到节点尝试（desktop 同样在 prompt 被接受后才发布绑定）；绑定被拒（尝试已不在运行）时结束该会话。turn 结束后执行桥结束会话，对话历史保留。
 - **结果映射**：只有 `completed` 且答案完整（`AnswerComplete`）才可能成功，再按 desktop 的停止原因映射：`end_turn`、`max_tokens`、`max_turn_requests` 成功；`refusal` 为 `agent_refusal`；缺少停止原因为 `session_ended_without_stop_reason`；其他为 `unknown_stop_reason`。turn 失败、取消、中断或答案不完整一律以 `session` 失败，失败节点保留已有的回答。
 - **取消**：先用发起运行的用户身份同时取消所有活动 turn，全部确认后再关闭运行；还在 Start 的尝试不拖住别的停止，它的 Start 一返回就取消它。任一停止未确认（包括等 Start 超时）时返回 `503 workflow_run_stop_unconfirmed`，运行保持打开但不再推进；已确认停止的兄弟不会提前关闭运行，最后一个 turn 结束后才由执行桥关闭为已取消；超时后才返回的 Start 由它的尝试自己取消。
@@ -836,7 +872,7 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 - 小队权限把 workspace `owner` 角色当作工作区管理员；成员撤销不会自动关闭其小队编组（由后续接入撤销事务的运行承接）。
 - 空间与插件：每个租户固定一个「演示空间」，开发登录时自动创建；里面登记两个真实安装、不可从设置页移除的 Agent 插件——`official/ora-space.opencode@0.6.11` 和 `official/ora-space.claude@0.4.5`，即 [`scripts/prepare-node.sh`](scripts/prepare-node.sh) 校验 SHA 后准备、chat、工作流与定时任务真正加载的那两个。目录来自配置的 marketplace Git 仓库，不读取仓库内硬编码条目；解析 `orax.toml`、README 和 logo，校验后事务替换 PostgreSQL 快照，同步失败或没有可见条目时保留上一版。MCP 通过租户安装和配置接口管理。Plugins 页对市场 Agent、Hook、合集等其他类型只浏览，不提供安装或移除（服务端拒绝新建这些选择，返回 `plugin_kind_not_installable`）；系统预装的 Agent 也只读展示「运行时预装」。Skill 就是空间选择本身，写入即可用、删除即移除，项目 Node 只按选择接收安装包，不参与状态确认。工作流插件由 v2-server 下载并校验 `.orax`，在安装事务里导入 `assets/workflows/*.json`、发布 `v1` 并记录来源幂等表；租户已有同名工作流时给新导入的定义加「（插件）」或序号，不改动已有定义；移除只清除选择，不删除工作流、快照或运行历史。安装写入口要求 owner、`Idempotency-Key` 和当前 version。
 - 成员列表：`memberships` 没有成员 id、版本和加入来源，所以 `id` 直接用 user id、`version` 恒为 1、`status` 取用户状态，`joinMethod` / `joinedAt` / `actorDisplayName` 恒为空；分页参数被忽略，一页返回全部。切到正式 Cloud 的成员接口时替换。
-- 启动时直接建表，没有迁移。
+- 数据库迁移只有前进方向、启动时自动执行，没有单独的 migrate 命令和回滚脚本；引入迁移之前的数据库直接重建，不做衔接（见「数据库迁移」）。
 - 本地 Node 的传输、监督和配套服务位于 [`internal/node`](internal/node/README.md) 与
   [`internal/nodeservices`](internal/nodeservices/README.md)，通过项目 Agent driver 接入服务入口。
   配套服务只支持演示仓库的只读 Git、固定 OpenCode / Claude Code 包、各协议的 fixture，以及配置的 OpenAI / Anthropic 兼容 provider；

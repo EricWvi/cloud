@@ -76,6 +76,15 @@ func executionCaller(caller execution.Caller) ([]byte, error) {
 // Duplicate caller identities return ErrConflict; the runtime resolves retries before dispatch.
 // Session and turn IDs must be server-generated random identities, never caller-selected IDs.
 func (s *Store) CreateExecutionSession(ctx context.Context, scope execution.Scope, session execution.Session, first execution.Turn) error {
+	return s.createExecutionSession(ctx, scope, session, first, false)
+}
+
+// CreateDeliveryExecutionSession admits the first turn and enrolls eligible work atomically.
+func (s *Store) CreateDeliveryExecutionSession(ctx context.Context, scope execution.Scope, session execution.Session, first execution.Turn) error {
+	return s.createExecutionSession(ctx, scope, session, first, true)
+}
+
+func (s *Store) createExecutionSession(ctx context.Context, scope execution.Scope, session execution.Session, first execution.Turn, deliver bool) error {
 	if session.ID == "" || session.EndedAt != nil || first.Ref.SessionID != session.ID {
 		return execution.ErrInvalidRequest
 	}
@@ -104,7 +113,10 @@ func (s *Store) CreateExecutionSession(ctx context.Context, scope execution.Scop
 		if _, err = tx.Exec(ctx, `INSERT INTO v2_execution_sessions(id,tenant_id,user_id,data) VALUES($1,$2,$3,$4)`, session.ID, scope.TenantID, scope.UserID, data); err != nil {
 			return err
 		}
-		return insertExecutionTurn(ctx, tx, scope, session.ID, first)
+		if err := insertExecutionTurn(ctx, tx, scope, session.ID, first); err != nil || !deliver {
+			return err
+		}
+		return enrollDelivery(ctx, tx, scope, session, first)
 	})
 	return executionError(err)
 }
@@ -139,6 +151,15 @@ func insertExecutionTurn(ctx context.Context, tx pgx.Tx, scope execution.Scope, 
 // AppendExecutionTurn records a new turn only while the owning session remains live.
 // TurnID must be a fresh server-generated random identity.
 func (s *Store) AppendExecutionTurn(ctx context.Context, scope execution.Scope, sid string, turn execution.Turn) error {
+	return s.appendExecutionTurn(ctx, scope, sid, turn, false)
+}
+
+// AppendDeliveryExecutionTurn admits a follow-up and enrolls eligible work atomically.
+func (s *Store) AppendDeliveryExecutionTurn(ctx context.Context, scope execution.Scope, sid string, turn execution.Turn) error {
+	return s.appendExecutionTurn(ctx, scope, sid, turn, true)
+}
+
+func (s *Store) appendExecutionTurn(ctx context.Context, scope execution.Scope, sid string, turn execution.Turn, deliver bool) error {
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := requireExecutionAccess(ctx, tx, scope); err != nil {
 			return err
@@ -150,7 +171,10 @@ func (s *Store) AppendExecutionTurn(ctx context.Context, scope execution.Scope, 
 		if session.EndedAt != nil {
 			return execution.ErrSessionEnded
 		}
-		return insertExecutionTurn(ctx, tx, scope, sid, turn)
+		if err := insertExecutionTurn(ctx, tx, scope, sid, turn); err != nil || !deliver {
+			return err
+		}
+		return enrollDelivery(ctx, tx, scope, session, turn)
 	})
 	return executionError(err)
 }

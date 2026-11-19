@@ -16,7 +16,7 @@ import PluginsPage from './page'
 import { useDemoPluginSelections } from '@/lib/demo/plugin-installs'
 
 const mock = vi.hoisted(() => ({ enabled: false }))
-vi.mock('@/lib/demo/flags', () => ({ demoMockEnabled: () => mock.enabled }))
+vi.mock('@/lib/demo/flags', () => ({ get DEMO_MOCK() { return mock.enabled } }))
 vi.mock('@/lib/demo/plugin-installs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/demo/plugin-installs')>()
   return { ...actual, demoInstallDelayMs: () => 0 }

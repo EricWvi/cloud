@@ -7,20 +7,32 @@ import (
 	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/executionwait"
 )
 
 // Subscribe reads directly from the durable cursor. A short poll avoids a replay/live handoff
 // race without another in-memory event log; closing this observer never cancels a worker.
 func (s *Service) Subscribe(ctx context.Context, scope execution.Scope, sid string, after uint64) (execution.Stream, error) {
-	latest, err := s.db.ReadExecutionCursor(ctx, scope, sid)
+	var latest uint64
+	err := s.readRetry.Read(ctx, func(read context.Context) error {
+		var err error
+		latest, err = s.db.ReadExecutionCursor(read, scope, sid)
+		if err != nil {
+			if s.observerReadFailed != nil {
+				s.observerReadFailed()
+			}
+			return publicError(err)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, publicError(err)
+		return nil, err
 	}
 	if after > latest {
 		return nil, execution.ErrInvalidRequest
 	}
 	owned, cancel := context.WithCancel(ctx)
-	return &stream{s: s, scope: scope, sid: sid, cursor: after, ctx: owned, cancel: cancel}, nil
+	return &stream{s: s, scope: scope, sid: sid, cursor: after, ctx: owned, cancel: cancel, retry: s.readRetry}, nil
 }
 
 type stream struct {
@@ -31,6 +43,7 @@ type stream struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	once   sync.Once
+	retry  executionwait.Policy
 }
 
 func (st *stream) Close() error { st.once.Do(st.cancel); return nil }
@@ -42,6 +55,9 @@ func (st *stream) Close() error { st.once.Do(st.cancel); return nil }
 func (st *stream) asNextError(query context.Context, err error) error {
 	if qerr := query.Err(); qerr != nil {
 		return qerr
+	}
+	if st.s.observerReadFailed != nil {
+		st.s.observerReadFailed()
 	}
 	return publicError(err)
 }
@@ -55,30 +71,19 @@ func (st *stream) Next(ctx context.Context) (execution.Event, error) {
 		if err := query.Err(); err != nil {
 			return execution.Event{}, err
 		}
-		events, err := st.s.db.ReadExecutionEvents(query, st.scope, st.sid, st.cursor, 1)
+		var event execution.Event
+		var available bool
+		err := st.retry.Read(query, func(read context.Context) error {
+			var err error
+			event, available, err = st.read(read)
+			return err
+		})
 		if err != nil {
-			return execution.Event{}, st.asNextError(query, err)
+			return execution.Event{}, err
 		}
-		if len(events) > 0 {
-			st.cursor = events[0].Sequence
-			return events[0], nil
-		}
-		session, err := st.s.ReadSession(query, st.scope, st.sid)
-		if err != nil {
-			return execution.Event{}, st.asNextError(query, err)
-		}
-		if session.EndedAt != nil {
-			// End may commit between the empty event query and this session read. Recheck
-			// after observing EndedAt so the terminal event cannot be skipped as EOF.
-			events, err = st.s.db.ReadExecutionEvents(query, st.scope, st.sid, st.cursor, 1)
-			if err != nil {
-				return execution.Event{}, st.asNextError(query, err)
-			}
-			if len(events) > 0 {
-				st.cursor = events[0].Sequence
-				return events[0], nil
-			}
-			return execution.Event{}, io.EOF
+		if available {
+			st.cursor = event.Sequence
+			return event, nil
 		}
 		timer := time.NewTimer(25 * time.Millisecond)
 		select {
@@ -88,4 +93,33 @@ func (st *stream) Next(ctx context.Context) (execution.Event, error) {
 		case <-timer.C:
 		}
 	}
+}
+
+// read keeps the event/session/terminal-recheck sequence in one retry budget.
+// Only Next advances the cursor, after the complete read has succeeded.
+func (st *stream) read(ctx context.Context) (execution.Event, bool, error) {
+	events, err := st.s.db.ReadExecutionEvents(ctx, st.scope, st.sid, st.cursor, 1)
+	if err != nil {
+		return execution.Event{}, false, st.asNextError(ctx, err)
+	}
+	if len(events) > 0 {
+		return events[0], true, nil
+	}
+	session, err := st.s.ReadSession(ctx, st.scope, st.sid)
+	if err != nil {
+		return execution.Event{}, false, st.asNextError(ctx, err)
+	}
+	if session.EndedAt == nil {
+		return execution.Event{}, false, nil
+	}
+	// End may commit between the empty event query and this session read. Recheck
+	// after observing EndedAt so the terminal event cannot be skipped as EOF.
+	events, err = st.s.db.ReadExecutionEvents(ctx, st.scope, st.sid, st.cursor, 1)
+	if err != nil {
+		return execution.Event{}, false, st.asNextError(ctx, err)
+	}
+	if len(events) > 0 {
+		return events[0], true, nil
+	}
+	return execution.Event{}, false, io.EOF
 }

@@ -37,7 +37,7 @@ func taskWorkflowFault(w http.ResponseWriter, err error) {
 		fault(w, http.StatusConflict, "task_closed")
 	case errors.Is(err, store.ErrNotFound):
 		fault(w, http.StatusNotFound, "not_found")
-	case errors.Is(err, ErrWorkflowRunNotStartable), errors.Is(err, ErrWorkflowRunNotEditable):
+	case errors.Is(err, ErrWorkflowRunNotStartable), errors.Is(err, ErrWorkflowRunNotEditable), errors.Is(err, ErrWorkflowRoleNotFound):
 		workflowRunLifecycleFault(w, err, "task workflow")
 	default:
 		workflowRunFault(w, err, "task workflow")

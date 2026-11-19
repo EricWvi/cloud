@@ -65,6 +65,10 @@ test('workflow runs: v2-server executes a published workflow started from chat',
   await page.getByRole('menuitem', { name: new RegExp(name) }).click()
   const dialog = page.getByRole('dialog', { name: '运行工作流' })
   await dialog.getByLabel('运行名称').fill(runName)
+  const injectLastFailure = dialog.getByRole('checkbox', { name: '节点重跑时把上次失败原因告诉智能体' })
+  await expect(injectLastFailure).toBeVisible()
+  await expect(injectLastFailure).toBeChecked()
+  await screenshot(page, testInfo.outputPath('run-dialog-inject-default.png'))
   await dialog.getByRole('button', { name: '创建运行' }).click()
   const pane = page.getByRole('region', { name: '工作流运行' })
   await expect(pane.getByRole('heading', { name: runName })).toBeVisible()
@@ -184,6 +188,10 @@ test('workflow runs: a Condition takes one branch and the other shows as inactiv
   await page.getByRole('menuitem', { name: new RegExp(name) }).click()
   const dialog = page.getByRole('dialog', { name: '运行工作流' })
   await dialog.getByLabel('运行名称').fill(runName)
+  const injectLastFailure = dialog.getByRole('checkbox', { name: '节点重跑时把上次失败原因告诉智能体' })
+  await expect(injectLastFailure).toBeVisible()
+  await expect(injectLastFailure).toBeChecked()
+  await screenshot(page, testInfo.outputPath('run-dialog-inject-default.png'))
   await dialog.getByRole('button', { name: '创建运行' }).click()
   const pane = page.getByRole('region', { name: '工作流运行' })
   await expect(pane.getByRole('heading', { name: runName })).toBeVisible()
@@ -458,4 +466,38 @@ test('workflow runs: another workspace member sees starter, full live and replay
   } finally {
     await colleagueContext.close()
   }
+})
+
+test('workflow runs: unchecking injectLastFailure sends false on create and resets on reopen', async ({ page }) => {
+  await page.goto('/chat')
+  await signIn(page)
+  const tenantId = ((await (await page.request.get('/api/v1/me/tenants')).json()) as { items: { id: string }[] }).items[0]!.id
+  const suffix = Date.now().toString(36)
+  const name = `失败注入开关 ${suffix}`
+  const created = await page.request.post(`/api/v2/tenants/${tenantId}/workflows`, { data: { name, graph: chain } })
+  expect(created.status()).toBe(201)
+  const workflowId = ((await created.json()) as { draft: { workflowId: string } }).draft.workflowId
+  expect((await page.request.post(`/api/v2/tenants/${tenantId}/workflows/${workflowId}/publish`, { data: { version: 'v1' } })).ok()).toBe(true)
+
+  await page.reload()
+  await page.getByRole('button', { name: '运行工作流', exact: true }).click()
+  await page.getByRole('menuitem', { name: new RegExp(name) }).click()
+  const dialog = page.getByRole('dialog', { name: '运行工作流' })
+  const checkbox = dialog.getByRole('checkbox', { name: '节点重跑时把上次失败原因告诉智能体' })
+  await expect(checkbox).toBeChecked()
+  await checkbox.uncheck()
+  await expect(checkbox).not.toBeChecked()
+
+  const createRequest = page.waitForRequest((req) => req.url().includes(`/workflows/${workflowId}/runs`) && req.method() === 'POST')
+  const createResponse = page.waitForResponse((res) => res.url().includes(`/workflows/${workflowId}/runs`) && res.request().method() === 'POST')
+  await dialog.getByLabel('运行名称').fill(`关闭注入 ${suffix}`)
+  await dialog.getByRole('button', { name: '创建运行' }).click()
+  expect((await createRequest).postDataJSON()).toMatchObject({ injectLastFailure: false })
+  const createdRun = (await (await createResponse).json()) as { run: { id: string } }
+  expect((await page.request.delete(`/api/v2/tenants/${tenantId}/workflow-runs/${createdRun.run.id}`)).ok()).toBe(true)
+
+  await page.getByRole('button', { name: '新建对话', exact: true }).click()
+  await page.getByRole('button', { name: '运行工作流', exact: true }).click()
+  await page.getByRole('menuitem', { name: new RegExp(name) }).click()
+  await expect(page.getByRole('dialog', { name: '运行工作流' }).getByRole('checkbox', { name: '节点重跑时把上次失败原因告诉智能体' })).toBeChecked()
 })

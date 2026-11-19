@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/getkin/kin-openapi/routers/legacy"
 )
 
 func TestTaskCommentWorkflowDeletedRunHidesOutputAndError(t *testing.T) {
@@ -35,9 +38,30 @@ func TestTaskCommentWorkflowDeletedRunHidesOutputAndError(t *testing.T) {
 	if _, err := f.db.Exec(f.ctx, `UPDATE v2_workflow_runs SET error = 'private error' WHERE id = $1`, runID); err != nil {
 		t.Fatal(err)
 	}
+	wfDoc, err := openapi3.NewLoader().LoadFromFile("../../task-workflows.openapi.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wfRoutes, err := legacy.NewRouter(wfDoc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskRoutes := c.routes
+	c.routes = wfRoutes
+	if code, wfList := c.do("GET", taskPath+"/workflow-runs", nil); code != 200 {
+		t.Fatalf("workflow-runs before delete = %d %v", code, wfList)
+	} else if items := wfList["items"].([]any); len(items) != 1 || items[0].(map[string]any)["failure"] != "private error" || items[0].(map[string]any)["deleted"] != false {
+		t.Fatalf("workflow-runs before delete = %v", items)
+	}
 	if err := f.store.DeleteWorkflowRun(f.ctx, tid, runID); err != nil {
 		t.Fatal(err)
 	}
+	if code, wfList := c.do("GET", taskPath+"/workflow-runs", nil); code != 200 {
+		t.Fatalf("workflow-runs after delete = %d %v", code, wfList)
+	} else if items := wfList["items"].([]any); len(items) != 1 || items[0].(map[string]any)["deleted"] != true || items[0].(map[string]any)["failure"] != "" {
+		t.Fatalf("deleted workflow-runs leaked failure: %v", items)
+	}
+	c.routes = taskRoutes
 	for _, read := range []string{"timeline", "replay"} {
 		var comment map[string]any
 		if read == "timeline" {

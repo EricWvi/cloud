@@ -7,8 +7,8 @@
 // person runs the Agent that person picks, and only they start it: the work is theirs.
 //
 // The run moves its task: starting or following up puts it in 进行中, a finished turn (completed or
-// failed) hands it to 待验收, and a stopped or interrupted turn returns it to 待处理. While a turn
-// runs, nobody moves the task by hand. Runs never outlive the process: Interrupt ends what a
+// failed) with a good delivery hands it to 待验收. A stopped, interrupted or undeliverable turn
+// returns it to 待处理. While a turn runs or delivers, nobody moves the task by hand. Runs never outlive the process: Interrupt ends what a
 // previous process left live before the host serves requests.
 package taskrun
 
@@ -20,8 +20,10 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/executionwait"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 )
 
@@ -54,6 +56,7 @@ type Store interface {
 	DeleteTaskRun(ctx context.Context, id string) error
 	RecordTaskTurn(ctx context.Context, runID, sessionID, turnID string) error
 	SettleTaskTurn(ctx context.Context, runID, turnID, result, failureCode string) (bool, error)
+	SettleDeliveredTaskTurn(ctx context.Context, tenant, taskID, runID, turnID, result, failureCode string) (bool, error)
 	EndTaskRun(ctx context.Context, runID, reason string) error
 	MarkTaskRunEnding(ctx context.Context, runID, reason string) error
 	ClearTaskRunEnding(ctx context.Context, runID string) error
@@ -70,9 +73,11 @@ type Host struct {
 	catalog execution.Catalog
 	log     *slog.Logger
 
-	ctx     context.Context
-	stop    context.CancelFunc
-	workers sync.WaitGroup
+	ctx         context.Context
+	stop        context.CancelFunc
+	workers     sync.WaitGroup
+	resultRetry executionwait.Policy
+	deliveries  bool
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
@@ -84,6 +89,9 @@ func New(s Store, exec execution.Service, catalog execution.Catalog, log *slog.L
 		log = slog.Default()
 	}
 	h := &Host{store: s, exec: exec, catalog: catalog, log: log, locks: map[string]*sync.Mutex{}}
+	if runtime, ok := exec.(interface{ DeliveryEnabled() bool }); ok && runtime.DeliveryEnabled() {
+		h.deliveries = true
+	}
 	h.ctx, h.stop = context.WithCancel(context.Background())
 	return h
 }
@@ -101,9 +109,6 @@ func (h *Host) Interrupt(ctx context.Context) error {
 	runs, e := h.store.InterruptTaskRuns(ctx)
 	if e != nil {
 		return fmt.Errorf("interrupt task runs: %w", e)
-	}
-	for _, r := range runs {
-		h.moveTask(ctx, r.TenantID, r.TaskID, store.TaskRunning, store.TaskPending)
 	}
 	if len(runs) != 0 {
 		h.log.Info("interrupted task runs left by the previous process", "runs", len(runs))
@@ -487,20 +492,31 @@ func (h *Host) end(ctx context.Context, run store.TaskRun, reason string) error 
 	if e := h.store.MarkTaskRunEnding(ctx, run.ID, reason); e != nil {
 		return e
 	}
-	e := func() error {
-		if run.TurnActive() {
-			result, e := h.exec.Cancel(ctx, owner, execution.Ref{SessionID: run.SessionID, TurnID: run.LastTurnID})
-			if e != nil {
-				return e
-			}
-			h.settle(ctx, run, run.LastTurnID, result)
+	var settleErr error
+	if run.TurnActive() {
+		result, e := h.exec.Cancel(ctx, owner, execution.Ref{SessionID: run.SessionID, TurnID: run.LastTurnID})
+		if e != nil {
+			return errors.Join(e, h.store.ClearTaskRunEnding(context.WithoutCancel(ctx), run.ID))
 		}
-		return h.exec.End(ctx, owner, run.SessionID)
-	}()
-	if e != nil {
+		// Cancel already stopped the turn; bound settlement under WithoutCancel so a storage
+		// outage does not hold the task lock indefinitely, and still end the session below.
+		settleCtx, cancel := h.endSettleContext(ctx)
+		settleErr = h.settle(settleCtx, run, run.LastTurnID, result, false)
+		cancel()
+	}
+	endErr := h.exec.End(context.WithoutCancel(ctx), owner, run.SessionID)
+	if e := errors.Join(settleErr, endErr); e != nil {
 		return errors.Join(e, h.store.ClearTaskRunEnding(context.WithoutCancel(ctx), run.ID))
 	}
 	return h.store.EndTaskRun(ctx, run.ID, reason)
+}
+
+func (h *Host) endSettleContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	budget := h.resultRetry.Budget
+	if budget <= 0 {
+		budget = h.resultRetry.Defaults().QueryTimeout
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), budget)
 }
 
 // watch follows an accepted turn until its result and settles it. Observing never stops the turn.
@@ -509,23 +525,65 @@ func (h *Host) watch(scope execution.Scope, run store.TaskRun, ref execution.Ref
 	go func() {
 		defer h.workers.Done()
 		result, e := h.await(scope, ref)
-		if e != nil {
-			if h.ctx.Err() == nil {
-				h.log.Warn("observe task turn", "run", run.ID, "turn", ref.TurnID, "error", e)
+		for e != nil && h.deliveries && h.ctx.Err() == nil {
+			h.log.Warn("retry observing task turn during delivery", "run", run.ID, "turn", ref.TurnID, "error", e)
+			select {
+			case <-h.ctx.Done():
+				return
+			case <-time.After(time.Second):
 			}
-			return
+			result, e = h.await(scope, ref)
 		}
-		h.settle(h.ctx, run, ref.TurnID, result)
+		if e != nil {
+			if h.ctx.Err() != nil {
+				return // the next process interrupts this run
+			}
+			h.log.Warn("observe task turn", "run", run.ID, "turn", ref.TurnID, "error", e)
+			// This is the task observer's failure, not a replacement for the runtime's
+			// immutable result. A new Start ends this old session before replacing it.
+			result = execution.Result{Status: execution.StatusFailed, FailureCode: "execution_result_unavailable"}
+		}
+		// settle takes the task lock per bounded storage attempt instead of across retry
+		// sleeps, so an outage does not block Start/Comment/Stop callers on the mutex.
+		_ = h.settle(h.ctx, run, ref.TurnID, result, true)
 	}()
 }
 
 // await follows the session until the turn's terminal event. If the stream ends or breaks first,
-// the recorded turn is the authority: it carries the result once written.
+// recoverTurn reads the recorded turn and re-subscribes from the last observed sequence whenever
+// the turn is still running.
 func (h *Host) await(scope execution.Scope, ref execution.Ref) (execution.Result, error) {
-	stream, e := h.exec.Subscribe(h.ctx, scope, ref.SessionID, 0)
-	if e != nil {
-		return h.recorded(scope, ref, e)
+	var cursor uint64
+	resubscribed := false
+	stream, e := h.exec.Subscribe(h.ctx, scope, ref.SessionID, cursor)
+	for {
+		if e == nil {
+			previousCursor := cursor
+			var result execution.Result
+			var done bool
+			result, done, e = h.drainStream(stream, ref.TurnID, &cursor)
+			if done {
+				return result, nil
+			}
+			if resubscribed && cursor == previousCursor {
+				if pauseErr := h.resultRetry.Pause(h.ctx); pauseErr != nil {
+					return execution.Result{}, errors.Join(e, pauseErr)
+				}
+			}
+		}
+		var next execution.Stream
+		var result execution.Result
+		var got bool
+		result, next, got, e = h.recoverTurn(scope, ref, cursor, e)
+		if got || e != nil {
+			return result, e
+		}
+		stream = next
+		resubscribed = true
 	}
+}
+
+func (h *Host) drainStream(stream execution.Stream, turnID string, cursor *uint64) (execution.Result, bool, error) {
 	defer func() { _ = stream.Close() }()
 	for {
 		event, e := stream.Next(h.ctx)
@@ -533,52 +591,150 @@ func (h *Host) await(scope execution.Scope, ref execution.Ref) (execution.Result
 			if errors.Is(e, io.EOF) {
 				e = execution.ErrSessionEnded
 			}
-			return h.recorded(scope, ref, e)
+			return execution.Result{}, false, e
 		}
-		if event.Kind == execution.EventTurnEnded && event.Ref.TurnID == ref.TurnID && event.Result != nil {
-			return *event.Result, nil
+		if event.Sequence > *cursor {
+			*cursor = event.Sequence
+		}
+		if event.Kind == execution.EventTurnEnded && event.Ref.TurnID == turnID && event.Result != nil {
+			return *event.Result, true, nil
 		}
 	}
 }
 
-func (h *Host) recorded(scope execution.Scope, ref execution.Ref, cause error) (execution.Result, error) {
+func (h *Host) recoverTurn(scope execution.Scope, ref execution.Ref, cursor uint64, cause error) (execution.Result, execution.Stream, bool, error) {
 	if h.ctx.Err() != nil {
-		return execution.Result{}, h.ctx.Err()
+		return execution.Result{}, nil, false, h.ctx.Err()
 	}
-	for cursor := ""; ; {
-		page, e := h.exec.ReadTurns(h.ctx, scope, ref.SessionID, cursor, 100)
-		if e != nil {
-			return execution.Result{}, errors.Join(cause, e)
-		}
-		for _, t := range page.Items {
-			if t.Ref.TurnID == ref.TurnID && t.Result != nil {
-				return *t.Result, nil
+	var result execution.Result
+	var next execution.Stream
+	var got bool
+	err := h.resultRetry.Read(h.ctx, func(ctx context.Context) error {
+		// Restart pagination after a failed read; a partial scan never proves absence.
+		for pageCursor := ""; ; {
+			page, e := h.exec.ReadTurns(ctx, scope, ref.SessionID, pageCursor, 100)
+			if e != nil {
+				return e
 			}
+			for _, t := range page.Items {
+				if t.Ref.TurnID == ref.TurnID {
+					if t.Result != nil {
+						result = *t.Result
+						got = true
+						return nil
+					}
+					if t.EndedAt == nil && !errors.Is(cause, execution.ErrSessionEnded) {
+						stream, e := h.exec.Subscribe(h.ctx, scope, ref.SessionID, cursor)
+						if e == nil {
+							next = stream
+							return nil
+						}
+						return e
+					}
+					return execution.ErrUnavailable
+				}
+			}
+			if page.NextCursor == "" {
+				return execution.ErrUnavailable
+			}
+			pageCursor = page.NextCursor
 		}
-		if page.NextCursor == "" {
-			return execution.Result{}, cause
+	})
+	if err != nil {
+		if next != nil {
+			_ = next.Close()
 		}
-		cursor = page.NextCursor
+		return execution.Result{}, nil, false, errors.Join(cause, err)
 	}
+	return result, next, got, nil
 }
 
 // settle records a turn's result once and moves the task: a completed or failed turn hands it to
-// 待验收, a cancelled or interrupted one returns it to 待处理.
-func (h *Host) settle(ctx context.Context, run store.TaskRun, turnID string, r execution.Result) {
-	ctx = context.WithoutCancel(ctx)
-	settled, e := h.store.SettleTaskTurn(ctx, run.ID, turnID, string(r.Status), r.FailureCode)
-	if e != nil {
-		h.log.Warn("settle task turn", "run", run.ID, "turn", turnID, "error", e)
-		return
-	}
-	if !settled {
-		return
+// 待验收, a cancelled or interrupted one returns it to 待处理. When lockAttempt is true, each
+// storage attempt takes the task lock briefly and releases it before any retry sleep.
+func (h *Host) settle(ctx context.Context, run store.TaskRun, turnID string, r execution.Result, lockAttempt bool) error {
+	owned, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(h.ctx, cancel)
+	defer stop()
+	if h.deliveries {
+		for {
+			err := h.resultRetry.Store(owned, func(write context.Context) error {
+				if lockAttempt {
+					defer h.lock(run.TaskID)()
+				}
+				_, err := h.store.SettleDeliveredTaskTurn(write, run.TenantID, run.TaskID, run.ID, turnID, string(r.Status), r.FailureCode)
+				return err
+			})
+			if err == nil || !lockAttempt || owned.Err() != nil {
+				return err
+			}
+			h.log.Warn("retry settling delivered task turn", "run", run.ID, "turn", turnID, "error", err)
+			select {
+			case <-owned.Done():
+				return owned.Err()
+			case <-time.After(time.Second):
+			}
+		}
 	}
 	to := store.TaskReview
 	if r.Status == execution.StatusCancelled || r.Status == execution.StatusInterrupted {
 		to = store.TaskPending
 	}
-	h.moveTask(ctx, run.TenantID, run.TaskID, store.TaskRunning, to)
+	stillOwns := func(read context.Context) (bool, error) {
+		latest, err := h.store.TaskRun(read, run.TenantID, run.TaskID, run.ID)
+		if err != nil {
+			return false, err
+		}
+		return latest.Live() && !latest.TurnActive() && latest.LastTurnID == turnID &&
+			latest.LastResult == string(r.Status) && latest.FailureCode == r.FailureCode, nil
+	}
+	// Keep the outcome (including an exhausted read budget) until it is stored.
+	// Shutdown cancels these retries; startup recovery remains the durable fallback.
+	// Remember the successful turn write across a failed task-status move.
+	turnStored := false
+	writeUncertain := false
+	err := h.resultRetry.Store(owned, func(write context.Context) error {
+		if lockAttempt {
+			unlock := h.lock(run.TaskID)
+			defer unlock()
+		}
+		if !turnStored {
+			settled, err := h.store.SettleTaskTurn(write, run.ID, turnID, string(r.Status), r.FailureCode)
+			if err != nil {
+				writeUncertain = true
+				return err
+			}
+			if !settled {
+				if !writeUncertain {
+					return nil // another observer, stop or newer turn owns it
+				}
+				// The write may have committed before its connection failed. Recover
+				// only this exact outcome; never move the task for an ended/newer turn.
+				ok, err := stillOwns(write)
+				if err != nil || !ok {
+					return err
+				}
+			}
+			turnStored = true
+		} else if lockAttempt {
+			// The task lock was released across the retry pause, so verify a newer turn or
+			// stop did not replace this turn before moving the task.
+			ok, err := stillOwns(write)
+			if err != nil || !ok {
+				return err
+			}
+		}
+		_, err := h.store.TransitionTaskStatus(write, run.TenantID, run.TaskID, store.TaskRunning, to)
+		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrInvalidTransition) || errors.Is(err, store.ErrRunActive) {
+			return nil // a person or another operation already moved the task
+		}
+		return err
+	})
+	if err != nil && h.ctx.Err() == nil {
+		h.log.Warn("settle task turn", "run", run.ID, "turn", turnID, "error", err)
+	}
+	return err
 }
 
 // moveTask applies a run's status move. A task a person already moved elsewhere stays where it is.

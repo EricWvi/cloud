@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
 
@@ -15,15 +16,14 @@ import (
 // already started in.
 const promptWorkspaceRoot = "."
 
-// agentPrompt is desktop's assemble_workflow_prompt (crates/backend/src/workflow/run/prompt.rs)
-// without the parts v2 does not apply: previous-failure injection (v2 never retries).
-// The node's prompt is already rendered against the pool, and roleContent is the role definition
-// read from the tenant's role catalog just before this attempt started; an empty content sends no
-// {@code system_instructions} block, as desktop does for an empty role. Each section is one ACP
-// text block, separated by a blank line because providers may concatenate block text verbatim. A
-// structured-output node ends with its output contract, last so the final-response constraint has
-// the strongest recency.
-func agentPrompt(d workflow.AgentDispatch, renderedTask, roleContent string) execution.Prompt {
+// agentPrompt is desktop's assemble_workflow_prompt (crates/backend/src/workflow/run/prompt.rs).
+// The node's prompt is already rendered against the pool, roleContent is the role definition read
+// from the tenant's role catalog just before this attempt started (an empty content sends no
+// {@code system_instructions} block, as desktop does for an empty role), and previousFailure is
+// the rendered retry/resume context when enabled. Each section is one ACP text block, separated by
+// a blank line because providers may concatenate block text verbatim. A structured-output node
+// ends with its output contract, last so the final-response constraint has the strongest recency.
+func agentPrompt(d workflow.AgentDispatch, renderedTask, roleContent, previousFailure string) execution.Prompt {
 	c := promptCopyFor(d.Locale)
 	sections := []string{
 		workspaceRootBlock(d.Locale),
@@ -37,6 +37,9 @@ func agentPrompt(d workflow.AgentDispatch, renderedTask, roleContent string) exe
 	)
 	if names := d.Node.Agent().Skills; len(names) > 0 {
 		sections = append(sections, "<required_skills>\nRead and follow the selected imported skills before doing this step. They are available under .opencode/skills or .claude/skills in this workspace. A plugin selection supplies its packaged skills.\n"+strings.Join(names, "\n")+"\n</required_skills>")
+	}
+	if previousFailure != "" {
+		sections = append(sections, previousFailure)
 	}
 	if schema := d.Node.Agent().Structured; schema != nil {
 		sections = append(sections, structuredContractBlock(schema, d.Locale))
@@ -210,4 +213,112 @@ func promptCopyFor(locale string) promptCopy {
 			workflow.StatusFailed: "failed", workflow.StatusCancelled: "cancelled",
 		},
 	}
+}
+
+const previousFailureOutputLimit = 4000
+
+type previousFailureForPrompt struct {
+	Attempt int
+	Kind    workflow.FailureKind
+	Message string
+	Output  *string
+}
+
+// previousFailureForInjection filters a soft-deleted failed attempt for prompt injection, mirroring
+// desktop's previous_failure_for_injection: only injectable failure kinds pass when enabled, empty
+// detail messages fall back to the row error, and only structured-output failures include output
+// (bounded to 4000 runes with a trailing ellipsis).
+func previousFailureForInjection(inject bool, prev *store.WorkflowNodeRun) *previousFailureForPrompt {
+	if !inject || prev == nil || len(prev.Payload) == 0 {
+		return nil
+	}
+	var decoded struct {
+		ErrorDetail *struct {
+			Kind    workflow.FailureKind `json:"kind"`
+			Message string               `json:"message"`
+			Attempt int                  `json:"attempt"`
+		} `json:"error_detail"`
+	}
+	if json.Unmarshal(prev.Payload, &decoded) != nil || decoded.ErrorDetail == nil {
+		return nil
+	}
+	detail := decoded.ErrorDetail
+	if !detail.Kind.InjectsIntoPrompt() {
+		return nil
+	}
+	message := detail.Message
+	if message == "" && prev.Error != nil {
+		message = *prev.Error
+	}
+	var output *string
+	if detail.Kind == workflow.FailureStructuredOutput && prev.Output != nil {
+		truncated := truncateRunes(*prev.Output, previousFailureOutputLimit)
+		output = &truncated
+	}
+	return &previousFailureForPrompt{
+		Attempt: detail.Attempt,
+		Kind:    detail.Kind,
+		Message: message,
+		Output:  output,
+	}
+}
+
+func truncateRunes(s string, limit int) string {
+	runes := []rune(s)
+	if len(runes) <= limit {
+		return s
+	}
+	return string(runes[:limit]) + "…"
+}
+
+func failureKindLabel(kind workflow.FailureKind, locale string) string {
+	if locale == workflow.LocaleZhCN {
+		switch kind {
+		case workflow.FailureStructuredOutput:
+			return "结构化输出不合格"
+		case workflow.FailureAgentRefusal:
+			return "智能体拒绝了请求"
+		case workflow.FailureUnknownStopReason:
+			return "未知的停止原因"
+		case workflow.FailureMultipleOutputs:
+			return "多个输出节点同时完成"
+		default:
+			return string(kind)
+		}
+	}
+	switch kind {
+	case workflow.FailureStructuredOutput:
+		return "Structured output invalid"
+	case workflow.FailureAgentRefusal:
+		return "Agent refused the request"
+	case workflow.FailureUnknownStopReason:
+		return "Unknown stop reason"
+	case workflow.FailureMultipleOutputs:
+		return "Multiple output nodes completed"
+	default:
+		return string(kind)
+	}
+}
+
+func renderPreviousFailure(prev previousFailureForPrompt, locale string) string {
+	kindLabel := failureKindLabel(prev.Kind, locale)
+	var text string
+	if locale == workflow.LocaleZhCN {
+		text = fmt.Sprintf(
+			"## 上一次尝试（第 %d 次）失败信息\n该步骤此前已尝试 %d 次并失败。以下是最近一次失败的原因，请避免重蹈覆辙，并按当前步骤要求重新完成。\n失败类型：%s\n失败信息：%s",
+			prev.Attempt, prev.Attempt, kindLabel, prev.Message,
+		)
+		if prev.Output != nil {
+			text += fmt.Sprintf("\n上一次的最终输出（供对照，可能已截断）：\n```text\n%s\n```", *prev.Output)
+		}
+		return text
+	}
+	text = fmt.Sprintf(
+		"## Previous attempt (%d) failed\nThis step already ran %d time(s) and failed. Below is the most recent failure; do not repeat it, and complete the step as instructed.\nFailure type: %s\nFailure message: %s",
+		prev.Attempt, prev.Attempt, kindLabel, prev.Message,
+	)
+	if prev.Output != nil {
+		text += fmt.Sprintf("\nPrevious final output (for reference, may be truncated):\n```text\n%s\n```", *prev.Output)
+	}
+	return text
 }

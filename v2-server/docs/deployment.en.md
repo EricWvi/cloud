@@ -4,8 +4,8 @@
 
 Basis: [Single-process Cloud (A1)](https://github.com/ora-space/specs/blob/main/decisions/cloud/lifecycle/0-single-process-cloud-on-enterprise-intranet.md) D2/D5/D6 and [Login and sessions (A6)](https://github.com/ora-space/specs/blob/main/decisions/cloud/login/0-idaas-or-email-login-with-shared-web-and-desktop-sessions.md).
 This build does not provide IDaaS login. `V2_LOGIN=idaas` refuses startup before touching data;
-it is not a deployable release and must not fall back to email. The current version does not
-yet provide versioned migrations. Production deployment
+it is not a deployable release and must not fall back to email. Database migrations run
+automatically at startup. Production deployment
 requires a version supporting the required capabilities and a verified HTTPS entrypoint.
 
 ## Build online
@@ -23,7 +23,8 @@ The builder runs prepare-node.sh first: it compiles Node/reaper at the pinned co
 checks both Agent plugins against pinned SHA-256 digests, and checks Deno's version before recording
 its local digest. Build concurrency is limited to two. Local executable and Deno digests prove
 integrity, not publisher authenticity; trust the build machine and toolchain. The frontend uses
-offline mode with `VITE_DEMO_MOCK=0`. Only the server, built web files, five runtime resources,
+offline mode with `VITE_DEMO_MOCK=0`; the build then scans it and stops if any recording demo mock
+remains (`npm run demo:check`). Only the server, built web files, five runtime resources,
 manifest, launcher and deployment guides are packaged. User configuration, databases, data volumes
 and other files from the preparation directory are excluded. Manifest paths are relative; legacy
 absolute development manifests remain supported.
@@ -38,19 +39,22 @@ the target host beforehand; operating system dependencies are not bundled.
 
 Use a dedicated non-root account. Agents run as the Cloud account without isolation; the first
 release is suitable only for mutually trusted members. Provision a dedicated PostgreSQL database
-and identity without demo credentials. This version applies schema directly at startup and has
-no versioned migrations; it cannot be used for production version upgrades that must preserve data.
+and identity without demo credentials. Pending versioned migrations run automatically at startup, so
+the database identity needs permission to create tables in that database. A database created by a
+version before migrations cannot be upgraded and startup refuses it; drop and recreate it.
 
 Keep configuration and secrets in protected process-manager configuration, outside the archive:
 
 - `V2_LOGIN=idaas`: the only deployment login. This build does not provide it and refuses startup.
   Once IDaaS is enabled, the frontend reads `/auth/providers` to detect deployment mode and hides
   only the browser-only model-connections page; the workspace roles page and workflow role fields remain available.
-- `V2_PUBLIC_URL`: public HTTPS address; configure `V2_IDAAS_BASE_URL`, `V2_IDAAS_CLIENT_ID` and
-  `V2_IDAAS_CLIENT_SECRET` as specified by A6. This build does not yet support IDaaS login.
+- `V2_PUBLIC_URL`: public HTTPS address, the root only, without a path (see "HTTPS ingress");
+  configure `V2_IDAAS_BASE_URL`, `V2_IDAAS_CLIENT_ID` and `V2_IDAAS_CLIENT_SECRET` as specified by A6.
+  This build does not yet support IDaaS login.
 - `V2_DATABASE_URL`: dedicated PostgreSQL connection with required TLS and least privilege.
-- `V2_ADDR`: HTTP listener, reachable only through the HTTPS termination entrypoint. HTTPS is
-  mandatory; this build does not provide HTTPS termination configuration.
+- `V2_ADDR`: plain HTTP listener, default `127.0.0.1:8090`. Only the enterprise HTTPS ingress may
+  connect; see "HTTPS ingress" for binding. v2-server does not terminate TLS itself. HTTPS is
+  mandatory; never use this HTTP listener as the user-facing entry.
 - `V2_DATA_DIR`: an absolute persistent directory such as `/srv/ora/data`. Neither it nor any parent
   may be writable by group or others. Do not use `/tmp`. Prefer mode `0700` owned by the service account.
 - `V2_MARKET_CREDENTIAL_KEY`: persist a stable 32-byte Base64-encoded key in the format required by
@@ -74,15 +78,88 @@ skips development presets, demo preparation and demo warming; this build blocks 
 because it does not provide IDaaS login.
 
 Install enterprise CAs in the host system trust store using your distribution's enterprise process.
-Git and Go HTTPS use system CAs. Never disable certificate verification. HTTPS termination belongs
-before the Cloud HTTP listener. Verify secure cookies and callback URLs for deployment. Derive
-public URLs only from configuration and do not trust forwarding headers. This guide does not
-choose a proxy or certificate management solution.
+Git and Go HTTPS use system CAs. Never disable certificate verification.
+
+## HTTPS ingress
+
+HTTPS is terminated by the enterprise's existing ingress (gateway or reverse proxy). v2-server does
+not configure TLS and the offline package ships no reverse proxy: the IDaaS callback domain and
+certificate already belong to the enterprise ingress. v2-server serves plain HTTP on `V2_ADDR` and
+does not read forwarding headers such as `X-Forwarded-*`. The target version that provides IDaaS
+login takes its public address only from `V2_PUBLIC_URL`; when that is https, it adds `Secure` and
+the `__Host-` prefix to the session cookie and accepts cookie-authenticated writes only from that
+address. This build does none of this yet.
+
+Ingress requirements:
+
+- Do not rewrite paths: the path the browser requests reaches v2-server unchanged, with no prefix
+  added or stripped. Pages, `/api` and `/auth` are all served from the root and the frontend uses
+  absolute paths starting with `/`, so the public address must be a root address (for example
+  `https://ora.example.com`), not a path prefix. v2-server does not read `Host`, so rewriting it
+  does no harm. The target version checks cookie-authenticated writes against `Origin`, so the
+  ingress must not rewrite `Origin`.
+- Do not rewrite `Set-Cookie` (no added `Domain`, no changed `Path`): browsers refuse the target
+  version's `__Host-` cookies once either is changed, and sign-in does not stick.
+- Route to a single v2-server process, with no load balancing across instances: v2-server is a
+  single-process service, and the target version keeps logins in progress in process memory.
+- Do not buffer `text/event-stream` responses. Live updates for conversations, task runs, workflow runs
+  and workflow nodes use SSE on paths ending in `/chat/conversations/{cid}/events`,
+  `/tasks/{taskid}/runs/{rid}/events`, `/workflow-runs/{rid}/events` and
+  `/workflow-runs/{rid}/nodes/{nodeRunId}/events` (all under `/api/v2/tenants/{tid}`). v2-server
+  already sends `Cache-Control: no-cache` and `X-Accel-Buffering: no`; if the ingress ignores them,
+  disable buffering for these paths explicitly, or updates arrive in one burst at the end.
+- Serve browsers over HTTP/2. Every open conversation, task run and workflow run page holds a
+  long-lived connection; over HTTP/1.1 a browser opens at most 6 connections per address, so with a
+  few pages open the remaining requests queue and pages hang.
+- Do not cap the total duration of these SSE connections, or make the cap generous. An SSE connection
+  stays open while its page is open: a conversation's connection spans turns until the
+  conversation's session ends, and a workflow run page's connection lasts until the page is left,
+  regardless of how long any model request takes. v2-server sends a heartbeat every 15 seconds, so
+  the idle timeout must be well above 15 seconds (at least 60 seconds is advisable). Model requests
+  go from v2-server straight to the model service, not through the ingress; `V2_MODEL_IDLE_TIMEOUT`
+  and `V2_MODEL_MAX_DURATION` have nothing to do with ingress timeouts. Cutting an SSE connection
+  does not stop execution: the browser reconnects within a few seconds, conversation, task-run and
+  workflow-node events resume after `Last-Event-ID`, and the workflow run page reads the run again,
+  so the page only pauses. If the ingress answers the reconnect with an error (for example a 502
+  while v2-server restarts), the browser stops reconnecting and the page stops updating until it is
+  reloaded; after a restart, ask users to reload open pages.
+- Allow request bodies at least as large as v2-server's own limits. The largest is 6 MiB, for
+  workflow definitions, drafts and versions and for workflow run requests such as starting a run,
+  submitting a form or sending a node turn; skill and role create, update and import take 2 MiB,
+  and the rest are smaller. Do not truncate bodies separately, or saving a large workflow or
+  starting a run fails at the ingress.
+- IDaaS callback: the target version fixes the callback at
+  `<V2_PUBLIC_URL>/auth/callback/huawei-idaas`, derived only from `V2_PUBLIC_URL` and printed at
+  startup; the ingress must forward this path with its query string unchanged. This build does not
+  have the route yet.
+
+The hop from the ingress to `V2_ADDR` is unencrypted HTTP. Use HTTP/1.1 on this hop; v2-server does
+not speak cleartext HTTP/2 (h2c). When the ingress runs on the same host, bind `V2_ADDR` to
+`127.0.0.1:<port>`. When it runs on another host, bind the internal address and use the host
+firewall so that only the ingress address can connect to that port, so no other machine can bypass
+HTTPS.
+
+## Ingress details to confirm on site
+
+Before deployment, confirm and record with the enterprise network or gateway owner:
+
+- ingress type and version (gateway product or reverse proxy);
+- public domain, which becomes `V2_PUBLIC_URL`;
+- certificate issuer, whether it is the enterprise CA, and whether the runtime host and employee
+  browsers already trust that CA;
+- whether HTTP/2 is enabled towards browsers;
+- whether buffering can be disabled, the idle timeout set to 60 seconds or more, and the total
+  duration limit removed or widened for the SSE paths above;
+- request body limit and whether it can be adjusted;
+- whether it rewrites paths, `Origin` or `Set-Cookie`, and whether that can be turned off;
+- whether it routes to a single v2-server instance;
+- where it runs relative to the v2-server host: the same host, or another host and its internal
+  address (for the firewall rule).
 
 ## First intranet acceptance
 
-Run the complete procedure only with a target version that provides IDaaS login and versioned migrations,
-following that version's administrator bootstrap and migration instructions. This build is for deployment
+Run the complete procedure only with a target version that provides IDaaS login,
+following that version's administrator bootstrap instructions. This build is for deployment
 preflight only and cannot go live. Email login or model fixtures cannot substitute for onsite acceptance.
 
 1. Prepare dedicated PostgreSQL and a persistent volume, a registered IDaaS application, an administrator
@@ -97,19 +174,24 @@ preflight only and cannot go live. Email login or model fixtures cannot substitu
    public-address checks. If internal DNS resolves to an address rejected by the current address policy,
    record a blocker; do not bypass TLS or relax address checks to proceed. Enter credentials only through
    protected configuration or settings, never in command lines, URLs, screenshots or logs.
-3. On the acceptance instance, migrate and bootstrap the IDaaS administrator according to the target
-   version's instructions, then invite the second employee to sign in and join the team. In the browser,
-   verify that web and `/api` share an origin, the IDaaS callback uses the registered public HTTPS address,
-   and the session cookie has `Secure`, `HttpOnly` and `SameSite=Lax`. Confirm there are no preset demo
-   accounts, projects or content. HTTPS termination connects before Cloud's HTTP listener; the deployment
-   must confirm its termination design. This procedure selects neither direct Cloud TLS nor a reverse proxy.
-4. As administrator, add a custom internal HTTPS Git source under Settings → Plugins → Manage markets.
+3. Record the "Ingress details to confirm on site" and configure the ingress and `V2_ADDR` as described
+   in "HTTPS ingress". On the ingress host run `curl -sS -m 5 http://<V2_ADDR>/healthz`; it must return
+   JSON containing `"status":"ok"`. Run the same command from another intranet machine; it must time
+   out or be refused. When the ingress shares the host, `ss -ltn` must list the port only as
+   `127.0.0.1:<port>`.
+4. On the acceptance instance, migrate and bootstrap the IDaaS administrator according to the target
+   version's instructions, then invite the second employee to sign in and join the team. In a browser,
+   open `V2_PUBLIC_URL` through the ingress and verify that web and `/api` share an origin, the Network
+   panel's Protocol column shows `h2`, the IDaaS callback returns to the registered public HTTPS
+   address, and the session cookie name has the `__Host-` prefix and the cookie has `Secure`,
+   `HttpOnly` and `SameSite=Lax`. Confirm there are no preset demo accounts, projects or content.
+5. As administrator, add a custom internal HTTPS Git source under Settings → Plugins → Manage markets.
    Enter its exact current repository URL (no redirects), branch, Git username and read-only token.
    Select S3 signed downloads and separately enter the S3 endpoint, bucket, region and AK/SK.
    Keep Git and S3 credentials separate, and persist and back up `V2_MARKET_CREDENTIAL_KEY`.
    Synchronize and confirm no source failure and the expected catalog version.
    Install a workflow plugin and confirm its imported workflow opens on the workflows page.
-5. Create a separate acceptance source using a different repository address, not another URL spelling of
+6. Create a separate acceptance source using a different repository address, not another URL spelling of
    the same repository. Synchronize successfully first, then replace only this source's Git token with an
    incorrect value and synchronize. Require the internal Git server's authentication failure response to
    be recognized as a readable repository authentication failure (not a generic network or clone error)
@@ -117,12 +199,19 @@ preflight only and cannot go live. Email login or model fixtures cannot substitu
    repository requiring authentication must still fail explicitly and retain its catalog. Restore correct
    credentials and verify synchronization succeeds again. Leave the normal source untouched; do not change
    S3 keys to mask a Git failure.
-6. Run the installed workflow and complete a conversation on the real project. Verify the actual model,
-   package download and Node execution succeed and that results and history are readable. Record members,
-   installed plugins, history and an acceptance file on the data volume, then restart only the acceptance
-   instance. After login, verify those states and files remain, the key still decrypts source credentials,
-   and synchronization succeeds again. Unfinished executions from before restart should be interrupted;
-   automatic resumption is not a success criterion.
+7. Run the installed workflow and complete a conversation on the real project. Verify the actual model,
+   package download and Node execution succeed and that results and history are readable. Watched
+   through the ingress, conversation and workflow output must appear as it is generated, not in one
+   burst at the end. Then open a conversation page, filter the browser developer tools' Network panel
+   by `events`, and keep the page open longer than the ingress idle timeout and total duration limit
+   recorded in step 3 (the larger of the two plus a few minutes). Pass: the conversation has exactly
+   one `events` request and it is still open. If the ingress's total limit cannot be removed, the new
+   `events` request that appears when it expires must carry a `Last-Event-ID` request header and
+   return 200, and the page must show no missing or duplicated output. Record members, installed
+   plugins, history and an acceptance file on the data volume, then restart only the acceptance
+   instance. After login, verify those states and files remain, the key still decrypts source
+   credentials, and synchronization succeeds again. Unfinished executions from before restart should
+   be interrupted; automatic resumption is not a success criterion.
 
 Keep redacted evidence for every step: program version, platform architecture, SHA verification, time,
 action and result. Never record secrets, tokens or full authentication responses. On failure, distinguish
@@ -138,8 +227,11 @@ or use consistent snapshots, and test restoration. Agent changes exist only in l
 and are not pushed to Git; a database-only backup is insufficient.
 
 Stop this instance and confirm its Nodes exited. Back up, unpack a new version into a separate
-program directory and verify checksums. This version has no versioned migrations; when migration
-is required, use a target version that supports it and follow that version's migration instructions. Replace
+program directory and verify checksums. The new version runs migrations automatically at startup, so
+back up before upgrading; a failed migration stops startup at the last completed one, and the
+error lists the migrations this start already applied. A database created by a version before
+migrations must be dropped and recreated; startup refuses it, as it
+refuses a database with migrations newer than the binary or an applied migration that changed. Replace
 programs and resources while retaining database, data directory, keys and host configuration. Do
 not reset demos, seed again or overwrite new resources with the old package. Unfinished executions
 become interrupted on restart and do not resume automatically. After migration, rollback requires

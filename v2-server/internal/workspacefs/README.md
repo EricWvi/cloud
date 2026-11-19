@@ -5,3 +5,11 @@
 - 页面传入的路径先经 `Clean` 规范化（拒绝绝对路径、反斜杠、NUL 和 `.git`），再在解析符号链接后确认仍在工作副本内。
 - 变更和 diff 用 index 的临时副本加 `git add --intent-to-add --all` 让未跟踪文件可见，不写 Agent 的 index。
 - 所有读取都有上限（`MaxFileBytes`、`MaxDiffBytes`、`MaxEntries`、`MaxChanges`），超出返回 `ErrTooLarge` 或标记 `Truncated`。
+
+## 回合交付
+
+一次交付使用独立的临时 Git 目录和以登记的起点初始化的临时索引。Git 从工作目录读取 `.gitignore`，并使用复制进临时仓库的本地与共享 Git 排除规则。排除文件的链接只能解析到工作目录或对应的 Git 目录内，无法安全读取时交付失败。`.git` 可以是目录、gitfile 指针或指向目录的符号链接（后两者按同样规则解析，见 `internal/gitexclude`）。Agent 删掉了 `.git` 时，交付不依赖 Agent 的仓库，照常进行、没有本地排除规则；但记录 Ora 物化技能路径的规则也随之消失，所以这时只要 `.opencode/skills` 或 `.claude/skills` 下有相对起点的改动，交付就失败（`ErrMaterializedUnknown`，记为 `delivery_unavailable`），不冒把技能带进交付的风险。临时仓库不使用 Agent 配置，所以工作目录属性指定的外部过滤器不会执行。提交和对象先在临时仓库生成，大小检查通过后导入镜像，再以只新建的方式发布交付 ref。调用方持有工作目录锁直到 PostgreSQL 写入交付结果。
+
+`DeliveryChanges`、`DeliveryDiff` 和 `DeliveryPatch` 从项目镜像比较交付提交和它的起点。完整 patch 包含二进制修改，超出调用方限制时返回 `ErrTooLarge`。
+
+启动时清理数据根目录下的 `delivery-scratch/`。写入 Git 对象前，交付先按工作目录中变更及未跟踪的普通文件大小检查上限。写入后继续检查相对起点的新增对象大小。

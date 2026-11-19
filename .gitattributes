@@ -21,3 +21,6 @@ internal/core/migrations/0039_workflow_run_identity.sql text eol=lf
 internal/core/migrations/0040_executor_slot_bindings.sql text eol=lf
 internal/core/migrations/0041_workflow_execution_node.sql text eol=lf
 internal/core/migrations/0042_workflow_run_plugin_version.sql text eol=lf
+# v2-server records each migration's SHA-256 over the embedded bytes in v2_schema_migrations, so
+# its newline has to be the same on every platform.
+v2-server/internal/store/migrations/*.sql text eol=lf

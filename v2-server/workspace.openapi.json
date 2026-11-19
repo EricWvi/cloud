@@ -3,7 +3,7 @@
   "info": {
     "title": "Temporary v2 workspace viewer",
     "version": "1.0.0",
-    "description": "Read-only views of an Agent checkout that v2-server serves outside api/openapi.json; candidates for Cloud."
+    "description": "Read-only views of an Agent checkout and of its turn deliveries that v2-server serves outside api/openapi.json; candidates for Cloud."
   },
   "paths": {
     "/api/v2/tenants/{tid}/chat/conversations/{cid}/workspace/entries": {
@@ -228,7 +228,7 @@
         "tags": [
           "workspace"
         ],
-        "summary": "Files that differ from the commit the checkout started at, untracked included (the conversation's checkout)",
+        "summary": "Changes of the latest good delivery against its base (the conversation's deliveries); the working directory for a source from before deliveries",
         "parameters": [
           {
             "name": "tid",
@@ -254,6 +254,17 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/WorkspaceChanges"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "private, no-store"
+                  ]
                 }
               }
             }
@@ -298,6 +309,16 @@
               }
             }
           },
+          "500": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Response",
             "content": {
@@ -317,7 +338,7 @@
         "tags": [
           "workspace"
         ],
-        "summary": "One file's unified diff against that commit (the conversation's checkout)",
+        "summary": "One file's diff in the latest good delivery, or the pinned one (the conversation's deliveries); the working directory for a source from before deliveries",
         "parameters": [
           {
             "name": "tid",
@@ -343,6 +364,16 @@
               "type": "string"
             },
             "description": "Path relative to the checkout, with forward slashes"
+          },
+          {
+            "name": "deliveryId",
+            "in": "query",
+            "required": false,
+            "description": "Pin the diff to this good delivery of the same source",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         ],
         "responses": {
@@ -352,6 +383,17 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/WorkspaceDiff"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "private, no-store"
+                  ]
                 }
               }
             }
@@ -386,6 +428,16 @@
               }
             }
           },
+          "409": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
           "410": {
             "description": "Response",
             "content": {
@@ -397,6 +449,156 @@
             }
           },
           "413": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/tenants/{tid}/chat/conversations/{cid}/workspace/deliveries/{deliveryId}/patch": {
+      "get": {
+        "operationId": "getChatWorkspaceDeliveryPatch",
+        "tags": [
+          "workspace"
+        ],
+        "summary": "The whole Git patch of one delivery against its base (the conversation's deliveries), applicable with git apply",
+        "parameters": [
+          {
+            "name": "tid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deliveryId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Full Git patch against the recorded base",
+            "headers": {
+              "Content-Disposition": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "pattern": "^attachment; filename=\"delivery-[0-9a-f-]{36}\\.patch\"$"
+                }
+              },
+              "Cache-Control": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "private, no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "The delivery tree equals the base; there is no patch"
+          },
+          "400": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "500": {
             "description": "Response",
             "content": {
               "application/json": {
@@ -641,7 +843,7 @@
         "tags": [
           "workspace"
         ],
-        "summary": "Files that differ from the commit the checkout started at, untracked included (the checkout the run's Agent nodes share)",
+        "summary": "Changes of the latest good delivery against its base (the workflow run's deliveries); the working directory for a source from before deliveries",
         "parameters": [
           {
             "name": "tid",
@@ -667,6 +869,17 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/WorkspaceChanges"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "private, no-store"
+                  ]
                 }
               }
             }
@@ -711,6 +924,16 @@
               }
             }
           },
+          "500": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Response",
             "content": {
@@ -730,7 +953,7 @@
         "tags": [
           "workspace"
         ],
-        "summary": "One file's unified diff against that commit (the checkout the run's Agent nodes share)",
+        "summary": "One file's diff in the latest good delivery, or the pinned one (the workflow run's deliveries); the working directory for a source from before deliveries",
         "parameters": [
           {
             "name": "tid",
@@ -756,6 +979,16 @@
               "type": "string"
             },
             "description": "Path relative to the checkout, with forward slashes"
+          },
+          {
+            "name": "deliveryId",
+            "in": "query",
+            "required": false,
+            "description": "Pin the diff to this good delivery of the same source",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         ],
         "responses": {
@@ -765,6 +998,17 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/WorkspaceDiff"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "private, no-store"
+                  ]
                 }
               }
             }
@@ -799,6 +1043,16 @@
               }
             }
           },
+          "409": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
           "410": {
             "description": "Response",
             "content": {
@@ -810,6 +1064,156 @@
             }
           },
           "413": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/tenants/{tid}/workflow-runs/{rid}/workspace/deliveries/{deliveryId}/patch": {
+      "get": {
+        "operationId": "getWorkflowRunWorkspaceDeliveryPatch",
+        "tags": [
+          "workspace"
+        ],
+        "summary": "The whole Git patch of one delivery against its base (the workflow run's deliveries), applicable with git apply",
+        "parameters": [
+          {
+            "name": "tid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deliveryId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Full Git patch against the recorded base",
+            "headers": {
+              "Content-Disposition": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "pattern": "^attachment; filename=\"delivery-[0-9a-f-]{36}\\.patch\"$"
+                }
+              },
+              "Cache-Control": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "private, no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "The delivery tree equals the base; there is no patch"
+          },
+          "400": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "500": {
             "description": "Response",
             "content": {
               "application/json": {
@@ -1070,7 +1474,7 @@
         "tags": [
           "workspace"
         ],
-        "summary": "Files that differ from the commit the checkout started at, untracked included (the checkout of this run)",
+        "summary": "Changes of the latest good delivery against its base (the task run's deliveries); the working directory for a source from before deliveries",
         "parameters": [
           {
             "name": "tid",
@@ -1106,6 +1510,17 @@
                   "$ref": "#/components/schemas/WorkspaceChanges"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "private, no-store"
+                  ]
+                }
+              }
             }
           },
           "401": {
@@ -1148,6 +1563,16 @@
               }
             }
           },
+          "500": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Response",
             "content": {
@@ -1167,7 +1592,7 @@
         "tags": [
           "workspace"
         ],
-        "summary": "One file's unified diff against that commit (the checkout of this run)",
+        "summary": "One file's diff in the latest good delivery, or the pinned one (the task run's deliveries); the working directory for a source from before deliveries",
         "parameters": [
           {
             "name": "tid",
@@ -1201,6 +1626,16 @@
               "type": "string"
             },
             "description": "Path relative to the checkout, with forward slashes"
+          },
+          {
+            "name": "deliveryId",
+            "in": "query",
+            "required": false,
+            "description": "Pin the diff to this good delivery of the same source",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         ],
         "responses": {
@@ -1210,6 +1645,17 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/WorkspaceDiff"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "private, no-store"
+                  ]
                 }
               }
             }
@@ -1244,6 +1690,16 @@
               }
             }
           },
+          "409": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
           "410": {
             "description": "Response",
             "content": {
@@ -1255,6 +1711,164 @@
             }
           },
           "413": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/tenants/{tid}/tasks/{taskid}/runs/{rid}/workspace/deliveries/{deliveryId}/patch": {
+      "get": {
+        "operationId": "getTaskRunWorkspaceDeliveryPatch",
+        "tags": [
+          "workspace"
+        ],
+        "summary": "The whole Git patch of one delivery against its base (the task run's deliveries), applicable with git apply",
+        "parameters": [
+          {
+            "name": "tid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "taskid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deliveryId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Full Git patch against the recorded base",
+            "headers": {
+              "Content-Disposition": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "pattern": "^attachment; filename=\"delivery-[0-9a-f-]{36}\\.patch\"$"
+                }
+              },
+              "Cache-Control": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "private, no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "The delivery tree equals the base; there is no patch"
+          },
+          "400": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceError"
+                }
+              }
+            }
+          },
+          "500": {
             "description": "Response",
             "content": {
               "application/json": {
@@ -1286,7 +1900,7 @@
         "properties": {
           "code": {
             "type": "string",
-            "description": "workspace_not_ready (no checkout yet), workspace_removed, invalid_path, path_not_found, not_a_directory, not_a_file, binary_file, too_large, not_found, workflow_run_not_found, execution_unavailable"
+            "description": "workspace_not_ready (no checkout yet), workspace_removed, invalid_path, path_not_found, not_a_directory, not_a_file, binary_file, too_large, not_found, workflow_run_not_found, execution_unavailable, workspace_unavailable (mirror or delivery ref unreadable), invalid_delivery_id, delivery_not_found, delivery_failed (params reasonCode, reason), patch_too_large (params message, maxBytes), internal"
           },
           "params": {
             "type": "object",
@@ -1418,12 +2032,16 @@
           },
           "truncated": {
             "type": "boolean"
+          },
+          "deliveryState": {
+            "$ref": "#/components/schemas/WorkspaceDeliveryState"
           }
         },
         "required": [
           "baseCommit",
           "files",
-          "truncated"
+          "truncated",
+          "deliveryState"
         ]
       },
       "WorkspaceDiff": {
@@ -1436,12 +2054,113 @@
           "patch": {
             "type": "string",
             "description": "Unified diff of this file; empty when it is unchanged"
+          },
+          "deliveryState": {
+            "$ref": "#/components/schemas/WorkspaceDeliveryState"
           }
         },
         "required": [
           "path",
-          "patch"
+          "patch",
+          "deliveryState"
         ]
+      },
+      "WorkspaceDelivery": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "One turn delivery. nodeId and nodeRunId occur together, for workflow runs only; deliveryCommit only for delivered; reasonCode and reason only for failed.",
+        "required": [
+          "id",
+          "status",
+          "turnId",
+          "turnPosition",
+          "createdAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "delivered",
+              "empty",
+              "failed"
+            ]
+          },
+          "turnId": {
+            "type": "string"
+          },
+          "turnPosition": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "nodeId": {
+            "type": "string"
+          },
+          "nodeRunId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "baseCommit": {
+            "type": "string",
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+          },
+          "deliveryCommit": {
+            "type": "string",
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reasonCode": {
+            "type": "string",
+            "enum": [
+              "changes_too_large",
+              "workspace_not_ready",
+              "workspace_removed",
+              "workspace_unstable",
+              "delivery_unavailable"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "WorkspaceDeliveryState": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "What the change view shows. mode working_directory: a source from before deliveries, read live. mode delivery: viewDelivery is the good delivery rendered (absent before the first one), latestDelivery the newest outcome including failed, latestFailedDelivery the newest failure; inProgress while a turn of the source runs or is being delivered.",
+        "required": [
+          "mode",
+          "inProgress"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "delivery",
+              "working_directory"
+            ]
+          },
+          "inProgress": {
+            "type": "boolean"
+          },
+          "viewDelivery": {
+            "$ref": "#/components/schemas/WorkspaceDelivery"
+          },
+          "latestDelivery": {
+            "$ref": "#/components/schemas/WorkspaceDelivery"
+          },
+          "latestFailedDelivery": {
+            "$ref": "#/components/schemas/WorkspaceDelivery"
+          }
+        }
       }
     }
   }

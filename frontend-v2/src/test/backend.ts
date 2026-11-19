@@ -1,17 +1,19 @@
 import type { AxiosAdapter, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { http } from '@/lib/api-client'
 
-type Route = (config: InternalAxiosRequestConfig) => { status: number; data?: unknown } | undefined
+type Reply = { status: number; data?: unknown } | undefined
+type Route = (config: InternalAxiosRequestConfig) => Reply | Promise<Reply>
 
 /**
  * Replaces the network with `route` for the shared axios instance; unmatched requests answer 404.
+ * A route may answer asynchronously, to hold a request open.
  * Returns the requests seen, as "METHOD /path".
  */
 export function fakeBackend(route: Route): string[] {
   const seen: string[] = []
   const adapter: AxiosAdapter = async (config) => {
     seen.push(`${config.method?.toUpperCase()} ${config.url}`)
-    const { status, data } = route(config) ?? { status: 404 }
+    const { status, data } = (await route(config)) ?? { status: 404 }
     const response: AxiosResponse = { status, statusText: String(status), data, headers: {}, config }
     if (status >= 400) {
       const { AxiosError } = await import('axios')

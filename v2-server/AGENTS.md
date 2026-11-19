@@ -11,9 +11,15 @@ over Cloud's durability machinery. It does not follow the specs process.
   `README.md` as a candidate for Cloud, and is exempt from the check.
 - **Login mirrors the Gateway's browser routes** (`/auth/providers`, `/auth/login`, `/auth/logout`,
   the `ora_session` cookie) with only a development provider.
-- **Simplified on purpose.** One process, one PostgreSQL database, schema applied idempotently at
-  startup from `internal/store/schema.sql` (no migrations), no tenant isolation beyond membership
-  checks. Write down every simplification in `README.md` so nobody mistakes it for Cloud behavior.
+- **Simplified on purpose.** One process, one PostgreSQL database, no tenant isolation beyond
+  membership checks. Write down every simplification in `README.md` so nobody mistakes it for Cloud behavior.
+- **Schema changes are migrations.** `internal/store/migrations/NNNN_snake_name.sql`, applied
+  automatically at startup (no separate migrate command), each recorded with its SHA-256 in
+  `v2_schema_migrations`. Never edit, rename or renumber a merged file; change the schema, and fix
+  data, only by adding the next number after `main`'s latest (re-check before merging; never equal
+  or lower). Each file runs in one transaction, so it contains no `BEGIN`/`COMMIT` and no statement
+  PostgreSQL forbids in a transaction block (`CREATE INDEX CONCURRENTLY`, `VACUUM`, ...). Existing
+  databases from before migrations are recreated, not bridged. See `README.md`.
 - **Layout.** `main.go` wires configuration and lifecycle; `internal/store` owns SQL;
   `internal/server` owns HTTP. Keep handlers thin and context-aware.
 - **Gate.** `gofmt`, `go vet` and `go test -race ./...` with `TEST_DATABASE_URL` set; the v2

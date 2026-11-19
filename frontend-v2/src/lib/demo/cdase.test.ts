@@ -1,20 +1,23 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { cdaseInput, cdaseReport, createCdaseRun, readCdaseRun, startCdaseRun, cdaseProjectRuns, endCdaseRun, isCdaseRun } from './cdase'
 
-afterEach(() => vi.unstubAllEnvs())
+const demo = vi.hoisted(() => ({ on: false }))
+vi.mock('./flags', () => ({ get DEMO_MOCK() { return demo.on } }))
+
+afterEach(() => { demo.on = false })
 it('keeps demo data unavailable by default and scoped to the tenant and project', () => {
-  vi.stubEnv('VITE_DEMO_MOCK', '')
+  demo.on = false
   expect(() => createCdaseRun('t', 'p', '')).toThrow('演示未启用')
-  vi.stubEnv('VITE_DEMO_MOCK', '1')
+  demo.on = true
   const id = createCdaseRun('t', 'p', '', 0)
   expect(() => readCdaseRun('another', id)).toThrow()
   expect(cdaseProjectRuns('t', 'other')).toEqual([])
-  vi.stubEnv('VITE_DEMO_MOCK', '')
+  demo.on = false
   expect(isCdaseRun(id)).toBe(false)
   expect(cdaseProjectRuns('t', 'p')).toEqual([])
 })
 it('projects real view models without claiming repository changes or completed tests', () => {
-  vi.stubEnv('VITE_DEMO_MOCK', '1')
+  demo.on = true
   const id = createCdaseRun('t', 'p', '退款风险评审', 0)
   expect(() => startCdaseRun('t', id, 'unrelated task', 0)).toThrow()
   startCdaseRun('t', id, cdaseInput, 100)
@@ -28,7 +31,7 @@ it('projects real view models without claiming repository changes or completed t
   expect(Object.values(done.nodeStates).some(n => n.fileChanges?.length)).toBe(false)
 })
 it('cancels only its own fixture, and repeated runs start pending', () => {
-  vi.stubEnv('VITE_DEMO_MOCK', '1')
+  demo.on = true
   const id = createCdaseRun('t', 'p', '')
   startCdaseRun('t', id, cdaseInput)
   expect(() => endCdaseRun('t', id, true)).toThrow()

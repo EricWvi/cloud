@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/executionwait"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
@@ -46,6 +47,8 @@ type Host struct {
 	busyRetry   time.Duration
 	// endRetry is the first wait before an unconfirmed End is retried (see retryEnd); tests lower it.
 	endRetry time.Duration
+	// resultRetry bounds polling for a turn's recorded result after a stream break; tests lower it.
+	resultRetry executionwait.Policy
 	// sessionLimit caps a run's unfinished sessions (see sessionsInUse); tests lower it.
 	sessionLimit int
 	engine       *workflow.Engine
@@ -69,6 +72,8 @@ type Host struct {
 	dispatching func(workflow.AgentDispatch)
 	// followingUp, when set (tests only), runs first in every accepted follow-up's goroutine.
 	followingUp func(nodeID string)
+	// moveNode overrides MoveWorkflowEngineNode in tests simulating transient storage errors.
+	moveNode func(ctx context.Context, runID, nodeRunID, from, to string, merge func(node []byte) ([]byte, error)) (bool, error)
 }
 
 // lifecycleLock is one run's cancel/resume lock and the number of callers holding or waiting.
@@ -231,20 +236,34 @@ func workflowInterrupts(graph string, nodes []store.WorkflowNodeRun, rounds []st
 // requests and after the owners of task runs have cancelled theirs, so an absorbed run is never
 // task-owned (package boot orders both).
 func (h *Host) Interrupt(ctx context.Context) error {
+	ids, err := h.SweepInterrupted(ctx)
+	if err != nil {
+		return err
+	}
+	return h.ResumeInterrupted(ctx, ids)
+}
+
+// SweepInterrupted concludes old attempts and closes sessions without dispatching new work.
+func (h *Host) SweepInterrupted(ctx context.Context) ([]string, error) {
 	f := workflow.Failure{Kind: workflow.FailureInterruptedByRestart, Message: interruptedMessage}
 	now := h.now()
 	ids, err := h.store.InterruptWorkflowRunsWithRecovery(ctx, interruptedMessage, func(attempt int, node []byte) ([]byte, error) {
 		return workflow.MergePayload(node, map[string]any{"error_detail": f.Detail(attempt, true, now)})
 	}, workflowInterrupts)
 	if err != nil {
-		return fmt.Errorf("interrupt workflow runs: %w", err)
+		return nil, fmt.Errorf("interrupt workflow runs: %w", err)
 	}
 	// Execution recovery kept the session of every node parked in a running run; those the sweep
 	// failed, or whose run it failed, have nothing left to talk to. This runs before any run is
 	// resumed, so the sessions resumed runs start are never mistaken for them.
 	if err := h.endUnparkedSessions(ctx, ""); err != nil {
-		return err
+		return nil, err
 	}
+	return ids, nil
+}
+
+// ResumeInterrupted continues boot-eligible workflows after snapshots of old turns are retained.
+func (h *Host) ResumeInterrupted(ctx context.Context, ids []string) error {
 	for _, id := range ids {
 		current, err := h.store.WorkflowEngineContext(ctx, id)
 		if err != nil {

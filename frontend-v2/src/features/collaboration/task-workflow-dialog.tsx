@@ -13,6 +13,8 @@ import { createWorkflowI18n } from '@/lib/workflows/host/i18n'
 import { WorkflowStartVariableFields } from '@/lib/workflows/host/start-variable-fields'
 import { workflowStartDrafts, parseWorkflowStartDrafts } from '@/lib/workflows/host/start-variable-drafts'
 import { workflowRunTranslations } from '@/features/chat/workflow-run/translations'
+import { codeOf } from '@/lib/api-client'
+import { taskRunMessageFor } from './task-model'
 import { startTaskWorkflow } from './task-workflows-api/generated'
 import type { Task } from './tasks-api/generated'
 
@@ -68,7 +70,11 @@ function HandlingForm({tenantId,task,snapshot,onClose,onStarted}:{tenantId:strin
       <WorkflowStartVariableFields variables={variables} drafts={drafts} setDrafts={next=>{attempt.current=null;setDrafts(next)}} attemptedStart={attempted}/>
       <Field><FieldLabel htmlFor="mc-handle-prompt">需求</FieldLabel><Textarea id="mc-handle-prompt" rows={6} value={prompt} onChange={e=>{attempt.current=null;setPrompt(e.target.value)}}/></Field>
     </FieldGroup></div>
-    {start.isError && <p role="alert" className="mc-form-error">工作流启动失败，请检查输入后重试。</p>}
+    {start.isError && <p role="alert" className="mc-form-error">{(() => {
+      if (codeOf(start.error) === 'not_assignee') return '任务派给了别人，只有负责人本人或所属小队成员能用工作流处理。'
+      const msg = taskRunMessageFor(start.error)
+      return msg === '操作失败，请重试。' ? '工作流启动失败，请检查输入后重试。' : msg
+    })()}</p>}
     <footer className="mc-form-actions"><Button type="button" variant="outline" onClick={onClose} disabled={start.isPending}>取消</Button>
       <Button type="submit" disabled={start.isPending}>{start.isPending?'启动中…':'启动工作流'}</Button></footer>
   </form>

@@ -9,6 +9,7 @@ import { parseWorkflowGraph } from '@/lib/workflows/runtime'
 export interface RunServer {
   runs: Map<string, { detail: WorkflowRunDetail; graph: string; version: string }>
   seen: string[]
+  createdBodies: Array<Record<string, unknown>>
   /** When set, a started run stops at its first Agent, running, until cancelled. */
   hold: boolean
   /** When set, a resume preview reports nodes still running (v2-server's idle gate). */
@@ -29,7 +30,7 @@ export interface RunServer {
  */
 export function serveRuns(tenantId: string, backend: LocalWorkflowBackend): RunServer {
   const server: RunServer = {
-    runs: new Map(), seen: [], hold: false,
+    runs: new Map(), seen: [], createdBodies: [], hold: false,
     finishHeld: (runId) => {
       const entry = server.runs.get(runId)!
       const held = entry.detail.nodes.find((n) => n.status === 'running')!
@@ -144,6 +145,7 @@ export function serveRuns(tenantId: string, backend: LocalWorkflowBackend): RunS
     if (created && method === 'POST') {
       const { published } = backend.get({ workflowId: created[1]! })
       if (!published || published.id !== body.snapshotId) return refuse(config, 400, 'workflow_no_published_snapshot')
+      server.createdBodies.push(body)
       const at = now()
       const run: WorkflowRun = {
         id: `run-${++ids}`, workflowId: created[1]!, snapshotId: published.id, projectId: body.projectId as string,

@@ -18,13 +18,21 @@ import { useWorkflowEditorStore } from "./workflow-editor-store";
 const tenantId = "model-hydration";
 const agent = "official/ora-space.opencode";
 const catalog = [
-  { id: "other-agent", agentId: "another-agent", agentName: "Other Agent", modelId: "foreign", modelName: "Foreign" },
-  { id: "first", agentId: agent, agentName: "OpenCode", modelId: "configured", modelName: "Current" },
-  { id: "second", agentId: agent, agentName: "OpenCode", modelId: "second", modelName: "Second" },
+  { id: "other-agent", name: "Other Agent · Foreign", agentId: "another-agent", agentName: "Other Agent", modelId: "foreign", modelName: "Foreign" },
+  { id: "first", name: "OpenCode · Current", agentId: agent, agentName: "OpenCode", modelId: "configured", modelName: "Current" },
+  { id: "second", name: "OpenCode · Second", agentId: agent, agentName: "OpenCode", modelId: "second", modelName: "Second" },
 ];
 
-/** Mounts the real editor with a catalog already available when the draft hydrates. */
-async function openEditor(modelId: string, options: { models?: typeof catalog; agentCli?: string; override?: boolean } = {}) {
+/** Mounts the real editor with an optional pre-seeded or deferred executor catalog. */
+async function openEditor(
+  modelId: string,
+  options: {
+    models?: typeof catalog | null;
+    agentCli?: string;
+    override?: boolean;
+    onList?: (client: ReturnType<typeof createContractsClient>) => void;
+  } = {},
+) {
   fakeBackend(() => undefined);
   const backend = new LocalWorkflowBackend({ storage: memoryWorkflowStorage() });
   const initialExecutor = { agentCli: options.agentCli ?? agent, modelId };
@@ -40,8 +48,13 @@ async function openEditor(modelId: string, options: { models?: typeof catalog; a
   const workflowId = created.workflow.id;
   const update = vi.spyOn(backend, "updateDraft");
   const client = createContractsClient(localWorkflowContracts(backend), tenantId);
+  if (options.models === null && options.onList) {
+    options.onList(client);
+  }
   const queries = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
-  queries.setQueryData(["workflow-catalog", "executors", tenantId], { items: options.models ?? catalog });
+  if (options.models !== null) {
+    queries.setQueryData(["workflow-catalog", "executors", tenantId], { items: options.models ?? catalog });
+  }
   useWorkflowEditorStore.setState({ selectedWorkflowId: workflowId, managerError: null });
   render(<I18nextProvider i18n={workflowI18n}><QueryClientProvider client={queries}>
     <ContractsClientProvider client={client}><UserContext.Provider value={demoUser}><TooltipProvider>
@@ -52,7 +65,7 @@ async function openEditor(modelId: string, options: { models?: typeof catalog; a
   await screen.findByLabelText("工作流画布");
   const savedExecutor = () => JSON.parse(backend.getDraft({ workflowId }).snapshot.graph).nodes
     .find((node: { id: string }) => node.id === "agent").data.agentConfig.executor;
-  return { backend, workflowId, update, initialExecutor, savedExecutor };
+  return { backend, workflowId, queries, client, update, initialExecutor, savedExecutor };
 }
 
 describe("editor model hydration", () => {
@@ -76,15 +89,91 @@ describe("editor model hydration", () => {
     expect(state.savedExecutor()).toEqual({ agentCli: options.agentCli ?? agent, modelId: expected });
   });
 
-  it("uses desktop's nonblank base executor for a new Agent when the catalog is empty", async () => {
+  it("re-runs stale model hydration when the catalog arrives late without dirtying the clean draft", async () => {
+    const state = await openEditor("deepseek/deepseek-v4-flash", { models: null });
+    expect(screen.queryByText("未保存")).not.toBeInTheDocument();
+    expect(state.update).not.toHaveBeenCalled();
+
+    state.queries.setQueryData(["workflow-catalog", "executors", tenantId], { items: catalog });
+    await waitFor(() => expect(screen.queryByText("未保存")).not.toBeInTheDocument());
+    expect(state.update).not.toHaveBeenCalled();
+    expect(state.savedExecutor()).toEqual(state.initialExecutor);
+
+    fireEvent.click(screen.getByRole("button", { name: "发布" }));
+    await screen.findByRole("alertdialog", { name: "发布工作流" });
+    await waitFor(() => expect(state.update).toHaveBeenCalledOnce());
+    expect(state.savedExecutor()).toEqual({ agentCli: agent, modelId: "configured" });
+  });
+
+  it("defaults a new Agent node to the catalog's first model", async () => {
+    const state = await openEditor("configured");
+    fireEvent.click(screen.getByRole("button", { name: "Agent" }));
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "发布" }));
+    await screen.findByRole("alertdialog", { name: "发布工作流" });
+    await waitFor(() => expect(state.update).toHaveBeenCalled());
+    const nodes = JSON.parse(state.backend.getDraft({ workflowId: state.workflowId }).snapshot.graph).nodes;
+    const added = nodes.find((node: { id: string; data: { kind: string } }) => node.data.kind === "agent" && node.id !== "agent");
+    expect(added.data.agentConfig.executor).toEqual({ agentCli: catalog[0]!.agentId, modelId: catalog[0]!.modelId });
+  });
+
+  it("leaves a new Agent executor blank when the catalog is empty and fills it once the catalog loads", async () => {
     const state = await openEditor("stale", { models: [] });
     fireEvent.click(screen.getByRole("button", { name: "Agent" }));
     expect(await screen.findByText("未保存")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "发布" }));
     await screen.findByRole("alertdialog", { name: "发布工作流" });
-    const nodes = JSON.parse(state.backend.getDraft({ workflowId: state.workflowId }).snapshot.graph).nodes;
-    const added = nodes.find((node: { id: string; data: { kind: string } }) => node.data.kind === "agent" && node.id !== "agent");
-    expect(added.data.agentConfig.executor).toEqual(createMockWorkflowCapabilities("zh-CN").defaultAgentConfig.executor);
-    expect(added.data.agentConfig.executor.modelId).not.toBe("");
+    await waitFor(() => expect(state.update).toHaveBeenCalledTimes(1));
+    let nodes = JSON.parse(state.backend.getDraft({ workflowId: state.workflowId }).snapshot.graph).nodes;
+    let added = nodes.find((node: { id: string; data: { kind: string } }) => node.data.kind === "agent" && node.id !== "agent");
+    expect(added.data.agentConfig.executor).toEqual({ agentCli: "", modelId: "" });
+
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    state.queries.setQueryData(["workflow-catalog", "executors", tenantId], { items: catalog });
+    await waitFor(() => expect(screen.getAllByText(/another-agent · foreign|Foreign/).length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole("button", { name: "发布" }));
+    await screen.findByRole("alertdialog", { name: "发布工作流" });
+    await waitFor(() => expect(state.update).toHaveBeenCalledTimes(2));
+    nodes = JSON.parse(state.backend.getDraft({ workflowId: state.workflowId }).snapshot.graph).nodes;
+    added = nodes.find((node: { id: string; data: { kind: string } }) => node.data.kind === "agent" && node.id !== "agent");
+    expect(added.data.agentConfig.executor).toEqual({ agentCli: catalog[0]!.agentId, modelId: catalog[0]!.modelId });
+  });
+
+  it("re-runs stale model hydration after an initial executor catalog error recovers", async () => {
+    let listSpy: ReturnType<typeof vi.spyOn> | undefined;
+    const state = await openEditor("deepseek/deepseek-v4-flash", {
+      models: null,
+      onList: (client) => {
+        listSpy = vi
+          .spyOn(client.executors, "list")
+          .mockRejectedValueOnce(new Error("executors unavailable"))
+          .mockResolvedValueOnce({ items: catalog });
+      },
+    });
+    await waitFor(() => expect(listSpy).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText("未保存")).not.toBeInTheDocument();
+    expect(state.update).not.toHaveBeenCalled();
+
+    await state.queries.refetchQueries({ queryKey: ["workflow-catalog", "executors", tenantId] });
+    await waitFor(() => expect(listSpy).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("未保存")).not.toBeInTheDocument();
+    expect(state.update).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "发布" }));
+    await screen.findByRole("alertdialog", { name: "发布工作流" });
+    await waitFor(() => expect(state.update).toHaveBeenCalledOnce());
+    expect(state.savedExecutor()).toEqual({ agentCli: agent, modelId: "configured" });
+  });
+
+  it("keeps prior edits and undo history intact when a late catalog repairs an untouched node", async () => {
+    const state = await openEditor("deepseek/deepseek-v4-flash", { models: null });
+    fireEvent.click(screen.getByRole("button", { name: "Agent" }));
+    expect(await screen.findByText("未保存")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "撤销" })).toBeEnabled();
+
+    state.queries.setQueryData(["workflow-catalog", "executors", tenantId], { items: catalog });
+    await waitFor(() => expect(screen.getAllByText(/another-agent · foreign|Foreign/).length).toBeGreaterThan(0));
+    expect(screen.getByRole("button", { name: "撤销" })).toBeEnabled();
+    expect(screen.getByText("未保存")).toBeInTheDocument();
   });
 });

@@ -403,3 +403,72 @@ func TestResumeRestartsAFailedLoopFromRoundOne(t *testing.T) {
 		t.Fatalf("the old round kept live rows: %+v", rows)
 	}
 }
+
+func TestResumeInjectsPreviousFailureAndRespectsDisabledFlag(t *testing.T) {
+	for _, inject := range []bool{true, false} {
+		t.Run(string(rune('0'+map[bool]int{true: 1, false: 0}[inject])), func(t *testing.T) {
+			f := newFixture(t)
+			ctx := context.Background()
+			graph := strings.Replace(reviewBranches, `"outputContract":`, `"retry":{"enabled":false,"maxRetries":0,"initialDelaySeconds":10},"outputContract":`, 1)
+			w, _, err := f.s.CreateWorkflow(ctx, f.scope.TenantID, "恢复注入", graph)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.s.PublishWorkflow(ctx, f.scope.TenantID, w.ID, "v1", nil); err != nil {
+				t.Fatal(err)
+			}
+			run, err := f.s.CreateWorkflowRun(ctx, f.scope.TenantID, w.ID, "", store.WorkflowRunInput{
+				ProjectID:         f.project,
+				Input:             str("支付评审"),
+				InjectLastFailure: &inject,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.host.StartRun(ctx, f.scope, run.ID); err != nil {
+				t.Fatal(err)
+			}
+			f.exec.finish(expectAgent(t, f, "review"), completed(`{"verdict":"bad"}`))
+			failedRun, _ := f.await(t, run.ID, terminal)
+			if failedRun.Status != "failed" {
+				t.Fatalf("run = %+v", failedRun)
+			}
+			if _, err := f.host.ResumeRun(ctx, f.scope, run.ID); err != nil {
+				t.Fatal(err)
+			}
+			resumedSession := expectAgent(t, f, "review")
+			prompt := promptText(t, f.exec.request(resumedSession).Prompt)
+			nodes, err := f.s.WorkflowRunNodes(ctx, f.scope.TenantID, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]any
+			if len(node(nodes, "review").Payload) > 0 {
+				if err := json.Unmarshal(node(nodes, "review").Payload, &payload); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if inject {
+				if !strings.Contains(prompt, "## 上一次尝试（第 1 次）失败信息") || !strings.Contains(prompt, `{"verdict":"bad"}`) {
+					t.Fatalf("missing previous failure in resumed prompt:\n%s", prompt)
+				}
+				if _, ok := payload["injected_failure_context"].(string); !ok {
+					t.Fatalf("resumed row missing injected_failure_context: %s", node(nodes, "review").Payload)
+				}
+			} else {
+				if strings.Contains(prompt, "上一次尝试") {
+					t.Fatalf("unexpected previous failure when disabled:\n%s", prompt)
+				}
+				if _, exists := payload["injected_failure_context"]; exists {
+					t.Fatalf("unexpected injected_failure_context when disabled: %s", node(nodes, "review").Payload)
+				}
+			}
+			f.exec.finish(resumedSession, completed(`{"approved":true}`))
+			f.exec.finish(expectAgent(t, f, "ship"), completed("已发布"))
+			settled, _ := f.await(t, run.ID, terminal)
+			if settled.Status != "succeeded" {
+				t.Fatalf("settled = %+v", settled)
+			}
+		})
+	}
+}

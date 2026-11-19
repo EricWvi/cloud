@@ -157,7 +157,8 @@ func SceneUsers(scenes []string) (store.Preset, error) {
 
 // Reset returns the environment to an empty state: it refuses while a server still holds the data
 // directory, stops the Node processes a previous run left behind, empties the directory, recreates
-// the database and writes the merged user file. v2-server then creates the schema and accounts.
+// the database and writes the merged user file. v2-server then applies the migrations and creates
+// the accounts.
 func Reset(ctx context.Context, c Config) error {
 	if !strings.HasPrefix(c.Database, "ora_v2_demo") || filepath.Base(c.DataDir) != c.Dir {
 		return fmt.Errorf("refusing to reset %s / %s: not a demo environment", c.Database, c.DataDir)
@@ -269,7 +270,7 @@ type Seeder struct {
 	Now      time.Time
 }
 
-// OpenSeeder connects to the environment's database. v2-server has already applied the schema and
+// OpenSeeder connects to the environment's database. v2-server has already applied the migrations and
 // written the accounts; the seed only adds rows, through the store wherever the store can.
 func OpenSeeder(ctx context.Context, c Config) (*Seeder, error) {
 	s, err := store.Open(ctx, c.DatabaseURL)

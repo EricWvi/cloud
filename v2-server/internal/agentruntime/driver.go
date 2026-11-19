@@ -63,7 +63,8 @@ type Checkout struct {
 }
 
 // Emit retains an event before its source Node envelope can be acknowledged. It must honor ctx.
-// TurnEnded must atomically retain Result and the terminal turn event before returning nil.
+// TurnEnded must durably retain the first terminal result before returning nil. The caller may
+// stage this result privately until it can publish the terminal event with its delivery.
 type Emit func(context.Context, execution.Event) error
 
 // Driver owns one Node per project and one physical Agent execution per logical session.

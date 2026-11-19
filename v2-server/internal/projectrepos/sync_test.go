@@ -89,6 +89,24 @@ func syncService(t *testing.T) (*Service, *store.Store, execution.Scope) {
 	return svc, s, execution.Scope{TenantID: tenant, UserID: user}
 }
 
+func seedDeliveryRefs(t *testing.T, project store.Project) func() {
+	t.Helper()
+	namespace := "refs/ora/deliveries/" + project.ID + "/"
+	for _, id := range []string{"9fc849e0-bdec-497e-ac07-3ccc7e2ea1d5", "ca652a0e-cb0d-49e5-8d6e-6f8a61db87b7"} {
+		projectGit(t, project.MirrorPath, "update-ref", namespace+id, project.Commit)
+	}
+	read := func() string {
+		return projectGit(t, project.MirrorPath, "for-each-ref", "--format=%(refname) %(objectname)", namespace)
+	}
+	before := read()
+	return func() {
+		t.Helper()
+		if after := read(); after != before {
+			t.Fatalf("sync changed delivery refs: before %q, after %q", before, after)
+		}
+	}
+}
+
 func TestSyncAdvancesCurrentSnapshotOnlyOnSuccess(t *testing.T) {
 	remote, bare, initial, _ := syncGitRemote(t)
 	svc, _, scope := syncService(t)
@@ -99,6 +117,8 @@ func TestSyncAdvancesCurrentSnapshotOnlyOnSuccess(t *testing.T) {
 	if project.Commit != initial {
 		t.Fatalf("created at %s want %s", project.Commit, initial)
 	}
+	checkDeliveryRefs := seedDeliveryRefs(t, project)
+	defer checkDeliveryRefs()
 	// Push a new commit on the remote, then sync.
 	work := filepath.Join(t.TempDir(), "work")
 	projectGit(t, filepath.Dir(work), "clone", "--quiet", bare, "work")
@@ -137,6 +157,8 @@ func TestSyncFollowsForcePushedBranchAndKeepsOldSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	checkDeliveryRefs := seedDeliveryRefs(t, project)
+	defer checkDeliveryRefs()
 	// Rewrite history: a fresh root commit, force-pushed over the branch.
 	work := filepath.Join(t.TempDir(), "work")
 	projectGit(t, filepath.Dir(work), "clone", "--quiet", bare, "work")

@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -36,6 +37,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/taskrun"
 	"github.com/wanglongan587/cloud/v2-server/internal/taskworkflow"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflowhost"
+	"github.com/wanglongan587/cloud/v2-server/internal/workspacefs"
 	"golang.org/x/sys/unix"
 )
 
@@ -56,7 +58,11 @@ func main() {
 	}
 }
 
-func run(addr, dbURL string, cleanup, fixture, testFixtures bool) (resultErr error) {
+func run(addr, dbURL string, cleanup, fixture, testFixtures bool) error {
+	return runWithListener(addr, dbURL, cleanup, fixture, testFixtures, (*http.Server).ListenAndServe)
+}
+
+func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, listen func(*http.Server) error) (resultErr error) {
 	login := os.Getenv("V2_LOGIN")
 	if e := validateLogin(login, fixture || testFixtures || cleanup); e != nil {
 		return e
@@ -76,9 +82,33 @@ func run(addr, dbURL string, cleanup, fixture, testFixtures bool) (resultErr err
 		return agentruntime.Cleanup(ctx, filepath.Join(base, "nodes"))
 	}
 
+	limit, e := strconv.ParseInt(envOr("V2_DELIVERY_MAX_OBJECT_BYTES", strconv.Itoa(workspacefs.DefaultDeliveryObjectBytes)), 10, 64)
+	if e != nil || limit <= 0 {
+		return errors.New("V2_DELIVERY_MAX_OBJECT_BYTES must be a positive integer")
+	}
+	// The data-root lock excludes delivery writers from the previous process.
+	scratch := filepath.Join(base, "delivery-scratch")
+	if e := os.RemoveAll(scratch); e != nil {
+		return fmt.Errorf("clear delivery scratch: %w", e)
+	}
+	if e := os.Mkdir(scratch, 0700); e != nil {
+		return fmt.Errorf("create delivery scratch: %w", e)
+	}
+	delivery, e := workspacefs.NewDeliveryFS(scratch, limit)
+	if e != nil {
+		return e
+	}
+	maxPatch, e := deliveryPatchLimit(envOr("V2_DELIVERY_MAX_PATCH_BYTES", strconv.Itoa(server.DefaultMaxPatchBytes)))
+	if e != nil {
+		return e
+	}
+
 	db, e := store.Open(ctx, dbURL)
 	if e != nil {
 		return e
+	}
+	for _, m := range db.AppliedMigrations() {
+		slog.Info("applied database migration", "version", m.Version, "name", m.Name)
 	}
 	db.DisableOfficialMarket(envDefault("V2_PLUGIN_MARKETPLACE_URL", "https://github.com/ora-space/marketplace") == "")
 	var preset store.Preset
@@ -184,7 +214,7 @@ func run(addr, dbURL string, cleanup, fixture, testFixtures bool) (resultErr err
 	if driver != nil {
 		agent = driver
 	}
-	runtime, e := executionruntime.New(ctx, executionruntime.Config{Store: db, Models: models, Agent: agent})
+	runtime, e := executionruntime.New(ctx, executionruntime.Config{Store: db, Models: models, Agent: agent, Delivery: delivery})
 	if e != nil {
 		if driver != nil {
 			shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -220,9 +250,6 @@ func run(addr, dbURL string, cleanup, fixture, testFixtures bool) (resultErr err
 				return errors.New("fixture-check requires V2_NODE_ASSETS_DIR; run task v2:node:prepare first")
 			}
 			return checkFixture(ctx, runtime, scope, demo.ID, filepath.Join(base, "nodes"))
-		}
-		if driver != nil {
-			go driver.WarmDemo(ctx, demo.ID, agentruntime.Project{MirrorPath: demo.MirrorPath, Commit: demo.Commit, SnapshotRef: demo.SnapshotRef})
 		}
 	}
 	marketValue := envDefault("V2_PLUGIN_MARKETPLACE_URL", "https://github.com/ora-space/marketplace")
@@ -286,9 +313,12 @@ func run(addr, dbURL string, cleanup, fixture, testFixtures bool) (resultErr err
 	decompositions := taskdecomp.New(db, workflowRunStarter{workflowRuns}, nil)
 	defer decompositions.Close()
 	if e := boot.Recover(ctx, boot.Hosts{
-		TaskWorkflows: taskWorkflows, Decompositions: decompositions, WorkflowRuns: workflowRuns, TaskRuns: taskRuns,
+		TaskWorkflows: taskWorkflows, Decompositions: decompositions, WorkflowRuns: workflowRuns, TaskRuns: taskRuns, Deliveries: runtime,
 	}); e != nil {
 		return e
+	}
+	if login == "email" && driver != nil {
+		go driver.WarmDemo(ctx, demo.ID, agentruntime.Project{MirrorPath: demo.MirrorPath, Commit: demo.Commit, SnapshotRef: demo.SnapshotRef})
 	}
 	options := withWorkflowDomain(server.Options{
 		RefreshOfficial:    refreshOfficial,
@@ -299,6 +329,8 @@ func run(addr, dbURL string, cleanup, fixture, testFixtures bool) (resultErr err
 		TaskRuns:           taskRuns,
 		TaskDecompositions: decompositions,
 		TaskWorkflows:      taskWorkflows,
+		Deliveries:         delivery,
+		MaxPatchBytes:      maxPatch,
 		// The signal context ends with the process, before the database pool is closed.
 		Context: ctx,
 	}, workflowRuns)
@@ -327,7 +359,7 @@ func run(addr, dbURL string, cleanup, fixture, testFixtures bool) (resultErr err
 	}
 	srv := newHTTPServer(ctx, addr, handler)
 	errs := make(chan error, 1)
-	go func() { errs <- srv.ListenAndServe() }()
+	go func() { errs <- listen(srv) }()
 	slog.Info("v2-server listening", "addr", addr)
 
 	select {
@@ -526,6 +558,16 @@ func fixtureMarkers(root string) (map[string]string, error) {
 		return nil
 	})
 	return markers, err
+}
+
+// deliveryPatchLimit parses V2_DELIVERY_MAX_PATCH_BYTES: a positive byte count no larger than
+// server.MaxPatchBytesCeiling, since every concurrent download may hold that much in memory.
+func deliveryPatchLimit(value string) (int, error) {
+	n, e := strconv.Atoi(value)
+	if e != nil || n <= 0 || n > server.MaxPatchBytesCeiling {
+		return 0, fmt.Errorf("V2_DELIVERY_MAX_PATCH_BYTES must be a positive integer of at most %d", server.MaxPatchBytesCeiling)
+	}
+	return n, nil
 }
 
 func envOr(key, fallback string) string {
