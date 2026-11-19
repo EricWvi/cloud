@@ -70,6 +70,10 @@ func (h *Host) recoverParked(ctx context.Context, st *runState, run store.Workfl
 		// Agent starts only with its next turn: a conservative count, as the slot is taken back
 		// then anyway.
 		st.track(n)
+		// The row's summary was written before the restart and may lag the session: a node being
+		// completed then had its session ended without the summary saying so, and the page would
+		// offer a message box its session refuses. Write it again from the rebuilt node.
+		h.refreshSummary(st, n, store.WorkflowStatusPending)
 		if n.sessionEnded && !n.sessionGone {
 			// The node's session ended before the restart (a stop, a lost Agent) but its End was
 			// never confirmed, so nothing retries it and it would keep its slot until the node
@@ -92,7 +96,9 @@ func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDis
 	var payload struct {
 		Task        string `json:"task"`
 		Interactive struct {
-			SessionEnded bool `json:"session_ended"`
+			SessionEnded  bool   `json:"session_ended"`
+			Sent          int    `json:"sent"`
+			LastTurnError string `json:"last_turn_error"`
 		} `json:"interactive"`
 	}
 	if err := json.Unmarshal(row.Payload, &payload); err != nil {
@@ -110,6 +116,11 @@ func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDis
 	// still lets the node complete with the last normal answer, as it did before.
 	n.sessionGone = session.EndedAt != nil
 	n.sessionEnded = n.sessionGone || payload.Interactive.SessionEnded
+	// The summary is the only record of a message the execution service refused at Append: it
+	// left no turn, so the turns below neither count its number nor tell that it was lost. Keep
+	// both, or rewriting the summary after the recovery would hide the notice and reuse its number.
+	n.undelivered = payload.Interactive.LastTurnError == turnErrorNotDelivered
+	n.seq = payload.Interactive.Sent
 	prefix := d.NodeRunID + "/turn-"
 	for cursor := ""; ; {
 		page, err := h.exec.ReadTurns(ctx, st.scope, n.session, cursor, 100)
