@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -598,5 +599,110 @@ func TestDriverIPCStopOfARefusedSubmissionKeepsTheSession(t *testing.T) {
 	}
 	if sent := sentIPC(f); slices.Contains(sent, "cancel_turn") || slices.Contains(sent, "end_session") {
 		t.Fatalf("commands after the stop = %v", sent)
+	}
+}
+
+// A submission Node refused and the driver then sent again (the MCP refresh came) is Node's turn
+// again: a stop must reach Node as CancelTurn, never end the turn locally while Node runs it.
+func TestDriverIPCStopAfterAResubmissionGoesToNode(t *testing.T) {
+	var submits atomic.Int32
+	h := newIPCHarness(t, func(f *fakeNodeIPC, m node.Message) bool {
+		if m.Type == "submit_user_turn" && submits.Add(1) == 1 {
+			var command struct {
+				ID string `json:"command_id"`
+			}
+			if err := json.Unmarshal(m.Payload, &command); err != nil {
+				return false
+			}
+			f.reply(m, "session_command_rejected", map[string]string{"command_id": command.ID, "reason": "mcp_update_required"})
+			return true
+		}
+		return false
+	})
+	h.turnCancel.Store(true)
+	h.driver.opts.ReadMCPTarget = func(_ context.Context, _ execution.Scope, _ string, _ *execution.MCPSelection, known int64) (*execution.MCPTarget, error) {
+		if known == -1 {
+			return &execution.MCPTarget{Configured: *ipcMCP()}, nil
+		}
+		return nil, nil // the refresh has nothing left to deliver: the turn is sent again
+	}
+	ctx := ipcContext(t)
+	session := h.session("resubmitted", "workspace")
+	session.MCP = ipcMCP()
+	run := func(id string) <-chan ipcRunOutcome {
+		done := make(chan ipcRunOutcome, 1)
+		go func() {
+			turn := execution.Turn{Ref: execution.Ref{SessionID: session.ID, TurnID: id}, Prompt: execution.TextPrompt(id), MCPGeneration: new(int64)}
+			result, err := h.driver.Run(ctx, h.scope, session, turn, discardIPCEvent)
+			done <- ipcRunOutcome{result, err}
+		}()
+		return done
+	}
+	first := run("first")
+	f := receiveIPC(t, h.created)
+	start := nextIPCCommand(t, f, "start_agent_session")
+	f.finishTurn(t, start, "first", "ready")
+	if got := receiveIPC(t, first); got.err != nil {
+		t.Fatal(got.err)
+	}
+	done := run("append")
+	nextIPCCommand(t, f, "submit_user_turn")           // refused
+	resent := nextIPCCommand(t, f, "submit_user_turn") // sent again after the refresh
+	stopTurn(t, h, session, "append")
+	cancel := nextCancel(t, f, start, "append")
+	f.finishTurnAs(t, resent, "append", "partial", "cancelled")
+	f.settleCancel(start, cancel, "stopped")
+	if got := receiveIPC(t, done); got.err != nil || !got.result.SessionKept || got.result.NotDelivered || got.result.Answer != "partial" {
+		t.Fatalf("stop of a resubmitted turn = %+v, want Node's stopped turn", got)
+	}
+}
+
+// A stop asked for before the turn began (the execution service admitted it, the driver had not
+// begun it) is handed to the turn when it begins: the turn is cancelled, the session kept.
+func TestDriverIPCStopBeforeTheTurnBeginsReachesIt(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	h.turnCancel.Store(true)
+	ctx := ipcContext(t)
+	session := h.session("session", "workspace")
+	first := startIPCRun(h, ctx, session, "first", discardIPCEvent)
+	f := receiveIPC(t, h.created)
+	start := nextIPCCommand(t, f, "start_agent_session")
+	f.finishTurn(t, start, "first", "done")
+	if got := receiveIPC(t, first); got.err != nil {
+		t.Fatal(got.err)
+	}
+	stopTurn(t, h, session, "second")
+	done := startIPCRun(h, ctx, session, "second", discardIPCEvent)
+	nextIPCCommand(t, f, "submit_user_turn")
+	f.settleCancel(start, nextCancel(t, f, start, "second"), "not_started")
+	if got := receiveIPC(t, done); got.err != nil || got.result.Status != execution.StatusCancelled || !got.result.SessionKept {
+		t.Fatalf("turn stopped before it began = %+v", got)
+	}
+}
+
+// While a session is still being prepared nothing was started that a stop could keep: StopTurn
+// refuses, so the caller ends the session (owner decision: a stop during preparation ends it).
+func TestDriverIPCStopTurnRefusesWhilePreparing(t *testing.T) {
+	clone := make(chan node.Message, 1)
+	h := newIPCHarness(t, func(_ *fakeNodeIPC, m node.Message) bool {
+		if m.Type == "clone_repository" {
+			clone <- m // held: the checkout is still being prepared
+			return true
+		}
+		return false
+	})
+	h.turnCancel.Store(true)
+	ctx := ipcContext(t)
+	session := h.session("session", "workspace")
+	done := startIPCRun(h, ctx, session, "first", discardIPCEvent)
+	f := receiveIPC(t, h.created)
+	m := receiveIPC(t, clone)
+	if h.driver.StopTurn(execution.Ref{SessionID: session.ID, TurnID: "first"}) {
+		t.Fatal("StopTurn took a stop while the session was still being prepared")
+	}
+	f.reply(m, "clone_result", map[string]any{"kind": "clone_ready", "result": map[string]string{"path": filepath.Join(f.project.root, "w", "r", m.ExecutionID), "commit": f.project.configuration.Commit}})
+	f.finishTurn(t, nextIPCCommand(t, f, "start_agent_session"), "first", "done")
+	if got := receiveIPC(t, done); got.err != nil {
+		t.Fatal(got.err)
 	}
 }

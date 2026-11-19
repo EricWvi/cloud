@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -488,6 +489,51 @@ func TestConcurrentStopsOfAKeptTurnKeepTheRun(t *testing.T) {
 	got, e := f.store.TaskRun(f.ctx, f.tenant, task.ID, run.ID)
 	if e != nil || !got.Live() || got.TurnActive() || got.EndReason != "" || got.LastResult != "cancelled" {
 		t.Fatalf("run after two stops of one kept turn = %+v %v", got, e)
+	}
+}
+
+// A Stop sent while turn A ran, that gets the task's lock only after another stop kept the
+// session and the starter's next comment started turn B, does not stop B: it was sent for A.
+func TestALateStopDoesNotStopTheNextTurn(t *testing.T) {
+	f := newFixture(t)
+	f.port.keepOnCancel = true
+	task := f.task(t, opencode)
+	run, e := f.host.Start(f.ctx, f.owner, task.ID, "start", taskrun.StartInput{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	var reads atomic.Int32
+	seen, hold := make(chan struct{}), make(chan struct{})
+	taskrun.SetStopRead(f.host, func() {
+		if reads.Add(1) == 1 { // the late stop: it has seen A running, and waits
+			close(seen)
+			<-hold
+		}
+	})
+	late := make(chan error, 1)
+	go func() {
+		_, e := f.host.Stop(f.ctx, f.member, task.ID, run.ID)
+		late <- e
+	}()
+	<-seen
+	if _, e := f.host.Stop(f.ctx, f.member, task.ID, run.ID); e != nil {
+		t.Fatal(e)
+	}
+	follow, e := f.host.Comment(f.ctx, f.owner, task.ID, "follow", taskrun.CommentInput{Body: "继续", ToAgent: true})
+	if e != nil || follow.RunID != run.ID {
+		t.Fatalf("follow-up after the kept stop = %+v %v", follow, e)
+	}
+	next, e := f.store.TaskRun(f.ctx, f.tenant, task.ID, run.ID)
+	if e != nil || !next.TurnActive() || next.LastTurnID == run.LastTurnID {
+		t.Fatalf("run running the follow-up = %+v %v", next, e)
+	}
+	close(hold)
+	if e := <-late; e != nil {
+		t.Fatal(e)
+	}
+	got, e := f.store.TaskRun(f.ctx, f.tenant, task.ID, run.ID)
+	if e != nil || !got.TurnActive() || got.LastTurnID != next.LastTurnID || got.EndReason != "" {
+		t.Fatalf("run after the late stop = %+v %v, want the follow-up still running", got, e)
 	}
 }
 
