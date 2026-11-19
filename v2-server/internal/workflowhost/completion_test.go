@@ -229,8 +229,8 @@ func TestDeliverablesBlockCompletion(t *testing.T) {
 		}
 	}
 	write("out/a.md", "before")
-	f.host.runCheckout = func(context.Context, string, string) (store.WorkspaceLocation, error) {
-		return store.WorkspaceLocation{Path: root}, nil
+	f.host.runCheckout = func(context.Context, string, string) (deliverableCheckout, error) {
+		return deliverableCheckout{WorkspaceLocation: store.WorkspaceLocation{Path: root}}, nil
 	}
 	runID, _ := f.startParked(t, interactiveDeliverables, "初稿一")
 	_, nodes := f.await(t, runID, parked("a"))
@@ -263,8 +263,8 @@ func TestForceCoversMissingDeliverables(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	root := t.TempDir()
-	f.host.runCheckout = func(context.Context, string, string) (store.WorkspaceLocation, error) {
-		return store.WorkspaceLocation{Path: root}, nil
+	f.host.runCheckout = func(context.Context, string, string) (deliverableCheckout, error) {
+		return deliverableCheckout{WorkspaceLocation: store.WorkspaceLocation{Path: root}}, nil
 	}
 	runID, a := f.startParked(t, interactiveDeliverables, "初稿一")
 	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "继续"); err != nil {
@@ -312,11 +312,11 @@ func TestTheBaseCommitIsTheBaselineOfTheFirstAgent(t *testing.T) {
 	gitIn("commit", "-q", "-m", "base")
 	base := gitIn("rev-parse", "HEAD")
 	cloned := false
-	f.host.runCheckout = func(context.Context, string, string) (store.WorkspaceLocation, error) {
+	f.host.runCheckout = func(context.Context, string, string) (deliverableCheckout, error) {
 		if !cloned {
-			return store.WorkspaceLocation{}, store.ErrNotFound
+			return deliverableCheckout{}, store.ErrNotFound
 		}
-		return store.WorkspaceLocation{Path: root, BaseCommit: base}, nil
+		return deliverableCheckout{WorkspaceLocation: store.WorkspaceLocation{Path: root, BaseCommit: base}, Mirror: filepath.Join(root, ".git")}, nil
 	}
 	runID, _ := f.startParked(t, interactiveDeliverables, "初稿一")
 	cloned = true

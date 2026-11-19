@@ -1,17 +1,13 @@
 package workflowhost
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -95,7 +91,7 @@ func (h *Host) captureBaseline(ctx context.Context, tenant, runID string, files 
 		h.log.Warn("read the checkout for a completion baseline", "run", runID, "error", err)
 		return &fileBaseline{Source: baselineMissing}
 	}
-	l := listFiles(ctx, at.Path, files)
+	l := listFiles(ctx, at, files)
 	b := &fileBaseline{Source: baselineCheckout, Declarations: map[string]string{}}
 	for _, f := range files {
 		if !f.MustChange {
@@ -126,7 +122,7 @@ func (h *Host) fileBlockers(ctx context.Context, tenant, runID string, files []w
 		}
 		return blockers, nil
 	}
-	l := listFiles(ctx, at.Path, files)
+	l := listFiles(ctx, at, files)
 	for _, f := range files {
 		matches, judged := l.matches(f)
 		if len(matches) == 0 {
@@ -157,7 +153,7 @@ func fileBlocker(kind, path string) completionBlocker {
 
 // changedSince reports whether declaration f's matches differ from the baseline; sure is false
 // when that cannot be told within the bounds. complete says matches is every match of f.
-func changedSince(ctx context.Context, at store.WorkspaceLocation, f workflow.CompletionFile, matches []string, complete bool, baseline *fileBaseline) (changed, sure bool) {
+func changedSince(ctx context.Context, at deliverableCheckout, f workflow.CompletionFile, matches []string, complete bool, baseline *fileBaseline) (changed, sure bool) {
 	if baseline == nil {
 		return false, false
 	}
@@ -179,7 +175,7 @@ func changedSince(ctx context.Context, at store.WorkspaceLocation, f workflow.Co
 			complete = false
 		}
 		for _, path := range matches {
-			before, err := committedDigest(ctx, at.Path, at.BaseCommit, path)
+			before, err := committedDigest(ctx, at.Mirror, at.BaseCommit, path)
 			if err != nil {
 				return false, false
 			}
@@ -245,7 +241,8 @@ func (l listing) matches(f workflow.CompletionFile) (matches []string, judged bo
 // listFiles lists the regular files under root that any declaration matches, by slash-separated
 // relative path. Symbolic links never count (a link could name a file outside the checkout), nor
 // does anything under .git.
-func listFiles(ctx context.Context, root string, files []workflow.CompletionFile) listing {
+func listFiles(ctx context.Context, at deliverableCheckout, files []workflow.CompletionFile) listing {
+	root := at.Path
 	l := listing{found: map[string]bool{}, complete: true}
 	var wildcards []workflow.CompletionFile
 	for _, f := range files {
@@ -273,7 +270,7 @@ func listFiles(ctx context.Context, root string, files []workflow.CompletionFile
 		}
 	}
 	prefixes := wildcardPrefixes(wildcards)
-	complete, err := gitListFiles(ctx, root, prefixes, add)
+	complete, err := gitListFiles(ctx, at, prefixes, add)
 	if err != nil {
 		// Not a git checkout: walk the prefixes instead, without gitignore.
 		complete = walkFiles(root, prefixes, add)
@@ -301,65 +298,6 @@ func wildcardPrefixes(wildcards []workflow.CompletionFile) []string {
 		prefixes = append(prefixes, p)
 	}
 	return prefixes
-}
-
-// gitListFiles feeds add git's tracked and untracked, not ignored paths under prefixes, up to
-// maxListedEntries; complete is false when the bound cut the listing short.
-func gitListFiles(ctx context.Context, root string, prefixes []string, add func(rel string)) (complete bool, err error) {
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
-	defer cancel()
-	args := []string{"ls-files", "-z", "--cached", "--others", "--exclude-standard", "--"}
-	for _, p := range prefixes {
-		if p == "" {
-			p = "."
-		}
-		args = append(args, p)
-	}
-	cmd := gitCommand(ctx, root, args...)
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		return false, err
-	}
-	if err := cmd.Start(); err != nil {
-		return false, err
-	}
-	scanner := bufio.NewScanner(out)
-	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024)
-	scanner.Split(splitNUL)
-	entries, seen := 0, map[string]bool{}
-	complete = true
-	for scanner.Scan() {
-		rel := scanner.Text()
-		if seen[rel] {
-			continue // a file both tracked and modified is listed once per stage
-		}
-		seen[rel] = true
-		if entries++; entries > maxListedEntries {
-			complete = false
-			cancel()
-			break
-		}
-		add(rel)
-	}
-	_, _ = io.Copy(io.Discard, out)
-	waitErr := cmd.Wait()
-	if !complete {
-		return false, nil
-	}
-	if err := scanner.Err(); err != nil {
-		return false, err
-	}
-	return true, waitErr
-}
-
-func splitNUL(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	if i := bytes.IndexByte(data, 0); i >= 0 {
-		return i + 1, data[:i], nil
-	}
-	if atEOF && len(data) > 0 {
-		return len(data), data, nil
-	}
-	return 0, nil, nil
 }
 
 // walkFiles walks prefixes under root, skipping .git, and feeds add every regular file, up to
@@ -424,70 +362,6 @@ func regularFile(root, rel string) bool {
 	}
 	info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel)))
 	return err == nil && info.Mode().IsRegular()
-}
-
-func fileDigest(root, rel string) (string, error) {
-	if !regularFile(root, rel) {
-		return "", fs.ErrNotExist
-	}
-	f, err := os.Open(filepath.Join(root, filepath.FromSlash(rel)))
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// committedDigest is fileDigest of rel's content at commit, "" when the commit does not have it.
-// The blob is read as stored, so no clean filter of the checkout's .gitattributes runs, and both
-// sides are hashed here.
-func committedDigest(ctx context.Context, root, commit, rel string) (string, error) {
-	if commit == "" {
-		return "", errors.New("no base commit recorded")
-	}
-	if _, err := git(ctx, root, "cat-file", "-e", commit+"^{commit}"); err != nil {
-		return "", err
-	}
-	if _, err := git(ctx, root, "cat-file", "-e", commit+":"+rel); err != nil {
-		return "", nil // the path is not in the commit
-	}
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
-	defer cancel()
-	h := sha256.New()
-	cmd := gitCommand(ctx, root, "cat-file", "blob", commit+":"+rel)
-	cmd.Stdout = h
-	if err := cmd.Run(); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-func git(ctx context.Context, root string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
-	defer cancel()
-	cmd := gitCommand(ctx, root, args...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(out.String()), nil
-}
-
-// gitCommand is a read-only git call in the checkout, whose configuration the Agent controls: as
-// workspacefs.runGit, nothing it configured may run a program (fsmonitor, hooks), paths are taken
-// literally, and git takes no optional lock. Callers only list, test and print objects as stored,
-// so no filter or textconv applies either.
-func gitCommand(ctx context.Context, root string, args ...string) *exec.Cmd {
-	base := []string{"-C", root, "--literal-pathspecs", "-c", "core.quotepath=off", "-c", "core.fsmonitor=false",
-		"-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false"}
-	cmd := exec.CommandContext(ctx, "git", append(base, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0")
-	return cmd
 }
 
 func dedupe(values []string) []string {

@@ -11,16 +11,18 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
 
-// checkoutRepo is a git checkout of files, committed, for the deliverable checks.
+// checkoutRepo is a git checkout of files, committed, for the deliverable checks, with a bare
+// clone standing in for the project's mirror.
 type checkoutRepo struct {
-	t    *testing.T
-	root string
+	t            *testing.T
+	root, mirror string
 }
 
 func newCheckoutRepo(t *testing.T, files map[string]string) checkoutRepo {
@@ -32,12 +34,14 @@ func newCheckoutRepo(t *testing.T, files map[string]string) checkoutRepo {
 	}
 	r.git("add", "-A")
 	r.git("commit", "-q", "--allow-empty", "-m", "base")
+	r.mirror = filepath.Join(t.TempDir(), "mirror.git")
+	r.git("clone", "-q", "--bare", r.root, r.mirror)
 	return r
 }
 
 func (r checkoutRepo) git(args ...string) string {
 	r.t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", r.root, "-c", "user.name=t", "-c", "user.email=t@example.com"}, args...)...)
+	cmd := exec.Command("git", append([]string{"-C", r.root, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "protocol.file.allow=always"}, args...)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		r.t.Fatalf("git %v: %v %s", args, err, out)
@@ -58,8 +62,8 @@ func (r checkoutRepo) write(rel, content string) {
 
 // host is a Host that only knows r as every run's checkout, enough for the file checks.
 func (r checkoutRepo) host(base string) *Host {
-	return &Host{runCheckout: func(context.Context, string, string) (store.WorkspaceLocation, error) {
-		return store.WorkspaceLocation{Path: r.root, BaseCommit: base}, nil
+	return &Host{runCheckout: func(context.Context, string, string) (deliverableCheckout, error) {
+		return deliverableCheckout{WorkspaceLocation: store.WorkspaceLocation{Path: r.root, BaseCommit: base}, Mirror: r.mirror}, nil
 	}}
 }
 
@@ -124,7 +128,7 @@ func TestWildcardsListOnlyUnderTheirPrefixAndOutsideIgnoredTrees(t *testing.T) {
 	if blockers, warnings := h.fileBlockers(t.Context(), "", "", declarations(t, "reports/*.md"), nil); len(blockers) != 0 || len(warnings) != 0 {
 		t.Fatalf("reports/*.md: %v %v", blockers, warnings)
 	}
-	l := listFiles(t.Context(), r.root, declarations(t, "**/*.md"))
+	l := listFiles(t.Context(), deliverableCheckout{WorkspaceLocation: store.WorkspaceLocation{Path: r.root}}, declarations(t, "**/*.md"))
 	if !l.complete || !reflect.DeepEqual(l.found, map[string]bool{"reports/plan.md": true}) {
 		t.Fatalf("**/*.md listed %v (complete %v), want only reports/plan.md", l.found, l.complete)
 	}
@@ -184,8 +188,8 @@ func TestTheFileBaselineSurvivesARestart(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	r := newCheckoutRepo(t, map[string]string{"plan.md": "计划", "out/a.md": "before"})
-	checkout := func(context.Context, string, string) (store.WorkspaceLocation, error) {
-		return store.WorkspaceLocation{Path: r.root}, nil
+	checkout := func(context.Context, string, string) (deliverableCheckout, error) {
+		return deliverableCheckout{WorkspaceLocation: store.WorkspaceLocation{Path: r.root}}, nil
 	}
 	f.host.runCheckout = checkout
 	runID, a := f.startParked(t, interactiveDeliverables, "初稿一")
@@ -250,5 +254,80 @@ func TestForceCannotBypassTheStaleCheck(t *testing.T) {
 				t.Fatalf("a stale forced completion moved the node: %s %v", node(nodes, "a").Status, p["completion_forced"])
 			}
 		})
+	}
+}
+
+// An Agent can make its checkout a partial clone whose promisor remote runs a program on a lazy
+// fetch. The checks read committed content from the mirror and list through a scratch
+// repository, so nothing configured in the checkout runs and nothing waits on a transport.
+func TestAPromisorRemoteInTheCheckoutRunsNothing(t *testing.T) {
+	r := newCheckoutRepo(t, map[string]string{"out/a.md": "before", "out/b.md": "kept"})
+	base := r.git("rev-parse", "HEAD")
+	marker := filepath.Join(t.TempDir(), "ran")
+	prog := filepath.Join(t.TempDir(), "transport")
+	if err := os.WriteFile(prog, []byte("#!/bin/sh\ntouch "+marker+"\nsleep 600\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.git("config", "core.repositoryformatversion", "1")
+	r.git("config", "extensions.partialClone", "origin")
+	r.git("config", "remote.origin.promisor", "true")
+	r.git("config", "remote.origin.url", "ssh://evil.invalid/x")
+	r.git("config", "core.sshCommand", prog)
+	r.git("config", "protocol.ext.allow", "always")
+	// The checkout no longer has out/a.md's blob: only a lazy fetch could produce it.
+	blob := r.git("rev-parse", base+":out/a.md")
+	if err := os.Remove(filepath.Join(r.root, ".git", "objects", blob[:2], blob[2:])); err != nil {
+		t.Fatal(err)
+	}
+	h := r.host(base)
+	files := declarations(t, "out/*.md!", "out/a.md")
+
+	started := time.Now()
+	blockers, warnings := h.fileBlockers(t.Context(), "", "", files, &fileBaseline{Source: baselineCommit})
+	if !reflect.DeepEqual(blockers, []completionBlocker{fileBlocker(blockerFileUnchanged, "out/*.md")}) || len(warnings) != 0 {
+		t.Fatalf("checks = %v %v, want out/*.md unchanged since the mirror's base", blockers, warnings)
+	}
+	if baseline := h.captureBaseline(t.Context(), "", "", files); baseline.Declarations["out/*.md"] == "" {
+		t.Fatalf("baseline = %v", baseline)
+	}
+	if elapsed := time.Since(started); elapsed > 30*time.Second {
+		t.Fatalf("the checks took %s", elapsed)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the checkout's transport ran: %v", err)
+	}
+}
+
+// The checkout baseline digests paths with contents: a match renamed with its content unchanged
+// is a change.
+func TestARenamedMatchIsAChange(t *testing.T) {
+	r := newCheckoutRepo(t, map[string]string{"out/a.md": "same"})
+	h := r.host("")
+	decl := declarations(t, "out/*.md!")
+	baseline := h.captureBaseline(t.Context(), "", "", decl)
+	if err := os.Rename(filepath.Join(r.root, "out/a.md"), filepath.Join(r.root, "out/b.md")); err != nil {
+		t.Fatal(err)
+	}
+	if blockers, warnings := h.fileBlockers(t.Context(), "", "", decl, baseline); len(blockers) != 0 || len(warnings) != 0 {
+		t.Fatalf("a renamed match: %v %v, want a change", blockers, warnings)
+	}
+}
+
+// The base commit's blob is compared as stored: no attribute rule, even one in the mirror that a
+// filtered read would apply (here an eol conversion), turns an untouched file into a change.
+func TestTheBaseCommitBlobIsComparedAsStored(t *testing.T) {
+	r := newCheckoutRepo(t, map[string]string{"out/a.md": "line\n"})
+	base := r.git("rev-parse", "HEAD")
+	if err := os.MkdirAll(filepath.Join(r.mirror, "info"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r.mirror, "info", "attributes"), []byte("*.md text eol=crlf\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r.write("out/a.md", "line\n") // as the Agent left it: untouched content
+	h := r.host(base)
+	blockers, _ := h.fileBlockers(t.Context(), "", "", declarations(t, "out/*.md!"), &fileBaseline{Source: baselineCommit})
+	if !reflect.DeepEqual(blockers, []completionBlocker{fileBlocker(blockerFileUnchanged, "out/*.md")}) {
+		t.Fatalf("an untouched file = %v, want file_unchanged", blockers)
 	}
 }
