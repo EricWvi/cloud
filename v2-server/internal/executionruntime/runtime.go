@@ -176,9 +176,10 @@ func New(ctx context.Context, cfg Config) (*Service, error) {
 	// the restart and it can only be completed: the run's later sessions, a successor of a node
 	// completed right after the restart included, share the workspace (which only this process's
 	// map remembers) and start on the recorded checkout with its edits. So does every other run
-	// still running, which the sweep may absorb and resume (an interrupted Iteration, a pending
-	// LoopExit cleanup) with no parked node. A run the sweep fails instead keeps the mapping too:
-	// resuming it from the failure continues on its checkout, as it does without a restart.
+	// still running and not a task's (see store.RunningWorkflowSessions), which the sweep may
+	// absorb and resume (an interrupted Iteration, a pending LoopExit cleanup) with no parked node.
+	// A running run the sweep fails instead keeps the mapping too: resuming it from the failure
+	// continues on its checkout, as it does without a restart.
 	parked, err := cfg.Store.ParkedWorkflowSessions(ctx)
 	if err != nil {
 		cancel()

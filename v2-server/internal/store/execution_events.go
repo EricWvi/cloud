@@ -352,7 +352,10 @@ func (s *Store) ParkedWorkflowSessions(ctx context.Context) ([]RecoveredSession,
 // created Agent node run, open or already ended. A run's sessions share one workspace, which only
 // the process that started them remembers. A run the restart sweep then absorbs (an interrupted
 // Iteration, a pending LoopExit cleanup) resumes with no parked node to remember it by, and its
-// later nodes must start on the run's checkout, not a fresh one.
+// later nodes must start on the run's checkout, not a fresh one. Runs owned by a task (its
+// handling runs and decomposition runs) are left out: their owners settle them on startup before
+// the sweep, a settled one is never resumed in place, and a decomposition kept at a submitted
+// review runs no further Agent (see package boot).
 func (s *Store) RunningWorkflowSessions(ctx context.Context) ([]RecoveredSession, error) {
 	rows, err := s.pool.Query(ctx, `SELECT DISTINCT ON (n.run_id) s.data, s.tenant_id::text, s.user_id::text,
 			(SELECT t.caller FROM v2_execution_turns t WHERE t.session_id = s.id ORDER BY t.position LIMIT 1)
@@ -360,6 +363,8 @@ func (s *Store) RunningWorkflowSessions(ctx context.Context) ([]RecoveredSession
 		JOIN v2_workflow_runs r ON r.id = n.run_id
 		JOIN v2_execution_sessions s ON s.id = n.session_id AND s.tenant_id = n.tenant_id
 		WHERE r.status = 'running' AND r.deleted_at IS NULL
+			AND NOT EXISTS (SELECT 1 FROM v2_task_workflow_runs tw WHERE tw.run_id = r.id)
+			AND NOT EXISTS (SELECT 1 FROM v2_task_decompositions d WHERE d.workflow_run_id = r.id)
 		ORDER BY n.run_id, n.created_at DESC, n.id DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list running workflow sessions: %w", err)

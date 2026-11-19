@@ -168,3 +168,42 @@ func TestARecoveredSessionWhoseCheckoutWasReplacedEnds(t *testing.T) {
 		})
 	}
 }
+
+// A run whose sessions span two workspaces (an earlier build gave its later nodes a fresh one after
+// a restart) and that has a parked node keeps the parked node's workspace for its next nodes: that
+// is where the conversation the starter continues lives. Both checkouts are reattached.
+func TestAParkedNodesWorkspaceWinsOverTheRunsLatest(t *testing.T) {
+	f := runtimeDatabase(t, nil)
+	agent := &recoveryAgent{}
+	restartService(t, f, agent)
+	runID := runningRun(t, f)
+	parked, _ := startNode(t, f, runID, "a", execution.LifetimeHeld)
+	// What a process that did not remember the run's workspace did: a later node in a new one.
+	f.service.mu.Lock()
+	f.service.workspaces = map[string]string{}
+	f.service.mu.Unlock()
+	later, _ := startNode(t, f, runID, "c", execution.LifetimeTurn)
+	if later.WorkspaceID == parked.WorkspaceID {
+		t.Fatal("the later node shares the parked node's workspace; the test needs two")
+	}
+	dirs := map[string]string{parked.WorkspaceID: t.TempDir(), later.WorkspaceID: t.TempDir()}
+	for workspace, dir := range dirs {
+		if err := f.db.RecordWorkspace(f.ctx, workspace, store.WorkspaceLocation{Path: dir, BaseCommit: "fixed", CloneExecution: "c-" + workspace}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	next := &recoveryAgent{}
+	restartService(t, f, next)
+	next.mu.Lock()
+	for workspace, dir := range dirs {
+		if got := next.reattached[workspace]; got != [2]string{"c-" + workspace, dir} {
+			t.Errorf("workspace %s reattached to %v, want its recorded checkout", workspace, got)
+		}
+	}
+	next.mu.Unlock()
+	successor, _ := startNode(t, f, runID, "b", execution.LifetimeTurn)
+	if successor.WorkspaceID != parked.WorkspaceID {
+		t.Fatalf("next node workspace = %s, want the parked node's %s (the run's latest is %s)", successor.WorkspaceID, parked.WorkspaceID, later.WorkspaceID)
+	}
+}
