@@ -48,7 +48,10 @@ func WithFrontend(api http.Handler, directory string) (http.Handler, error) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		name := strings.TrimPrefix(r.URL.Path, "/")
+		// A trailing slash names the same route, so drop one before the containment check: a page
+		// pasted as /settings/plugins/ must not 404. A missing file keeps its extension and still
+		// fails instead of becoming HTML.
+		name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), "/")
 		if strings.Contains(name, "\\") || path.Clean("/"+name) != "/"+name && name != "" {
 			http.NotFound(w, r)
 			return
