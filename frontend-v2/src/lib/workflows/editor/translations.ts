@@ -525,9 +525,9 @@ export const workflowEditorTranslations = {
       "路径不能超过 32 层目录。",
 
     "settings.workflow.unapplied.completionSignal":
-      "已保存，v2 暂不支持智能体完成工具，运行时按“回合正常结束即可”判定。",
+      "已保存，v2 暂不支持智能体完成工具，运行时按“回合正常结束即可”判定；完成工具上线后会开始生效。",
     "settings.workflow.unapplied.autoAcceptAgentCompletion":
-      "已保存，v2 暂不自动接受完成，仍由发起人确认。",
+      "已保存，v2 暂不自动接受完成，仍由发起人确认；完成工具上线后会开始生效。",
     "settings.workflow.unapplied.badge": "暂不生效",
     "settings.workflow.unapplied.mcp":
       "已保存，运行时暂不连接已启用的 MCP，节点照常执行。",
@@ -1193,9 +1193,9 @@ export const workflowEditorTranslations = {
       "The path must not nest deeper than 32 directories.",
 
     "settings.workflow.unapplied.completionSignal":
-      "Saved; v2 has no agent completion tool yet and judges a normally ended turn instead.",
+      "Saved; v2 has no agent completion tool yet and judges a normally ended turn instead. It takes effect once the completion tool ships.",
     "settings.workflow.unapplied.autoAcceptAgentCompletion":
-      "Saved; v2 does not accept completions automatically yet, the starter still confirms.",
+      "Saved; v2 does not accept completions automatically yet, the starter still confirms. It takes effect once the completion tool ships.",
     "settings.workflow.unapplied.badge": "Not applied yet",
     "settings.workflow.unapplied.mcp":
       "Saved, but runs do not connect the enabled MCPs yet; the node still runs.",
