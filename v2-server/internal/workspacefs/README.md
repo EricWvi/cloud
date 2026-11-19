@@ -16,6 +16,6 @@
 
 ## 删除对话时的检查与删除
 
-`InspectReclaim` 持目录锁按交付的快照规则在临时目录生成树（不写镜像、不写 ref），与给定交付提交（空时起点）的树比对，列出差异（至多 `MaxReclaimChanges` 条，另给总数），并查交付带不走的 Git 状态（`refs/stash`、`refs/remotes/` 之外超出起点与 `HEAD` 的本地 ref、与起点不同的 gitlink、嵌套 `.git`）和有无被忽略规则排除的文件（不算物化的技能），并带出快照树 OID 供预览的 `revision` 绑定内容。目录内容无法验证时返回 `ErrUnverifiable`，其余错误（磁盘、镜像、Git）可重试。
+`InspectReclaim` 持目录锁按交付的快照规则在临时目录生成树（不写镜像、不写 ref），与给定交付提交（空时起点）的树比对，列出差异（至多 `MaxReclaimChanges` 条，另给总数），并查交付带不走的 Git 状态（`refs/stash`、`refs/remotes/` 之外超出起点与 `HEAD` 的本地 ref、与起点不同的 gitlink、嵌套 `.git`）和有无被忽略规则排除的文件（不算物化的技能），并带出快照树 OID 和 Git 身份摘要供预览的 `revision` 绑定内容。身份摘要读嵌套仓库的状态文件与工作树内容时不调用 Git、不跟随链接：先 `Lstat` 只接受普通文件，再以 `O_NOFOLLOW|O_NONBLOCK` 打开并 `fstat` 复核，FIFO 等特殊文件判 `ErrUnverifiable`；内容字节共用交付的对象上限、条目至多 10 万，超出时摘要不完整（`GitIdentityComplete` 为 false）。整个检查受 2 分钟上限约束。目录内容无法验证时返回 `ErrUnverifiable`，其余错误（磁盘、镜像、Git）可重试。
 
 `RemoveCheckout(root, path)` 只删除位于 checkout 根 `root`（`<项目目录>/w/r`）之下的 `path`：从 `root` 起经目录句柄逐级打开，每级先 `Lstat` 确认是目录而非链接、打开后比对 dev/inode；统计、补属主写权限、删内容（链接只删本身）经 checkout 句柄，最后经父目录句柄删掉 checkout 本身，检查之后不再按路径重开。读不到的条目返回带路径的错误，列出后消失的不计。不安全时返回 `ErrUnsafeCheckout`；路径或根已不存在视为已删除。

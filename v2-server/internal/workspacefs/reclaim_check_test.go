@@ -1,11 +1,14 @@
 package workspacefs_test
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/workspacefs"
 )
@@ -193,5 +196,71 @@ func TestInspectReclaimGitIdentityFollowsNestedRepositories(t *testing.T) {
 	deliveryGit(t, sub, "commit", "-qam", "lib 2")
 	if committed := inspect(t, f, req, ""); committed.GitIdentity == edited.GitIdentity {
 		t.Fatal("a nested commit kept the identity")
+	}
+}
+
+// A FIFO where a nested repository's Git metadata belongs neither hangs the inspection nor ignores
+// its context: it returns once the context ends, or as unverifiable.
+func TestInspectReclaimDoesNotHangOnAFIFO(t *testing.T) {
+	for name, place := range map[string]func(t *testing.T, root string){
+		"gitfile": func(t *testing.T, root string) {
+			if err := os.MkdirAll(filepath.Join(root, "data"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(filepath.Join(root, "data", ".git"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"nested stash log": func(t *testing.T, root string) {
+			sub := filepath.Join(root, "vendor", "lib")
+			deliveryWrite(t, sub, "lib.go", "package lib\n")
+			deliveryGit(t, sub, "init", "-q", ".")
+			deliveryGit(t, sub, "add", ".")
+			deliveryGit(t, sub, "commit", "-qm", "lib")
+			if err := os.MkdirAll(filepath.Join(sub, ".git", "logs", "refs"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(filepath.Join(sub, ".git", "logs", "refs", "stash"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"nested HEAD": func(t *testing.T, root string) {
+			sub := filepath.Join(root, "vendor", "lib")
+			deliveryWrite(t, sub, "lib.go", "package lib\n")
+			deliveryGit(t, sub, "init", "-q", ".")
+			if err := os.Remove(filepath.Join(sub, ".git", "HEAD")); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(filepath.Join(sub, ".git", "HEAD"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
+			place(t, req.Workspace.Root)
+			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+			defer cancel()
+			start := time.Now()
+			done := make(chan error, 1)
+			go func() {
+				_, err := f.InspectReclaim(ctx, req.Workspace, req.MirrorPath, "")
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("a FIFO in Git metadata passed inspection")
+				}
+				// Where Ora reads the metadata itself the FIFO is refused outright; where Git reads
+				// it first, the context ends Git.
+				if name != "nested HEAD" && !errors.Is(err, workspacefs.ErrUnverifiable) {
+					t.Fatalf("err = %v, want ErrUnverifiable", err)
+				}
+				t.Logf("returned after %v: %v", time.Since(start), err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("inspection hung on a FIFO")
+			}
+		})
 	}
 }
