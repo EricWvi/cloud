@@ -175,24 +175,24 @@ func TestTaskAssignees(t *testing.T) {
 	task := createTask(t, f, owner, store.TaskInput{Title: "交给谁"})
 
 	// All three typed assignees are accepted and read back with live names.
-	human, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: member}, 1)
+	human, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, "", &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: member}, 1)
 	if e != nil || human.Assignee == nil || human.Assignee.DisplayName != "member" || human.Assignee.Identifier != "" {
 		t.Fatalf("human assignee = %+v %v", human, e)
 	}
-	agent, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, &store.TaskAssigneeRef{Type: store.AssigneeAgent, ID: agentID}, 2)
+	agent, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, "", &store.TaskAssigneeRef{Type: store.AssigneeAgent, ID: agentID}, 2)
 	if e != nil || agent.Assignee == nil || agent.Assignee.DisplayName != "OpenCode" ||
 		agent.Assignee.Identifier != "official/ora-space.opencode" {
 		t.Fatalf("agent assignee = %+v %v", agent, e)
 	}
-	bySquad, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, &store.TaskAssigneeRef{Type: store.AssigneeSquad, ID: squad.ID}, 3)
+	bySquad, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, "", &store.TaskAssigneeRef{Type: store.AssigneeSquad, ID: squad.ID}, 3)
 	if e != nil || bySquad.Assignee == nil || bySquad.Assignee.DisplayName != "产品小队" {
 		t.Fatalf("squad assignee = %+v %v", bySquad, e)
 	}
-	cleared, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, nil, 4)
+	cleared, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, "", nil, 4)
 	if e != nil || cleared.Assignee != nil || cleared.Version != 5 {
 		t.Fatalf("clear assignee = %+v %v", cleared, e)
 	}
-	if _, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, nil, 4); !errors.Is(e, store.ErrConflict) {
+	if _, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, "", nil, 4); !errors.Is(e, store.ErrConflict) {
 		t.Fatalf("stale assignment = %v", e)
 	}
 
@@ -201,16 +201,16 @@ func TestTaskAssignees(t *testing.T) {
 	if e := f.db.QueryRow(ctx, `INSERT INTO v2_space_agents (tenant_id, name, status) VALUES ($1, '退役', 'retired') RETURNING id`, f.tenant).Scan(&retired); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, &store.TaskAssigneeRef{Type: store.AssigneeAgent, ID: retired}, 5); !errors.Is(e, store.ErrAgentUnavailable) {
+	if _, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, "", &store.TaskAssigneeRef{Type: store.AssigneeAgent, ID: retired}, 5); !errors.Is(e, store.ErrAgentUnavailable) {
 		t.Fatalf("retired agent = %v", e)
 	}
 	if _, e := f.store.ArchiveSquad(ctx, storetest.Access(t, f.store, f.tenant, owner), squad.ID, squad.Version); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, &store.TaskAssigneeRef{Type: store.AssigneeSquad, ID: squad.ID}, 5); !errors.Is(e, store.ErrInvalidAssignee) {
+	if _, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, "", &store.TaskAssigneeRef{Type: store.AssigneeSquad, ID: squad.ID}, 5); !errors.Is(e, store.ErrInvalidAssignee) {
 		t.Fatalf("archived squad = %v", e)
 	}
-	if _, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, &store.TaskAssigneeRef{Type: "robot", ID: member}, 5); !errors.Is(e, store.ErrInvalidAssignee) {
+	if _, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, "", &store.TaskAssigneeRef{Type: "robot", ID: member}, 5); !errors.Is(e, store.ErrInvalidAssignee) {
 		t.Fatalf("unknown kind = %v", e)
 	}
 
@@ -225,7 +225,7 @@ func TestTaskAssignees(t *testing.T) {
 	if _, e := f.db.Exec(ctx, `INSERT INTO memberships (tenant_id, user_id, role) VALUES ($1, $2, 'member')`, strangerTenant, stranger); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: stranger}, 5); !errors.Is(e, store.ErrUserUnavailable) {
+	if _, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, "", &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: stranger}, 5); !errors.Is(e, store.ErrUserUnavailable) {
 		t.Fatalf("foreign human = %v", e)
 	}
 }

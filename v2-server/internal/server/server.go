@@ -261,6 +261,7 @@ func newRouter(h *handler) *router {
 	h.dashboardRoutes(rt)
 	h.workspaceRoutes(rt)
 	h.taskRunRoutes(rt)
+	h.notificationRoutes(rt)
 	h.taskDecompositionRoutes(rt)
 	h.taskWorkflowRoutes(rt)
 	rt.public("/api/", func(w http.ResponseWriter, _ *http.Request) { fault(w, http.StatusNotFound, "not_found") })

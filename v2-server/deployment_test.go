@@ -65,7 +65,7 @@ func TestPublicURL(t *testing.T) {
 			t.Fatalf("parsePublicURL(%q) = %v, %v; want %q", value, got, err, want)
 		}
 	}
-	for _, value := range []string{"ora.example.com", "ftp://ora.example.com", "https://ora.example.com/?a=1", "https://ora.example.com/#x", "https://user@ora.example.com", "https://", "https://ora.example.com/ora", "https://ora.example.com/ora/"} {
+	for _, value := range []string{"ora.example.com", "ftp://ora.example.com", "https://ora.example.com/?a=1", "https://ora.example.com/#x", "https://ora.example.com/?", "https://ora.example.com?", "https://ora.example.com/#", "https://user@ora.example.com", "https://", "https://ora.example.com/ora", "https://ora.example.com/ora/"} {
 		if _, err := parsePublicURL(value); err == nil {
 			t.Fatalf("parsePublicURL(%q) accepted", value)
 		}

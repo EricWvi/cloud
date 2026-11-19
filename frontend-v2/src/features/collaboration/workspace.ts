@@ -28,8 +28,8 @@ export function useTaskList(tenantId: string) {
 }
 
 /**
- * The caller's mentions still waiting on their reply, by task. With no notification channel, this
- * is how an @ reaches a person: the task joins 待我处理 and its card says who is waiting.
+ * The caller's mentions still waiting on their reply, by task: the task joins 待我处理 and its card
+ * says who is waiting. The rail's notification bell tells them about the @ itself.
  */
 export function usePendingMentions(tenantId: string): ReadonlyMap<string, PendingMention> {
   const query = useQuery({
@@ -43,8 +43,8 @@ export function usePendingMentions(tenantId: string): ReadonlyMap<string, Pendin
 }
 
 /**
- * The tasks of the caller's squads, by task. With no notification channel, this is how a squad task
- * reaches each member: it joins their 我的任务 and, until they act on it, their 待我处理.
+ * The tasks of the caller's squads, by task: a squad task joins each member's 我的任务 and, until
+ * they act on it, their 待我处理. The rail's notification bell tells them it was assigned.
  */
 export function useMySquadTasks(tenantId: string): SquadTasks {
   const query = useQuery({

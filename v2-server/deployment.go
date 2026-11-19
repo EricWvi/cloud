@@ -69,8 +69,10 @@ func parsePublicURL(value string) (*url.URL, error) {
 		return nil, nil
 	}
 	u, e := url.Parse(value)
+	// An empty "?" or "#" parses to no query and no fragment, but "?" survives in u.String() and
+	// would end up in every address derived from it, so reject both characters outright.
 	if e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil ||
-		u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		strings.ContainsAny(value, "?#") || u.Opaque != "" {
 		return nil, fmt.Errorf("V2_PUBLIC_URL %q must be an absolute http or https URL without query or fragment", value)
 	}
 	// Browsers send Origin with a lowercase host and without the scheme's default port, and
