@@ -9,6 +9,8 @@ const unappliedSettingKeys: Readonly<Record<WorkflowAgentUnappliedCapability, st
   mcp: 'workflowRun.v2.setting.mcp',
   retry: 'workflowRun.v2.setting.retry',
   interactive: 'workflowRun.v2.setting.interactive',
+  completionSignal: 'workflowRun.v2.setting.completionSignal',
+  autoAcceptAgentCompletion: 'workflowRun.v2.setting.autoAcceptAgentCompletion',
 }
 
 function isKnownSetting(setting: string): setting is WorkflowAgentUnappliedCapability {

@@ -13,6 +13,7 @@ import {
   type WorkflowNodeConversationItem,
   type WorkflowNodeErrorDetail,
   type WorkflowNodeExecutorUsed,
+  type WorkflowNodeInteractiveBlocker,
   type WorkflowNodeInteractiveSession,
   type WorkflowNodeModelUsed,
   type WorkflowNodeSessionSlotWait,
@@ -71,24 +72,44 @@ function modelUsed(payload: Record<string, unknown>): WorkflowNodeModelUsed | un
   return { id: text(m.id), name: text(m.name), requested: text(m.requested), fallback: m.fallback === true }
 }
 
+/** Reads a completion snapshot's blockers; malformed entries are dropped. */
+function blockers(value: unknown): WorkflowNodeInteractiveBlocker[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    const b = record(item)
+    if (b === undefined || text(b.kind) === '') return []
+    const params = record(b.params)
+    const blocker: WorkflowNodeInteractiveBlocker = { kind: text(b.kind) }
+    if (text(params?.path) !== '') blocker.path = text(params?.path)
+    if (text(params?.message) !== '') blocker.message = text(params?.message)
+    return [blocker]
+  })
+}
+
 /** Reads `payload.interactive`, what v2 records each time an interactive Agent node parks. */
 function interactiveSession(payload: Record<string, unknown>): WorkflowNodeInteractiveSession | undefined {
   const i = record(payload.interactive)
   if (i === undefined) return undefined
+  const completion = record(i.completion)
   const session: WorkflowNodeInteractiveSession = {
     turns: typeof i.turns === 'number' ? i.turns : 0,
     sessionEnded: i.session_ended === true,
     completable: i.completable === true,
+    blockers: blockers(completion?.blockers),
   }
-  const blocker = record(i.blocker)
-  if (blocker !== undefined && text(blocker.reason) !== '') session.blocker = { reason: text(blocker.reason), detail: text(blocker.detail) }
+  if (completion !== undefined) {
+    if (text(completion.parkKind) !== '') session.parkKind = text(completion.parkKind)
+    if (text(completion.turnOrigin) !== '') session.turnOrigin = text(completion.turnOrigin)
+    if (text(completion.stopCause) !== '') session.stopCause = text(completion.stopCause)
+  }
   if (typeof i.answer === 'string') session.answer = i.answer
+  if (text(i.answer_source) !== '') session.answerSource = text(i.answer_source)
   if (typeof i.sent === 'number') session.sent = i.sent
   if (text(i.last_turn_error) !== '') session.lastTurnError = text(i.last_turn_error)
   return session
 }
 
-const unappliedNames: ReadonlySet<string> = new Set<WorkflowAgentUnappliedCapability>(['role', 'skill', 'mcp', 'retry', 'interactive'])
+const unappliedNames: ReadonlySet<string> = new Set<WorkflowAgentUnappliedCapability>(['role', 'skill', 'mcp', 'retry', 'interactive', 'completionSignal', 'autoAcceptAgentCompletion'])
 
 /** Reads `payload.unapplied`, the configured settings v2 ran the attempt without; unknown names are dropped. */
 function unapplied(payload: Record<string, unknown>): WorkflowAgentUnappliedCapability[] | undefined {

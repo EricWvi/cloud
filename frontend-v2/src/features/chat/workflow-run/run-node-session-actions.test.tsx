@@ -28,7 +28,7 @@ vi.mock('@/lib/workflows/host/ui', async (original) => {
 
 const zh = workflowRunTranslations['zh-CN']
 const runI18n = createWorkflowI18n(['zh-CN'], { 'zh-CN': zh })
-const parked: WorkflowNodeInteractiveSession = { turns: 1, sessionEnded: false, completable: true, answer: '初稿' }
+const parked: WorkflowNodeInteractiveSession = { turns: 2, sessionEnded: false, completable: true, blockers: [], answer: '初稿', answerSource: 'turn_window' }
 
 /** Renders the actions for target; `show` renders a later state of the same node in the same view. */
 function view(target: Partial<InteractiveNodeTarget>, starter = true, beside?: ReactNode) {
@@ -75,10 +75,11 @@ describe('RunNodeSessionActions', () => {
     expect(screen.queryByRole('button', { name: zh['workflowRun.v2.interactive.stop'] })).toBeNull()
   })
 
-  it('completes a completable node', async () => {
+  it('completes a node whose turn ended normally', async () => {
     view({})
     fireEvent.click(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.complete'] }))
-    await waitFor(() => expect(calls.completeNode).toHaveBeenCalledWith('tenant-1', 'run-1', 'a'))
+    await waitFor(() => expect(calls.completeNode).toHaveBeenCalledWith('tenant-1', 'run-1', 'a', {}))
+    expect(screen.queryByRole('button', { name: zh['workflowRun.v2.interactive.completeAnyway'] })).toBeNull()
   })
 
   it('offers only "停止本轮" while a turn runs', async () => {
@@ -89,32 +90,61 @@ describe('RunNodeSessionActions', () => {
     await waitFor(() => expect(calls.stopNodeTurn).toHaveBeenCalledWith('tenant-1', 'run-1', 'a'))
   })
 
-  it('keeps completion closed and explains why while the node is blocked', () => {
-    view({ session: { turns: 1, sessionEnded: false, completable: false, blocker: { reason: 'structured_output', detail: 'missing approved' } } })
-    expect(screen.getByText(zh['workflowRun.v2.interactive.blocker.structured_output'])).toBeTruthy()
-    expect((screen.getByRole('button', { name: zh['workflowRun.v2.interactive.complete'] }) as HTMLButtonElement).disabled).toBe(true)
+  it('asks the starter to confirm the workflow\'s own first turn and never offers force for it', async () => {
+    view({ session: { ...parked, turns: 1, completable: false, blockers: [{ kind: 'turn_unconfirmed' }], parkKind: 'awaiting_user', turnOrigin: 'workflow' } })
+    expect(screen.getByText(zh['workflowRun.v2.interactive.confirmHint'])).toBeTruthy()
+    expect(screen.queryByRole('button', { name: zh['workflowRun.v2.interactive.completeAnyway'] })).toBeNull()
+    expect(screen.queryByRole('button', { name: zh['workflowRun.v2.interactive.complete'] })).toBeNull()
+    expect(screen.getByRole('textbox')).toBeTruthy() // continuing is the other way
+    fireEvent.click(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.confirmComplete'] }))
+    await waitFor(() => expect(calls.completeNode).toHaveBeenCalledWith('tenant-1', 'run-1', 'a', { confirmInitialTurn: true }))
   })
 
-  it('takes no more messages once the session was stopped', () => {
-    view({ session: { turns: 2, sessionEnded: true, completable: true, answer: '初稿' } })
+  it('explains a turn that did not end normally and completes it anyway only after the confirmation', async () => {
+    view({ session: { ...parked, completable: false, blockers: [{ kind: 'turn_refused' }], parkKind: 'abnormal', answer: '不行' } })
+    expect(screen.getByText(zh['workflowRun.v2.interactive.blocker.turn_refused'])).toBeTruthy()
+    expect(screen.getByText(zh['workflowRun.v2.interactive.blockedHint'])).toBeTruthy()
+    expect(screen.queryByRole('button', { name: zh['workflowRun.v2.interactive.complete'] })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.completeAnyway'] }))
+    expect(calls.completeNode).not.toHaveBeenCalled()
+    expect(await screen.findByText(zh['workflowRun.v2.interactive.forceTitle'])).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.forceConfirm'] }))
+    await waitFor(() => expect(calls.completeNode).toHaveBeenCalledWith('tenant-1', 'run-1', 'a', { force: true }))
+  })
+
+  it('takes no more messages once the session was stopped and says force takes the last normal answer', async () => {
+    view({ session: { ...parked, sessionEnded: true, completable: false, blockers: [{ kind: 'turn_stopped' }], stopCause: 'user_stopped', answerSource: 'last_completed_turn' } })
     expect(screen.queryByRole('textbox')).toBeNull()
     expect(screen.getByText(zh['workflowRun.v2.interactive.sessionEnded'])).toBeTruthy()
-    expect((screen.getByRole('button', { name: zh['workflowRun.v2.interactive.complete'] }) as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.getByText(zh['workflowRun.v2.interactive.blockedEndedHint'])).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.completeAnyway'] }))
+    expect(await screen.findByText(new RegExp(zh['workflowRun.v2.interactive.forceSource.last_completed_turn']))).toBeTruthy()
   })
 
-  it('does not offer completion or another message once the session ended without an acceptable answer', () => {
-    view({ session: { turns: 1, sessionEnded: true, completable: false, blocker: { reason: 'no_completed_turn', detail: 'no turn ended normally' } } })
-    expect(screen.getByText(zh['workflowRun.v2.interactive.sessionEndedBlocked'])).toBeTruthy()
-    expect(screen.queryByText(zh['workflowRun.v2.interactive.sessionEnded'])).toBeNull()
-    expect(screen.getByText(zh['workflowRun.v2.interactive.blocker.no_completed_turn'])).toBeTruthy()
-    expect((screen.getByRole('button', { name: zh['workflowRun.v2.interactive.complete'] }) as HTMLButtonElement).disabled).toBe(true)
+  it('names the deliverables a refused completion listed and offers to complete anyway', async () => {
+    calls.completeNode.mockRejectedValueOnce(new ContractError('workflow_node_incomplete', { blockers: [{ kind: 'file_missing', path: 'plan.md' }] }))
+    view({})
+    fireEvent.click(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.complete'] }))
+    expect(await screen.findByText('缺少交付文件：plan.md')).toBeTruthy()
+    // Shown inline only: a toast would cover the action it offers.
+    expect(toastError).not.toHaveBeenCalled()
+    expect(screen.getByText(zh['workflowRun.v2.interactive.filesHint'])).toBeTruthy()
+    expect(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.completeAnyway'] })).toBeTruthy()
   })
 
-  it('does not tell the starter to keep talking about a structured output once the session ended', () => {
-    view({ session: { turns: 2, sessionEnded: true, completable: false, answer: '初稿', blocker: { reason: 'structured_output', detail: 'missing approved' } } })
-    expect(screen.getByText(zh['workflowRun.v2.interactive.blocker.structured_output_ended'])).toBeTruthy()
-    expect(screen.queryByText(zh['workflowRun.v2.interactive.blocker.structured_output'])).toBeNull()
-    expect(screen.queryByRole('textbox')).toBeNull()
+  it('says why a confirmation was refused when the refusal names only the unconfirmed opening turn', async () => {
+    calls.completeNode.mockRejectedValueOnce(new ContractError('workflow_node_incomplete', { blockers: [{ kind: 'turn_unconfirmed' }] }))
+    view({ session: { ...parked, turns: 1, completable: false, blockers: [{ kind: 'turn_unconfirmed' }] } })
+    fireEvent.click(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.confirmComplete'] }))
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith(zh['workflowRun.v2.interactive.blocker.turn_unconfirmed']))
+  })
+
+  it('does not offer force when the first turn still awaits confirmation, even with a missing deliverable', async () => {
+    calls.completeNode.mockRejectedValueOnce(new ContractError('workflow_node_incomplete', { blockers: [{ kind: 'file_missing', path: 'plan.md' }] }))
+    view({ session: { ...parked, turns: 1, completable: false, blockers: [{ kind: 'turn_unconfirmed' }] } })
+    fireEvent.click(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.confirmComplete'] }))
+    expect(await screen.findByText('缺少交付文件：plan.md')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: zh['workflowRun.v2.interactive.completeAnyway'] })).toBeNull()
   })
 
   it('shows other members the transcript read-only', () => {

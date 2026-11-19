@@ -945,8 +945,8 @@ describe("WorkflowInspector unapplied-setting hints", () => {
     expect(screen.queryByTestId("workflow-unapplied-interactive")).toBeNull();
     const note = screen.getByTestId("workflow-interactive-partial");
     expect(note).toHaveTextContent("简化版");
-    expect(note).toHaveTextContent("当前按 end_turn 完成");
-    expect(note).toHaveTextContent("Agent 完成信号和确认门禁暂未支持");
+    expect(note).toHaveTextContent("首轮要点「确认并完成」");
+    expect(note).toHaveTextContent("Agent 完成信号暂未支持");
     // Switching the mode off removes the note with it.
     await user.click(screen.getByRole("switch", { name: "交互模式" }));
     expect(screen.queryByTestId("workflow-interactive-partial")).toBeNull();

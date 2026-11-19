@@ -25,7 +25,7 @@ type WorkflowRunHost interface {
 	StartRun(context.Context, WorkflowRunScope, string) (store.WorkflowRun, error)
 	CancelRun(context.Context, WorkflowRunScope, string) (store.WorkflowRun, error)
 	UpdateRunInput(context.Context, WorkflowRunScope, string, *string, map[string]json.RawMessage) (store.WorkflowRun, error)
-	CompleteNode(context.Context, WorkflowRunScope, string, string, bool, string) (store.WorkflowRun, error)
+	CompleteNode(context.Context, WorkflowRunScope, string, string, WorkflowNodeCompletion) (store.WorkflowRun, error)
 }
 
 var (
@@ -150,8 +150,9 @@ func (h *handler) completeWorkflowNode(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 	var in struct {
-		Force     bool   `json:"force"`
-		Requester string `json:"requester"`
+		Force              bool   `json:"force"`
+		ConfirmInitialTurn bool   `json:"confirmInitialTurn"`
+		Requester          string `json:"requester"`
 	}
 	if !decodeWorkflow(w, r, &in) {
 		return
@@ -160,7 +161,7 @@ func (h *handler) completeWorkflowNode(w http.ResponseWriter, r *http.Request, a
 		fault(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	run, err := host.CompleteNode(r.Context(), scope, runID, nodeID, in.Force, in.Requester)
+	run, err := host.CompleteNode(r.Context(), scope, runID, nodeID, WorkflowNodeCompletion{Force: in.Force, ConfirmInitialTurn: in.ConfirmInitialTurn})
 	if err != nil {
 		workflowRunLifecycleFault(w, err, "complete workflow node")
 		return

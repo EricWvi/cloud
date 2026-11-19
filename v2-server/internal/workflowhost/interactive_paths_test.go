@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -109,7 +110,7 @@ func TestStopEndsAFollowUpWhileASiblingIsPrepared(t *testing.T) {
 		t.Fatalf("stopping the follow-up = %v", err)
 	}
 	_, nodes := f.await(t, runID, parked("a"))
-	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != true || p["completable"] != true || !f.exec.isClosed(a) {
+	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != true || p["completable"] != false || !f.exec.isClosed(a) {
 		t.Fatalf("summary = %v closed = %v", p, f.exec.isClosed(a))
 	}
 	release()
@@ -140,7 +141,7 @@ func TestTurnRefusedByAStoppedRunLeavesTheNodeClaimable(t *testing.T) {
 	// The refused move gave the claim back, so the completion can still settle the node at once:
 	// its accepted answer is recorded under the failed run, as any root attempt that settles after
 	// a sibling failed the run is, and a resume from failure reuses it.
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err != nil {
 		t.Fatalf("completion under a failed run = %v", err)
 	}
 	if r := f.nodeRow(t, runID, "a"); r.Status != store.WorkflowStatusSucceeded || !f.exec.isClosed(a) {
@@ -191,7 +192,7 @@ func TestAppendToAnEndedSessionMarksItEnded(t *testing.T) {
 	_, nodes := f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
 		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["session_ended"] == true
 	})
-	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != true || p["turns"] != float64(1) || p["last_turn_error"] != turnErrorNotDelivered {
+	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != false || p["turns"] != float64(1) || p["last_turn_error"] != turnErrorNotDelivered {
 		t.Fatalf("summary = %v, want the message reported as not delivered", p)
 	}
 	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再试"); !errors.Is(err, server.ErrWorkflowNodeSessionEnded) {
@@ -289,7 +290,7 @@ func TestRefusedFollowUpIsReportedAsNotDelivered(t *testing.T) {
 				return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["last_turn_error"] != nil
 			})
 			p := interactivePayload(t, node(nodes, "a"))
-			if p["last_turn_error"] != turnErrorNotDelivered || p["sent"] != float64(1) || p["session_ended"] != false || p["completable"] != true || p["turns"] != float64(1) || p["answer"] != "初稿一" {
+			if p["last_turn_error"] != turnErrorNotDelivered || p["sent"] != float64(1) || p["session_ended"] != false || p["completable"] != false || p["turns"] != float64(1) || p["answer"] != "初稿一" {
 				t.Fatalf("summary = %v, want the node as it was plus the notice about the first message", p)
 			}
 			if f.exec.isClosed(a) {
@@ -336,7 +337,7 @@ func TestUndeliveredNoticeFollowsTheLatestMessage(t *testing.T) {
 		f.await(t, runID, undelivered)
 		f.awaitClaimable(t, runID, "a")
 	}
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err != nil {
 		t.Fatalf("completing with the earlier answer: %v", err)
 	}
 	if row := f.nodeRow(t, runID, "a"); row.Status != store.WorkflowStatusSucceeded || interactivePayload(t, row)["last_turn_error"] != nil {
@@ -357,7 +358,7 @@ func TestCompletionOutlivesItsRequest(t *testing.T) {
 		}
 		return end(c, scope, id)
 	}
-	_, _ = f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human")
+	_, _ = f.host.CompleteNode(ctx, f.scope, runID, "a", confirm)
 	b := f.exec.awaitStart(t)
 	if f.exec.request(b).Caller.NodeID != "b" {
 		t.Fatalf("successor = %s", f.exec.request(b).Caller.NodeID)
@@ -442,7 +443,7 @@ func TestCompletionThatCommittedWinsOverALateCancellation(t *testing.T) {
 	f.host.engine = workflow.NewEngine(cancelBeforeStart{repository{f.s}, f.scope.TenantID, &armed}, f.host, f.host.hub.Publish, f.host.now)
 	runID, _ := f.startParked(t, interactiveChain, "初稿一")
 	armed = true // only the completion's successor wave starts nodes from here on
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err != nil {
 		t.Fatalf("a committed completion = %v, want its win reported", err)
 	}
 	if r := f.nodeRow(t, runID, "a"); r.Status != store.WorkflowStatusSucceeded || r.Output == nil || *r.Output != "初稿一" {
@@ -490,7 +491,7 @@ func TestResumeRestartsANodeParkedWhenTheRunFailed(t *testing.T) {
 		t.Fatalf("resumed A = %+v, want a new attempt on its first turn", row)
 	}
 	f.exec.finish(resumed["c"], completed("旁支好了"))
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err != nil {
 		t.Fatal(err)
 	}
 	run, nodes := f.await(t, runID, terminal)
@@ -739,7 +740,7 @@ func TestUnconfirmedStopOfAFollowUpStillEndsTheSession(t *testing.T) {
 	}
 	release()
 	f.exec.finish(f.exec.awaitStart(t), completed("好"))
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err != nil {
 		t.Fatalf("completion after the stop = %v", err)
 	}
 	if run, _ := f.await(t, runID, terminal); run.Status != store.WorkflowStatusSucceeded {
@@ -805,13 +806,14 @@ func TestUnconfirmedEndDuringCompletionClosesTheConversation(t *testing.T) {
 	runID, a := f.startParked(t, interactiveChain, "初稿")
 	end := f.exec.EndFunc
 	f.exec.EndFunc = func(context.Context, execution.Scope, string) error { return execution.ErrStopUnconfirmed }
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); !errors.Is(err, server.ErrWorkflowRunStopUnconfirmed) {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); !errors.Is(err, server.ErrWorkflowRunStopUnconfirmed) {
 		t.Fatalf("completion with an unconfirmed End = %v", err)
 	}
 	_, nodes := f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
 		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["session_ended"] == true
 	})
-	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != true || node(nodes, "a").Output != nil {
+	// Still the opening turn awaiting confirmation, as before the attempt.
+	if p := interactivePayload(t, node(nodes, "a")); !reflect.DeepEqual(blockerKinds(p), []string{blockerTurnUnconfirmed}) || node(nodes, "a").Output != nil {
 		t.Fatalf("summary = %v, output = %v; want still parked and completable", p, node(nodes, "a").Output)
 	}
 	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "还能说吗"); !errors.Is(err, server.ErrWorkflowNodeSessionEnded) {
@@ -824,7 +826,7 @@ func TestUnconfirmedEndDuringCompletionClosesTheConversation(t *testing.T) {
 		t.Fatal("a turn was accepted for a session that was asked to end")
 	}
 	f.exec.EndFunc = end
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err != nil {
 		t.Fatalf("retried completion = %v", err)
 	}
 	b := f.exec.awaitStart(t)
@@ -856,7 +858,7 @@ func TestStopDuringPreparationParksInsteadOfFailing(t *testing.T) {
 	}
 	run, nodes := f.await(t, runID, awaitingInput("a"))
 	row := node(nodes, "a")
-	if p := interactivePayload(t, row); run.Status != store.WorkflowRunAwaitingInput || errorKind(t, row) != "" || p["session_ended"] != true || p["blocker"].(map[string]any)["reason"] != blockerNoCompletedTurn {
+	if p := interactivePayload(t, row); run.Status != store.WorkflowRunAwaitingInput || errorKind(t, row) != "" || p["session_ended"] != true || !reflect.DeepEqual(blockerKinds(p), []string{blockerTurnStopped}) {
 		t.Fatalf("run %s, A %+v, summary %v; want parked by the stop, never failed", run.Status, row, p)
 	}
 }
@@ -879,7 +881,7 @@ func TestParkedInteractiveSessionHoldsItsSlot(t *testing.T) {
 	f.exec.finish(a, completed("在"))
 	f.await(t, runID, parked("a"))
 	f.exec.noStart(t, "C started beside A's parked session")
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err != nil {
 		t.Fatal(err)
 	}
 	c := f.exec.awaitStart(t)
@@ -909,19 +911,19 @@ func TestUnconfirmedEndKeepsTheInteractiveSlot(t *testing.T) {
 	release()
 	f.exec.finish(a, completed("在"))
 	f.await(t, runID, parked("a"))
-	confirm := f.exec.EndFunc
+	realEnd := f.exec.EndFunc
 	f.exec.EndFunc = func(ctx context.Context, scope execution.Scope, id string) error {
 		if id == a {
 			return execution.ErrStopUnconfirmed
 		}
-		return confirm(ctx, scope, id)
+		return realEnd(ctx, scope, id)
 	}
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err == nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err == nil {
 		t.Fatal("completion with an unconfirmed End succeeded")
 	}
 	f.exec.noStart(t, "C started while A's session may still be live")
-	f.exec.EndFunc = confirm
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	f.exec.EndFunc = realEnd
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err != nil {
 		t.Fatalf("retried completion: %v", err)
 	}
 	if !f.exec.isClosed(a) {
@@ -957,13 +959,13 @@ func TestStoppedTurnKeepsTheSlotUntilEndReturns(t *testing.T) {
 	ending, finishEnd := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	t.Cleanup(func() { once.Do(func() { close(finishEnd) }) })
-	confirm := f.exec.EndFunc
+	realEnd := f.exec.EndFunc
 	f.exec.EndFunc = func(ctx context.Context, scope execution.Scope, id string) error {
 		if id == a {
 			close(ending)
 			<-finishEnd
 		}
-		return confirm(ctx, scope, id)
+		return realEnd(ctx, scope, id)
 	}
 	f.exec.onCancel = func(ref execution.Ref) error {
 		f.exec.finish(ref.SessionID, completed("停"))

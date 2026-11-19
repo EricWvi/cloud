@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -99,7 +100,7 @@ func TestParkedNodeSurvivesARestartAndContinues(t *testing.T) {
 		t.Fatalf("summary after the restart = %v", p)
 	}
 
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err != nil {
 		t.Fatalf("complete after the restart: %v", err)
 	}
 	b := f.exec.awaitStart(t)
@@ -222,8 +223,8 @@ func TestUnstartedRecoveryKeepsTheNodeWaiting(t *testing.T) {
 	_, nodes = f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
 		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["turns"] == float64(2)
 	})
-	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != false || p["answer"] != "初稿一" {
-		t.Fatalf("summary = %v, want the session open with the earlier answer", p)
+	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != false || !reflect.DeepEqual(blockerKinds(p), []string{blockerTurnUnknown}) {
+		t.Fatalf("summary = %v, want the session open and the failed turn blocking completion", p)
 	}
 	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再试一次"); err != nil {
 		t.Fatalf("retry after an unstarted recovery: %v", err)
@@ -320,10 +321,12 @@ func TestARestartDuringCompletionReadsTheSessionAsEnded(t *testing.T) {
 	_, nodes = f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
 		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["session_ended"] == true
 	})
-	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != true || p["answer"] != "初稿一" {
-		t.Fatalf("summary after the restart = %v, want it completable with the earlier answer", p)
+	// The opening turn still awaits the starter's confirmation, which then completes it.
+	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != false || p["answer"] != "初稿一" ||
+		!reflect.DeepEqual(blockerKinds(p), []string{blockerTurnUnconfirmed}) {
+		t.Fatalf("summary after the restart = %v, want the earlier answer awaiting confirmation", p)
 	}
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err != nil {
 		t.Fatalf("complete after the restart: %v", err)
 	}
 }

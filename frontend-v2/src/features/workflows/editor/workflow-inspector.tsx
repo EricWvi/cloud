@@ -1,6 +1,9 @@
 import { WorkflowMcpFields } from "./workflow-mcp-fields";
 import { WorkflowAgentRetryFields } from "./workflow-agent-retry-fields";
 import { WorkflowAgentInactivityField } from "./workflow-agent-inactivity-field";
+import { WorkflowAgentCompletionField } from "./workflow-agent-completion-field";
+import { WorkflowAgentCompletionFields } from "./workflow-agent-completion-fields";
+import { withInteractive } from "./workflow-agent-interactive";
 import {
   WorkflowInteractivePartialNote,
   WorkflowOtherUnappliedSettings,
@@ -1015,7 +1018,7 @@ function AgentConfigurationFields({
               checked={config.interactive ?? false}
               disabled={iterationMember}
               onCheckedChange={(interactive) =>
-                onChange({ ...config, interactive })
+                onChange(withInteractive(config, interactive))
               }
             />
           </div>
@@ -1038,7 +1041,7 @@ function AgentConfigurationFields({
                 variant="outline"
                 size="sm"
                 className="mt-2 h-7"
-                onClick={() => onChange({ ...config, interactive: false })}
+                onClick={() => onChange(withInteractive(config, false))}
               >
                 {t("settings.workflow.iteration.disableInteractive")}
               </Button>
@@ -1046,6 +1049,13 @@ function AgentConfigurationFields({
           )}
         </div>
       </InspectorField>
+      {config.interactive === true && !iterationMember && (
+        <WorkflowAgentCompletionField
+          config={config}
+          unapplied={unapplied}
+          onChange={onChange}
+        />
+      )}
       <WorkflowAgentInactivityField config={config} onChange={onChange} />
       <div className="min-w-0 space-y-1.5">
         <div className="flex items-center justify-between gap-3">
@@ -1096,6 +1106,9 @@ function AgentConfigurationFields({
           </div>
         )}
       </div>
+      {(config.interactive === true || config.completion !== undefined) && (
+        <WorkflowAgentCompletionFields config={config} onChange={onChange} />
+      )}
       <div>
         {/* Interactive nodes wait for a person instead of rerunning, so the fields would be inert. */}
         {workflowAgentRetryApplies(config) && (

@@ -320,9 +320,20 @@ export async function stopNodeTurn(tenantId: string, runId: string, nodeId: stri
   await call(() => stopWorkflowNodeTurn(tenantId, runId, nodeId))
 }
 
-/** Completes a parked interactive node with the last answer that ended normally (no forced completion). */
-export async function completeNode(tenantId: string, runId: string, nodeId: string): Promise<void> {
-  await call(() => completeWorkflowNode(tenantId, runId, nodeId, { force: false, requester: 'human' }))
+/**
+ * What the starter decided on a completion: `confirmInitialTurn` adopts the workflow's own first
+ * turn, `force` completes despite every other blocker and leaves an audit. v2-server refuses both
+ * at once.
+ */
+export interface NodeCompletion {
+  confirmInitialTurn?: boolean
+  force?: boolean
+}
+
+/** Completes a parked interactive node through v2-server's completion gate. */
+export async function completeNode(tenantId: string, runId: string, nodeId: string, completion: NodeCompletion = {}): Promise<void> {
+  const body = { force: completion.force === true, requester: 'human' as const, ...(completion.confirmInitialTurn === true ? { confirmInitialTurn: true } : {}) }
+  await call(() => completeWorkflowNode(tenantId, runId, nodeId, body))
 }
 
 /** Deletes a finished run with its node rows. */

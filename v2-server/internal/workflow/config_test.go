@@ -54,6 +54,29 @@ func TestNodeConfigurationValidation(t *testing.T) {
 		{"aggregator duplicate", "aggregator", obj{"aggregatorConfig": obj{"variables": []any{[]string{"start", "input"}, []string{"start", "input"}}}}, false},
 		{"aggregator unknown variable", "aggregator", obj{"aggregatorConfig": obj{"variables": []any{[]string{"start", "unknown"}}}}, false},
 		{"bad unrelated wire field", "output", obj{"cases": "unfinished"}, false},
+		{"agent schema version 3", "agent", obj{"agentConfig": obj{"schemaVersion": 3}}, true},
+		{"agent schema version 5", "agent", obj{"agentConfig": obj{"schemaVersion": 5}}, false},
+		{"agent schema version text", "agent", obj{"agentConfig": obj{"schemaVersion": "4"}}, false},
+		{"completion signal needs version 4", "agent", obj{"agentConfig": obj{"schemaVersion": 3, "completionSignal": "end_turn"}}, false},
+		{"completion signal without version", "agent", obj{"agentConfig": obj{"completionSignal": "agent"}}, false},
+		{"completion signal end_turn", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "interactive": true, "completionSignal": "end_turn"}}, true},
+		{"completion signal agent", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "interactive": true, "completionSignal": "agent", "autoAcceptAgentCompletion": true}}, true},
+		{"completion signal unknown", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "completionSignal": "tool"}}, false},
+		{"auto accept not boolean", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "autoAcceptAgentCompletion": "yes"}}, false},
+		{"auto accept needs version 4", "agent", obj{"agentConfig": obj{"autoAcceptAgentCompletion": false}}, false},
+		{"completion files", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "completion": obj{"files": []any{obj{"path": "reports/plan.md", "mustChange": true}, obj{"path": "docs/**/*.md"}}}}}, true},
+		{"completion files need version 4", "agent", obj{"agentConfig": obj{"completion": obj{"files": []any{obj{"path": "a.md"}}}}}, false},
+		{"completion files empty", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "completion": obj{"files": []any{}}}}, false},
+		{"completion files missing", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "completion": obj{}}}, false},
+		{"completion unknown field", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "completion": obj{"files": []any{obj{"path": "a.md"}}, "criteria": "x"}}}, false},
+		{"completion file unknown field", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "completion": obj{"files": []any{obj{"path": "a.md", "checklist": true}}}}}, false},
+		{"completion file without path", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "completion": obj{"files": []any{obj{"mustChange": true}}}}}, false},
+		{"completion file null mustChange", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "completion": obj{"files": []any{obj{"path": "a.md", "mustChange": nil}}}}}, false},
+		{"completion file absolute", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "completion": obj{"files": []any{obj{"path": "/etc/passwd"}}}}}, false},
+		{"completion file traversal", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "completion": obj{"files": []any{obj{"path": "a/../b.md"}}}}}, false},
+		{"completion file class", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "completion": obj{"files": []any{obj{"path": "a/[ab].md"}}}}}, false},
+		{"completion too many files", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "completion": obj{"files": manyFiles(33)}}}, false},
+		{"completion 32 files", "agent", obj{"agentConfig": obj{"schemaVersion": 4, "completion": obj{"files": manyFiles(32)}}}, true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -208,4 +231,13 @@ func TestDerivedCatalogKeepsFirstDeclaration(t *testing.T) {
 	// Globals precede both base and derived node declarations, as on desktop.
 	g["globalVariables"] = []any{obj{"name": "agent.output", "valueType": "number", "value": 0}}
 	requireInvalid(t, g, "invalid_aggregator")
+}
+
+// manyFiles declares n distinct completion files.
+func manyFiles(n int) []any {
+	files := make([]any, n)
+	for i := range files {
+		files[i] = obj{"path": "out/" + strings.Repeat("f", i+1) + ".md"}
+	}
+	return files
 }

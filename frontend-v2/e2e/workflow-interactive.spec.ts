@@ -47,6 +47,19 @@ const parallelPair = JSON.stringify({
   ],
 })
 
+/** Start → 起草 (interactive, must leave plan.md) → 审阅: completion checks the deliverable. */
+const deliverable = JSON.stringify({
+  nodes: [
+    { id: 'start', type: 'workflow', position: { x: 0, y: 0 }, data: { kind: 'start', title: '开始' } },
+    { id: 'draft', type: 'workflow', position: { x: 320, y: 0 }, data: { kind: 'agent', title: '起草', agentConfig: { schemaVersion: 4, executor: { agentCli: 'official/ora-space.opencode', modelId: 'fixture' }, prompt: '根据需求起草方案：{{#start.input#}}', interactive: true, completionSignal: 'end_turn', completion: { files: [{ path: 'plan.md' }, { path: 'docs/*.md', mustChange: true }] } } } },
+    { id: 'review', type: 'workflow', position: { x: 640, y: 0 }, data: { kind: 'agent', title: '审阅', agentConfig: { executor: { agentCli: 'official/ora-space.opencode', modelId: 'fixture' }, prompt: '审阅上一步的方案：{{#draft.output#}}' } } },
+  ],
+  edges: [
+    { id: 'e1', source: 'start', target: 'draft' },
+    { id: 'e2', source: 'draft', target: 'review' },
+  ],
+})
+
 /** Publishes graph, creates a run of it in Demo from the chat entry and starts it. */
 async function startRun(page: Page, graph: string, label: string) {
   await page.goto('/chat')
@@ -83,7 +96,7 @@ async function startRun(page: Page, graph: string, label: string) {
   return { tenantId, pane, row, runId }
 }
 
-const partialNote = '当前为简化版：由发起人确认完成。停止本轮会结束这个节点的会话，停止后不能继续对话。'
+const partialNote = 'Agent 完成信号暂未支持，由发起人确认完成。停止本轮会结束这个节点的会话，停止后不能继续对话。'
 
 async function screenshot(page: Page, path: string) {
   await page.waitForFunction(() =>
@@ -106,9 +119,15 @@ test('interactive Agent: the starter talks to the parked node in its session, th
   await expect(pane.getByText('等待输入：打开会话继续对话，或完成这一步')).toBeVisible()
   await screenshot(page, testInfo.outputPath('1-awaiting-input.png'))
 
-  // The starter replies in the node's own session; the answer arrives over its events stream.
+  // The workflow's own first turn needs the starter's confirmation: no plain "完成" yet.
   await pane.getByRole('button', { name: '查看节点会话' }).click()
   await expect(pane.getByText(partialNote)).toBeVisible()
+  await expect(pane.getByRole('button', { name: '确认并完成' })).toBeVisible()
+  await expect(pane.getByText(/这是工作流发起的首轮/)).toBeVisible()
+  await expect(pane.getByRole('button', { name: '仍然完成' })).toHaveCount(0)
+  await screenshot(page, testInfo.outputPath('1b-confirm-first-turn.png'))
+
+  // The starter replies in the node's own session; the answer arrives over its events stream.
   const composer = pane.getByRole('textbox', { name: '回复 Agent' })
   await composer.fill('请把接口命名改成 reconcile')
   await composer.press('Enter')
@@ -118,7 +137,8 @@ test('interactive Agent: the starter talks to the parked node in its session, th
   await expect(pane.getByText(/V2 fixture complete\./).last()).toBeVisible()
   await screenshot(page, testInfo.outputPath('3-parked-again.png'))
 
-  // Completing writes 起草's output; 审阅 reads it and the run finishes.
+  // The starter's own turn ended normally, so it completes without confirmation; 审阅 reads the
+  // output and the run finishes.
   await pane.getByRole('button', { name: '完成', exact: true }).click()
   await expect(row('成功')).toBeVisible({ timeout: 150_000 })
   await screenshot(page, testInfo.outputPath('4-result.png'))
@@ -127,6 +147,33 @@ test('interactive Agent: the starter talks to the parked node in its session, th
   const draft = detail.nodes.find((n) => n.nodeId === 'draft')!
   expect(draft.status).toBe('succeeded')
   expect(JSON.parse(draft.payload!).interactive.turns).toBe(2)
+  expect(detail.nodes.find((n) => n.nodeId === 'review')!.status).toBe('succeeded')
+})
+
+test('interactive Agent: 「确认并完成」 adopts the opening turn without forcing it', async ({ page }, testInfo) => {
+  test.skip(!realAgents, 'prepared Node assets are required for a real Agent session')
+  test.setTimeout(240_000)
+  const { tenantId, pane, row, runId: readRunId } = await startRun(page, chain, '交互确认首轮')
+  await expect(pane.locator('[data-path-node="draft"]')).toContainText('等待输入', { timeout: 150_000 })
+  await pane.getByRole('button', { name: '查看节点会话' }).click()
+
+  // The request must carry confirmInitialTurn: without it v2-server refuses with turn_unconfirmed.
+  const completed = page.waitForResponse((r) => r.url().endsWith('/nodes/draft/complete') && r.request().method() === 'POST')
+  await pane.getByRole('button', { name: '确认并完成' }).click()
+  const response = await completed
+  expect(response.status()).toBe(200)
+  expect(response.request().postDataJSON()).toEqual({ force: false, requester: 'human', confirmInitialTurn: true })
+  await expect(row('成功')).toBeVisible({ timeout: 150_000 })
+  await screenshot(page, testInfo.outputPath('1c-confirmed-first-turn.png'))
+
+  const runId = await readRunId()
+  const detail = (await (await page.request.get(`/api/v2/tenants/${tenantId}/workflow-runs/${runId}`)).json()) as { nodes: { nodeId: string; status: string; payload: string | null }[] }
+  const draft = detail.nodes.find((n) => n.nodeId === 'draft')!
+  const payload = JSON.parse(draft.payload!)
+  expect(draft.status).toBe('succeeded')
+  expect(payload.interactive.turns).toBe(1)
+  expect(payload.completion_forced).toBeUndefined()
+  expect(payload.requester).toBe('human')
   expect(detail.nodes.find((n) => n.nodeId === 'review')!.status).toBe('succeeded')
 })
 
@@ -147,7 +194,8 @@ test('interactive Agent: a sibling running its Agent leaves the parked session o
   await expect.poll(async () => (await draftRow()).side?.status, { timeout: 150_000 }).toBe('succeeded')
   const { draft, side } = await draftRow()
   expect(draft!.status).toBe('pending')
-  expect(JSON.parse(draft!.payload!).interactive).toMatchObject({ turns: 1, session_ended: false, completable: true })
+  // The first turn awaits confirmation, so it is not completable yet.
+  expect(JSON.parse(draft!.payload!).interactive).toMatchObject({ turns: 1, session_ended: false, completable: false })
   expect(side!.sessionId).not.toBe(draft!.sessionId)
 
   // The starter's message, sent after 旁支 ran beside it, reaches 起草's own session.
@@ -222,6 +270,42 @@ test('parallel nodes: the run view switches between their sessions, and each kee
   expect(JSON.parse(plan.payload!).interactive.turns).toBe(1)
 })
 
+test('interactive Agent: a missing deliverable blocks completion until the starter completes anyway', async ({ page }, testInfo) => {
+  test.skip(!realAgents, 'prepared Node assets are required for a real Agent session')
+  test.setTimeout(300_000)
+  const { tenantId, pane, row, runId: readRunId } = await startRun(page, deliverable, '交付文件')
+  const draftChip = pane.locator('[data-path-node="draft"]')
+  await expect(draftChip).toContainText('等待输入', { timeout: 150_000 })
+  await pane.getByRole('button', { name: '查看节点会话' }).click()
+  const composer = pane.getByRole('textbox', { name: '回复 Agent' })
+  await composer.fill('方案可以，写进 plan.md')
+  await composer.press('Enter')
+  await expect(pane.getByText('方案可以，写进 plan.md').first()).toBeVisible({ timeout: 30_000 })
+  await expect(draftChip).toContainText('等待输入', { timeout: 150_000 })
+  await expect(pane.getByRole('button', { name: '完成', exact: true })).toBeEnabled({ timeout: 30_000 })
+
+  // The fixture Agent writes no file: completing names both deliverables and offers force.
+  await pane.getByRole('button', { name: '完成', exact: true }).click()
+  await expect(pane.getByText('缺少交付文件：plan.md', { exact: true })).toBeVisible({ timeout: 30_000 })
+  await expect(pane.getByText('缺少交付文件：docs/*.md', { exact: true })).toBeVisible()
+  await expect(pane.getByText('补齐或修改文件后可以再次完成。')).toBeVisible()
+  await screenshot(page, testInfo.outputPath('8-deliverables-blocked.png'))
+
+  await pane.getByRole('button', { name: '仍然完成' }).click()
+  const dialog = page.getByRole('alertdialog')
+  await expect(dialog.getByText('仍然完成这一步？')).toBeVisible()
+  await expect(dialog).toContainText('这一轮的回答')
+  await screenshot(page, testInfo.outputPath('9-complete-anyway.png'))
+  await dialog.getByRole('button', { name: '仍然完成' }).click()
+  await expect(row('成功')).toBeVisible({ timeout: 150_000 })
+
+  const runId = await readRunId()
+  const detail = (await (await page.request.get(`/api/v2/tenants/${tenantId}/workflow-runs/${runId}`)).json()) as { nodes: { nodeId: string; status: string; payload: string | null }[] }
+  const forced = JSON.parse(detail.nodes.find((n) => n.nodeId === 'draft')!.payload!).completion_forced
+  expect(forced).toMatchObject({ by: 'human', output_source: 'turn_window', without_turn: false })
+  expect(forced.blockers.map((b: { kind: string }) => b.kind)).toEqual(['file_missing', 'file_missing'])
+})
+
 test('the Agent inspector marks interactive mode as the end_turn version', async ({ page }, testInfo) => {
   test.setTimeout(120_000)
   await page.setViewportSize({ width: 1440, height: 1000 })
@@ -243,7 +327,7 @@ test('the Agent inspector marks interactive mode as the end_turn version', async
   const inspector = page.locator('[data-workflow-inspector]')
   const note = inspector.getByTestId('workflow-interactive-partial')
   await expect(note).toContainText('简化版')
-  await expect(note).toContainText('当前按 end_turn 完成')
+  await expect(note).toContainText('首轮要点「确认并完成」')
   await expect(inspector.getByTestId('workflow-unapplied-interactive')).toHaveCount(0)
   await note.scrollIntoViewIfNeeded()
   await page.screenshot({ path: testInfo.outputPath('6-editor-end-turn-note.png'), animations: 'disabled' })
@@ -251,4 +335,36 @@ test('the Agent inspector marks interactive mode as the end_turn version', async
   // The note belongs to the mode: switching it off removes it.
   await inspector.getByRole('switch', { name: '交互模式' }).click()
   await expect(note).toHaveCount(0)
+})
+
+test('the Agent inspector edits the completion rule and deliverables, and marks the agent rule as not applied', async ({ page }, testInfo) => {
+  test.setTimeout(120_000)
+  await page.setViewportSize({ width: 1440, height: 1200 })
+  await page.goto('/workflows')
+  await signIn(page)
+  const tenantId = ((await (await page.request.get('/api/v1/me/tenants')).json()) as { items: { id: string }[] }).items[0]!.id
+  const name = `完成判定 ${Date.now().toString(36)}`
+  const graph = JSON.parse(deliverable)
+  graph.nodes[1].data.agentConfig.completionSignal = 'agent'
+  const created = await page.request.post(`/api/v2/tenants/${tenantId}/workflows`, { data: { name, graph: JSON.stringify(graph) } })
+  expect(created.status()).toBe(201)
+
+  await page.reload()
+  await page.getByRole('complementary', { name: '工作流列表' }).getByRole('button', { name, exact: true }).click()
+  await page.locator('.react-flow__node[data-id="draft"]').click()
+  const inspector = page.locator('[data-workflow-inspector]')
+  await expect(inspector.getByRole('combobox', { name: '完成判定' })).toContainText('智能体显式上报完成')
+  const hint = inspector.getByTestId('workflow-unapplied-completionSignal')
+  await expect(hint).toContainText('v2 暂不支持智能体完成工具')
+  await expect(inspector.getByLabel('文件 1 路径')).toHaveValue('plan.md')
+  await expect(inspector.getByLabel('文件 2 路径')).toHaveValue('docs/*.md')
+  await hint.scrollIntoViewIfNeeded()
+  await page.screenshot({ path: testInfo.outputPath('10-editor-completion.png'), animations: 'disabled' })
+  await inspector.getByLabel('文件 2 路径').scrollIntoViewIfNeeded()
+  await page.screenshot({ path: testInfo.outputPath('11-editor-deliverables.png'), animations: 'disabled' })
+
+  // Back to end_turn: the hint goes, as the server stops listing the rule.
+  await inspector.getByRole('combobox', { name: '完成判定' }).click()
+  await page.getByRole('option', { name: '回合正常结束即可' }).click()
+  await expect(inspector.getByTestId('workflow-unapplied-completionSignal')).toHaveCount(0, { timeout: 15_000 })
 })
