@@ -20,6 +20,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/node"
 	"github.com/wanglongan587/cloud/v2-server/internal/nodehistory"
 	"github.com/wanglongan587/cloud/v2-server/internal/nodeservices"
+	"github.com/wanglongan587/cloud/v2-server/internal/rotatefile"
 )
 
 type controlWait struct {
@@ -71,7 +72,7 @@ type projectRuntime struct {
 	receiveStarted bool
 	services       *nodeservices.Service
 	reader         *nodehistory.Reader
-	journal        *os.File
+	journal        *rotatefile.Writer
 	loopDone       chan struct{}
 	dead           chan struct{}
 	deadOnce       sync.Once
@@ -282,7 +283,9 @@ func (p *projectRuntime) start() error {
 		p.client = wrap(p.client)
 	}
 	// Start the receiver before any control wait. It also drains terminal events during cleanup.
-	p.journal, err = os.OpenFile(filepath.Join(p.root, "node-events.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	// The event journal is bounded: 64 MiB per file, 3 files kept (the #1191 budget), so a long
+	// running project cannot grow its event log without limit.
+	p.journal, err = rotatefile.New(filepath.Join(p.root, "node-events.jsonl"), 64<<20, 3)
 	if err != nil {
 		return err
 	}

@@ -937,6 +937,10 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 当前构建不提供 IDaaS 登录，在任何数据操作前明确拒绝启动，不得回落 email。`V2_FRONTEND_DIR` 指向前端构建目录，空值保留 API-only。
 `V2_PLUGIN_MARKETPLACE_URL` 未设置保留开发默认，显式空字符串关闭官方同步和目录，保留自定义源；`V2_MARKET_CREDENTIAL_KEY` 同步保护自定义市场 S3/Git 凭据、租户 MCP 设置与私有项目仓库令牌。
 
+### 日志有界保留
+
+Node 子进程的诊断日志（`<Node 可执行文件>.log`）和每个项目的事件日志 `node-events.jsonl` 有界保留：单文件分别 10 MiB、64 MiB，各保留 3 份（含当前文件）；超过预算即轮转为 `.1`/`.2` 并继续写当前文件，不丢 envelope、不改变“写入后 `Sync`”的顺序，失败会从写入或 `Sync` 返回而不是静默丢事件（#1191 方案 A 的预算）。工作目录回收和 Node 会话历史 JSONL 不在本项范围内。
+
 部署边界依据：[Cloud 单进程（A1）](https://github.com/ora-space/specs/blob/main/decisions/cloud/lifecycle/0-single-process-cloud-on-enterprise-intranet.md) 和[登录与会话（A6）](https://github.com/ora-space/specs/blob/main/decisions/cloud/login/0-idaas-or-email-login-with-shared-web-and-desktop-sessions.md)。
 
 来源列表候选契约 `market-sources.openapi.json` 的 `officialEnabled` 返回部署是否启用官方来源，

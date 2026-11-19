@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/wanglongan587/cloud/v2-server/internal/rotatefile"
 )
 
 // ErrRuntimeBusy means another supervisor still owns this Workspace runtime root.
@@ -245,22 +247,24 @@ func claimRoot(root string) (Paths, *os.File, error) {
 }
 
 func startChild(binary string, paths Paths, args ...string) (*child, error) {
-	fd, err := unix.Open(binary+".log", unix.O_CREAT|unix.O_WRONLY|unix.O_APPEND|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
+	// Bound the child's combined stdout+stderr: 10 MiB per file, 3 files kept
+	// (the #1191 budget). The writer is safe for the two copy goroutines that
+	// os/exec runs for stdout and stderr.
+	logWriter, err := rotatefile.New(binary+".log", 10<<20, 3)
 	if err != nil {
 		return nil, err
 	}
-	log := os.NewFile(uintptr(fd), binary+".log")
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = paths.Root
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + paths.UserHome}
-	cmd.Stdout = log
-	cmd.Stderr = log
+	cmd.Stdout = logWriter
+	cmd.Stderr = logWriter
 	if err := cmd.Start(); err != nil {
-		log.Close()
+		_ = logWriter.Close()
 		return nil, err
 	}
 	p := &child{cmd: cmd, done: make(chan struct{})}
-	go func() { p.err = cmd.Wait(); log.Close(); close(p.done) }()
+	go func() { p.err = cmd.Wait(); _ = logWriter.Close(); close(p.done) }()
 	return p, nil
 }
 
