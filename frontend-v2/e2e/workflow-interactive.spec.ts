@@ -356,6 +356,7 @@ test('the Agent inspector edits the completion rule and deliverables, and marks 
   await expect(inspector.getByRole('combobox', { name: '完成判定' })).toContainText('智能体显式上报完成')
   const hint = inspector.getByTestId('workflow-unapplied-completionSignal')
   await expect(hint).toContainText('v2 暂不支持智能体完成工具')
+  await expect(hint).toContainText('完成工具上线后会开始生效')
   await expect(inspector.getByLabel('文件 1 路径')).toHaveValue('plan.md')
   await expect(inspector.getByLabel('文件 2 路径')).toHaveValue('docs/*.md')
   await hint.scrollIntoViewIfNeeded()
