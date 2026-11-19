@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { Client } from 'pg'
 import { signIn } from './login.ts'
 
 /** Executes one explicit selection through the real workflow host, with retry enabled. */
@@ -40,6 +41,46 @@ async function openMcpFailure(page: Page, runId: string, title: string) {
   await diagnostics.scrollIntoViewIfNeeded()
   return diagnostics
 }
+
+test('an unreadable MCP leaves other installations accessible and can be removed', async ({ page }, info) => {
+  await page.goto('/settings/plugins')
+  await signIn(page)
+  const tid = (await (await page.request.get('/api/v1/me/tenants')).json()).items[0].id
+  const suffix = crypto.randomUUID().slice(0, 8)
+  const unreadable = `settings-check-${suffix}`
+  const healthy = `healthy-check-${suffix}`
+  const ids = [`fixture/${unreadable}`, `fixture/${healthy}`]
+  const db = new Client({ connectionString: process.env.E2E_DATABASE_URL ?? 'postgres://ora:ora-local@127.0.0.1:55432/ora_v2_e2e?sslmode=disable' })
+  await db.connect()
+  try {
+    // Only the persisted starting state is seeded. The list and removal use the real API.
+    for (const [index, id] of ids.entries()) {
+      await db.query(`INSERT INTO v2_tenant_mcps(tenant_id,plugin_id,name,plugin_version,digest,archive,declaration,settings)
+        VALUES($1,$2,$2,'1.0.0',$3,'','{"settings":[]}'::jsonb,$4)`,
+      [tid, id, '0'.repeat(64), index === 0 ? Buffer.from('unreadable-fixture') : null])
+    }
+    await page.reload()
+    const row = page.getByRole('article', { name: unreadable, exact: true })
+    const other = page.getByRole('article', { name: healthy, exact: true })
+    await expect(other.getByText('已安装', { exact: true })).toBeVisible()
+    await row.getByRole('button', { name: `查看插件 ${unreadable}` }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByRole('alert')).toContainText('请联系部署管理员检查密钥')
+    await expect(dialog.getByRole('button', { name: '保存 MCP 配置' })).toHaveCount(0)
+    await page.screenshot({ path: info.outputPath('mcp-settings-unavailable.png'), animations: 'disabled' })
+    await dialog.getByRole('button', { name: '关闭详情' }).click()
+    await row.getByRole('button', { name: '移除', exact: true }).click()
+    await page.getByRole('alertdialog').getByRole('button', { name: '移除', exact: true }).click()
+    await expect(row).toHaveCount(0)
+    await expect(other.getByText('已安装', { exact: true })).toBeVisible()
+  } finally {
+    try {
+      await db.query('DELETE FROM v2_tenant_mcps WHERE tenant_id=$1 AND plugin_id=ANY($2)', [tid, ids])
+    } finally {
+      await db.end()
+    }
+  }
+})
 
 test('the deployed UI installs a real MCP and preserves its workflow binding after removal', async ({ page }, info) => {
   test.setTimeout(120_000)

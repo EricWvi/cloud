@@ -164,6 +164,21 @@ it('installs and configures a tenant MCP through the server, keeping secrets wri
   })
 })
 
+it('keeps an unreadable MCP removable and explains which key needs attention', async () => {
+  const backend = installMarketplaceBackend({ catalog: [github, writing] })
+  backend.state.mcps.push({ ...installedGithub(), settingsUnavailable: true, complete: false, settings: [], values: {}, configuredSecrets: [] })
+  const user = userEvent.setup()
+  renderSettingsPage(<PluginsPage />)
+  await user.click(await screen.findByRole('button', { name: '查看插件 GitHub 工具' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('请联系部署管理员检查密钥')
+  expect(screen.queryByRole('button', { name: '保存 MCP 配置' })).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: '关闭详情' }))
+  const row = screen.getByRole('article', { name: 'GitHub 工具' })
+  await user.click(within(row).getByRole('button', { name: '移除' }))
+  await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: '移除' }))
+  await waitFor(() => expect(backend.state.mcps).toHaveLength(0))
+})
+
 it('keeps Hooks read-only with no install entry', async () => {
   const backend = installMarketplaceBackend({ catalog: [hook] })
   renderSettingsPage(<PluginsPage />)

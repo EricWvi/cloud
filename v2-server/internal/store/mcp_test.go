@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
+	"github.com/wanglongan587/cloud/v2-server/internal/pluginmarket"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
 )
@@ -178,8 +179,9 @@ func TestTenantMCPConfigurationIsSharedSealedAndVersioned(t *testing.T) {
 		t.Fatal(err)
 	}
 	scope := execution.Scope{TenantID: f.tenant, UserID: member}
-	if _, err = f.store.ResolveWorkflowMCP(f.ctx, scope, "mcp-project", []string{item.ID}); err == nil {
-		t.Fatal("missing required secret accepted")
+	var absent *execution.MCPFailure
+	if _, err = f.store.ResolveWorkflowMCP(f.ctx, scope, "mcp-project", []string{item.ID}); !errors.As(err, &absent) || absent.Code != "mcp_setting_missing" || absent.SettingID != "apiKey" {
+		t.Fatal("missing required secret lost its setting diagnostic", err)
 	}
 	const secret = "test-only-mcp-secret-1201"
 	item, err = f.store.SetTenantMCPSettings(f.ctx, a, space, item.ID, item.Revision, map[string]any{"apiKey": secret}, nil)
@@ -253,9 +255,24 @@ func TestTenantMCPConfigurationIsSharedSealedAndVersioned(t *testing.T) {
 	if err != nil || len(items) != 0 {
 		t.Fatal("cross tenant leakage", err)
 	}
+	for _, key := range []string{"", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{8}, 32))} {
+		t.Setenv("V2_MARKET_CREDENTIAL_KEY", key)
+		if _, err := f.store.ResolveWorkflowMCP(f.ctx, scope, "mcp-project", []string{item.ID}); !errors.Is(err, pluginmarket.ErrCredentials) {
+			t.Fatal("unreadable settings lost their deployment error", err)
+		}
+		listed, err := f.store.TenantMCPs(f.ctx, m)
+		if err != nil || len(listed) != 1 {
+			t.Fatal("unreadable installation blocked the list", err)
+		}
+		row := listed[0]
+		if row.ID != item.ID || row.Revision != item.Revision || !row.SettingsUnavailable || row.Complete || len(row.Values)+len(row.ConfiguredSecrets)+len(row.Settings)+len(row.SettingsMissing) != 0 {
+			t.Fatal("unreadable installation must return only installation metadata")
+		}
+	}
 	if err = f.store.RemoveTenantMCP(f.ctx, a, space, item.ID, item.Revision); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("V2_MARKET_CREDENTIAL_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)))
 	if _, err = f.store.ResolveWorkflowMCP(f.ctx, scope, "mcp-project", []string{item.ID}); err == nil {
 		t.Fatal("removed plugin selected")
 	}

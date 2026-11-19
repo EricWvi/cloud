@@ -63,6 +63,8 @@ export interface McpInstallation {
   values: McpInstallationValues;
   configuredSecrets: string[];
   complete: boolean;
+  /** The deployment could not decrypt the stored settings. The installation can still be removed. */
+  settingsUnavailable?: boolean;
   settingsMissing: string[];
 }
 

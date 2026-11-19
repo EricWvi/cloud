@@ -556,6 +556,10 @@
           "complete": {
             "type": "boolean"
           },
+          "settingsUnavailable": {
+            "type": "boolean",
+            "description": "The deployment could not decrypt the stored settings. The installation can still be removed."
+          },
           "settingsMissing": {
             "type": "array",
             "items": {

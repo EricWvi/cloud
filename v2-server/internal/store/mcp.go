@@ -17,16 +17,17 @@ import (
 // TenantMCP is the read-safe view of a downloaded MCP package and its shared configuration.
 // Installed means the verified package is cached. A session separately confirms Node installation.
 type TenantMCP struct {
-	ID                string                    `json:"id"`
-	Name              string                    `json:"name"`
-	PluginVersion     string                    `json:"pluginVersion"`
-	Revision          int64                     `json:"revision"`
-	State             string                    `json:"state"`
-	Settings          []pluginmarket.MCPSetting `json:"settings"`
-	Values            map[string]any            `json:"values"`
-	ConfiguredSecrets []string                  `json:"configuredSecrets"`
-	Complete          bool                      `json:"complete"`
-	SettingsMissing   []string                  `json:"settingsMissing"`
+	ID                  string                    `json:"id"`
+	Name                string                    `json:"name"`
+	PluginVersion       string                    `json:"pluginVersion"`
+	Revision            int64                     `json:"revision"`
+	State               string                    `json:"state"`
+	SettingsUnavailable bool                      `json:"settingsUnavailable,omitempty"`
+	Settings            []pluginmarket.MCPSetting `json:"settings"`
+	Values              map[string]any            `json:"values"`
+	ConfiguredSecrets   []string                  `json:"configuredSecrets"`
+	Complete            bool                      `json:"complete"`
+	SettingsMissing     []string                  `json:"settingsMissing"`
 }
 
 // TenantMCPs lists tenant-wide installations without returning any secret override or default.
@@ -57,14 +58,21 @@ func scanTenantMCP(row pgx.Row, tenant string) (TenantMCP, error) {
 	if json.Unmarshal(raw, &declaration) != nil {
 		return out, pluginmarket.ErrPackage
 	}
+	out.State = "installed"
+	out.Values = map[string]any{}
+	out.ConfiguredSecrets = []string{}
 	values, err := pluginmarket.OpenMCPSettings(sealed, tenant+"/"+out.ID)
+	if errors.Is(err, pluginmarket.ErrCredentials) {
+		// Keep the identity and revision available for removal while configuration is unreadable.
+		out.SettingsUnavailable = true
+		out.Settings = []pluginmarket.MCPSetting{}
+		out.SettingsMissing = []string{}
+		return out, nil
+	}
 	if err != nil {
 		return out, err
 	}
-	out.State = "installed"
 	out.Settings = declaration.Settings
-	out.Values = map[string]any{}
-	out.ConfiguredSecrets = []string{}
 	out.SettingsMissing = missingMCPSettings(declaration, values)
 	out.Complete = len(out.SettingsMissing) == 0
 	for i, setting := range out.Settings {
@@ -305,7 +313,7 @@ func (s *Store) ResolveWorkflowMCP(ctx context.Context, scope execution.Scope, p
 		}
 		values, err := pluginmarket.OpenMCPSettings(sealed, scope.TenantID+"/"+id)
 		if err != nil {
-			return nil, &execution.MCPFailure{Code: "mcp_setting_missing", PluginID: id}
+			return nil, err
 		}
 		if missing := missingMCPSettings(declaration, values); len(missing) > 0 {
 			return nil, &execution.MCPFailure{Code: "mcp_setting_missing", PluginID: id, SettingID: missing[0], Transport: declaration.Transport}

@@ -52,7 +52,9 @@ export async function workflowMcpCatalog(tenantId: string): Promise<InstalledPlu
     displayName: item.name, version: item.pluginVersion,
     description: '', homepage: null, license: null, logo: null, kind: 'mcp',
     installationValidity: { validity: 'valid' },
-    configuration: { state: 'available', completeness: item.complete ? 'complete' : 'incomplete' },
+    configuration: item.settingsUnavailable
+      ? { state: 'unavailable', errorCode: 'mcp_settings_unavailable' }
+      : { state: 'available', completeness: item.complete ? 'complete' : 'incomplete' },
     runtime: 'stopped',
   }))
 }
