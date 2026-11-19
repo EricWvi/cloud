@@ -31,13 +31,13 @@ import { useState } from 'react'
 import { SidebarResizeHandle } from '@/components/sidebar-resize-handle'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
-import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 import { isResponding } from '@/components/agent-thread/model/conversation'
 import { emptyConversation } from '@/components/agent-thread/model/types'
 import { type Project, type Session, useChatStore } from '../store'
+import { DeleteSessionDialog } from './delete-session-dialog'
 import { AgentActivityDots } from './agent-activity-dots'
 import { FadeText } from './fade-text'
 import { NewProjectDialog } from './new-project-dialog'
@@ -287,7 +287,7 @@ function SessionRow({ session }: { session: Session }) {
   const selected = useChatStore((s) => s.selectedId === session.id && !s.selectedRunId)
   const responding = useChatStore((s) => isResponding(s.conversations[session.id] ?? emptyConversation))
   const unread = useChatStore((s) => !!s.unread[session.id])
-  const { select, renameSession, deleteSession } = useChatStore.getState()
+  const { select, renameSession } = useChatStore.getState()
   const [editing, setEditing] = useState(false)
   const [confirming, setConfirming] = useState(false)
 
@@ -343,20 +343,7 @@ function SessionRow({ session }: { session: Session }) {
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-      <Dialog open={confirming} onOpenChange={setConfirming}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>删除"{session.title}"？</DialogTitle>
-            <DialogDescription>会话和它的聊天记录都会删除，无法恢复。</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <DialogClose render={<Button variant="outline" />}>取消</DialogClose>
-            <Button variant="destructive" onClick={() => (deleteSession(session.id), setConfirming(false))}>
-              删除
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <DeleteSessionDialog session={session} open={confirming} onOpenChange={setConfirming} />
     </div>
   )
 }

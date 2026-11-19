@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { UserContext } from '@/app/auth/user'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { demoUser } from '@/test/backend'
@@ -346,6 +346,80 @@ describe('chat page', () => {
     await renderReady()
     const cloud = within(sidebar()).getByRole('region', { name: '项目 ora-space/cloud' })
     expect(within(cloud).getByText(/同步失败：上次同步被中断，请重新同步。/)).toBeInTheDocument()
+  })
+
+  const openDelete = async (title: string) => {
+    await userEvent.click(within(sidebar()).getByRole('button', { name: `${title} 的更多操作` }))
+    await userEvent.click(await screen.findByRole('menuitem', { name: '删除' }))
+    return within(await screen.findByRole('dialog'))
+  }
+
+  it('deletes a recoverable conversation with its working directory, offering its patch first', async () => {
+    backend.deletion = { workspace: 'recoverable', ignored: true, latestDelivery: 'd-7' }
+    const created: Blob[] = []
+    URL.createObjectURL = vi.fn((b: Blob) => (created.push(b), 'blob:patch'))
+    URL.revokeObjectURL = vi.fn()
+    await renderReady()
+    const dialog = await openDelete('梳理 v2 接口缺口')
+    expect(await dialog.findByText(/工作目录会一起删除。删除后你无法再取回它的改动，只有运维能从交付恢复/)).toBeInTheDocument()
+    expect(dialog.getByText(/被忽略规则（.gitignore 与 .git\/info\/exclude）排除的文件/)).toBeInTheDocument()
+    expect(dialog.queryByRole('checkbox')).not.toBeInTheDocument()
+    await userEvent.click(dialog.getByRole('button', { name: '下载改动（patch）' }))
+    await waitFor(() => expect(created).toHaveLength(1))
+    expect(backend.seen).toContain(`GET /api/v2/tenants/${tenantId}/chat/conversations/c-main/workspace/deliveries/d-7/patch`)
+    await userEvent.click(dialog.getByRole('button', { name: '删除' }))
+    await waitFor(() => expect(backend.deletedWith['c-main']).toEqual({}))
+  })
+
+  it('keeps an undelivered working directory unless the person discards what the preview listed', async () => {
+    backend.deletion = { workspace: 'undelivered', reason: 'legacy', revision: 'rev-legacy' }
+    await renderReady()
+    let dialog = await openDelete('梳理 v2 接口缺口')
+    expect(await dialog.findByText(/早于交付功能.*默认保留工作目录/)).toBeInTheDocument()
+    expect(dialog.getByRole('checkbox', { name: /同时丢弃未交付的改动/ })).not.toBeChecked()
+    await userEvent.click(dialog.getByRole('button', { name: '删除' }))
+    await waitFor(() => expect(backend.deletedWith['c-main']).toEqual({}))
+
+    backend.deletion = {
+      workspace: 'undelivered', reason: 'changed_after_delivery', revision: 'rev-late',
+      undeliveredChanges: [{ path: 'late.txt', status: 'added', additions: 1, deletions: 0, binary: false }], undeliveredTotal: 1,
+    }
+    dialog = await openDelete('对话页样式')
+    expect(await dialog.findByText(/最后一次交付之后/)).toBeInTheDocument()
+    expect(within(dialog.getByRole('list', { name: '未交付的改动' })).getByText(/late\.txt/)).toBeInTheDocument()
+    await userEvent.click(dialog.getByRole('checkbox', { name: /同时丢弃未交付的改动/ }))
+    await userEvent.click(dialog.getByRole('button', { name: '删除' }))
+    await waitFor(() => expect(backend.deletedWith['c-style']).toEqual({ workspace: 'discard', revision: 'rev-late' }))
+  })
+
+  it('does not offer discarding while the last turn still delivers', async () => {
+    backend.deletion = { workspace: 'undelivered', reason: 'delivering' }
+    await renderReady()
+    const dialog = await openDelete('梳理 v2 接口缺口')
+    expect(await dialog.findByText(/请等这一轮结束后再决定是否丢弃/)).toBeInTheDocument()
+    expect(dialog.queryByRole('checkbox')).not.toBeInTheDocument()
+  })
+
+  it('shows the new preview when the discard turned out stale', async () => {
+    backend.deletion = { workspace: 'undelivered', reason: 'last_turn_undelivered', revision: 'rev-1' }
+    backend.staleDiscard = true
+    await renderReady()
+    const dialog = await openDelete('梳理 v2 接口缺口')
+    await userEvent.click(await dialog.findByRole('checkbox', { name: /同时丢弃未交付的改动/ }))
+    backend.deletion = { workspace: 'undelivered', reason: 'changed_after_delivery', revision: 'rev-2' }
+    await userEvent.click(dialog.getByRole('button', { name: '删除' }))
+    expect(await dialog.findByText(/工作目录在你确认前有了变化/)).toBeInTheDocument()
+    expect(await dialog.findByText(/最后一次交付之后/)).toBeInTheDocument()
+    expect(dialog.getByRole('checkbox', { name: /同时丢弃未交付的改动/ })).not.toBeChecked()
+    expect('c-main' in backend.deletedWith).toBe(false)
+  })
+
+  it('keeps the working directory when the preview cannot be read', async () => {
+    backend.deletion = { status: 503 }
+    await renderReady()
+    const dialog = await openDelete('梳理 v2 接口缺口')
+    expect(await dialog.findByText(/无法确认工作目录里的改动是否已交付，删除后保留工作目录/)).toBeInTheDocument()
+    expect(dialog.queryByRole('checkbox')).not.toBeInTheDocument()
   })
 
   const openProjectSettings = async (name = 'ora-space/cloud') => {

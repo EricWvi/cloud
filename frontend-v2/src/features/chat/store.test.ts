@@ -187,6 +187,21 @@ describe('chat store: backend conversations', () => {
     expect(backend.seen).toContain(`DELETE /api/v2/tenants/${tenantId}/chat/conversations/c-main`)
     expect(state().sessions.some((s) => s.id === 'c-main')).toBe(false)
     expect(state().selectedId).toBeUndefined()
+    expect(backend.deletedWith['c-main']).toEqual({})
+    expect(await state().deleteSession('c-style', 'rev-9')).toBeUndefined()
+    expect(backend.deletedWith['c-style']).toEqual({ workspace: 'discard', revision: 'rev-9' })
+  })
+
+  it('reports a stale discard without deleting', async () => {
+    backend.staleDiscard = true
+    expect(await state().deleteSession('c-main', 'rev-1')).toBe('stale')
+    expect(state().sessions.some((s) => s.id === 'c-main')).toBe(true)
+    expect(state().notices['c-main']).toBeUndefined()
+  })
+
+  it('previews what deleting does to the working directory', async () => {
+    backend.deletion = { workspace: 'undelivered', reason: 'delivering' }
+    await expect(state().deletionPreview('c-main')).resolves.toMatchObject({ workspace: 'undelivered', reason: 'delivering', revision: 'rev-1' })
   })
 
   it('saves the project order for the person', () => {
