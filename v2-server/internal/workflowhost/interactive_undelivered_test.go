@@ -68,6 +68,7 @@ func (*refusingDriver) End(context.Context, string) error { return nil }
 func (*refusingDriver) Rebuild(string)                    {}
 func (*refusingDriver) Reattach(string, string, string)   {}
 func (*refusingDriver) Close(context.Context) error       { return nil }
+func (*refusingDriver) StopTurn(execution.Ref) bool       { return false }
 
 func (d *refusingDriver) refuse(r *driverRefusal) {
 	d.mu.Lock()

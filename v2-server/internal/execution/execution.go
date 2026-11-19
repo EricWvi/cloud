@@ -21,11 +21,10 @@ var (
 	ErrSessionEnded    = errors.New("execution session ended")
 )
 
-// ErrStopTurn is the cancellation cause with which the execution service asks a driver to stop
-// only the running turn (context.Cause of the context Run was given). A driver whose session can
-// keep its Agent after a stopped turn stops just that turn and reports Result.SessionKept; any
-// other driver, and any other cause, ends the session as before.
-var ErrStopTurn = errors.New("the caller stopped the turn")
+// TurnStopSettleLimit is the longest Cancel of an Agent turn may wait for Node to settle a stop
+// that keeps the session, before it ends the session instead. A caller that bounds a stop adds it
+// to its own budget, so a Node that settles slowly is not taken for a stop that failed.
+const TurnStopSettleLimit = 60 * time.Second
 
 // Scope comes from the authenticated page service or persisted schedule owner, never directly
 // from a request body. Background callers do not need an online browser or stored cookie.
@@ -162,9 +161,9 @@ type Result struct {
 	// sending failed midway may have arrived, so it is not marked.
 	NotDelivered bool `json:",omitempty"`
 	// SessionKept tells the execution service that the Agent session outlives this turn although
-	// it did not complete: the caller stopped it (ErrStopTurn) and Node kept the session. It is
-	// what lets a non-held session take the next turn after a stop. Never persisted: a stored
-	// result reports a lost session through AgentLost.
+	// it did not complete: the caller stopped it (a driver's StopTurn) and Node kept the session.
+	// It is what lets a non-held session take the next turn after a stop. Never persisted: a
+	// stored result reports a lost session through AgentLost.
 	SessionKept bool `json:"-"`
 }
 

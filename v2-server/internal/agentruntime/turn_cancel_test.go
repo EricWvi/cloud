@@ -3,10 +3,12 @@
 package agentruntime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,6 +76,15 @@ func cutOnceRetrying(g *retryGuard) {
 	g.begin()
 }
 
+// stopTurn asks the driver to stop only turn, as execution.Service.Cancel does, and fails the test
+// unless the driver takes the stop.
+func stopTurn(t *testing.T, h *ipcHarness, session execution.Session, turn string) {
+	t.Helper()
+	if !h.driver.StopTurn(execution.Ref{SessionID: session.ID, TurnID: turn}) {
+		t.Fatalf("the driver refused to stop only turn %s", turn)
+	}
+}
+
 // turnEnds collects the TurnEnded publications of a run.
 func turnEnds() (Emit, chan execution.Event) {
 	events := make(chan execution.Event, 8)
@@ -93,17 +104,16 @@ func TestDriverIPCStoppedTurnKeepsTheSessionForTheNextTurn(t *testing.T) {
 	h := newIPCHarness(t, nil)
 	h.turnCancel.Store(true)
 	ctx := ipcContext(t)
-	turnCtx, stop := context.WithCancelCause(ctx)
 	session := h.session("session", "workspace")
 	emit, events := turnEnds()
-	done := startIPCRun(h, turnCtx, session, "first", emit)
+	done := startIPCRun(h, ctx, session, "first", emit)
 	f := receiveIPC(t, h.created)
 	start := nextIPCCommand(t, f, "start_agent_session")
 	spec := startSpec(t, start)
 	if _, failure := spec["keep_session_on_failure"]; spec["keep_session_on_cancel"] != true || failure {
 		t.Fatalf("keep choices in the start spec = %v / %v, want only keep_session_on_cancel", spec["keep_session_on_cancel"], spec["keep_session_on_failure"])
 	}
-	stop(execution.ErrStopTurn)
+	stopTurn(t, h, session, "first")
 	cancel := nextCancel(t, f, start, "first")
 	f.finishTurnAs(t, start, "first", "partial", "cancelled")
 	receiveIPC(t, f.acked)
@@ -146,14 +156,13 @@ func TestDriverIPCUserStopAfterACutStaysCancelled(t *testing.T) {
 	h := newIPCHarness(t, nil)
 	h.turnCancel.Store(true)
 	ctx := ipcContext(t)
-	turnCtx, stop := context.WithCancelCause(ctx)
 	session := h.session("session", "workspace")
 	emit, events := turnEnds()
-	done := startIPCRun(h, turnCtx, session, "first", emit)
+	done := startIPCRun(h, ctx, session, "first", emit)
 	f := receiveIPC(t, h.created)
 	start := nextIPCCommand(t, f, "start_agent_session")
 	cutOnceRetrying(activeGuard(t, h, session.ID))
-	stop(execution.ErrStopTurn)
+	stopTurn(t, h, session, "first")
 	cancel := nextCancel(t, f, start, "first")
 	f.finishTurnAs(t, start, "first", "", "cancelled")
 	f.settleCancel(start, cancel, "stopped")
@@ -184,14 +193,13 @@ func TestDriverIPCStopNodeCannotKeepEndsTheSession(t *testing.T) {
 	h := newIPCHarness(t, nil)
 	h.turnCancel.Store(true)
 	ctx := ipcContext(t)
-	turnCtx, stop := context.WithCancelCause(ctx)
 	session := h.session("session", "workspace")
 	emit, events := turnEnds()
-	done := startIPCRun(h, turnCtx, session, "first", emit)
+	done := startIPCRun(h, ctx, session, "first", emit)
 	f := receiveIPC(t, h.created)
 	start := nextIPCCommand(t, f, "start_agent_session")
 	cutOnceRetrying(activeGuard(t, h, session.ID))
-	stop(execution.ErrStopTurn)
+	stopTurn(t, h, session, "first")
 	cancel := nextCancel(t, f, start, "first")
 	f.finishTurnAs(t, start, "first", "partial", "cancelled")
 	f.settleCancel(start, cancel, "session_ending")
@@ -224,13 +232,12 @@ func TestDriverIPCStopOfATurnNotStartedKeepsTheSession(t *testing.T) {
 	h := newIPCHarness(t, nil)
 	h.turnCancel.Store(true)
 	ctx := ipcContext(t)
-	turnCtx, stop := context.WithCancelCause(ctx)
 	session := h.session("session", "workspace")
 	emit, events := turnEnds()
-	done := startIPCRun(h, turnCtx, session, "first", emit)
+	done := startIPCRun(h, ctx, session, "first", emit)
 	f := receiveIPC(t, h.created)
 	start := nextIPCCommand(t, f, "start_agent_session")
-	stop(execution.ErrStopTurn)
+	stopTurn(t, h, session, "first")
 	f.settleCancel(start, nextCancel(t, f, start, "first"), "not_started")
 	if event := receiveIPC(t, events); event.Result == nil || event.Result.Status != execution.StatusCancelled {
 		t.Fatalf("dropped turn publication = %+v", event)
@@ -251,13 +258,12 @@ func TestDriverIPCStopRacingTheTurnsEndKeepsItsResult(t *testing.T) {
 	h := newIPCHarness(t, nil)
 	h.turnCancel.Store(true)
 	ctx := ipcContext(t)
-	turnCtx, stop := context.WithCancelCause(ctx)
 	session := h.session("session", "workspace")
 	emit, _ := turnEnds()
-	done := startIPCRun(h, turnCtx, session, "first", emit)
+	done := startIPCRun(h, ctx, session, "first", emit)
 	f := receiveIPC(t, h.created)
 	start := nextIPCCommand(t, f, "start_agent_session")
-	stop(execution.ErrStopTurn)
+	stopTurn(t, h, session, "first")
 	cancel := nextCancel(t, f, start, "first")
 	f.finishTurn(t, start, "first", "complete answer")
 	f.settleCancel(start, cancel, "already_ended")
@@ -274,8 +280,9 @@ func TestDriverIPCStopRacingTheTurnsEndKeepsItsResult(t *testing.T) {
 }
 
 // Whenever Node cannot settle the stop for a kept session (the session did not negotiate
-// turn_cancel, Node refuses the command or does not know the turn, or no settlement arrives in
-// time), the stop ends the session through EndSession, as before turn_cancel.
+// turn_cancel, so StopTurn refuses and the caller cancels the turn; Node refuses the command or
+// does not know the turn; or no settlement arrives in time), the stop ends the session through
+// EndSession, as before turn_cancel.
 func TestDriverIPCStopFallsBackToEndingTheSession(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -303,15 +310,21 @@ func TestDriverIPCStopFallsBackToEndingTheSession(t *testing.T) {
 				h.driver.turnCancelWait = tc.wait
 			}
 			ctx := ipcContext(t)
-			turnCtx, stop := context.WithCancelCause(ctx)
+			runCtx, end := context.WithCancel(ctx)
+			defer end()
 			session := h.session("session", "workspace")
-			done := startIPCRun(h, turnCtx, session, "first", discardIPCEvent)
+			done := startIPCRun(h, runCtx, session, "first", discardIPCEvent)
 			f := receiveIPC(t, h.created)
 			start := nextIPCCommand(t, f, "start_agent_session")
 			if spec := startSpec(t, start); (spec["keep_session_on_cancel"] == true) != tc.turnCancel {
 				t.Fatalf("keep_session_on_cancel = %v with turn_cancel negotiated %v", spec["keep_session_on_cancel"], tc.turnCancel)
 			}
-			stop(execution.ErrStopTurn)
+			if took := h.driver.StopTurn(execution.Ref{SessionID: session.ID, TurnID: "first"}); took != tc.turnCancel {
+				t.Fatalf("StopTurn took the stop = %v with turn_cancel negotiated %v", took, tc.turnCancel)
+			}
+			if !tc.turnCancel {
+				end() // what execution.Service.Cancel does when the driver cannot keep the session
+			}
 			var kinds []string
 			for {
 				m := receiveIPC(t, f.sent)
@@ -332,5 +345,258 @@ func TestDriverIPCStopFallsBackToEndingTheSession(t *testing.T) {
 				t.Fatalf("stop that ended the session = %+v", got)
 			}
 		})
+	}
+}
+
+// startStoppable starts the session's first turn over a Node with turn_cancel and returns its run,
+// the fake Node, the start command and the cancel the stop sent.
+func startStoppable(t *testing.T, h *ipcHarness, ctx context.Context, session execution.Session, emit Emit) (<-chan ipcRunOutcome, *fakeNodeIPC, node.Message, cancelCommand) {
+	t.Helper()
+	h.turnCancel.Store(true)
+	done := startIPCRun(h, ctx, session, "first", emit)
+	f := receiveIPC(t, h.created)
+	start := nextIPCCommand(t, f, "start_agent_session")
+	stopTurn(t, h, session, "first")
+	return done, f, start, nextCancel(t, f, start, "first")
+}
+
+// Once Run stopped waiting for the settlement and is ending the session, a settlement that keeps
+// the session arrives too late: the turn still reports its session lost, also in what it
+// published, so nobody sends another turn to an ending session.
+func TestDriverIPCLateSettlementAfterTheWaitNeverKeepsTheSession(t *testing.T) {
+	for _, outcome := range []string{"stopped", "not_started"} {
+		t.Run(outcome, func(t *testing.T) {
+			h := newIPCHarness(t, nil)
+			h.driver.turnCancelWait = 50 * time.Millisecond
+			ctx := ipcContext(t)
+			session := h.session("session", "workspace")
+			emit, events := turnEnds()
+			done, f, start, cancel := startStoppable(t, h, ctx, session, emit)
+			end := nextIPCCommand(t, f, "end_session")
+			if outcome == "stopped" {
+				f.finishTurnAs(t, start, "first", "partial", "cancelled")
+			}
+			f.settleCancel(start, cancel, outcome)
+			f.terminal(end)
+			if event := receiveIPC(t, events); event.Result == nil || event.Result.Status != execution.StatusCancelled || !event.Result.AgentLost {
+				t.Fatalf("late settlement was published as %+v", event.Result)
+			}
+			got := receiveIPC(t, done)
+			if !errors.Is(got.err, execution.ErrSessionEnded) || got.result.SessionKept || !got.result.AgentLost || got.result.Status != execution.StatusCancelled {
+				t.Fatalf("turn whose session was ended = %+v", got)
+			}
+		})
+	}
+}
+
+// The wait for a settlement restarts on every message of the session (cancel-turn ADR D4: a
+// backlog that is still being delivered is not a Node that does not settle), but never runs past
+// its limit.
+func TestDriverIPCSettlementWaitFollowsDeliveryProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		limit time.Duration
+		kept  bool
+	}{
+		{name: "events keep the wait going", limit: time.Minute, kept: true},
+		{name: "the limit ends it", limit: 300 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newIPCHarness(t, nil)
+			h.driver.turnCancelWait = 150 * time.Millisecond
+			h.driver.turnCancelLimit = tc.limit
+			ctx := ipcContext(t)
+			session := h.session("session", "workspace")
+			done, f, start, cancel := startStoppable(t, h, ctx, session, discardIPCEvent)
+			accepted, _ := json.Marshal(map[string]string{"command_id": cancel.CommandID})
+			ended := false
+			for deadline := time.Now().Add(600 * time.Millisecond); time.Now().Before(deadline) && !ended; {
+				f.in <- node.Message{Type: "session_command_accepted", Version: 1, OperationID: start.OperationID, ExecutionID: start.ExecutionID, Payload: accepted}
+				ended = slices.Contains(sentIPC(f), "end_session")
+				time.Sleep(50 * time.Millisecond)
+			}
+			if ended == tc.kept {
+				t.Fatalf("EndSession sent = %v while the session kept delivering, want %v", ended, !tc.kept)
+			}
+			if !tc.kept {
+				f.terminal(start)
+				if got := receiveIPC(t, done); got.err == nil || got.result.SessionKept {
+					t.Fatalf("stop past the limit = %+v", got)
+				}
+				return
+			}
+			f.finishTurnAs(t, start, "first", "", "cancelled")
+			f.settleCancel(start, cancel, "stopped")
+			if got := receiveIPC(t, done); got.err != nil || !got.result.SessionKept {
+				t.Fatalf("stop settled after a long delivery = %+v", got)
+			}
+		})
+	}
+}
+
+// End, Close and shutdown cancel Run's context, which a stop does not: while a stop awaits its
+// settlement they still end the session at once, without waiting out the window.
+func TestDriverIPCEndDuringTheSettlementWaitEndsAtOnce(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	h.driver.turnCancelWait = time.Hour
+	ctx := ipcContext(t)
+	runCtx, shutdown := context.WithCancel(ctx)
+	defer shutdown()
+	session := h.session("session", "workspace")
+	done, f, _, _ := startStoppable(t, h, runCtx, session, discardIPCEvent)
+	shutdown()
+	f.terminal(nextIPCCommand(t, f, "end_session"))
+	if got := receiveIPC(t, done); got.err == nil || got.result.Status != execution.StatusCancelled || got.result.SessionKept {
+		t.Fatalf("turn ended by shutdown during a stop = %+v", got)
+	}
+}
+
+// After the wait fell back to EndSession, Node's terminal may give any reason (here: the Agent never
+// answered the cancel); the turn is still the caller's stop.
+func TestDriverIPCStoppedTurnEndedByAnyTerminalIsCancelled(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	h.driver.turnCancelWait = 50 * time.Millisecond
+	ctx := ipcContext(t)
+	session := h.session("session", "workspace")
+	done, f, _, _ := startStoppable(t, h, ctx, session, discardIPCEvent)
+	f.terminalAs(nextIPCCommand(t, f, "end_session"), "agent_failed", "turn_cancel_unanswered")
+	if got := receiveIPC(t, done); got.result.Status != execution.StatusCancelled || got.result.FailureCode != "" || !got.result.AgentLost || got.err == nil {
+		t.Fatalf("stopped turn ended by an agent_failed terminal = %+v", got)
+	}
+}
+
+// cloud#369: a turn that ended on its own (cancelled after a cut) before the stop took effect keeps
+// its own result, the cut included, when Node settles the stop as already_ended.
+func TestDriverIPCAlreadyEndedTurnKeepsItsCut(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	h.turnCancel.Store(true)
+	ctx := ipcContext(t)
+	session := h.session("session", "workspace")
+	done := startIPCRun(h, ctx, session, "first", discardIPCEvent)
+	f := receiveIPC(t, h.created)
+	start := nextIPCCommand(t, f, "start_agent_session")
+	cutOnceRetrying(activeGuard(t, h, session.ID))
+	stopTurn(t, h, session, "first")
+	cancel := nextCancel(t, f, start, "first")
+	f.finishTurnAs(t, start, "first", "", "cancelled")
+	f.settleCancel(start, cancel, "already_ended")
+	if got := receiveIPC(t, done); got.err != nil || got.result.Status != execution.StatusFailed || got.result.FailureCode != nodeservices.CutIdle || got.result.SessionKept {
+		t.Fatalf("turn that failed with a cut before the stop = %+v", got)
+	}
+}
+
+// A settlement settles only the cancel it names, for the turn it names: one for another command or
+// another turn (a late one of an earlier turn, say) is acknowledged and changes nothing.
+func TestDriverIPCSettlementOfAnotherCancelIsIgnored(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	session := h.session("session", "workspace")
+	done, f, start, cancel := startStoppable(t, h, ctx, session, discardIPCEvent)
+	f.finishTurnAs(t, start, "first", "", "cancelled")
+	receiveIPC(t, f.acked)
+	for _, other := range []cancelCommand{{CommandID: "cancel-other", TurnID: "first"}, {CommandID: cancel.CommandID, TurnID: "earlier"}} {
+		f.settleCancel(start, other, "stopped")
+		if ack := receiveIPC(t, f.acked); ack.Type != "turn_cancel_settled" {
+			t.Fatalf("acknowledged %s, want the foreign settlement", ack.Type)
+		}
+		select {
+		case got := <-done:
+			t.Fatalf("a settlement of %+v settled the turn: %+v", other, got)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	f.settleCancel(start, cancel, "stopped")
+	if got := receiveIPC(t, done); got.err != nil || !got.result.SessionKept {
+		t.Fatalf("turn after its own settlement = %+v", got)
+	}
+}
+
+// A Node that goes away while a stopped turn awaits its settlement ends the session; the turn is
+// still the caller's stop, not a lost turn a held session would recover.
+func TestDriverIPCNodeLostDuringTheSettlementWaitIsTheCallersStop(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	session := h.session("session", "workspace")
+	done, f, _, _ := startStoppable(t, h, ctx, session, discardIPCEvent)
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got := receiveIPC(t, done)
+	if got.err == nil || got.result.Status != execution.StatusCancelled || got.result.FailureCode != "" || !got.result.AgentLost || got.result.SessionKept {
+		t.Fatalf("stopped turn whose Node went away = %+v", got)
+	}
+}
+
+// A stop while Node refused the turn's submission (mcp_update_required) and the driver still waits
+// for the refresh to send it again: Node holds no such turn, so no CancelTurn goes out (it would
+// only learn unknown); the turn stops here, is never sent again, and the session takes the next.
+func TestDriverIPCStopOfARefusedSubmissionKeepsTheSession(t *testing.T) {
+	var refuse atomic.Bool
+	failedRead := make(chan struct{}, 1)
+	h := newIPCHarness(t, func(f *fakeNodeIPC, m node.Message) bool {
+		if m.Type == "submit_user_turn" && refuse.Load() {
+			var command struct {
+				ID string `json:"command_id"`
+			}
+			if err := json.Unmarshal(m.Payload, &command); err != nil {
+				return false
+			}
+			f.reply(m, "session_command_rejected", map[string]string{"command_id": command.ID, "reason": "mcp_update_required"})
+			return true
+		}
+		return false
+	})
+	h.turnCancel.Store(true)
+	h.driver.mcpRefreshWait = time.Minute
+	h.driver.opts.ReadMCPTarget = func(_ context.Context, _ execution.Scope, _ string, _ *execution.MCPSelection, known int64) (*execution.MCPTarget, error) {
+		if known == -1 {
+			return &execution.MCPTarget{Configured: *ipcMCP()}, nil
+		}
+		if refuse.Load() {
+			signal(failedRead)
+			return nil, execution.ErrUnavailable
+		}
+		return nil, nil
+	}
+	ctx := ipcContext(t)
+	session := h.session("refused-session", "workspace")
+	session.MCP = ipcMCP()
+	run := func(id string) <-chan ipcRunOutcome {
+		done := make(chan ipcRunOutcome, 1)
+		go func() {
+			turn := execution.Turn{Ref: execution.Ref{SessionID: session.ID, TurnID: id}, Prompt: execution.TextPrompt(id), MCPGeneration: new(int64)}
+			result, err := h.driver.Run(ctx, h.scope, session, turn, discardIPCEvent)
+			done <- ipcRunOutcome{result, err}
+		}()
+		return done
+	}
+	first := run("first")
+	f := receiveIPC(t, h.created)
+	start := nextIPCCommand(t, f, "start_agent_session")
+	f.finishTurn(t, start, "first", "ready")
+	if got := receiveIPC(t, first); got.err != nil {
+		t.Fatal(got.err)
+	}
+	refuse.Store(true)
+	refused := run("refused")
+	nextIPCCommand(t, f, "submit_user_turn")
+	receiveIPC(t, failedRead) // the driver waits for the refresh
+	stopTurn(t, h, session, "refused")
+	got := receiveIPC(t, refused)
+	if got.err != nil || got.result.Status != execution.StatusCancelled || !got.result.SessionKept {
+		t.Fatalf("stop of a refused submission = %+v", got)
+	}
+	refuse.Store(false)
+	next := run("next")
+	command := nextIPCCommand(t, f, "submit_user_turn")
+	if !bytes.Contains(command.Payload, []byte(digest("next"))) {
+		t.Fatalf("the stopped submission was sent again: %s", command.Payload)
+	}
+	f.finishTurn(t, command, "next", "healthy")
+	if got := receiveIPC(t, next); got.err != nil || got.result.Status != execution.StatusCompleted {
+		t.Fatalf("turn after the stop = %+v", got)
+	}
+	if sent := sentIPC(f); slices.Contains(sent, "cancel_turn") || slices.Contains(sent, "end_session") {
+		t.Fatalf("commands after the stop = %v", sent)
 	}
 }

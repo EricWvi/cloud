@@ -52,6 +52,7 @@ func (a *failureAgent) End(ctx context.Context, sid string) error {
 	}
 }
 func (*failureAgent) Reattach(string, string, string) {}
+func (*failureAgent) StopTurn(execution.Ref) bool     { return false }
 
 func (a *failureAgent) Rebuild(sid string) {
 	a.mu.Lock()

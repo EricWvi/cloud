@@ -25,6 +25,7 @@ func (a *quietAgent) Run(ctx context.Context, _ execution.Scope, _ execution.Ses
 
 func (*quietAgent) End(context.Context, string) error { return nil }
 func (*quietAgent) Rebuild(string)                    {}
+func (*quietAgent) StopTurn(execution.Ref) bool       { return false }
 func (*quietAgent) Reattach(string, string, string)   {}
 func (*quietAgent) Close(context.Context) error       { return nil }
 

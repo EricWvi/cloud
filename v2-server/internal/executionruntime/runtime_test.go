@@ -558,9 +558,11 @@ type orchestrationAgent struct {
 	ended   chan string
 	mu      sync.Mutex
 	closed  map[string]bool
-	// keepOnStop makes a stop with execution.ErrStopTurn cancel only the turn, as the real
-	// driver does over a Node that negotiated turn_cancel.
+	// keepOnStop makes StopTurn stop only the turn, as the real driver does over a Node that
+	// negotiated turn_cancel; without it StopTurn refuses, and Cancel ends the session.
 	keepOnStop bool
+	// running is each session's turn in Run, for StopTurn.
+	running map[string]*agentCall
 }
 
 type agentCall struct {
@@ -573,18 +575,34 @@ type agentCall struct {
 	result *execution.Result
 	err    error
 	silent bool
+	// stopped is closed by StopTurn; stopOnce guards it.
+	stopped  chan struct{}
+	stopOnce sync.Once
 }
 
 func (c *agentCall) unblock() { c.once.Do(func() { close(c.release) }) }
 
 func (a *orchestrationAgent) Run(ctx context.Context, _ execution.Scope, session execution.Session, _ execution.Turn, emit func(context.Context, execution.Event) error) (execution.Result, error) {
-	call := &agentCall{ctx: ctx, session: session, release: make(chan struct{})}
+	call := &agentCall{ctx: ctx, session: session, release: make(chan struct{}), stopped: make(chan struct{})}
+	a.mu.Lock()
+	if a.running == nil {
+		a.running = map[string]*agentCall{}
+	}
+	a.running[session.ID] = call
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		if a.running[session.ID] == call {
+			delete(a.running, session.ID)
+		}
+		a.mu.Unlock()
+	}()
 	a.started <- call
 	select {
 	case <-ctx.Done():
-		result := execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}
-		result.SessionKept = a.keepOnStop && errors.Is(context.Cause(ctx), execution.ErrStopTurn)
-		return result, nil
+		return execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}, nil
+	case <-call.stopped:
+		return execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled", SessionKept: true}, nil
 	case <-call.release:
 		result := execution.Result{Status: execution.StatusCompleted, Answer: "fake driver orchestration", AnswerComplete: true, StopReason: "end_turn"}
 		if call.result != nil {
@@ -614,7 +632,19 @@ func (a *orchestrationAgent) End(_ context.Context, sid string) error {
 	}
 	return nil
 }
-func (a *orchestrationAgent) Rebuild(string)                  {}
+func (a *orchestrationAgent) Rebuild(string) {}
+
+// StopTurn stops only the session's running turn when keepOnStop is set.
+func (a *orchestrationAgent) StopTurn(ref execution.Ref) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	call := a.running[ref.SessionID]
+	if !a.keepOnStop || call == nil {
+		return false
+	}
+	call.stopOnce.Do(func() { close(call.stopped) })
+	return true
+}
 func (a *orchestrationAgent) Reattach(string, string, string) {}
 func (a *orchestrationAgent) Close(context.Context) error     { return nil }
 

@@ -57,15 +57,36 @@ type activeTurn struct {
 	// (it refused the command, did not know the turn, or contradicted it): Run ends the session
 	// as a stop did before turn_cancel.
 	cancelFallback chan struct{}
+	// stopRequested is closed by StopTurn (requestStop) when the caller asks to stop only this turn.
+	stopRequested chan struct{}
+	stopOnce      sync.Once
+	// progress is signalled for every message of this session while a cancel awaits its
+	// settlement, so Run's wait for it restarts (cancel-turn ADR D4: wait on delivery progress).
+	progress chan struct{}
+	// fallingBack is set once Run ends the session instead of waiting longer: a settlement that
+	// arrives after that cannot keep the session. Protected by agentSession.mu.
+	fallingBack bool
+	// refused marks a submission Node refused (mcp_update_required) and has not been sent again:
+	// Node holds no such turn, so a stop ends it here instead of sending CancelTurn. Protected by
+	// agentSession.mu; commandMu orders it with the resubmission.
+	refused bool
 }
 
-// fallBack hands the stop back to Run's session-ending path; repeated signals coalesce.
-func (call *activeTurn) fallBack() {
+// requestStop asks Run to stop only this turn; repeated requests coalesce.
+func (call *activeTurn) requestStop() {
+	call.stopOnce.Do(func() { close(call.stopRequested) })
+}
+
+// signal wakes a buffered notification channel without blocking; repeated signals coalesce.
+func signal(ch chan struct{}) {
 	select {
-	case call.cancelFallback <- struct{}{}:
+	case ch <- struct{}{}:
 	default:
 	}
 }
+
+// fallBack hands the stop back to Run's session-ending path; repeated signals coalesce.
+func (call *activeTurn) fallBack() { signal(call.cancelFallback) }
 
 // keepChoices are what a session chose in its StartAgentSession to survive (cancel-turn ADR D5).
 // They are frozen with the session, so a later connection cannot change its rules.
@@ -122,6 +143,8 @@ type agentSession struct {
 	emit Emit
 	// keep is fixed when the Agent is started (submit) and read under mu.
 	keep keepChoices
+	// stopNext is a turn StopTurn was asked to stop before it began; begin hands the stop to it.
+	stopNext string
 	// publishMu orders history publications, so a preview never lands after a newer snapshot.
 	publishMu     sync.Mutex
 	preview       *execution.HistorySnapshot // latest pending set not yet published
@@ -365,7 +388,11 @@ func (a *agentSession) begin(turn string, selection *execution.MCPSelection, emi
 	if a.active != nil {
 		return nil, false, execution.ErrWorkspaceBusy
 	}
-	call := &activeTurn{id: turn, done: make(chan turnOutcome, 1), cancelFallback: make(chan struct{}, 1)}
+	call := &activeTurn{id: turn, done: make(chan turnOutcome, 1), cancelFallback: make(chan struct{}, 1), stopRequested: make(chan struct{}), progress: make(chan struct{}, 1)}
+	if a.stopNext == turn {
+		a.stopNext = ""
+		call.requestStop()
+	}
 	if a.started && selection != nil && len(selection.Bindings) > 0 {
 		call.updateRequired = make(chan struct{}, 1)
 	}
@@ -546,14 +573,25 @@ func (a *agentSession) fail(code string, err error) {
 	a.mu.Lock()
 	a.broken = true
 	call := a.active
+	stoppedByCaller := call != nil && call.cancel != ""
 	a.mu.Unlock()
-	if call != nil {
-		// Infrastructure strings are deliberately not exposed through Run.
-		if !errors.Is(err, execution.ErrStopUnconfirmed) && !errors.Is(err, execution.ErrNodeLost) {
-			err = errors.New(code)
-		}
-		a.complete(turnOutcome{call.id, failed(code), err})
+	if call == nil {
+		return
 	}
+	if stoppedByCaller {
+		// The caller stopped this turn and the session is lost before Node settled the stop (its
+		// Node went away, say): the turn is the caller's stop, and nothing can follow it.
+		if !errors.Is(err, execution.ErrStopUnconfirmed) {
+			err = execution.ErrSessionEnded
+		}
+		a.complete(turnOutcome{call.id, execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled", AgentLost: true}, err})
+		return
+	}
+	// Infrastructure strings are deliberately not exposed through Run.
+	if !errors.Is(err, execution.ErrStopUnconfirmed) && !errors.Is(err, execution.ErrNodeLost) {
+		err = errors.New(code)
+	}
+	a.complete(turnOutcome{call.id, failed(code), err})
 }
 
 func (a *agentSession) publish(event execution.Event) error {
@@ -584,6 +622,14 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 		a.fail("agent_identity_mismatch", execution.ErrUnavailable)
 		a.requestEnd()
 		return nil, false
+	}
+	if call != nil {
+		a.mu.Lock()
+		settling := call.cancel != ""
+		a.mu.Unlock()
+		if settling {
+			signal(call.progress)
+		}
 	}
 	if message.Type == "session_turn_failed" {
 		var failure struct {
@@ -703,6 +749,9 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 		}
 		if parsed && rejection.Reason == "mcp_update_required" {
 			if message.Sequence == nil && call != nil && call.updateRequired != nil && call.commandID == rejection.CommandID {
+				a.mu.Lock()
+				call.refused = true
+				a.mu.Unlock()
 				select {
 				case call.updateRequired <- struct{}{}:
 				default:

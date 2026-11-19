@@ -65,7 +65,8 @@ func (a *recoveryAgent) End(_ context.Context, sid string) error {
 	}
 	return nil
 }
-func (*recoveryAgent) Rebuild(string) {}
+func (*recoveryAgent) Rebuild(string)              {}
+func (*recoveryAgent) StopTurn(execution.Ref) bool { return false }
 func (a *recoveryAgent) Reattach(workspace, clone, path string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

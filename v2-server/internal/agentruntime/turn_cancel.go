@@ -11,10 +11,12 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/nodehistory"
 )
 
-// defaultTurnCancelWait bounds how long Run waits for TurnCancelSettled after sending CancelTurn
-// before it ends the session as a stop did before turn_cancel. Node settles within G + Q (15 s +
-// 2 s, cancel-turn ADR D2); the rest is margin for delivery. The ADR lets a Controller wait on
-// delivery progress instead; one local Node needs no more than a fixed bound.
+// defaultTurnCancelWait is how long Run waits for TurnCancelSettled after sending CancelTurn, or
+// after the last message of the session that arrived meanwhile, before it ends the session as a
+// stop did before turn_cancel. Node settles within G + Q (15 s + 2 s, cancel-turn ADR D2) of the
+// cancel; restarting the window on every message approximates ADR D4's rule of waiting on
+// delivery progress, so a backlog of events is never taken for a Node that does not settle. The
+// whole wait never exceeds execution.TurnStopSettleLimit.
 const defaultTurnCancelWait = 30 * time.Second
 
 // turnStop is what stopTurn did with a caller's stop.
@@ -23,7 +25,8 @@ type turnStop int
 const (
 	// turnStopSent: CancelTurn was sent; Node's settlement completes the turn.
 	turnStopSent turnStop = iota
-	// turnStopFinished: the turn already ended on its own; its outcome is on call.done.
+	// turnStopFinished: the turn already has its outcome on call.done: it ended on its own, or
+	// Node never held it and it was stopped here.
 	turnStopFinished
 	// turnStopUnavailable: this session cannot keep its Agent after a stop (it did not choose
 	// keep_session_on_cancel, or it is ending or broken); the caller ends the session.
@@ -31,7 +34,10 @@ const (
 )
 
 // stopTurn asks Node to cancel only call's turn. The command is sent under commandMu, after the
-// turn's own submission, so Node has accepted the turn by the time it reads the cancel.
+// turn's own submission, so Node has accepted the turn by the time it reads the cancel. A
+// submission Node refused and that was not sent again is no turn of Node's (CancelTurn would
+// only learn unknown, ADR D1), so it is stopped here, before its resubmission, and the session
+// is kept: nothing of it reached the Agent.
 func (a *agentSession) stopTurn(call *activeTurn) turnStop {
 	a.commandMu.Lock()
 	defer a.commandMu.Unlock()
@@ -44,6 +50,17 @@ func (a *agentSession) stopTurn(call *activeTurn) turnStop {
 	if !a.keep.onCancel || !a.started || a.ended || a.ending || a.broken || call.cancel != "" {
 		a.mu.Unlock()
 		return turnStopUnavailable
+	}
+	if call.refused {
+		a.mu.Unlock()
+		result := execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled", SessionKept: true}
+		if a.publish(execution.Event{Ref: execution.Ref{TurnID: call.id}, Kind: execution.EventTurnEnded, Result: &result}) != nil {
+			a.fail("agent_event_write_failed", errEventStore)
+			a.requestEnd()
+			return turnStopFinished
+		}
+		a.complete(turnOutcome{call.id, result, nil})
+		return turnStopFinished
 	}
 	call.cancel = "cancel-" + digest(call.id)
 	command := call.cancel
@@ -72,8 +89,9 @@ func (a *agentSession) observeCancelSettled(message node.Message, call *activeTu
 	a.mu.Lock()
 	ours := call != nil && call.cancel == settled.CommandID && call.id == settled.TurnID
 	var stopped *nodehistory.Turn
+	var fallingBack bool
 	if ours {
-		stopped = call.stopped
+		stopped, fallingBack = call.stopped, call.fallingBack
 	}
 	a.mu.Unlock()
 	if !ours {
@@ -83,6 +101,11 @@ func (a *agentSession) observeCancelSettled(message node.Message, call *activeTu
 	if !ok {
 		call.fallBack()
 		return nil, !publicationFailed
+	}
+	if fallingBack {
+		// Run stopped waiting and is ending the session: whatever Node concluded, the session
+		// does not outlive this turn.
+		result.SessionKept, result.AgentLost, ended = false, true, true
 	}
 	if publicationFailed || a.publish(execution.Event{Ref: execution.Ref{TurnID: call.id}, Kind: execution.EventTurnEnded, Result: &result}) != nil {
 		a.fail("agent_event_write_failed", errEventStore)

@@ -256,6 +256,10 @@ func (a *agentSession) reconcileTurn(ctx context.Context, deadline time.Time, ca
 	if ctx.Err() != nil {
 		return context.Cause(ctx)
 	}
+	// From here Node may hold the turn again, so a stop goes to Node (see stopTurn).
+	a.mu.Lock()
+	call.refused = false
+	a.mu.Unlock()
 	return a.submit(turn, text, false)
 }
 
