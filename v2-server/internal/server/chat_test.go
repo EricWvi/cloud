@@ -287,8 +287,22 @@ func TestChatConversationLifecycle(t *testing.T) {
 	if items := list["items"].([]any); status != 200 || len(items) != 2 || items[0].(map[string]any)["session"].(map[string]any)["endReason"] != "stopped" {
 		t.Fatalf("list = %d %v", status, list)
 	}
-	if status, _ := c.do("DELETE", "/conversations/"+id, nil); status != 204 {
-		t.Fatalf("delete = %d", status)
+	// The stub records no checkout, so deleting has nothing to keep or reclaim.
+	status, preview := c.do("GET", "/conversations/"+id+"/deletion", nil)
+	if status != 200 || preview["workspace"] != "none" || preview["reason"] != "no_workspace" || preview["ignored"] != false {
+		t.Fatalf("deletion preview = %d %v", status, preview)
+	}
+	if status, body := c.do("GET", "/conversations/00000000-0000-0000-0000-000000000009/deletion", nil); status != 404 {
+		t.Fatalf("preview of an unknown conversation = %d %v", status, body)
+	}
+	if status, body := c.do("DELETE", "/conversations/"+id+"?workspace=keep", nil); status != 400 || body["code"] != "invalid_request" {
+		t.Fatalf("delete with an unknown workspace choice = %d %v", status, body)
+	}
+	if status, body := c.do("DELETE", "/conversations/"+id+"?workspace=discard", nil); status != 400 || body["code"] != "invalid_request" {
+		t.Fatalf("discard without the preview's revision = %d %v", status, body)
+	}
+	if status, body := c.do("DELETE", "/conversations/"+id+"?workspace=discard&revision=x", nil); status != 200 || body["workspace"] != "none" {
+		t.Fatalf("delete = %d %v", status, body)
 	}
 	if status, _ := c.do("PATCH", "/conversations/"+id, map[string]any{"title": "x"}); status != 404 {
 		t.Fatalf("rename deleted = %d", status)

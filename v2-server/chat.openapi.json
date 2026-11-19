@@ -341,7 +341,120 @@
         "tags": [
           "chat"
         ],
-        "summary": "End the live session, then delete the conversation",
+        "summary": "End the live session, delete the conversation and reclaim its checkout",
+        "parameters": [
+          {
+            "name": "tid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "reclaim",
+                "discard"
+              ],
+              "default": "reclaim"
+            }
+          },
+          {
+            "name": "revision",
+            "in": "query",
+            "required": false,
+            "description": "The deletion preview's revision; required with workspace=discard.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatDeletionResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatError"
+                }
+              }
+            }
+          }
+        },
+        "description": "workspace says what happens to the conversation's checkout: reclaim (the default) removes it only when its work is recoverable from the session's deliveries and keeps it otherwise; discard removes it regardless, dropping undelivered work, and must carry the revision of the deletion preview the person saw. A discard whose preview is stale, or made while a turn runs or delivers, answers 409 deletion_preview_stale and changes nothing. The reclaim is recorded with the deletion and executed at once; the body says what came of it (pending ones finish at the next start)."
+      }
+    },
+    "/api/v2/tenants/{tid}/chat/conversations/{cid}/deletion": {
+      "get": {
+        "operationId": "previewChatConversationDeletion",
+        "tags": [
+          "chat"
+        ],
+        "summary": "What deleting the conversation does to its checkout",
+        "description": "workspace none: no checkout recorded (no_workspace) or it no longer exists (workspace_missing). recoverable: the last turn's delivery holds the checkout's work, so deleting removes it; afterwards only an operator can restore that work from the delivery, so latestDelivery offers its patch first; ignored tells whether files the ignore rules leave out of deliveries would go with it. undelivered: deleting keeps the checkout unless workspace=discard; reason says why and undeliveredChanges lists what is not delivered (against the newest delivered delivery, else the base), up to a limit with undeliveredTotal counting all. revision identifies this state for a discard.",
         "parameters": [
           {
             "name": "tid",
@@ -361,15 +474,12 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Response"
-          },
-          "400": {
+          "200": {
             "description": "Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ChatError"
+                  "$ref": "#/components/schemas/ChatDeletionPreview"
                 }
               }
             }
@@ -1296,6 +1406,122 @@
         "required": [
           "projectIds"
         ]
+      },
+      "ChatDeletionPreview": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace",
+          "ignored",
+          "undeliveredChanges",
+          "undeliveredTotal",
+          "revision"
+        ],
+        "properties": {
+          "workspace": {
+            "type": "string",
+            "enum": [
+              "none",
+              "recoverable",
+              "undelivered"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "no_workspace",
+              "workspace_missing",
+              "legacy",
+              "delivering",
+              "last_turn_undelivered",
+              "git_state",
+              "changed_after_delivery",
+              "unverifiable"
+            ]
+          },
+          "ignored": {
+            "type": "boolean"
+          },
+          "undeliveredChanges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatUndeliveredChange"
+            }
+          },
+          "undeliveredTotal": {
+            "type": "integer"
+          },
+          "latestDelivery": {
+            "type": "string",
+            "description": "The newest delivered delivery, whose patch the workspace routes download."
+          },
+          "revision": {
+            "type": "string"
+          }
+        }
+      },
+      "ChatUndeliveredChange": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "status",
+          "additions",
+          "deletions",
+          "binary"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "added",
+              "modified",
+              "deleted"
+            ]
+          },
+          "additions": {
+            "type": "integer"
+          },
+          "deletions": {
+            "type": "integer"
+          },
+          "binary": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ChatDeletionResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace"
+        ],
+        "properties": {
+          "workspace": {
+            "type": "string",
+            "enum": [
+              "none",
+              "reclaimed",
+              "kept",
+              "pending"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why kept or pending (pending: delivering or removal_failed); operator_discard never appears here."
+          },
+          "releasedBytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "releasedFiles": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
       }
     }
   }

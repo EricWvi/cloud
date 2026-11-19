@@ -663,7 +663,8 @@ not execute these kinds: `crates/application/src/workflow_run/engine/node_type.r
 | `GET …/chat/conversations` | 本人在该租户的对话，按创建时间排序，各带自己的执行 session |
 | `POST …/chat/conversations` | 以第一条消息创建对话并 `Start`，返回 201 和该轮的 session/turn |
 | `PATCH …/chat/conversations/{cid}` | 改名 |
-| `DELETE …/chat/conversations/{cid}` | 先 `End` 活 session，确认后再删除对话 |
+| `DELETE …/chat/conversations/{cid}` | 先 `End` 活 session，确认后再删除对话，同一事务里登记回收它的工作目录并立即执行；可选 `workspace=reclaim`（默认）/ `discard`（须带预览的 `revision`），返回工作目录的结果（见下文「删除对话时回收工作目录」） |
+| `GET …/chat/conversations/{cid}/deletion` | 删除前预览工作目录会怎样：能否恢复及原因、未交付的改动、有无被忽略的文件、可下载的最近交付、`revision` |
 | `POST …/chat/conversations/{cid}/messages` | 在对话的 session 上 `Append` 下一条消息 |
 | `POST …/chat/conversations/{cid}/stop` | `Cancel` 最近一轮 |
 | `GET …/chat/conversations/{cid}/events` | 对话 session 的事件，Server-Sent Events |
@@ -683,6 +684,20 @@ not execute these kinds: `crates/application/src/workflow_run/engine/node_type.r
 - **简化**：同一对话的操作用进程内互斥串行，依赖 v2-server 是单进程；首版只接文本消息，必须选项目。
 
 装配：`server.New` 用传入的 store 和注入的 `Execution` / `Catalog` 建一个 `chat.Service`，chat 不改 `main.go` 或启动入口。chat 只调用公共 `execution.Service`，不直接写执行存储的事件、终态或 End；chat 自己的表只记录对话、session 归属和结束原因。
+
+#### 删除对话时回收工作目录
+
+用户删除普通对话时，它的工作目录在成果能从回合交付恢复、或用户选了 `discard` 时才删除。判定、状态与运维见 [`internal/workspacereclaim`](internal/workspacereclaim)：
+
+- **能恢复**（按登记的 session 直接查 `v2_execution_turns` / `v2_turn_deliveries` / `v2_turn_delivery_work`，对话行删了也能判）：有交付记录（否则 `legacy`）；没有未结束的回合和交付义务（否则 `delivering`）；最后一轮的交付是 `delivered`/`empty`（否则 `last_turn_undelivered`）；Agent 仓库没有 `refs/stash`、没有 `refs/remotes/` 之外指向起点与 `HEAD` 祖先以外的 ref、快照里没有与起点不同的 gitlink、没有嵌套 `.git`（否则 `git_state`）；持交付的目录锁按交付快照规则重新生成树（只写临时目录），与最后一轮交付的树（`empty` 时起点的树）相同（否则 `changed_after_delivery`，生成不了为 `unverifiable`）。
+- **预览**：`workspace`（`none` 附 `no_workspace` / `workspace_missing`；`recoverable`；`undelivered` 附上面的原因）、`ignored`、`undeliveredChanges`（相对最近一次 `delivered` 交付，没有时相对起点，至多 200 条）与 `undeliveredTotal`、`latestDelivery`（页面经 `…/workspace/deliveries/{id}/patch` 下载）、`revision`（最后一轮、交付与未交付改动的摘要）。
+- **删除**：`reclaim` 不需要 `revision`，删除时重新判定，结果只会更保守。`discard` 必须带回预览的 `revision`，在结束会话之前重新计算，不一致或还在交付返回 409 `deletion_preview_stale`，对话和目录都不动。返回 `workspace`：`reclaimed`（附 `releasedBytes`、`releasedFiles`）、`kept`（附原因）、`pending`（`delivering` 或 `removal_failed`，下次启动再做）、`none`。
+- **先登记再删**：`store.DeleteChatConversationReclaiming`（只有用户删除走它；首轮被拒回滚对话用的 `DeleteChatConversation` 不登记）在删除对话的同一事务里写一行 `v2_workspace_reclaims`：目录 ID、项目、session、路径、`clone_execution`、模式（不可变）。状态 `pending → deleting → reclaimed | kept`；`deleting` 之后只重查身份与路径，不再判定。启动时在 `boot.Recover` 里 `RecoverTurnDeliveries` 之后、恢复工作流之前，把 `pending` / `deleting` 的再执行一遍；运行中不另外触发，不加定时任务。同一条回收在进程内按目录 ID 互斥。
+- **保留与重试**：`reclaim` 下不能恢复、身份不符（`identity_mismatch`：路径或 `clone_execution` 与 `v2_workspaces` 不一致或路径被别的行记录）、别的 session 用过（`shared`）、仍有活 session（`session_live`）、路径不安全（`unsafe_path`）记 `kept`；删除时 IO 等错误保持原状态，`attempts` 加一、记 `last_error` 与日志，下次启动重试。
+- **精确删除**：`agentruntime.Driver.RemoveCheckout` 持 `skillsMu`、在 `p.mu` 下确认 `p.owners` 为空并摘掉 `p.checkouts`，再从 `skill-checkouts.json` 去掉路径；项目 runtime 不在时持 Driver 锁改磁盘索引；技能投影遇到已不存在的 checkout 跳过。`workspacefs.RemoveCheckout` 要求路径在 `<V2_DATA_DIR>/nodes/<项目摘要>/w/r` 之下、逐级 `Lstat` 都不是链接，`os.OpenRoot` 打开后比对 dev/inode，经该 root 统计（普通文件逻辑大小之和、所有条目数）、补属主写权限、删内容，最后删目录本身。
+- **不碰**：`v2_workspaces`、交付记录与 ref、镜像、Node 会话历史和 Node 账本。工作流和任务运行的目录、本功能上线前已删除对话的目录都不回收，后者只能停服后 `-cleanup`。
+- **运维**：`v2-server reclaims [pending|deleting|kept|reclaimed ...]` 只读列出回收记录（服务运行时可用）；`v2-server discard-kept <目录 ID>` 停服后丢弃一条 `kept`（持数据目录锁，按同样的身份与路径检查删除，记 `reclaimed`、原因 `operator_discard`）。已回收目录的成果按记录里的交付提交与起点提交在项目镜像上恢复：`git diff --binary <起点> <交付提交>` 或 `git archive <交付提交>`。
+- **简化**：没有 Agent 运行时（未配置 `V2_NODE_ASSETS_DIR`）时不起回收器，也就没有 checkout 可删。
 
 HTTP 集成测试按 `chat.openapi.json` 验证 JSON 响应，向注入点传入 `executiontest.Stub`，覆盖对话生命周期、停止后只读、事件流续传、项目顺序和执行不可用；`internal/chat` 的测试用真实 PostgreSQL 和执行端口替身，覆盖幂等重试、结果未知、上一轮未结束、停止与重启后只读和删除顺序。
 
@@ -761,7 +776,7 @@ V2_NODE_ASSETS_DIR=/absolute/path/to/assets TEST_DATABASE_URL='postgres://ora:or
 首次安装要解压和校验，明显慢于之后的启动；安装结果留在 `V2_DATA_DIR` 的项目 Node 目录里，
 之后重启服务再用只需约一秒。演示前先在每个演示项目里跑一轮 Claude Code，可避开这次等待。
 
-End 和重启不自动删除目录。停止服务后 `V2_LOGIN=email go run . -cleanup` 只删除确认停止后的登记 Node 与对话目录，
+End 和重启不自动删除目录；只有删除对话时按「删除对话时回收工作目录」回收那一个对话的目录。停止服务后 `V2_LOGIN=email go run . -cleanup` 只删除确认停止后的登记 Node 与对话目录，
 保留项目 mirror 和数据库历史；命令拒绝与持有同一数据目录的服务并行运行。
 外部 provider 的显式验收入口与配置见执行服务包 README；默认 skip 不代表外部 provider 验收通过。
 

@@ -40,6 +40,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/taskworkflow"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflowhost"
 	"github.com/wanglongan587/cloud/v2-server/internal/workspacefs"
+	"github.com/wanglongan587/cloud/v2-server/internal/workspacereclaim"
 	"golang.org/x/sys/unix"
 )
 
@@ -47,6 +48,17 @@ import (
 const defaultDatabase = "postgres://ora:ora-local@127.0.0.1:55432/ora_v2?sslmode=disable"
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "reclaims" || os.Args[1] == "discard-kept") {
+		command := reclaimsCommand
+		if os.Args[1] == "discard-kept" {
+			command = discardKeptCommand
+		}
+		if e := command(os.Args[2:], os.Stdout); e != nil {
+			slog.Error(os.Args[1], "error", e)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "admin-invite" {
 		if e := adminInvite(os.Args[2:], os.Stdout); e != nil {
 			slog.Error("admin-invite", "error", e)
@@ -346,9 +358,14 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	defer taskRuns.Close()
 	decompositions := taskdecomp.New(db, workflowRunStarter{workflowRuns}, nil)
 	defer decompositions.Close()
-	if e := boot.Recover(ctx, boot.Hosts{
-		TaskWorkflows: taskWorkflows, Decompositions: decompositions, WorkflowRuns: workflowRuns, TaskRuns: taskRuns, Deliveries: runtime,
-	}); e != nil {
+	// Deleted conversations' checkouts; without an Agent runtime there are none to reclaim.
+	hosts := boot.Hosts{TaskWorkflows: taskWorkflows, Decompositions: decompositions, WorkflowRuns: workflowRuns, TaskRuns: taskRuns, Deliveries: runtime}
+	var reclaims *workspacereclaim.Reclaimer
+	if driver != nil {
+		reclaims = workspacereclaim.New(db, delivery, driver)
+		hosts.WorkspaceReclaims = reclaims
+	}
+	if e := boot.Recover(ctx, hosts); e != nil {
 		return e
 	}
 	if login.has(server.LoginProviderEmail) && driver != nil {
@@ -373,6 +390,7 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	}, workflowRuns)
 	if driver != nil {
 		options.SessionMCP = driver
+		options.WorkspaceReclaims = reclaims
 	}
 	coordinator, e := server.NewScheduleCoordinator(db, options, time.Now)
 	if e != nil {

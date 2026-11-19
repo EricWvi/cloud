@@ -43,6 +43,11 @@ type DeliveryRecovery interface {
 	RecoverTurnDeliveries(context.Context) error
 }
 
+// WorkspaceReclaims finishes the reclaims of deleted conversations' checkouts left open.
+type WorkspaceReclaims interface {
+	Resume(context.Context) error
+}
+
 // Hosts are the startup steps, one per owner of state a previous process can leave live.
 type Hosts struct {
 	// TaskWorkflows cancels the live handling runs of tasks and settles their links.
@@ -53,6 +58,9 @@ type Hosts struct {
 	// WorkflowRuns fails, or absorbs and resumes, the workflow runs left executing.
 	WorkflowRuns WorkflowRecovery
 	Deliveries   DeliveryRecovery
+	// WorkspaceReclaims runs after Deliveries, so a reclaim that waited for an interrupted turn's
+	// delivery can now be judged, and before workflows resume or requests are served.
+	WorkspaceReclaims WorkspaceReclaims
 	// TaskRuns ends the task Agent turns left live.
 	TaskRuns Interrupter
 }
@@ -77,6 +85,11 @@ func Recover(ctx context.Context, h Hosts) error {
 	}
 	if h.Deliveries != nil {
 		if err := h.Deliveries.RecoverTurnDeliveries(ctx); err != nil {
+			return err
+		}
+	}
+	if h.WorkspaceReclaims != nil {
+		if err := h.WorkspaceReclaims.Resume(ctx); err != nil {
 			return err
 		}
 	}
