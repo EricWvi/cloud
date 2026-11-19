@@ -99,7 +99,7 @@ func (h *handler) removeMember(w http.ResponseWriter, r *http.Request, a access)
 func (h *handler) inviteURL(token string) string {
 	path := "/invite/" + token
 	if p := h.opts.PublicURL; p != nil {
-		return p.Scheme + "://" + p.Host + p.Path + path
+		return p.Scheme + "://" + p.Host + path
 	}
 	return path
 }

@@ -201,11 +201,11 @@ func TestRevokingALinkOverHTTP(t *testing.T) {
 }
 
 func TestInviteURLUsesThePublicAddress(t *testing.T) {
-	public, _ := url.Parse("https://ora.example.com/ora")
+	public, _ := url.Parse("https://ora.example.com")
 	f := newInviteFixture(t, server.Options{PublicURL: public})
 	f.owner.Name = server.SecureSessionCookie
 	_, created := f.call("POST", "/api/v2/tenants/"+f.tenant+"/invite-links", f.owner, map[string]string{})
-	if u, _ := created["url"].(string); !strings.HasPrefix(u, "https://ora.example.com/ora/invite/") {
+	if u, _ := created["url"].(string); !strings.HasPrefix(u, "https://ora.example.com/invite/") {
 		t.Fatalf("url = %v", created)
 	}
 }
