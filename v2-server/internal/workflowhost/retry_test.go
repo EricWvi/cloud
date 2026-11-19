@@ -42,6 +42,7 @@ func retryHost(t *testing.T, f *fixture, now func() time.Time) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	h.turnStopSettle = 0
 	f.host = h
 	t.Cleanup(h.Close)
 }

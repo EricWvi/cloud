@@ -23,8 +23,9 @@ import (
 //
 // How a turn ended never fails the node (workflow-runs.md:125-126, 152-155): a refused, truncated,
 // unknown or unrequested cancelled turn keeps it parked with its held session open, so the starter
-// can keep talking, and completion waits for a turn that ended normally. Only a lost Agent or the
-// starter's stop ends the session; the node then parks for completion with the last normal
+// can keep talking, and completion waits for a turn that ended normally. So does a turn the
+// starter stopped when the Node keeps its session through the stop. Only a lost Agent, a stop that
+// lost it included, ends the session; the node then parks for completion with the last normal
 // answer, if there is one.
 //
 // Every transition of one node is claimed under runState.mu through interactiveNode.phase, so a
@@ -575,7 +576,7 @@ func (h *Host) StopNodeTurn(ctx context.Context, scope server.WorkflowRunScope, 
 	if st == nil {
 		return store.WorkflowRun{}, server.ErrWorkflowNodeTurnNotRunning
 	}
-	stopCtx, cancel := context.WithTimeout(ctx, h.stopTimeout)
+	stopCtx, cancel := context.WithTimeout(ctx, h.stopBudget())
 	defer cancel()
 	ref, err := st.turnOf(stopCtx, nodeID)
 	if err != nil {

@@ -27,6 +27,8 @@ type port struct {
 	attempts map[string]execution.Ref
 	// keepOnCancel makes Cancel stop only the turn, as over a Node that negotiated turn_cancel.
 	keepOnCancel bool
+	// cancelGate, when set, holds every Cancel until it is closed.
+	cancelGate chan struct{}
 }
 
 type session struct {
@@ -121,6 +123,9 @@ func (p *port) runtime() *executiontest.Stub {
 			return p.admit(scope, req.SessionID, req.Caller, req.Prompt), nil
 		},
 		CancelFunc: func(_ context.Context, scope execution.Scope, ref execution.Ref) (execution.Result, error) {
+			if p.cancelGate != nil {
+				<-p.cancelGate
+			}
 			p.mu.Lock()
 			defer p.mu.Unlock()
 			s, e := p.owned(scope, ref.SessionID)
@@ -448,6 +453,41 @@ func TestStopKeepsTheRunWhenItsSessionOutlivesTheTurn(t *testing.T) {
 	f.await(t, task.ID, store.TaskReview)
 	if ended, e := f.host.Stop(f.ctx, f.member, task.ID, run.ID); e != nil || ended.State != store.TaskRunEnded || ended.EndReason != store.TaskRunStopped {
 		t.Fatalf("stop of the idle run = %+v %v", ended, e)
+	}
+}
+
+// Two members stop the same running turn at once and the session outlives the stop: the second
+// Stop finds the turn it was sent for already stopped and leaves the idle run alone, instead of
+// ending it as a Stop of the idle run would.
+func TestConcurrentStopsOfAKeptTurnKeepTheRun(t *testing.T) {
+	f := newFixture(t)
+	f.port.keepOnCancel = true
+	task := f.task(t, opencode)
+	run, e := f.host.Start(f.ctx, f.owner, task.ID, "start", taskrun.StartInput{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	f.port.cancelGate = make(chan struct{})
+	read := make(chan struct{}, 2)
+	taskrun.SetStopRead(f.host, func() { read <- struct{}{} })
+	stopped := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, e := f.host.Stop(f.ctx, f.member, task.ID, run.ID)
+			stopped <- e
+		}()
+	}
+	<-read
+	<-read // both saw the turn running
+	close(f.port.cancelGate)
+	for range 2 {
+		if e := <-stopped; e != nil {
+			t.Fatal(e)
+		}
+	}
+	got, e := f.store.TaskRun(f.ctx, f.tenant, task.ID, run.ID)
+	if e != nil || !got.Live() || got.TurnActive() || got.EndReason != "" || got.LastResult != "cancelled" {
+		t.Fatalf("run after two stops of one kept turn = %+v %v", got, e)
 	}
 }
 

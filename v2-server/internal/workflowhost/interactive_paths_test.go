@@ -1064,3 +1064,49 @@ func TestCancelDropsASiblingWaitingBehindAParkedSession(t *testing.T) {
 	f.exec.noStart(t, "the waiting sibling started after the cancellation")
 	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
 }
+
+// A stop that Node settles more slowly than the host's stop timeout, but within what Cancel may
+// spend on a settlement (execution.TurnStopSettleLimit), is not reported as unconfirmed: neither
+// stopping a node's turn nor cancelling the run.
+func TestSlowlySettledStopIsNotUnconfirmed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(f *fixture, runID string) error
+	}{
+		{name: "node turn", stop: func(f *fixture, runID string) error {
+			_, err := f.host.StopNodeTurn(context.Background(), f.scope, runID, "a")
+			return err
+		}},
+		{name: "run", stop: func(f *fixture, runID string) error {
+			_, err := f.host.CancelRun(context.Background(), f.scope, runID)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			ctx := context.Background()
+			runID, a := f.startParked(t, interactiveChain, "初稿一")
+			if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "继续"); err != nil {
+				t.Fatal(err)
+			}
+			f.exec.awaitAppend(t)
+			f.host.turnStopSettle = 2 * f.host.stopTimeout
+			settle := f.exec.CancelFunc
+			f.exec.CancelFunc = func(ctx context.Context, scope execution.Scope, ref execution.Ref) (execution.Result, error) {
+				// Node settles the stop half a stop timeout too late for the stop timeout alone.
+				select {
+				case <-ctx.Done():
+					return execution.Result{}, ctx.Err()
+				case <-time.After(f.host.stopTimeout * 3 / 2):
+				}
+				if ref.SessionID == a {
+					f.exec.finish(ref.SessionID, stopKept())
+				}
+				return settle(ctx, scope, ref)
+			}
+			if err := tc.stop(f, runID); err != nil {
+				t.Fatalf("slowly settled stop = %v", err)
+			}
+		})
+	}
+}

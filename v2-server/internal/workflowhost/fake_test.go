@@ -388,6 +388,8 @@ func (f *fixture) newHost(t *testing.T) *Host {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The fake settles every stop at once; tests that need the allowance set it.
+	h.turnStopSettle = 0
 	t.Cleanup(h.Close)
 	return h
 }

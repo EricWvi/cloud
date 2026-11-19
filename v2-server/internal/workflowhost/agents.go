@@ -315,7 +315,7 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 		h.workers.Add(1)
 		go func() {
 			defer h.workers.Done()
-			stopCtx, cancel := context.WithTimeout(context.WithoutCancel(h.ctx), h.stopTimeout)
+			stopCtx, cancel := context.WithTimeout(context.WithoutCancel(h.ctx), h.stopBudget())
 			defer cancel()
 			if _, err := h.exec.Cancel(stopCtx, st.scope, ref); err != nil {
 				h.log.Warn("stop a turn started after its run was cancelled", "run", d.RunID, "node_run", d.NodeRunID, "error", publicReason(err))
