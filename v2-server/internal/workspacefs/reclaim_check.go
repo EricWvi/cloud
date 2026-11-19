@@ -218,27 +218,26 @@ func (s *DeliveryFS) gitState(ctx context.Context, st *staged) (GitFindings, err
 	return g, nil
 }
 
-// Limits of the identity digest of nested repositories. maxGitMetadataBytes bounds one file of a
-// repository's state (HEAD, packed-refs, a ref, the stash log); maxGitfileBytes a gitfile;
-// maxNestedEntries the entries of nested working trees. Their file contents share the delivery's
-// object limit. Beyond a limit the digest is incomplete and a discard cannot be verified.
-const (
-	maxGitMetadataBytes = 8 << 20
-	maxGitfileBytes     = 4 << 10
-	maxNestedEntries    = 100000
-)
+// maxNestedEntries bounds the entries the identity digest reads; its file contents share the
+// delivery's object limit. Beyond either the digest is incomplete.
+const maxNestedEntries = 100000
 
-// gitIdentity digests what identifies the Git state gitState counted: every ref's name and
-// target (peeled), HEAD and each stash reflog entry of the checkout's repository; and for every
-// nested repository the files that name its state (HEAD, packed-refs, refs/, the stash log, the
-// index's size and time) or its gitfile, plus its working tree by content: these files are in no
-// snapshot, so the digest must change whenever any of them does. Files are read without Git,
-// without following links, after an Lstat shows a regular file and an fstat confirms it, and opened
-// non-blocking, so a FIFO or a device cannot hang the read. A special file where Git metadata
-// belongs makes the checkout unverifiable. complete is false when a limit cut the digest short:
-// the identity then cannot vouch for what a discard would drop.
+// gitIdentity digests the actual bytes of everything Git-related that a discard would delete and
+// no delivery carries: the checkout repository's refs (name, target, peeled target), HEAD, stash
+// reflog entries and index; and for every nested repository its whole subtree (working tree and
+// .git, objects included) by content, plus, when its .git is a gitfile or a link, the Git
+// directories it points at as long as they lie inside the checkout. A revision built on it
+// changes whenever any of those bytes does.
+//
+// complete reports that every such byte was bound. It is false, and stays false, when anything
+// could not be: a byte or entry limit, a special file, a read that failed, a pointer leading out
+// of the checkout or not resolving. A discard is then refused, since the revision cannot prove the
+// person saw what would be deleted. Files are read without Git and without following links: an
+// Lstat must show a regular file, the open is O_NOFOLLOW|O_NONBLOCK and an fstat must confirm the
+// same file, so nothing can block on a FIFO or a device.
 func (s *DeliveryFS) gitIdentity(ctx context.Context, st *staged, g GitFindings) (identity string, complete bool, err error) {
 	h := sha256.New()
+	d := &digester{ctx: ctx, h: h, bytes: s.maxObjects, complete: true}
 	if _, err := os.Lstat(filepath.Join(st.root, ".git")); err == nil {
 		agent := deliveryGit{binary: s.git, dir: st.root, env: []string{"GIT_CEILING_DIRECTORIES=" + filepath.Dir(st.root)}}
 		refs, err := agent.run(ctx, nil, MaxDiffBytes, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(*objectname)")
@@ -255,62 +254,80 @@ func (s *DeliveryFS) gitIdentity(ctx context.Context, st *staged, g GitFindings)
 			}
 			h.Write(stashes)
 		}
+		// The index: what is staged is in no snapshot (the snapshot reads the working tree).
+		if layout, err := gitexclude.Resolve(st.root); err != nil {
+			d.incomplete("resolve .git", err)
+		} else if gitdir, err := os.OpenRoot(layout.GitDir()); err != nil {
+			d.incomplete("open Git directory", err)
+		} else {
+			d.file(gitdir, "index")
+			gitdir.Close()
+		}
 	}
 	root, err := os.OpenRoot(st.root)
 	if err != nil {
 		return "", false, err
 	}
 	defer root.Close()
-	d := &digester{ctx: ctx, h: h, bytes: s.maxObjects, complete: true}
+	realRoot, err := filepath.EvalSymlinks(st.root)
+	if err != nil {
+		return "", false, err
+	}
 	for _, repo := range g.Repositories {
+		if err := ctx.Err(); err != nil {
+			return "", false, err
+		}
 		fmt.Fprintf(h, "repository %s\x00", repo)
 		if name, ok := strings.CutPrefix(repo, ".git/modules/"); ok {
 			layout, err := gitexclude.Resolve(st.root)
 			if err != nil {
-				return "", false, fmt.Errorf("%w: %w", ErrUnverifiable, err)
+				d.incomplete("resolve .git", err)
+				continue
 			}
 			modules, err := os.OpenRoot(filepath.Join(layout.CommonDir(), "modules"))
 			if err != nil {
-				return "", false, err
+				d.incomplete("open modules", err)
+				continue
 			}
-			err = d.gitDir(modules, name)
+			d.tree(modules, name)
 			modules.Close()
-			if err != nil {
-				return "", false, err
-			}
 			continue
 		}
-		gitEntry := path.Join(repo, ".git")
-		if info, err := root.Lstat(gitEntry); err == nil {
-			switch {
-			case info.IsDir():
-				if err := d.gitDir(root, gitEntry); err != nil {
-					return "", false, err
-				}
-			case info.Mode()&fs.ModeSymlink != 0:
-				target, err := root.Readlink(gitEntry)
-				if err != nil {
-					return "", false, err
-				}
-				fmt.Fprintf(h, "link %s\x00", target)
-			case info.Mode().IsRegular() && info.Size() <= maxGitfileBytes:
-				if err := d.file(root, gitEntry, maxGitfileBytes, true); err != nil {
-					return "", false, err
-				}
-			default:
-				return "", false, fmt.Errorf("%w: nested %s is not a regular gitfile", ErrUnverifiable, gitEntry)
+		d.tree(root, repo)
+		// A gitfile or link names Git directories elsewhere: bound only when they are inside the
+		// checkout (and so deleted with it); outside, a discard could not show what it drops.
+		info, err := root.Lstat(path.Join(repo, ".git"))
+		if err != nil || info.IsDir() {
+			continue
+		}
+		layout, err := gitexclude.Resolve(filepath.Join(st.root, filepath.FromSlash(repo)))
+		if err != nil {
+			d.incomplete("resolve nested .git", err)
+			continue
+		}
+		for _, dir := range []string{layout.GitDir(), layout.CommonDir()} {
+			real, err := filepath.EvalSymlinks(dir)
+			if err != nil {
+				d.incomplete("resolve nested Git directory", err)
+				continue
 			}
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return "", false, err
+			rel, err := filepath.Rel(realRoot, real)
+			if err != nil || !filepath.IsLocal(rel) {
+				d.incomplete("nested Git directory outside the checkout", nil)
+				continue
+			}
+			fmt.Fprintf(h, "points at %s\x00", filepath.ToSlash(rel))
+			d.tree(root, filepath.ToSlash(rel))
 		}
-		if err := d.tree(root, repo); err != nil {
-			return "", false, err
-		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", false, err
 	}
 	return hex.EncodeToString(h.Sum(nil)), d.complete, nil
 }
 
-// digester writes file identities into h within a budget of content bytes and entries.
+// digester writes the bytes of files into h within a budget of content bytes and entries. Once
+// anything cannot be bound, complete is false for good.
 type digester struct {
 	ctx      context.Context
 	h        io.Writer
@@ -319,106 +336,71 @@ type digester struct {
 	complete bool
 }
 
-// file writes the content of name, which must be a regular file of at most limit bytes (a
-// metadata file is an error past it when strict, and only ends the digest otherwise); a missing
-// file writes nothing. It never follows a link and never blocks on a special file.
-func (d *digester) file(r *os.Root, name string, limit int64, strict bool) error {
+func (d *digester) incomplete(what string, err error) {
+	d.complete = false
+	fmt.Fprintf(d.h, "incomplete %s: %v\x00", what, err)
+}
+
+// file writes the content of name, which must be a regular file within the remaining budget; a
+// missing file writes a marker. It never follows a link and never blocks on a special file.
+func (d *digester) file(r *os.Root, name string) {
 	info, err := r.Lstat(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		fmt.Fprintf(d.h, "%s -\x00", name)
-		return nil
+		return
 	}
 	if err != nil {
-		return err
+		d.incomplete(name, err)
+		return
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%w: %s is not a regular file", ErrUnverifiable, name)
+		d.incomplete(name+" is not a regular file", nil)
+		return
 	}
-	if info.Size() > limit || info.Size() > d.bytes {
-		if strict {
-			return fmt.Errorf("%w: %s exceeds its size limit", ErrUnverifiable, name)
-		}
-		d.complete = false
-		return nil
+	if info.Size() > d.bytes {
+		d.incomplete(name+" exceeds the digest limit", nil)
+		return
 	}
 	f, err := r.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return err
+		d.incomplete(name, err)
+		return
 	}
 	defer f.Close()
 	opened, err := f.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		d.incomplete(name+" changed while it was read", err)
+		return
+	}
+	fmt.Fprintf(d.h, "file %s %d\x00", name, opened.Size())
+	n, err := io.Copy(d.h, io.LimitReader(f, d.bytes+1))
 	if err != nil {
-		return err
+		d.incomplete(name, err)
+		return
 	}
-	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
-		return fmt.Errorf("%w: %s changed while it was read", ErrUnverifiable, name)
-	}
-	fmt.Fprintf(d.h, "%s %d\x00", name, opened.Size())
-	n, err := io.Copy(d.h, io.LimitReader(f, min(limit, d.bytes)+1))
-	if err != nil {
-		return err
-	}
-	if n > min(limit, d.bytes) {
-		if strict {
-			return fmt.Errorf("%w: %s grew past its size limit", ErrUnverifiable, name)
-		}
-		d.complete = false
-		return nil
+	if n > d.bytes {
+		d.incomplete(name+" grew past the digest limit", nil)
+		return
 	}
 	d.bytes -= n
-	return nil
 }
 
-// gitDir writes the files that name a repository's state: HEAD, packed-refs, every file under
-// refs/, the stash log, and the index's size and modification time.
-func (d *digester) gitDir(r *os.Root, dir string) error {
-	for _, name := range []string{"HEAD", "packed-refs", "logs/refs/stash"} {
-		if err := d.file(r, path.Join(dir, name), maxGitMetadataBytes, true); err != nil {
-			return err
-		}
-	}
-	if info, err := r.Lstat(path.Join(dir, "index")); err == nil {
-		fmt.Fprintf(d.h, "index %s %d %d\x00", info.Mode().Type(), info.Size(), info.ModTime().UnixNano())
-	}
-	err := fs.WalkDir(r.FS(), path.Join(dir, "refs"), func(p string, e fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if err := d.ctx.Err(); err != nil {
-			return err
-		}
-		if e.IsDir() {
-			return nil
-		}
-		return d.file(r, p, maxGitMetadataBytes, true)
-	})
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	return err
-}
-
-// tree writes every entry of a nested working tree (its .git apart): regular files by content,
-// links by target, other entries by type, all without following links.
-func (d *digester) tree(r *os.Root, dir string) error {
+// tree writes every entry below dir (dir itself included, .git directories included): regular
+// files by content, links by target, directories by name. Any other kind of entry cannot be bound.
+func (d *digester) tree(r *os.Root, dir string) {
 	if _, err := r.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
-		return nil // a gitlink with no working tree here
+		fmt.Fprintf(d.h, "missing %s\x00", dir)
+		return // a gitlink with no working tree here
 	}
-	return fs.WalkDir(r.FS(), dir, func(p string, e fs.DirEntry, err error) error {
+	err := fs.WalkDir(r.FS(), dir, func(p string, e fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if err := d.ctx.Err(); err != nil {
 			return err
-		}
-		if e.Name() == ".git" && p != dir {
-			if e.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
 		}
 		if d.entries++; d.entries > maxNestedEntries {
-			d.complete = false
+			d.incomplete("too many entries", nil)
 			return fs.SkipAll
 		}
 		switch t := e.Type(); {
@@ -431,17 +413,18 @@ func (d *digester) tree(r *os.Root, dir string) error {
 			}
 			fmt.Fprintf(d.h, "link %s %s\x00", p, target)
 		case t.IsRegular():
-			if err := d.file(r, p, d.bytes, false); err != nil {
-				return err
-			}
-			if !d.complete {
-				return fs.SkipAll
-			}
+			d.file(r, p)
 		default:
-			fmt.Fprintf(d.h, "special %s %s\x00", p, t)
+			d.incomplete(p+" is a special file", nil)
+		}
+		if !d.complete {
+			return fs.SkipAll // nothing past this can make the digest complete again
 		}
 		return nil
 	})
+	if err != nil {
+		d.incomplete(dir, err)
+	}
 }
 
 // nestedGit lists every entry named .git below the checkout's top level, whatever its kind

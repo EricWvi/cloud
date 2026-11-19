@@ -242,22 +242,26 @@ func TestInspectReclaimDoesNotHangOnAFIFO(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 			defer cancel()
 			start := time.Now()
-			done := make(chan error, 1)
+			type result struct {
+				in  workspacefs.ReclaimInspection
+				err error
+			}
+			done := make(chan result, 1)
 			go func() {
-				_, err := f.InspectReclaim(ctx, req.Workspace, req.MirrorPath, "")
-				done <- err
+				in, err := f.InspectReclaim(ctx, req.Workspace, req.MirrorPath, "")
+				done <- result{in, err}
 			}()
 			select {
-			case err := <-done:
-				if err == nil {
-					t.Fatal("a FIFO in Git metadata passed inspection")
+			case res := <-done:
+				// Where Ora reads the metadata itself the FIFO leaves the digest incomplete at once;
+				// where Git reads it first, the context ends Git.
+				if res.err == nil && res.in.GitIdentityComplete {
+					t.Fatal("a FIFO in Git metadata was bound as if it were content")
 				}
-				// Where Ora reads the metadata itself the FIFO is refused outright; where Git reads
-				// it first, the context ends Git.
-				if name != "nested HEAD" && !errors.Is(err, workspacefs.ErrUnverifiable) {
-					t.Fatalf("err = %v, want ErrUnverifiable", err)
+				if name != "nested HEAD" && res.err != nil {
+					t.Fatalf("err = %v, want an incomplete digest", res.err)
 				}
-				t.Logf("returned after %v: %v", time.Since(start), err)
+				t.Logf("returned after %v: %v", time.Since(start), res.err)
 			case <-time.After(5 * time.Second):
 				t.Fatal("inspection hung on a FIFO")
 			}
