@@ -289,7 +289,7 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 			fail(mcpFailure(err))
 			return
 		}
-		fail(workflow.Failure{Kind: workflow.FailureSession, Message: "execution refused to start the Agent: " + publicReason(err)})
+		fail(h.sessionFailure(st.scope, "execution refused to start the Agent: "+publicReason(err)))
 		return
 	}
 
@@ -786,7 +786,8 @@ func (h *Host) resolveExecutor(scope execution.Scope, cfg workflow.AgentConfig) 
 	}
 	executors, err := h.catalog.ListExecutors(h.ctx, scope)
 	if err != nil {
-		return resolvedExecutor{}, &workflow.Failure{Kind: workflow.FailureSession, Message: "list executors: " + publicReason(err)}
+		failure := h.sessionFailure(scope, "list executors: "+publicReason(err))
+		return resolvedExecutor{}, &failure
 	}
 	var first *execution.Executor
 	for i := range executors {
@@ -826,4 +827,26 @@ func publicReason(err error) string {
 		}
 	}
 	return "execution error"
+}
+
+// sessionFailure classifies a refusal to list executors or start an Agent under scope. When the
+// identity the run executes under is no longer an active member of the workspace, the refusal
+// fails the node as starter_unavailable, which never retries automatically: a retry under the same
+// identity is refused again. Anything else, including a failed membership lookup, stays a session
+// failure.
+func (h *Host) sessionFailure(scope execution.Scope, message string) workflow.Failure {
+	if active, err := h.activeMember(h.ctx, scope.TenantID, scope.UserID); err == nil && !active {
+		return workflow.Failure{Kind: workflow.FailureStarterUnavailable, Message: "the run's starter is no longer an active member of the workspace (" + message + ")"}
+	}
+	return workflow.Failure{Kind: workflow.FailureSession, Message: message}
+}
+
+// activeMember reports whether user may still act in tenant: a member whose account is active, in
+// an active workspace, the same rule every request and every execution start checks.
+func (h *Host) activeMember(ctx context.Context, tenant, user string) (bool, error) {
+	_, err := h.store.TenantAccess(ctx, tenant, user)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
 }
