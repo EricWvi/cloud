@@ -440,8 +440,8 @@ HTTP 集成测试按此候选 OpenAPI 校验每一次响应，并覆盖创建、
 - 可选查询参数 `issueId` 在 v2 被忽略，传其他租户或不存在的 `issueId` 仍返回 200（Cloud 对未知或跨租户 `issueId` 返回 404）。
 - 通过 `POST /api/v2/tenants/{tid}/tasks/{taskid}/comments` `@` 工作流提交时，对声明为 `object`、`array`、`array[...]`、`array[file]` 的文本输入在 `workflow.CheckStart` 前先按 JSON 解码（非法 JSON 返回 `400 workflow_run_input_invalid`、`reason: "type_mismatch"`）；直接传结构化 JSON 值也照常接受。
 - 普通评论与工作流评论共用 `(task_id, author_id, create_key)`：同一个 key 换内容仍返回原评论，不比较请求体；正式 Cloud 返回 `409 idempotency_conflict`。
-- 工作流评论在准备或启动被拒绝、且运行从未开始执行时，事务撤销评论、运行及初始 scope，释放 key；同 key 重试可重新启动。若 `Start` 已进入执行后才报错，则保留评论与运行，确认停止后标为已取消并记录安全的失败原因；同 key 重试返回这条记录，不重复执行。后一种情况与正式 Cloud 的失败请求不留记录约定不同，重新发起须使用新 key。
-- 已软删除运行的评论卡片只保留名称、版本和状态，时间线与同 key 重放均不返回其输出或错误，前端也不渲染这些内容。
+- 工作流评论在准备或启动被拒绝、且运行从未开始执行时（包括在提交评论后、运行开始前发生进程重启的场景，由 `taskworkflow.Host.Recover` 清理），事务撤销评论、运行及初始 scope，释放 key；同 key 重试可重新启动。若 `Start` 已进入执行后才报错，则保留评论与运行，确认停止后标为已取消并记录安全的失败原因；同 key 重试返回这条记录，不重复执行。后一种情况与正式 Cloud 的失败请求不留记录约定不同，重新发起须使用新 key。
+- 已软删除运行的评论卡片与 `GET /api/v2/tenants/{tid}/tasks/{taskid}/workflow-runs` 只保留名称、版本和状态，不返回其输出或失败原因，前端也不渲染这些内容。
 
 ### 项目仓库
 
@@ -607,7 +607,7 @@ not execute these kinds: `crates/application/src/workflow_run/engine/node_type.r
 - **变量与失败尝试投影**：运行 payload 的其余部分不公开；除了 Condition 的 `conditionDecisions`，详情再投影 desktop `GetWorkflowRunResponse` 里的两项。`variables` 读 `variablePool` 的 catalog（`<节点>.<名字>`，按键排序），`sourceNodeId` 取 `writer`，没赋值的不带 `value`，赋了 `null` 的带 `null`；跳过旧的 `selected_branch_id` 路由项，键不合法的项跳过而不让整个详情失败（desktop 在这里报 payload 损坏）。运行开始前没有变量池，读出空列表。`failedAttempts` 是被软删的 `failed` 节点行（desktop 的 `list_failed_attempts`），取各行 `payload.error_detail`，没有的跳过；只有重试、续跑和整次重跑会软删失败行；v2 由自动重试（根作用域与 Loop / Iteration 成员）和「从失败处继续」软删（v2 没有整次重跑），其余情况下为空，当前失败的尝试就是节点自己的行。
 - **能力边界**：支持在同一次运行里「从失败处继续」（只保留现状，不回滚文件，见下文）；整次运行 restart、checkpoint 回滚和换用新发布版本续跑不在演示范围，顶栏“再跑一次”创建新运行。重启中断由执行桥提供，见下文“工作流执行”。
 
-运行页按选中的 Loop scope 或 Iteration 下标投影节点状态，并以该次尝试的 `nodeRunId` 订阅会话事件。该轮未执行的成员没有尝试身份，不继承前一轮的会话或执行元数据。启动输入和根变量只覆盖根 Start，不覆盖 Loop 的本轮入口。`failedAttempts` 按发生它的作用域归属：根作用域的尝试归根节点，Iteration 尝试归它的轮次，Loop 尝试归它的轮次 scope；前端按选中的轮次展示，跨轮不串。
+运行页按选中的 Loop scope 或 Iteration 下标投影节点状态，并以该次尝试的 `nodeRunId` 订阅会话事件。该轮未执行的成员没有尝试身份，不继承前一轮的会话或执行元数据。启动输入和根变量只覆盖根 Start，不覆盖 Loop 的本轮入口；当根 Start 声明了名为 `input` 的显式启动变量且已赋值时，`StartAs` 保留该显式值、不再用 kickoff `input` 覆盖（与 desktop 先写变量再镜像 kickoff 相反，按 `#1235` 有意保留）。`failedAttempts` 按发生它的作用域归属：根作用域的尝试归根节点，Iteration 尝试归它的轮次，Loop 尝试归它的轮次 scope；前端按选中的轮次展示，跨轮不串。
 
 ### 对话
 

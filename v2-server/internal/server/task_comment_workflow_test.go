@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,10 +14,13 @@ import (
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/routers/legacy"
+	"github.com/wanglongan587/cloud/v2-server/internal/boot"
+	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/execution/executiontest"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
+	"github.com/wanglongan587/cloud/v2-server/internal/taskdecomp"
 	"github.com/wanglongan587/cloud/v2-server/internal/taskrun"
 	"github.com/wanglongan587/cloud/v2-server/internal/taskworkflow"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflowhost"
@@ -531,10 +535,21 @@ func TestTaskCommentWorkflowCancelsOnStartFailure(t *testing.T) {
 
 func TestTaskCommentWorkflowRetainsHistoryAfterExecutionStarted(t *testing.T) {
 	f := newSquadServer(t)
-	port := failingStartRuns{err: errors.New("private infrastructure detail"), start: func(ctx context.Context, tenant, runID string) error {
-		_, err := f.store.StartWorkflowRun(ctx, tenant, runID)
-		return err
-	}}
+	var mu sync.Mutex
+	var cancelCalls []string
+	port := &failingStartRuns{
+		err: errors.New("private infrastructure detail"),
+		start: func(ctx context.Context, tenant, runID string) error {
+			_, err := f.store.StartWorkflowRun(ctx, tenant, runID)
+			return err
+		},
+		cancel: func(_ context.Context, _ string, _ string, runID string) error {
+			mu.Lock()
+			cancelCalls = append(cancelCalls, runID)
+			mu.Unlock()
+			return nil
+		},
+	}
 	host := taskworkflow.New(f.store, port)
 	t.Cleanup(host.Close)
 	f.srv.Close()
@@ -566,6 +581,12 @@ func TestTaskCommentWorkflowRetainsHistoryAfterExecutionStarted(t *testing.T) {
 	if run["status"] != "cancelled" || run["error"] != "工作流启动失败，请重新发起。" {
 		t.Fatalf("failed start lost its safe reason: %v", run)
 	}
+	mu.Lock()
+	gotCancels := append([]string(nil), cancelCalls...)
+	mu.Unlock()
+	if len(gotCancels) != 1 || gotCancels[0] != run["id"].(string) {
+		t.Fatalf("host Cancel calls = %v, want [%v]", gotCancels, run["id"])
+	}
 	for _, table := range []string{"v2_task_comments", "v2_workflow_runs"} {
 		var count int
 		if err := f.db.QueryRow(f.ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
@@ -577,10 +598,365 @@ func TestTaskCommentWorkflowRetainsHistoryAfterExecutionStarted(t *testing.T) {
 	}
 }
 
+func TestTaskCommentWorkflowMissingRoleReturns400AndRecovers(t *testing.T) {
+	f := newSquadServer(t)
+	commentWorkflowServer(t, f)
+	c := f.taskClient()
+	c.login()
+	tid := f.tenant(t)
+	f.project(t)
+
+	graph := `{"nodes":[{"id":"start","data":{"kind":"start"}},{"id":"a","data":{"kind":"agent","agentConfig":{"prompt":"Review","roleId":"reviewer"}}},{"id":"out","data":{"kind":"output","outputs":[{"name":"comment","variableSelector":["start","input"]}]}}],"edges":[{"source":"start","target":"a"},{"source":"a","target":"out"}]}`
+	wf, _, err := f.store.CreateWorkflow(f.ctx, tid, "MissingRoleWF", graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.PublishWorkflow(f.ctx, tid, wf.ID, "v1", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, task := c.do("POST", "/api/v2/tenants/"+tid+"/tasks", map[string]any{"title": "MissingRoleTask", "projectId": taskProjectID})
+	path := "/api/v2/tenants/" + tid + "/tasks/" + task["id"].(string) + "/comments"
+	payload := map[string]any{
+		"body":     "@MissingRoleWF",
+		"mentions": []map[string]any{{"type": "workflow", "id": wf.ID}},
+		"workflow": map[string]any{"workflowId": wf.ID, "values": map[string]any{}},
+	}
+	key := map[string]string{"Idempotency-Key": "missing-role-comment"}
+	status, got := c.doHeaders("POST", path, payload, key)
+	if status != 400 || got["code"] != "workflow_role_not_found" {
+		t.Fatalf("missing role comment = %d %v, want 400 workflow_role_not_found", status, got)
+	}
+	for _, table := range []string{"v2_task_comments", "v2_workflow_runs", "v2_workflow_scopes", "v2_workflow_run_roots"} {
+		var count int
+		if err := f.db.QueryRow(f.ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("missing role refusal left %d rows in %s", count, table)
+		}
+	}
+
+	if _, err := f.store.CreateRole(f.ctx, tid, task["createdBy"].(string), store.RoleInput{Name: "reviewer", Description: "Reviewer", Content: "# Reviewer"}); err != nil {
+		t.Fatal(err)
+	}
+	// Replace the graph with a no-agent output path so completion succeeds deterministically once role check passes.
+	readyGraph := `{"nodes":[{"id":"start","data":{"kind":"start"}},{"id":"note","data":{"kind":"agent","agentConfig":{"prompt":"Review","roleId":"reviewer"}}},{"id":"out","data":{"kind":"output","outputs":[{"name":"comment","variableSelector":["start","input"]}]}}],"edges":[{"source":"start","target":"out"}]}`
+	wfReady, _, err := f.store.CreateWorkflow(f.ctx, tid, "ReadyRoleWF", readyGraph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.PublishWorkflow(f.ctx, tid, wfReady.ID, "v1", nil); err != nil {
+		t.Fatal(err)
+	}
+	payload["mentions"] = []map[string]any{{"type": "workflow", "id": wfReady.ID}}
+	payload["workflow"] = map[string]any{"workflowId": wfReady.ID, "values": map[string]any{}}
+	status, created := c.doHeaders("POST", path, payload, key)
+	if status != 201 {
+		t.Fatalf("retry after role creation = %d %v", status, created)
+	}
+	runID := created["workflowRun"].(map[string]any)["id"].(string)
+	waitForCommentWorkflowStatus(t, c, "/api/v2/tenants/"+tid+"/tasks/"+task["id"].(string)+"/timeline", runID, "succeeded")
+}
+
+func TestTaskCommentWorkflowBootRecoverClearsPendingCrashWindow(t *testing.T) {
+	f := newSquadServer(t)
+
+	c := f.taskClient()
+	c.login()
+	tid := f.tenant(t)
+	f.project(t)
+	wf, _, err := f.store.CreateWorkflow(f.ctx, tid, "CrashWindowWF", commentWorkflowGraph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := f.store.PublishWorkflow(f.ctx, tid, wf.ID, "v1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, task := c.do("POST", "/api/v2/tenants/"+tid+"/tasks", map[string]any{"title": "CrashRecover", "projectId": taskProjectID})
+	taskID := task["id"].(string)
+
+	// Simulate CreateTaskWorkflowComment committing right before process death (bypassing rejectCommentWorkflow).
+	crashed, fresh, err := f.store.CreateTaskWorkflowComment(f.ctx, store.NewTaskWorkflowComment{
+		TenantID: tid, TaskID: taskID, AuthorID: task["createdBy"].(string), CreateKey: "crash-window",
+		Body: "@CrashWindowWF", Mentions: []store.TaskMention{{Type: "workflow", ID: wf.ID}},
+		WorkflowID: wf.ID, SnapshotID: snap.ID,
+	})
+	if err != nil || !fresh || crashed.WorkflowRun == nil {
+		t.Fatalf("seed crash-window comment: fresh=%t err=%v", fresh, err)
+	}
+	// Also seed an already-started comment run so boot.Recover proves it only discards unstarted pending runs.
+	started, fresh, err := f.store.CreateTaskWorkflowComment(f.ctx, store.NewTaskWorkflowComment{
+		TenantID: tid, TaskID: taskID, AuthorID: task["createdBy"].(string), CreateKey: "started-before-crash",
+		Body: "@CrashWindowWF started", Mentions: []store.TaskMention{{Type: "workflow", ID: wf.ID}},
+		WorkflowID: wf.ID, SnapshotID: snap.ID,
+	})
+	if err != nil || !fresh || started.WorkflowRun == nil {
+		t.Fatalf("seed started comment: fresh=%t err=%v", fresh, err)
+	}
+	if _, err := f.store.StartWorkflowRun(f.ctx, tid, started.WorkflowRun.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	exec := &executiontest.Stub{}
+	wfHost, err := workflowhost.NewHost(workflowhost.Config{Store: f.store, Execution: exec, Catalog: exec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(wfHost.Close)
+	twHost := taskworkflow.New(f.store, realWorkflowTaskPort{host: wfHost})
+	t.Cleanup(twHost.Close)
+	decompHost := taskdecomp.New(f.store, realWorkflowTaskPort{host: wfHost}, nil)
+	t.Cleanup(decompHost.Close)
+	trHost := taskrun.New(f.store, exec, exec, nil)
+	t.Cleanup(trHost.Close)
+
+	if err := boot.Recover(f.ctx, boot.Hosts{
+		TaskWorkflows: twHost, Decompositions: decompHost, WorkflowRuns: wfHost, TaskRuns: trHost,
+	}); err != nil {
+		t.Fatalf("boot.Recover = %v", err)
+	}
+
+	if _, err := f.store.TaskCommentByKey(f.ctx, tid, taskID, task["createdBy"].(string), "crash-window"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unstarted crash-window comment survived boot.Recover: %v", err)
+	}
+	if got, err := f.store.TaskCommentByKey(f.ctx, tid, taskID, task["createdBy"].(string), "started-before-crash"); err != nil || got.WorkflowRun == nil || got.WorkflowRun.Status != store.WorkflowStatusFailed {
+		t.Fatalf("started comment run state after boot.Recover = %+v %v", got, err)
+	}
+
+	f.srv.Close()
+	f.srv = httptest.NewServer(server.New(f.store, server.Options{
+		SessionTTL: time.Hour, WorkflowRuns: wfHost, WorkflowRunEvents: wfHost.Hub(), TaskWorkflows: twHost, TaskRuns: trHost,
+	}))
+	t.Cleanup(f.srv.Close)
+	c = f.taskClient()
+	c.login()
+	path := "/api/v2/tenants/" + tid + "/tasks/" + taskID + "/comments"
+	payload := map[string]any{
+		"body":     "@CrashWindowWF",
+		"mentions": []map[string]any{{"type": "workflow", "id": wf.ID}},
+		"workflow": map[string]any{"workflowId": wf.ID, "values": map[string]any{"branch": "main", "tags": []any{}, "meta": map[string]any{}}},
+	}
+	status, created := c.doHeaders("POST", path, payload, map[string]string{"Idempotency-Key": "crash-window"})
+	if status != 201 {
+		t.Fatalf("same-key retry after boot.Recover = %d %v", status, created)
+	}
+	runID := created["workflowRun"].(map[string]any)["id"].(string)
+	waitForCommentWorkflowStatus(t, c, "/api/v2/tenants/"+tid+"/tasks/"+taskID+"/timeline", runID, "succeeded")
+}
+
+type blockingTurnStream struct {
+	events chan execution.Event
+}
+
+func (s *blockingTurnStream) Next(ctx context.Context) (execution.Event, error) {
+	select {
+	case ev, ok := <-s.events:
+		if !ok {
+			return execution.Event{}, io.EOF
+		}
+		return ev, nil
+	case <-ctx.Done():
+		return execution.Event{}, ctx.Err()
+	}
+}
+
+func (s *blockingTurnStream) Close() error { return nil }
+
+type postStartFailingPort struct {
+	realWorkflowTaskPort
+	started <-chan struct{}
+	err     error
+}
+
+func (p postStartFailingPort) Start(ctx context.Context, tenant, user, id string) error {
+	if err := p.realWorkflowTaskPort.Start(ctx, tenant, user, id); err != nil {
+		return err
+	}
+	select {
+	case <-p.started:
+		return p.err
+	case <-time.After(10 * time.Second):
+		return errors.New("timed out waiting for the Agent turn to start")
+	}
+}
+
+func TestTaskCommentWorkflowRealWorkflowHostCancelAndUnconfirmedStop(t *testing.T) {
+	agentGraph := `{"nodes":[{"id":"start","data":{"kind":"start"}},{"id":"a","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"official/ora-space.opencode","modelId":"fixture"},"prompt":"Run"}}}],"edges":[{"source":"start","target":"a"}]}`
+	for _, confirmed := range []bool{true, false} {
+		name := "confirmed stop marks cancelled"
+		if !confirmed {
+			name = "unconfirmed stop keeps running without failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newSquadServer(t)
+			var mu sync.Mutex
+			var cancelCalls []execution.Ref
+			startedCh := make(chan struct{})
+			var startedOnce sync.Once
+			stream := &blockingTurnStream{events: make(chan execution.Event, 4)}
+			exec := &executiontest.Stub{
+				ListExecutorsFunc: func(context.Context, execution.Scope) ([]execution.Executor, error) {
+					return []execution.Executor{{
+						ID: "opencode:fixture", Name: "OpenCode / Fixture", AgentID: "official/ora-space.opencode",
+						AgentName: "OpenCode", PluginVersion: "0.6.11", Model: execution.Model{ID: "fixture", Name: "Fixture"},
+					}}, nil
+				},
+				StartFunc: func(context.Context, execution.Scope, execution.StartRequest) (execution.Ref, error) {
+					startedOnce.Do(func() { close(startedCh) })
+					return execution.Ref{SessionID: "sess-1", TurnID: "turn-1"}, nil
+				},
+				SubscribeFunc: func(context.Context, execution.Scope, string, uint64) (execution.Stream, error) {
+					return stream, nil
+				},
+				CancelFunc: func(_ context.Context, _ execution.Scope, ref execution.Ref) (execution.Result, error) {
+					mu.Lock()
+					cancelCalls = append(cancelCalls, ref)
+					mu.Unlock()
+					if !confirmed {
+						return execution.Result{}, errors.New("stop unconfirmed")
+					}
+					res := execution.Result{Status: execution.StatusCancelled}
+					stream.events <- execution.Event{Kind: execution.EventTurnEnded, Ref: ref, Result: &res}
+					close(stream.events)
+					return res, nil
+				},
+				EndFunc: func(context.Context, execution.Scope, string) error { return nil },
+			}
+			wfHost, err := workflowhost.NewHost(workflowhost.Config{Store: f.store, Execution: exec, Catalog: exec})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if !confirmed {
+					select {
+					case <-stream.events:
+					default:
+						close(stream.events)
+					}
+				}
+				wfHost.Close()
+			})
+			twHost := taskworkflow.New(f.store, postStartFailingPort{
+				realWorkflowTaskPort: realWorkflowTaskPort{host: wfHost},
+				started:              startedCh,
+				err:                  errors.New("start error after dispatch"),
+			})
+			t.Cleanup(twHost.Close)
+			f.srv.Close()
+			f.srv = httptest.NewServer(server.New(f.store, server.Options{
+				SessionTTL: time.Hour, WorkflowRuns: wfHost, WorkflowRunEvents: wfHost.Hub(), TaskWorkflows: twHost,
+			}))
+			t.Cleanup(f.srv.Close)
+
+			c := f.taskClient()
+			c.login()
+			tid := f.tenant(t)
+			f.project(t)
+			wf, _, err := f.store.CreateWorkflow(f.ctx, tid, "AgentCommentWF", agentGraph)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.store.PublishWorkflow(f.ctx, tid, wf.ID, "v1", nil); err != nil {
+				t.Fatal(err)
+			}
+			_, task := c.do("POST", "/api/v2/tenants/"+tid+"/tasks", map[string]any{"title": "RealCancel", "projectId": taskProjectID})
+			path := "/api/v2/tenants/" + tid + "/tasks/" + task["id"].(string) + "/comments"
+			payload := map[string]any{"body": "@AgentCommentWF", "workflow": map[string]any{"workflowId": wf.ID, "values": map[string]any{}}}
+			key := map[string]string{"Idempotency-Key": "real-cancel-" + name}
+
+			status, _ := c.doHeaders("POST", path, payload, key)
+			if status < 500 {
+				t.Fatalf("expected 5xx from post-start/cancel failure, got %d", status)
+			}
+
+			mu.Lock()
+			gotExecCancels := len(cancelCalls)
+			mu.Unlock()
+			if gotExecCancels == 0 {
+				t.Fatalf("execution Cancel was never invoked through workflowhost.CancelRun")
+			}
+
+			replayStatus, replay := c.doHeaders("POST", path, payload, key)
+			if replayStatus != 201 {
+				t.Fatalf("replay = %d %v", replayStatus, replay)
+			}
+			run := replay["workflowRun"].(map[string]any)
+			if confirmed {
+				if run["status"] != "cancelled" || run["error"] != "工作流启动失败，请重新发起。" {
+					t.Fatalf("confirmed stop run = %v", run)
+				}
+			} else {
+				if run["status"] != "running" || run["error"] != nil {
+					t.Fatalf("unconfirmed stop illegally cancelled run: %v", run)
+				}
+			}
+		})
+	}
+}
+
+func TestTaskCommentWorkflowPreservesStartVariableNamedInput(t *testing.T) {
+	f := newSquadServer(t)
+	commentWorkflowServer(t, f)
+	c := f.taskClient()
+	c.login()
+	tid := f.tenant(t)
+	f.project(t)
+
+	graph := `{"nodes":[
+		{"id":"start","data":{"kind":"start","inputVariables":[{"name":"input","valueType":"string","required":true}]}},
+		{"id":"out","data":{"kind":"output","outputs":[{"name":"result","variableSelector":["start","input"]}]}}
+	],"edges":[{"source":"start","target":"out"}]}`
+	wf, _, err := f.store.CreateWorkflow(f.ctx, tid, "InputVarWF", graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.PublishWorkflow(f.ctx, tid, wf.ID, "v1", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, task := c.do("POST", "/api/v2/tenants/"+tid+"/tasks", map[string]any{"title": "InputVarTask", "projectId": taskProjectID})
+	taskID := task["id"].(string)
+	path := "/api/v2/tenants/" + tid + "/tasks/" + taskID + "/comments"
+	timelinePath := "/api/v2/tenants/" + tid + "/tasks/" + taskID + "/timeline"
+
+	for _, tc := range []struct {
+		name      string
+		key       string
+		input     any
+		wantValue string
+	}{
+		{name: "form values input without kickoff input", key: "input-var-nil", input: nil, wantValue: "custom from form"},
+		{name: "form values input overrides kickoff input", key: "input-var-kickoff", input: "kickoff text", wantValue: "explicit wins"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wfBody := map[string]any{"workflowId": wf.ID, "values": map[string]any{"input": tc.wantValue}}
+			if tc.input != nil {
+				wfBody["input"] = tc.input
+			}
+			status, created := c.doHeaders("POST", path, map[string]any{
+				"body":     "@InputVarWF",
+				"mentions": []map[string]any{{"type": "workflow", "id": wf.ID}},
+				"workflow": wfBody,
+			}, map[string]string{"Idempotency-Key": tc.key})
+			if status != 201 {
+				t.Fatalf("comment start = %d %v", status, created)
+			}
+			runID := created["workflowRun"].(map[string]any)["id"].(string)
+			settled := waitForCommentWorkflowStatus(t, c, timelinePath, runID, "succeeded")
+			out, _ := settled["output"].(string)
+			want := `{"result":"` + tc.wantValue + `"}`
+			if out != want {
+				t.Fatalf("settled output = %q, want %q", out, want)
+			}
+		})
+	}
+}
+
 type failingStartRuns struct {
 	err     error
 	prepare bool
 	start   func(context.Context, string, string) error
+	cancel  func(context.Context, string, string, string) error
 }
 
 func (f failingStartRuns) Prepare(context.Context, string, string, string, *string, map[string]json.RawMessage) error {
@@ -597,5 +973,10 @@ func (f failingStartRuns) Start(ctx context.Context, tenant, _ string, runID str
 	}
 	return f.err
 }
-func (failingStartRuns) Cancel(context.Context, string, string, string) error { return nil }
-func (failingStartRuns) Subscribe(string) (<-chan struct{}, func())           { return nil, func() {} }
+func (f failingStartRuns) Cancel(ctx context.Context, tenant, user, runID string) error {
+	if f.cancel != nil {
+		return f.cancel(ctx, tenant, user, runID)
+	}
+	return nil
+}
+func (failingStartRuns) Subscribe(string) (<-chan struct{}, func()) { return nil, func() {} }

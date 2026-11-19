@@ -119,6 +119,15 @@ test('comment @ workflow validates per field, runs as commenter, updates output 
     ],
   })
 
+  const missingRoleName = `缺角色流程-${suffix}`
+  await publishWorkflow(page, base, missingRoleName, {
+    nodes: [
+      { id: 'start', type: 'workflow', position: { x: 0, y: 100 }, data: { kind: 'start', title: 'start', inputVariables: [] } },
+      { id: 'agent', type: 'workflow', position: { x: 340, y: 100 }, data: { kind: 'agent', title: 'agent', agentConfig: { prompt: 'Check', roleId: `missing-role-${suffix}` } } },
+    ],
+    edges: [{ id: 'start-agent', source: 'start', target: 'agent' }],
+  })
+
   // Sign in as the invited non-assignee member on a fresh context.
   const memberContext = await browser.newContext()
   const memberPage = await memberContext.newPage()
@@ -127,9 +136,21 @@ test('comment @ workflow validates per field, runs as commenter, updates output 
   await memberPage.goto(`/collaboration/tasks/${taskId}?tab=discussion`)
   const memberId = (await (await memberPage.request.get('/api/v1/me')).json()).id as string
 
-  // Trigger @ workflow picker and validate per field cleanly (both client and structured server JSON).
+  const screenDir = process.env.E2E_SCREENSHOT_DIR || test.info().outputPath('screens')
+
+  // Missing workspace role on @ workflow comment must return 400 workflow_role_not_found and explain why.
   const composer = memberPage.getByLabel('评论或给 Agent 的消息')
   await composer.click()
+  await composer.fill(`@${missingRoleName}`)
+  await memberPage.getByRole('option', { name: new RegExp(missingRoleName) }).click()
+  const missingRoleResp = memberPage.waitForResponse(r => r.url().endsWith(`/tasks/${taskId}/comments`) && r.request().method() === 'POST')
+  await memberPage.getByRole('button', { name: '发送并运行' }).click()
+  expect((await missingRoleResp).status()).toBe(400)
+  await expect(memberPage.getByText('工作流引用的角色在工作区角色目录里不存在，请先在设置的角色页新建同名角色再启动。')).toBeVisible()
+  await memberPage.screenshot({ path: `${screenDir}/00-missing-role-comment-error.png`, fullPage: true })
+  await memberPage.getByRole('button', { name: `取消启动 ${missingRoleName}` }).click()
+
+  // Trigger @ workflow picker and validate per field cleanly (both client and structured server JSON).
   await composer.fill(`@${quickName}`)
   await memberPage.getByRole('option', { name: new RegExp(quickName) }).click()
 
@@ -155,7 +176,6 @@ test('comment @ workflow validates per field, runs as commenter, updates output 
 
   // Fix invalid structured JSON field and launch cleanly as member.
   await formCard.getByLabel(/附加参数/).fill('{"env":"prod"}')
-  const screenDir = process.env.E2E_SCREENSHOT_DIR || test.info().outputPath('screens')
   await memberPage.screenshot({ path: `${screenDir}/01-composer-form.png`, fullPage: true })
   await memberPage.getByRole('button', { name: '发送并运行' }).click()
 
@@ -207,6 +227,7 @@ test('comment @ workflow validates per field, runs as commenter, updates output 
   await expect(reviewRegion.getByText('核对上线清单', { exact: true })).toBeVisible()
   await reviewRegion.getByRole('button', { name: '是问题', exact: true }).click()
   await reviewRegion.getByRole('button', { name: '确认', exact: true }).click()
+  await expect(reviewRegion.getByText('已提交', { exact: true })).toBeVisible()
   await helperPage.close()
 
   // Live SSE updates timeline status -> 已完成 and reveals final output without page reload.
@@ -253,8 +274,65 @@ test('comment @ workflow validates per field, runs as commenter, updates output 
   const replayDeleted = await memberPage.request.post(`${base}/tasks/${taskId}/comments`, { headers: idemHeaders, data: idemPayload })
   expect(replayDeleted.status()).toBe(201)
   expect((await replayDeleted.json()).workflowRun).toMatchObject({ id: deletedRunId, deleted: true, output: null, error: null })
+  const deletedRunsResp = await (await memberPage.request.get(`${base}/tasks/${taskId}/workflow-runs`)).json()
+  const deletedRunRecord = (deletedRunsResp.items as { workflowRunId: string; deleted: boolean; failure: string }[]).find(r => r.workflowRunId === deletedRunId)
+  expect(deletedRunRecord).toMatchObject({ workflowRunId: deletedRunId, deleted: true, failure: '' })
   expect((await memberPage.request.get(`${base}/workflow-runs/${deletedRunId}`)).status()).toBe(404)
   await memberPage.screenshot({ path: `${screenDir}/05-deleted-run-hidden-output.png`, fullPage: true })
 
   await memberContext.close()
+})
+
+test('comment @ workflow preserves explicit Start variable named input', async ({ page }) => {
+  test.setTimeout(60_000)
+  const suffix = crypto.randomUUID().slice(0, 8)
+  await page.goto('/collaboration')
+  await signIn(page)
+  const tid = (await (await page.request.get('/api/v1/me/tenants')).json()).items[0].id as string
+  const ownerId = (await (await page.request.get('/api/v1/me')).json()).id as string
+  const base = `/api/v2/tenants/${tid}`
+  const projectId = (await (await page.request.get(`${base}/projects`)).json()).items[0].id as string
+
+  const taskRes = await page.request.post(`${base}/tasks`, {
+    data: { title: `Input 变量验证 ${suffix}`, projectId, assignee: { type: 'human', id: ownerId } },
+  })
+  expect(taskRes.status(), await taskRes.text()).toBe(201)
+  const taskId = (await taskRes.json()).id as string
+
+  const wfName = `输入变量流-${suffix}`
+  await publishWorkflow(page, base, wfName, {
+    nodes: [
+      {
+        id: 'start',
+        type: 'workflow',
+        position: { x: 0, y: 100 },
+        data: {
+          kind: 'start',
+          title: 'start',
+          inputVariables: [{ name: 'input', displayName: '自定义输入', valueType: 'string', required: true }],
+        },
+      },
+      {
+        id: 'out',
+        type: 'workflow',
+        position: { x: 340, y: 100 },
+        data: { kind: 'output', title: 'out', outputs: [{ name: 'input', variableSelector: ['start', 'input'] }] },
+      },
+    ],
+    edges: [{ id: 'start-out', source: 'start', target: 'out' }],
+  })
+
+  await page.goto(`/collaboration/tasks/${taskId}?tab=discussion`)
+  const composer = page.getByLabel('评论或给 Agent 的消息')
+  await composer.click()
+  await composer.fill(`@${wfName}`)
+  await page.getByRole('option', { name: new RegExp(wfName) }).click()
+
+  const formCard = page.getByRole('region', { name: `启动工作流：${wfName}` })
+  await formCard.getByLabel(/自定义输入/).fill(`explicit-input-${suffix}`)
+  await page.getByRole('button', { name: '发送并运行' }).click()
+
+  const card = page.getByRole('region', { name: `工作流运行：${wfName}` })
+  await expect(card.locator('.mc-status')).toHaveText('已完成', { timeout: 15_000 })
+  await expect(card.getByLabel('工作流输出')).toContainText(`"input": "explicit-input-${suffix}"`)
 })

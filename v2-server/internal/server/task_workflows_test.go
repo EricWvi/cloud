@@ -145,10 +145,12 @@ func TestTaskWorkflowChoiceErrorsHTTP(t *testing.T) {
 	if err := doc.Validate(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	c.routes, err = legacy.NewRouter(doc)
+	original := c.routes
+	routes, err := legacy.NewRouter(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.routes = routes
 	for _, tc := range []struct {
 		name, wid, snapshot, code string
 		status                    int
@@ -198,5 +200,111 @@ func TestTaskWorkflowChoiceErrorsHTTP(t *testing.T) {
 	status, got = c.doHeaders("POST", path, map[string]any{"workflowId": w.ID}, map[string]string{"Idempotency-Key": "conflict"})
 	if status != 409 || got["code"] != "version_conflict" {
 		t.Fatalf("conflict=%d %v", status, got)
+	}
+
+	commentWorkflowServer(t, f)
+	c = f.taskClient()
+	c.login()
+	c.routes = routes
+	roleGraph := `{"nodes":[{"id":"start","data":{"kind":"start"}},{"id":"a","data":{"kind":"agent","agentConfig":{"prompt":"Review","roleId":"reviewer"}}}],"edges":[{"source":"start","target":"a"}]}`
+	roleWF, _, err := f.store.CreateWorkflow(f.ctx, tid, "Needs role", roleGraph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.PublishWorkflow(f.ctx, tid, roleWF.ID, "v1", nil); err != nil {
+		t.Fatal(err)
+	}
+	status, got = c.doHeaders("POST", path, map[string]any{"workflowId": roleWF.ID}, map[string]string{"Idempotency-Key": "missing-role"})
+	if status != 400 || got["code"] != "workflow_role_not_found" {
+		t.Fatalf("missing role = %d %v, want 400 workflow_role_not_found", status, got)
+	}
+	c.routes = original
+	status, gotTask := c.do("GET", base+"/"+task["id"].(string), nil)
+	if status != 200 || gotTask["status"] != store.TaskPending {
+		t.Fatalf("missing role moved task status: %d %v", status, gotTask)
+	}
+	c.routes = routes
+	if _, err := f.store.CreateRole(f.ctx, tid, task["createdBy"].(string), store.RoleInput{Name: "reviewer", Description: "Reviewer", Content: "# Reviewer"}); err != nil {
+		t.Fatal(err)
+	}
+	if status, started := c.doHeaders("POST", path, map[string]any{"workflowId": roleWF.ID}, map[string]string{"Idempotency-Key": "role-ready"}); status != 201 || started["workflowRunId"] == "" {
+		t.Fatalf("start after creating role = %d %v", status, started)
+	}
+}
+
+func TestTaskWorkflowListHidesDeletedHandleFailureOnFirstSettlementHTTP(t *testing.T) {
+	f := newSquadServer(t)
+	host := taskworkflow.New(f.store, workflowTaskHTTPPort{finishingRuns{store: f.store, output: `{}`}})
+	t.Cleanup(host.Close)
+	f.srv.Close()
+	f.srv = httptest.NewServer(server.New(f.store, server.Options{SessionTTL: time.Hour, TaskWorkflows: host}))
+	t.Cleanup(f.srv.Close)
+	c := f.taskClient()
+	c.login()
+	tid := f.tenant(t)
+	f.project(t)
+	wf, snap, err := f.store.CreateWorkflow(f.ctx, tid, "Handling", `{"nodes":[{"id":"start","data":{"kind":"start"}}],"edges":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap, err = f.store.PublishWorkflow(f.ctx, tid, wf.ID, "v1", nil); err != nil {
+		t.Fatal(err)
+	}
+	base := "/api/v2/tenants/" + tid + "/tasks"
+	_, task := c.do("POST", base, map[string]any{"title": "Deleted handle", "projectId": taskProjectID})
+	_, task = c.do("PUT", base+"/"+task["id"].(string)+"/assignment", map[string]any{"version": task["version"], "assignee": map[string]any{"type": "human", "id": task["createdBy"]}})
+
+	runID, fresh, err := f.store.CreateTaskWorkflowRun(f.ctx, store.NewTaskWorkflow{
+		TenantID: tid, TaskID: task["id"].(string), UserID: task["createdBy"].(string),
+		Key: "deleted-before-settle", WorkflowID: wf.ID, SnapshotID: snap.ID,
+	})
+	if err != nil || !fresh {
+		t.Fatalf("CreateTaskWorkflowRun = %q %t %v", runID, fresh, err)
+	}
+	if _, err := f.store.StartWorkflowRun(f.ctx, tid, runID); err != nil {
+		t.Fatal(err)
+	}
+	handleErr := "private handle error"
+	if _, err := f.store.FinishWorkflowRun(f.ctx, tid, runID, store.WorkflowStatusFailed, nil, &handleErr); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.DeleteWorkflowRun(f.ctx, tid, runID); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := openapi3.NewLoader().LoadFromFile("../../task-workflows.openapi.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := legacy.NewRouter(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskRoutes := c.routes
+	c.routes = routes
+	path := base + "/" + task["id"].(string) + "/workflow-runs"
+	for _, attempt := range []string{"first settlement read", "post-settlement read"} {
+		status, list := c.do("GET", path, nil)
+		items, _ := list["items"].([]any)
+		if status != 200 || len(items) != 1 {
+			t.Fatalf("%s workflow-runs = %d %v", attempt, status, list)
+		}
+		item := items[0].(map[string]any)
+		if item["workflowRunId"] != runID || item["status"] != "failed" || item["deleted"] != true || item["failure"] != "" {
+			t.Fatalf("%s leaked or misreported deleted handle run: %v", attempt, item)
+		}
+	}
+
+	c.routes = taskRoutes
+	status, gotTask := c.do("GET", base+"/"+task["id"].(string), nil)
+	if status != 200 || gotTask["status"] != store.TaskReview {
+		t.Fatalf("task status after List settlement = %d %v", status, gotTask)
+	}
+	var linkStatus, linkFailure string
+	if err := f.db.QueryRow(f.ctx, `SELECT status, failure FROM v2_task_workflow_runs WHERE tenant_id = $1 AND run_id = $2`, tid, runID).Scan(&linkStatus, &linkFailure); err != nil {
+		t.Fatal(err)
+	}
+	if linkStatus != "failed" || linkFailure != handleErr {
+		t.Fatalf("stored link = %q %q, want failed %q", linkStatus, linkFailure, handleErr)
 	}
 }

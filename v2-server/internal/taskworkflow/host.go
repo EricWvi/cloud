@@ -245,34 +245,39 @@ func (h *Host) watch(tenant, id string, events <-chan struct{}, cancel func()) {
 var stoppedBeforeStart = errors.New("Workflow run was stopped before it started.")
 
 func (h *Host) settle(ctx context.Context, tenant, id string) (string, string, error) {
+	status, failure, _, err := h.settleOutcome(ctx, tenant, id)
+	return status, failure, err
+}
+
+func (h *Host) settleOutcome(ctx context.Context, tenant, id string) (string, string, bool, error) {
 	outcome, err := h.db.TaskWorkflowOutcome(ctx, tenant, id)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	const deletedFailure = "Workflow run was deleted."
 	if outcome.Status == store.WorkflowStatusPending {
 		if !outcome.Deleted {
-			return "", "", nil
+			return "", "", false, nil
 		}
 		// Deleting an admission that never executed is a refused start, not a failed execution.
-		return store.WorkflowStatusFailed, deletedFailure, h.db.RefuseTaskWorkflow(ctx, tenant, id, deletedFailure)
+		return store.WorkflowStatusFailed, deletedFailure, true, h.db.RefuseTaskWorkflow(ctx, tenant, id, deletedFailure)
 	}
 	if outcome.Status == store.WorkflowStatusCancelled && !outcome.Executed {
 		// A run stopped before it ever executed is a start that did not happen, whichever of
 		// Start's own refusal or a history read settles first: the link records the stop and the
 		// task returns to its original status instead of being pulled to pending (D10 over D5).
-		return store.WorkflowStatusFailed, stoppedBeforeStart.Error(), h.db.RefuseTaskWorkflow(ctx, tenant, id, stoppedBeforeStart.Error())
+		return store.WorkflowStatusFailed, stoppedBeforeStart.Error(), outcome.Deleted, h.db.RefuseTaskWorkflow(ctx, tenant, id, stoppedBeforeStart.Error())
 	}
 	switch outcome.Status {
 	case store.WorkflowStatusSucceeded, store.WorkflowStatusFailed, store.WorkflowStatusCancelled:
 	default:
-		return "", "", nil
+		return "", "", outcome.Deleted, nil
 	}
 	failure := outcome.Failure
 	if outcome.Deleted && failure == "" {
 		failure = deletedFailure
 	}
-	return outcome.Status, failure, h.db.SettleTaskWorkflow(ctx, tenant, id, outcome.Status, failure)
+	return outcome.Status, failure, outcome.Deleted, h.db.SettleTaskWorkflow(ctx, tenant, id, outcome.Status, failure)
 }
 
 // startFailure settles a dispatch that returned an error after admission and reports whether the
@@ -314,13 +319,18 @@ func (h *Host) List(ctx context.Context, tenant, taskID string) ([]store.TaskWor
 	}
 	for i, item := range items {
 		if item.Kind == "handle" && item.LinkStatus == "running" {
-			status, failure, err := h.settle(ctx, tenant, item.WorkflowRunID)
+			status, failure, deleted, err := h.settleOutcome(ctx, tenant, item.WorkflowRunID)
 			if err != nil {
 				return nil, err
 			}
 			if status != "" {
 				items[i].Status = status
-				items[i].Failure = failure
+				if item.Deleted || deleted {
+					items[i].Deleted = true
+					items[i].Failure = ""
+				} else {
+					items[i].Failure = failure
+				}
 				items[i].LinkStatus = status
 			}
 		}
@@ -330,7 +340,8 @@ func (h *Host) List(ctx context.Context, tenant, taskID string) ([]store.TaskWor
 
 // Recover runs before workflow interruption. Completed runs keep their outcome; all still-live
 // handling runs are cancelled and marked interrupted, including parked forms and pending starts.
-// Previous-process sessions have already been ended by execution recovery at this point.
+// Comment-initiated runs left pending before execution ever began are discarded so same-key retries
+// can start cleanly. Previous-process sessions have already been ended by execution recovery at this point.
 func (h *Host) Recover(ctx context.Context) error {
 	items, err := h.db.LiveTaskWorkflows(ctx)
 	if err != nil {
@@ -346,6 +357,15 @@ func (h *Host) Recover(ctx context.Context) error {
 			return err
 		}
 		if err := h.db.SettleTaskWorkflow(ctx, item.Tenant, item.RunID, "interrupted", "Server restarted; start a new run."); err != nil {
+			return err
+		}
+	}
+	pendingComments, err := h.db.PendingCommentWorkflows(ctx)
+	if err != nil {
+		return err
+	}
+	for _, comment := range pendingComments {
+		if _, err := h.db.DiscardUnstartedCommentWorkflow(ctx, comment.TenantID, comment.TaskID, comment.AuthorID, comment.CreateKey, comment.RunID); err != nil {
 			return err
 		}
 	}
