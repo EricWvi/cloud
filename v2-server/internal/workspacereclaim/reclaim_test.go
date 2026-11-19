@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -573,4 +574,81 @@ func TestBackgroundRemovalStoppedAtShutdownIsFinishedAtStart(t *testing.T) {
 	if got := f.reclaim(t, c); got.Status != store.ReclaimReclaimed || exists(t, c.Path) {
 		t.Fatalf("after start = %+v", got)
 	}
+}
+
+// discardAfter previews the conversation, lets change alter the repository, and checks that a
+// discard with the earlier revision is stale and changes nothing.
+func discardAfter(t *testing.T, f *fixture, c st.ChatCheckout, change func()) {
+	t.Helper()
+	ctx := context.Background()
+	c.End(t, f.s)
+	if err := f.s.EndChatSession(ctx, c.SessionID, store.EndStopped, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	stub := &executiontest.Stub{}
+	svc := chat.New(f.s, stub, stub, chat.Options{Reclaims: f.r})
+	seen, err := svc.DeletionPreview(ctx, f.scope, c.ConversationID)
+	if err != nil || seen.Reason != wr.ReasonGitState {
+		t.Fatalf("preview = %+v, %v", seen, err)
+	}
+	change()
+	now, err := svc.DeletionPreview(ctx, f.scope, c.ConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(now.Git, seen.Git) {
+		t.Fatalf("the shown findings differ, so this case proves nothing: %+v vs %+v", seen.Git, now.Git)
+	}
+	if _, err := svc.Delete(ctx, f.scope, c.ConversationID, store.ReclaimDiscard, seen.Revision); !errors.Is(err, chat.ErrDeletionPreviewStale) {
+		t.Fatalf("discard with the earlier revision = %v", err)
+	}
+	if _, err := f.s.ChatConversation(ctx, f.scope.TenantID, f.scope.UserID, c.ConversationID); err != nil {
+		t.Fatalf("the conversation went: %v", err)
+	}
+	if !exists(t, filepath.Join(c.Path, ".git")) {
+		t.Fatal("the checkout went")
+	}
+}
+
+// Another stash in place of the one previewed: the same count, a different stash.
+func TestDiscardIsStaleWhenTheStashIsReplaced(t *testing.T) {
+	f := newFixture(t)
+	c := f.chat(t, st.TurnDelivered)
+	write(t, c.Path, "README.md", "first stash\n")
+	git(t, c.Path, "stash", "push", "-q")
+	discardAfter(t, f, c, func() {
+		git(t, c.Path, "stash", "drop", "-q")
+		write(t, c.Path, "README.md", "second stash\n")
+		git(t, c.Path, "stash", "push", "-q")
+	})
+}
+
+// A ref moved to other commits, as many beyond the base and HEAD as before.
+func TestDiscardIsStaleWhenARefMovesWithTheSameCount(t *testing.T) {
+	f := newFixture(t)
+	c := f.chat(t, st.TurnDelivered)
+	git(t, c.Path, "stash", "push", "-q", "-u")
+	for _, n := range []string{"a", "b"} {
+		git(t, c.Path, "checkout", "-q", "-b", "side-"+n, "main")
+		write(t, c.Path, "side.txt", n+"\n")
+		git(t, c.Path, "add", "side.txt")
+		git(t, c.Path, "commit", "-qm", "side "+n)
+	}
+	git(t, c.Path, "checkout", "-q", "main")
+	git(t, c.Path, "branch", "-D", "-q", "side-b")
+	git(t, c.Path, "stash", "pop", "-q")
+	// side-a reaches one commit beyond HEAD; afterwards it reaches a different one.
+	var other string
+	discardAfter(t, f, c, func() {
+		git(t, c.Path, "stash", "push", "-q", "-u")
+		git(t, c.Path, "checkout", "-q", "-b", "tmp", "main")
+		write(t, c.Path, "side.txt", "c\n")
+		git(t, c.Path, "add", "side.txt")
+		git(t, c.Path, "commit", "-qm", "side c")
+		other = git(t, c.Path, "rev-parse", "HEAD")
+		git(t, c.Path, "checkout", "-q", "main")
+		git(t, c.Path, "branch", "-q", "-f", "side-a", other)
+		git(t, c.Path, "branch", "-D", "-q", "tmp")
+		git(t, c.Path, "stash", "pop", "-q")
+	})
 }

@@ -171,3 +171,27 @@ func TestInspectReclaimCannotVerifyAnUnresolvableGit(t *testing.T) {
 		t.Fatalf("err = %v, want ErrUnverifiable", err)
 	}
 }
+
+// The identity digest stays put while nothing changes and moves with a nested repository's
+// commits or working tree, which the shown findings (its path) do not reflect.
+func TestInspectReclaimGitIdentityFollowsNestedRepositories(t *testing.T) {
+	f, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
+	sub := filepath.Join(req.Workspace.Root, "vendor", "lib")
+	deliveryWrite(t, sub, "lib.go", "package lib\n")
+	deliveryGit(t, sub, "init", "-q", ".")
+	deliveryGit(t, sub, "add", ".")
+	deliveryGit(t, sub, "commit", "-qm", "lib")
+	first := inspect(t, f, req, "")
+	if again := inspect(t, f, req, ""); again.GitIdentity != first.GitIdentity || first.GitIdentity == "" {
+		t.Fatalf("identity moved without a change: %q, %q", first.GitIdentity, again.GitIdentity)
+	}
+	deliveryWrite(t, sub, "lib.go", "package lib // uncommitted\n")
+	edited := inspect(t, f, req, "")
+	if edited.GitIdentity == first.GitIdentity || !reflect.DeepEqual(edited.Git, first.Git) {
+		t.Fatalf("an uncommitted nested change kept the identity: %+v", edited)
+	}
+	deliveryGit(t, sub, "commit", "-qam", "lib 2")
+	if committed := inspect(t, f, req, ""); committed.GitIdentity == edited.GitIdentity {
+		t.Fatal("a nested commit kept the identity")
+	}
+}

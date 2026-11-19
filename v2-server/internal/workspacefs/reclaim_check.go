@@ -3,8 +3,11 @@ package workspacefs
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -53,8 +56,11 @@ type ReclaimInspection struct {
 	// Unchanged reports that the checkout's snapshot tree, built by the delivery rules, equals
 	// the tree it was compared with.
 	Unchanged bool
-	// Git is what the Agent's repository holds that a delivery cannot carry.
+	// Git is what the Agent's repository holds that a delivery cannot carry, as counts to show.
 	Git GitFindings
+	// GitIdentity digests the actual Git state behind Git (stash entries, ref targets, HEAD,
+	// nested repositories), so a revision changes when that state does even if the counts do not.
+	GitIdentity string
 	// Ignored reports files the ignore rules (.gitignore and .git/info/exclude) leave out of
 	// every delivery, not counting the skills Ora materialized.
 	Ignored bool
@@ -106,6 +112,9 @@ func (s *DeliveryFS) InspectReclaim(ctx context.Context, ws Workspace, mirrorPat
 		out.Changes = all.Files[:min(len(all.Files), MaxReclaimChanges)]
 	}
 	if out.Git, err = s.gitState(ctx, st); err != nil {
+		return out, err
+	}
+	if out.GitIdentity, err = s.gitIdentity(ctx, st, out.Git); err != nil {
 		return out, err
 	}
 	out.Ignored, err = ignoredFiles(ctx, st)
@@ -196,6 +205,147 @@ func (s *DeliveryFS) gitState(ctx context.Context, st *staged) (GitFindings, err
 		return dup
 	})
 	return g, nil
+}
+
+// gitIdentity digests what identifies the Git state gitState counted: every ref's name and
+// target (peeled), HEAD and each stash reflog entry of the checkout's repository; and for every
+// nested repository the files that name its state (HEAD, packed-refs, refs/, the stash log, the
+// index's size and time) or its gitfile, plus every entry of its working tree by path, type, size
+// and modification time. Reading these files invokes no Git and follows no link. The digest only
+// has to change when the state does; a nested working tree touched without a change can make a
+// preview stale, which asks the person to look again and loses nothing.
+func (s *DeliveryFS) gitIdentity(ctx context.Context, st *staged, g GitFindings) (string, error) {
+	h := sha256.New()
+	if _, err := os.Lstat(filepath.Join(st.root, ".git")); err == nil {
+		agent := deliveryGit{binary: s.git, dir: st.root, env: []string{"GIT_CEILING_DIRECTORIES=" + filepath.Dir(st.root)}}
+		refs, err := agent.run(ctx, nil, MaxDiffBytes, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(*objectname)")
+		if err != nil {
+			return "", err
+		}
+		h.Write(refs)
+		head, _ := agent.value(ctx, "rev-parse", "-q", "--verify", "HEAD")
+		fmt.Fprintf(h, "HEAD %s\x00", head)
+		if g.Stashes > 0 {
+			stashes, err := agent.run(ctx, nil, MaxDiffBytes, "rev-list", "--walk-reflogs", "refs/stash")
+			if err != nil {
+				return "", err
+			}
+			h.Write(stashes)
+		}
+	}
+	root, err := os.OpenRoot(st.root)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	for _, repo := range g.Repositories {
+		fmt.Fprintf(h, "repository %s\x00", repo)
+		if name, ok := strings.CutPrefix(repo, ".git/modules/"); ok {
+			layout, err := gitexclude.Resolve(st.root)
+			if err != nil {
+				return "", fmt.Errorf("%w: %w", ErrUnverifiable, err)
+			}
+			modules, err := os.OpenRoot(filepath.Join(layout.CommonDir(), "modules"))
+			if err != nil {
+				return "", err
+			}
+			err = digestGitDir(h, modules.FS(), name)
+			modules.Close()
+			if err != nil {
+				return "", err
+			}
+			continue
+		}
+		fsys := root.FS()
+		gitEntry := path.Join(repo, ".git")
+		if info, err := fs.Lstat(fsys, gitEntry); err == nil {
+			switch {
+			case info.IsDir():
+				if err := digestGitDir(h, fsys, gitEntry); err != nil {
+					return "", err
+				}
+			case info.Mode()&fs.ModeSymlink != 0:
+				target, err := root.Readlink(gitEntry)
+				if err != nil {
+					return "", err
+				}
+				fmt.Fprintf(h, "link %s\x00", target)
+			default:
+				content, err := fs.ReadFile(fsys, gitEntry)
+				if err != nil {
+					return "", err
+				}
+				fmt.Fprintf(h, "gitfile %s\x00", content)
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		if err := digestTree(h, fsys, repo); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// digestGitDir writes the files that name a repository's state: HEAD, packed-refs, every file
+// under refs/, the stash log, and the index's size and modification time.
+func digestGitDir(h io.Writer, fsys fs.FS, dir string) error {
+	for _, name := range []string{"HEAD", "packed-refs", "logs/refs/stash"} {
+		content, err := fs.ReadFile(fsys, path.Join(dir, name))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		fmt.Fprintf(h, "%s %s\x00", name, content)
+	}
+	if info, err := fs.Lstat(fsys, path.Join(dir, "index")); err == nil {
+		fmt.Fprintf(h, "index %d %d\x00", info.Size(), info.ModTime().UnixNano())
+	}
+	err := fs.WalkDir(fsys, path.Join(dir, "refs"), func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		content, err := fs.ReadFile(fsys, p)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(h, "%s %s\x00", p, content)
+		return nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+// digestTree writes every entry of a nested working tree (its .git apart) by path, type, size and
+// modification time, without following links.
+func digestTree(h io.Writer, fsys fs.FS, dir string) error {
+	if _, err := fs.Lstat(fsys, dir); errors.Is(err, fs.ErrNotExist) {
+		return nil // a gitlink with no working tree here
+	}
+	return fs.WalkDir(fsys, dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Name() == ".git" && p != dir {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		info, err := d.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(h, "%s %s %d %d\x00", p, info.Mode().Type(), info.Size(), info.ModTime().UnixNano())
+		return nil
+	})
 }
 
 // nestedGit lists every entry named .git below the checkout's top level, whatever its kind

@@ -280,7 +280,9 @@ func (r *Reclaimer) judge(ctx context.Context, c store.Checkout) (Verdict, func(
 		unlock()
 		return Verdict{}, nil, err
 	}
-	return seal(v, c, in.Tree+"\x00"+string(git)), unlock, nil
+	// The counts show what is held; the identity digest binds the actual stash entries, ref
+	// targets and nested repositories, which the counts alone would not.
+	return seal(v, c, in.Tree+"\x00"+string(git)+"\x00"+in.GitIdentity), unlock, nil
 }
 
 // seal fills in what every verdict carries: the newest good delivery and the revision, a digest
