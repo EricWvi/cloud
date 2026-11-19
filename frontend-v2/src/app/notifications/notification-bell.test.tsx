@@ -333,6 +333,33 @@ describe('notification bell', () => {
     expect(await within(list).findByText('修登录页')).toBeInTheDocument()
   })
 
+  it('forgets the open list and the pages browsed while access was lost', async () => {
+    pageSize = 1
+    renderAt('/')
+    await userEvent.click(await screen.findByRole('button', { name: '提醒，2 条未读' }))
+    const list = await screen.findByRole('list', { name: '提醒列表' })
+    await userEvent.click(await within(list).findByRole('button', { name: '加载更多' }))
+    await within(list).findByText('修登录页')
+    // Removed while browsing: the next page is refused.
+    pageStatus = { '2': 404 }
+    await userEvent.click(within(list).getByRole('button', { name: '加载更多' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: /^提醒/ })).not.toBeInTheDocument())
+
+    // Back in the team: the bell returns closed, and the old pages are not shown again.
+    pageStatus = {}
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    const bell = await screen.findByRole('button', { name: '提醒，2 条未读' })
+    expect(screen.queryByRole('list', { name: '提醒列表' })).not.toBeInTheDocument()
+    await userEvent.click(bell)
+    const reopened = await screen.findByRole('list', { name: '提醒列表' })
+    expect(within(reopened).getByText('写周报')).toBeInTheDocument()
+    expect(within(reopened).queryByText('修登录页')).not.toBeInTheDocument()
+    act(() => focusManager.setFocused(undefined))
+  })
+
   it('says so when there is nothing', async () => {
     items = []
     renderAt('/')

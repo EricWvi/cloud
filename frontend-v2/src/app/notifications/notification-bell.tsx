@@ -70,6 +70,19 @@ const formatTime = (iso: string): string =>
 export function NotificationBell() {
   const tenants = useGetApiV1MeTenants()
   const tenantId = tenants.data?.items?.[0]?.id ?? ''
+  const newest = useQuery({
+    queryKey: newestKey(tenantId),
+    queryFn: ({ signal }) => readPage(tenantId, '', signal),
+    enabled: !!tenantId,
+    refetchInterval: POLL_MS,
+  })
+  // The newest page keeps polling here, so the bell comes back if access does. The list below is
+  // unmounted meanwhile: whether it was open and what it had paged through are gone with it.
+  if (!tenantId || !newest.data || newest.data.denied) return null
+  return <NotificationPanel tenantId={tenantId} newest={newest.data} newestFailed={newest.isError} />
+}
+
+function NotificationPanel({ tenantId, newest, newestFailed }: { tenantId: string; newest: InboxPage; newestFailed: boolean }) {
   const [open, setOpen] = useState(false)
   const navigate = useNavigate()
   const client = useQueryClient()
@@ -78,20 +91,13 @@ export function NotificationBell() {
   // not shift the history out from under the person; the badge keeps updating.
   const [browse, setBrowse] = useState<{ items: Notification[]; from: string } | null>(null)
   const browsing = browse !== null
-  const newest = useQuery({
-    queryKey: newestKey(tenantId),
-    queryFn: ({ signal }) => readPage(tenantId, '', signal),
-    enabled: !!tenantId,
-    refetchInterval: POLL_MS,
-  })
-  const lost = newest.data?.denied === true
   const from = browse?.from ?? ''
   const older = useInfiniteQuery({
     queryKey: [...olderKey(tenantId), from],
     queryFn: ({ pageParam, signal }) => readOlder(client, tenantId, pageParam, signal),
     initialPageParam: from,
     getNextPageParam: last => last.nextCursor || undefined,
-    enabled: open && browsing && !!from && !lost,
+    enabled: open && browsing && !!from,
     staleTime: Infinity,
     refetchOnWindowFocus: false,
     // The person retries from the list; a failed page must not look like the end.
@@ -119,19 +125,17 @@ export function NotificationBell() {
       setBrowse(prev => prev && { ...prev, items: mark({ items: prev.items, unread: 0, nextCursor: '' }).items })
     },
   })
-  // Hidden, not unmounted: the newest page keeps polling, so the bell comes back if access does.
-  if (!tenantId || lost) return null
   const items = browse
     ? [...browse.items, ...(older.data?.pages ?? []).flatMap(page => page.items)]
-    : newest.data?.items ?? []
-  const unread = newest.data?.unread ?? 0
+    : newest.items
+  const unread = newest.unread
   // Reached the end only when the last page read says so; a failed read keeps the way to retry.
   const loadFailed = browsing && older.isError
-  const hasMore = browsing ? older.hasNextPage || older.isPending || loadFailed : !!newest.data?.nextCursor
+  const hasMore = browsing ? older.hasNextPage || older.isPending || loadFailed : !!newest.nextCursor
   const loadingMore = browsing && (older.isFetching)
   const loadMore = () => {
     if (!browse) {
-      if (newest.data?.nextCursor) setBrowse({ items: newest.data.items, from: newest.data.nextCursor })
+      if (newest.nextCursor) setBrowse({ items: newest.items, from: newest.nextCursor })
     } else if (!older.data) void older.refetch()
     else void older.fetchNextPage()
   }
@@ -170,7 +174,7 @@ export function NotificationBell() {
           </button>
         </header>
         {items.length === 0
-          ? <p className="px-3 py-8 text-center text-xs text-muted-foreground">{newest.isError ? '提醒加载失败' : '暂无提醒'}</p>
+          ? <p className="px-3 py-8 text-center text-xs text-muted-foreground">{newestFailed ? '提醒加载失败' : '暂无提醒'}</p>
           : (
               <ul aria-label="提醒列表" className="max-h-96 overflow-y-auto py-1">
                 {items.map(n => (
