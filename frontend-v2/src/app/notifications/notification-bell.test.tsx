@@ -267,6 +267,72 @@ describe('notification bell', () => {
     act(() => focusManager.setFocused(undefined))
   })
 
+  it('does not let a newest-page read already in flight overwrite a refusal', async () => {
+    pageSize = 1
+    pageStatus = { '1': 404 }
+    renderAt('/')
+    await userEvent.click(await screen.findByRole('button', { name: '提醒，2 条未读' }))
+    const list = await screen.findByRole('list', { name: '提醒列表' })
+    const more = await within(list).findByRole('button', { name: '加载更多' })
+    // A poll of the newest page is admitted and its answer delayed past the older page's refusal.
+    let release = () => {}
+    holdPage = { first: new Promise<void>(resolve => { release = resolve }) }
+    const before = inboxReads.length
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await waitFor(() => expect(inboxReads.length).toBeGreaterThan(before))
+    await userEvent.click(more)
+    await waitFor(() => expect(screen.queryByRole('button', { name: /^提醒/ })).not.toBeInTheDocument())
+    // Any later read of the older page never answers, so only the late newest page could change
+    // what is shown.
+    holdPage = { '1': new Promise<void>(() => {}) }
+    act(() => release())
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(screen.queryByRole('button', { name: /^提醒/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('写周报')).not.toBeInTheDocument()
+    act(() => focusManager.setFocused(undefined))
+  })
+
+  it('keeps the pages being browsed when a new notification arrives', async () => {
+    pageSize = 1
+    renderAt('/')
+    await userEvent.click(await screen.findByRole('button', { name: '提醒，2 条未读' }))
+    const list = await screen.findByRole('list', { name: '提醒列表' })
+    await userEvent.click(await within(list).findByRole('button', { name: '加载更多' }))
+    await within(list).findByText('修登录页')
+    await userEvent.click(within(list).getByRole('button', { name: '加载更多' }))
+    await within(list).findByText('旧任务')
+
+    // Someone assigns another task meanwhile; the poll brings it into the newest page.
+    items = [notice({ id: 'n4', taskId: 't4', taskTitle: '新来的任务' }), ...items]
+    const before = inboxReads.length
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await waitFor(() => expect(inboxReads.length).toBeGreaterThan(before))
+    expect(await screen.findByRole('button', { name: '提醒，3 条未读' })).toBeInTheDocument()
+    // The badge moved on; what the person was reading did not.
+    for (const title of ['写周报', '修登录页', '旧任务']) expect(within(list).getByText(title)).toBeInTheDocument()
+    expect(within(list).queryByText('新来的任务')).not.toBeInTheDocument()
+    act(() => focusManager.setFocused(undefined))
+  })
+
+  it('offers a retry when the first older page cannot be read', async () => {
+    pageSize = 1
+    pageStatus = { '1': 503 }
+    renderAt('/')
+    await userEvent.click(await screen.findByRole('button', { name: '提醒，2 条未读' }))
+    const list = await screen.findByRole('list', { name: '提醒列表' })
+    await userEvent.click(await within(list).findByRole('button', { name: '加载更多' }))
+    const retry = await within(list).findByRole('button', { name: '加载失败，重试' }, { timeout: 5000 })
+    pageStatus = {}
+    await userEvent.click(retry)
+    expect(await within(list).findByText('修登录页')).toBeInTheDocument()
+  })
+
   it('says so when there is nothing', async () => {
     items = []
     renderAt('/')

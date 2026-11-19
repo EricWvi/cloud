@@ -50,6 +50,9 @@ async function readPage(tenantId: string, cursor: string, signal: AbortSignal): 
 async function readOlder(client: QueryClient, tenantId: string, cursor: string, signal: AbortSignal): Promise<InboxPage> {
   const page = await readPage(tenantId, cursor, signal)
   if (page.denied) {
+    // A newest-page read already in flight may have been admitted before the removal; its late
+    // answer must not overwrite the refusal. Only a read started after it can show the bell again.
+    await client.cancelQueries({ queryKey: newestKey(tenantId) })
     client.setQueryData(newestKey(tenantId), deniedPage)
     void client.cancelQueries({ queryKey: olderKey(tenantId) })
   }
@@ -70,8 +73,11 @@ export function NotificationBell() {
   const [open, setOpen] = useState(false)
   const navigate = useNavigate()
   const client = useQueryClient()
-  // Older pages are asked for with 加载更多 and forgotten when the list closes.
-  const [browsing, setBrowsing] = useState(false)
+  // Browsing starts with the first 加载更多 and ends when the list closes. It freezes the newest
+  // page as it was then and pages on from where it ended, so notifications arriving meanwhile do
+  // not shift the history out from under the person; the badge keeps updating.
+  const [browse, setBrowse] = useState<{ items: Notification[]; from: string } | null>(null)
+  const browsing = browse !== null
   const newest = useQuery({
     queryKey: newestKey(tenantId),
     queryFn: ({ signal }) => readPage(tenantId, '', signal),
@@ -79,23 +85,24 @@ export function NotificationBell() {
     refetchInterval: POLL_MS,
   })
   const lost = newest.data?.denied === true
-  const start = newest.data?.nextCursor ?? ''
+  const from = browse?.from ?? ''
   const older = useInfiniteQuery({
-    // Keyed by where the newest page ends, so a newer poll restarts the history after it.
-    queryKey: [...olderKey(tenantId), start],
+    queryKey: [...olderKey(tenantId), from],
     queryFn: ({ pageParam, signal }) => readOlder(client, tenantId, pageParam, signal),
-    initialPageParam: start,
+    initialPageParam: from,
     getNextPageParam: last => last.nextCursor || undefined,
-    enabled: open && browsing && !!start && !lost,
+    enabled: open && browsing && !!from && !lost,
     staleTime: Infinity,
     refetchOnWindowFocus: false,
+    // The person retries from the list; a failed page must not look like the end.
+    retry: 1,
   })
   // Opening or closing the list starts the history over. A page still in flight would otherwise
   // land after the list closed: cancel it and drop the history, so nothing but the newest page is
   // read until the person pages again.
   const setListOpen = (next: boolean) => {
     setOpen(next)
-    setBrowsing(false)
+    setBrowse(null)
     void client.cancelQueries({ queryKey: olderKey(tenantId) })
     client.removeQueries({ queryKey: olderKey(tenantId) })
   }
@@ -109,17 +116,23 @@ export function NotificationBell() {
       })
       client.setQueryData<InboxPage>(newestKey(tenantId), prev => prev && { ...mark(prev), unread })
       client.setQueriesData<Older>({ queryKey: olderKey(tenantId) }, prev => prev && { ...prev, pages: prev.pages.map(mark) })
+      setBrowse(prev => prev && { ...prev, items: mark({ items: prev.items, unread: 0, nextCursor: '' }).items })
     },
   })
   // Hidden, not unmounted: the newest page keeps polling, so the bell comes back if access does.
   if (!tenantId || lost) return null
-  const olderPages = browsing ? older.data?.pages ?? [] : []
-  const items = [...(newest.data?.items ?? []), ...olderPages.flatMap(page => page.items)]
+  const items = browse
+    ? [...browse.items, ...(older.data?.pages ?? []).flatMap(page => page.items)]
+    : newest.data?.items ?? []
   const unread = newest.data?.unread ?? 0
-  const hasMore = browsing ? older.hasNextPage || older.isPending : start !== ''
-  const loadingMore = browsing && (older.isPending || older.isFetchingNextPage)
+  // Reached the end only when the last page read says so; a failed read keeps the way to retry.
+  const loadFailed = browsing && older.isError
+  const hasMore = browsing ? older.hasNextPage || older.isPending || loadFailed : !!newest.data?.nextCursor
+  const loadingMore = browsing && (older.isFetching)
   const loadMore = () => {
-    if (!browsing) setBrowsing(true)
+    if (!browse) {
+      if (newest.data?.nextCursor) setBrowse({ items: newest.data.items, from: newest.data.nextCursor })
+    } else if (!older.data) void older.refetch()
     else void older.fetchNextPage()
   }
   const label = unread > 0 ? `提醒，${unread} 条未读` : '提醒'
@@ -185,7 +198,7 @@ export function NotificationBell() {
                       onClick={loadMore}
                       className="w-full rounded-md py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
                     >
-                      {loadingMore ? '加载中…' : '加载更多'}
+                      {loadingMore ? '加载中…' : loadFailed ? '加载失败，重试' : '加载更多'}
                     </button>
                   </li>
                 )}
