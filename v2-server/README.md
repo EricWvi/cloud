@@ -317,7 +317,7 @@ Agent 正在执行一轮时，人工推进返回 409 `run_active`。
   其他成员发给 Agent 是 409 `run_owned`，他们可以重新执行，用自己的身份开一次新运行。
 - **一个任务最多一个活着的运行**：与活工作流处理也互斥（409 `run_active`），空闲 Agent 会话必须先结束才能交给工作流。重新执行会先结束空闲的旧会话（`endReason = replaced`）；正在执行一轮时是 409 `run_active`，要先停。
   页面不排队，追问在一轮执行中同样是 409 `run_active`。
-- **停止即结束这次运行**：固定 Node 上取消一轮会结束整个会话，之后只能重新执行。任务完成或取消时结束空闲会话（`closed`）。
+- **停止**：正在执行的一轮被取消（见下文「停止一轮」）。会话在停止后保留时，运行仍然活着、空闲，等发起人追问，任务回到待处理；停止让会话结束了（Node 没能保留它），或者运行本来就空闲，就结束这次运行（`endReason = stopped`），之后只能重新执行。任务完成或取消时结束空闲会话（`closed`）。
 - **回合交付**：完成或执行失败的回合，在交付为 `delivered` 或 `empty` 后进入待验收。交付失败或停止回到待处理，交付失败的原因保存在交付记录中。交付期间任务仍为进行中，人工推进返回 409 `run_active`。
 - **重启**：进程启动前结束上一个进程留下的活运行，正在执行或交付的任务回到 `pending`。启动补交付只保存原工作目录的内容，不重放回合。
 - **派给人的任务**：负责人本人可以用自己选的 Agent 处理，执行器就决定了 Agent。只有负责人能开运行（包括重新执行和 `toAgent` 评论开的新运行），
@@ -635,7 +635,7 @@ not execute these kinds: `crates/application/src/workflow_run/engine/node_type.r
 | `PATCH …/workflow-runs/{rid}/input` | 更新启动输入与变量；执行桥判定不可编辑时返回 `409 workflow_run_not_editable`（desktop 允许未开始和已结束的运行修改，用于准备下一次执行） |
 | `POST …/workflow-runs/{rid}/nodes/{nodeId}/complete` | 完成等待输入的交互式 Agent 节点（`force`、`confirmInitialTurn`、`requester: human`），只有发起人可以操作，规则见下文“交互节点的完成门禁” |
 | `POST …/workflow-runs/{rid}/nodes/{nodeId}/turns` | v2 独有：发起人向等待输入的交互式节点发一轮消息（`{"content"}`，1–16000 字），在节点自己的会话里执行；响应除 `run` 外带 `sent`，是这条消息在发起人发给该节点的消息里的序号 |
-| `POST …/workflow-runs/{rid}/nodes/{nodeId}/stop` | v2 独有：停止交互式节点正在执行的一轮；固定 Node 只能靠结束会话来停，所以停止后节点等待完成、不能再发消息，运行继续 |
+| `POST …/workflow-runs/{rid}/nodes/{nodeId}/stop` | v2 独有：停止交互式节点正在执行的一轮（见下文「停止一轮」）。之后节点等发起人：会话保留时可以接着发消息，停止让会话结束了就只能完成；运行继续 |
 | `GET …/workflow-runs/{rid}/nodes` | 只要节点行 |
 | `GET …/workflow-runs/{rid}/events` | SSE，只发 `workflow_run_invalidated`（data `{"runId"}`，不带状态，同 desktop 的同名事件）：连上先发一条，之后每次提交的变化一条，未读的合并；页面收到后重新读取运行。未注入运行事件端口时返回 `503 workflow_run_events_unavailable` |
 | `GET …/workflow-runs/{rid}/nodes/{nodeRunId}/events?after=` | 一次节点尝试的会话事件，帧格式、游标和 `end`/`failure` 与对话的事件流相同；校验当前成员租户归属后按运行发起人身份读共享会话（没有记录发起人的运行回退为调用者），尝试不属于该运行返回 `404 workflow_node_run_not_found`，还没派发（`sessionId` 为空）返回 `404 workflow_node_session_not_found` |
@@ -673,7 +673,7 @@ not execute these kinds: `crates/application/src/workflow_run/engine/node_type.r
 `…` 是 `/api/v2/tenants/{tid}`。所有路由要求登录 cookie 和成员关系；他人的对话按 404 处理。执行服务和目录取自统一注入点 `server.Options.Execution` / `Catalog`（见下一节）；它们还是未配置的 Stub 时，对话列表照常读取，执行器清单、创建对话和发消息等需要执行的调用返回 503 `execution_unavailable`。
 
 - **一个对话、一个 session**：创建对话时只选项目，执行服务为这个对话新建目录，对话之间、对话与定时任务和工作流之间都不争抢目录。session 在两轮之间保持，直到下列情况之一，并记下 `endReason`：
-  - `stopped`：停止。固定 Node 取消进行中的一轮会结束整个 session。
+  - `stopped`：停止让 session 结束了（Node 没能在取消这一轮后保留它，见下文「停止一轮」）。只停了这一轮、session 保留时不记结束原因，对话照常接着发消息。
   - `deleted`：删除对话。
   - `interrupted`：在对话之外结束，例如服务重启后 `Append` 返回 `ErrSessionEnded`。
 
@@ -700,7 +700,20 @@ not execute these kinds: `crates/application/src/workflow_run/engine/node_type.r
 - **Git 版本**：回收用到的 Git 命令和参数在 Git 2.34（Ubuntu 22.04 自带）上可用，相关测试在 2.34.1 与 2.53 上都通过。HEAD 的形态直接读 HEAD 文件判断，不依赖较新的 `symbolic-ref --no-recurse`；旧版 Git 对读不到的对象和缺失的对象报同样的话，所以"对象缺失"还要在磁盘上确认。
 - **没有 Agent 运行时**（未配置 `V2_NODE_ASSETS_DIR` 或没有模型）时不起回收器，但之前带运行时的进程留下的 checkout 还在：有 checkout 的对话，预览和 `discard` 在结束会话、删除对话之前返回 503 `workspace_reclaim_unavailable`；默认删除照常删对话并登记 `pending`（`reclaim_unavailable`），等以后带运行时的启动按同样的条件判定。
 
-HTTP 集成测试按 `chat.openapi.json` 验证 JSON 响应，向注入点传入 `executiontest.Stub`，覆盖对话生命周期、停止后只读、事件流续传、项目顺序和执行不可用；`internal/chat` 的测试用真实 PostgreSQL 和执行端口替身，覆盖幂等重试、结果未知、上一轮未结束、停止与重启后只读和删除顺序。
+HTTP 集成测试按 `chat.openapi.json` 验证 JSON 响应，向注入点传入 `executiontest.Stub`，覆盖对话生命周期、停止后只读、事件流续传、项目顺序和执行不可用；`internal/chat` 的测试用真实 PostgreSQL 和执行端口替身，覆盖幂等重试、结果未知、上一轮未结束、停止后保留会话接着发消息、停止让会话结束与重启后只读和删除顺序。
+
+#### 停止一轮
+
+对话、任务运行和工作流交互节点的「停止」都经 `execution.Service.Cancel` 停这一轮。v2-server 在 Hello 里声明 `turn_cancel`；Node 也支持时（握手回 `turn_cancel: true` 和同名能力），新会话在 `StartAgentSession` 里选择 `keep_session_on_cancel`，停止发 `CancelTurn{command_id, turn_id}`，按 Node 的 `TurnCancelSettled` 决定：`stopped`、`not_started` 只停这一轮，会话保留；`already_ended` 是这一轮已经自己结束，保留它自己的结果；`session_ending` 表示 Node 不保留会话，它自己停 Agent 并在取得停止证据后发终态。Node 不支持 `turn_cancel` 时照旧发 `EndSession`，停止就结束会话。依据是 specs 的 `decisions/node/protocol/20261116-cancel-turn-and-keep-session-after-turn-ends.md`。
+
+用户停的这一轮以 `cancelled` 结束，即使它最近的模型请求被限值切断过（只有不是用户停的一轮才按切断原因记为 `failed`，模型代理 ADR `20261113-…` D4）。
+
+简化（不是 Cloud 的行为）：
+
+- 只选 `keep_session_on_cancel`，不选 `keep_session_on_failure`：失败的一轮仍然结束会话，等失败原因能上报（circus#1138）再打开。
+- 等 `TurnCancelSettled` 用固定的 30 秒上限，不按 ADR D4 的投递进展等待；超时、Node 拒绝这条命令（`session_command_rejected`）或回 `unknown` 时，都退回 `EndSession` 结束会话。
+- 还在准备工作区（Agent 尚未启动）时停止，照旧结束会话。
+- 会话能否保留由 Node 判定：Agent 版本不在 Node 的轮次边界清单里，或这一轮不满足静止条件时，结论是 `session_ending`，会话照旧结束。
 
 ### 回合交付
 

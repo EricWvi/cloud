@@ -272,8 +272,9 @@ func (s *Service) start(ctx context.Context, scope execution.Scope, c store.Chat
 	return ref, s.store.RecordChatTurn(ctx, c.ID, ref.SessionID, key, ref.TurnID, s.now())
 }
 
-// Stop cancels the session's latest turn. On the fixed Node that ends the whole session, so it is
-// recorded as stopped once the port confirms; an unconfirmed stop changes nothing.
+// Stop cancels the session's latest turn. When the session outlives the stop (the Node kept it
+// through turn_cancel) the conversation stays live and takes the next prompt; when the stop ended
+// it, it is recorded as stopped once the port confirms. An unconfirmed stop changes nothing.
 func (s *Service) Stop(ctx context.Context, scope execution.Scope, conversationID string) (execution.Result, error) {
 	defer s.lock(conversationID)()
 	c, e := s.store.ChatConversation(ctx, scope.TenantID, scope.UserID, conversationID)
@@ -300,7 +301,7 @@ func (s *Service) Stop(ctx context.Context, scope execution.Scope, conversationI
 		return result, e
 	}
 	if session.EndedAt == nil {
-		// The turn had already finished, so cancelling it ended nothing: the session stays live.
+		// Only the turn stopped, or it had already finished: the session stays live.
 		return result, s.store.ClearChatSessionEnding(ctx, live.ID)
 	}
 	return result, s.store.EndChatSession(ctx, live.ID, store.EndStopped, s.now())

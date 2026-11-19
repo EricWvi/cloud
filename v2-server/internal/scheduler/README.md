@@ -40,7 +40,7 @@
 - **Reconcile**：按身份找运行。没有运行且没绑定过记 `not_accepted`；运行还是 pending 说明启动没有提交，取消它再记 `not_accepted`；运行中则绑定后等待；结束则记结果并释放占位（没有会话需要 End）。重启恢复（`server_restarted`）中失败的运行记 `interrupted`。
 - **Cancel**：`cancel_requested` 后经执行桥取消；停止未确认时保持 `cancelling`，运行真正结束后由 Reconcile 记录。
 
-两路共用结果、取消与释放流程。已接收的执行结果通过公共记录读取。成功必须满足 `AnswerComplete`；完整性不足不能标 succeeded。Agent Cancel 结束会话，model-only Cancel 只停止当前轮；定时任务不追问结果，两路随后都调用幂等 End。只有 End 确认后才释放同任务占位，历史和目录继续保留。
+两路共用结果、取消与释放流程。已接收的执行结果通过公共记录读取。成功必须满足 `AnswerComplete`；完整性不足不能标 succeeded。Agent Cancel 在 Node 不能保留会话时结束会话、能保留时只停这一轮，model-only Cancel 只停止当前轮；定时任务不追问结果，两路随后都调用幂等 End。只有 End 确认后才释放同任务占位，历史和目录继续保留。
 
 Start 是进程内同步调用。ConversationAdapter 对每条 occurrence 的操作串行；同一条正在处理时返回 `ErrOperationInProgress`，后续 Tick 可继续观察，不排队或重派。一个适配器负责全部定时对话，不能为相同记录创建并行适配器；启动恢复必须先于新派发。
 

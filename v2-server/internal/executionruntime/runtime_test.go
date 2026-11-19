@@ -558,6 +558,9 @@ type orchestrationAgent struct {
 	ended   chan string
 	mu      sync.Mutex
 	closed  map[string]bool
+	// keepOnStop makes a stop with execution.ErrStopTurn cancel only the turn, as the real
+	// driver does over a Node that negotiated turn_cancel.
+	keepOnStop bool
 }
 
 type agentCall struct {
@@ -579,7 +582,9 @@ func (a *orchestrationAgent) Run(ctx context.Context, _ execution.Scope, session
 	a.started <- call
 	select {
 	case <-ctx.Done():
-		return execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}, nil
+		result := execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}
+		result.SessionKept = a.keepOnStop && errors.Is(context.Cause(ctx), execution.ErrStopTurn)
+		return result, nil
 	case <-call.release:
 		result := execution.Result{Status: execution.StatusCompleted, Answer: "fake driver orchestration", AnswerComplete: true, StopReason: "end_turn"}
 		if call.result != nil {

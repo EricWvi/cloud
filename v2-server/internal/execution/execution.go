@@ -21,6 +21,12 @@ var (
 	ErrSessionEnded    = errors.New("execution session ended")
 )
 
+// ErrStopTurn is the cancellation cause with which the execution service asks a driver to stop
+// only the running turn (context.Cause of the context Run was given). A driver whose session can
+// keep its Agent after a stopped turn stops just that turn and reports Result.SessionKept; any
+// other driver, and any other cause, ends the session as before.
+var ErrStopTurn = errors.New("the caller stopped the turn")
+
 // Scope comes from the authenticated page service or persisted schedule owner, never directly
 // from a request body. Background callers do not need an online browser or stored cookie.
 // Implementations must check membership and resource ownership on every operation.
@@ -155,6 +161,11 @@ type Result struct {
 	// never came). AgentLost still says whether the session can take another turn. A turn whose
 	// sending failed midway may have arrived, so it is not marked.
 	NotDelivered bool `json:",omitempty"`
+	// SessionKept tells the execution service that the Agent session outlives this turn although
+	// it did not complete: the caller stopped it (ErrStopTurn) and Node kept the session. It is
+	// what lets a non-held session take the next turn after a stop. Never persisted: a stored
+	// result reports a lost session through AgentLost.
+	SessionKept bool `json:"-"`
 }
 
 // Failure codes of a turn whose session Node refused to admit to, or could not hand over, a
@@ -346,8 +357,11 @@ type Service interface {
 
 	// Cancel waits for execution-side confirmation and durable terminal publication. It is
 	// idempotent for terminal turns and returns their actual result, including a racing success.
-	// Cancelling an active Agent turn ends the entire Node session; subsequent Append returns
-	// ErrSessionEnded. It must not replay history or silently replace the Agent to continue it.
+	// Cancelling an active Agent turn stops only that turn when the session's Node keeps
+	// sessions after a cancelled turn (turn_cancel); the session then takes further Append.
+	// Otherwise, or when Node decides it cannot keep the session, the entire Node session ends,
+	// the result reports AgentLost and subsequent Append returns ErrSessionEnded. It must not
+	// replay history or silently replace the Agent to continue it.
 	// Model-only cancellation stops just the current provider call and permits later Append.
 	// A terminal turn is a no-op and cannot stop a later turn. A deadline or ErrStopUnconfirmed
 	// does not confirm stopping; callers observe the actual result through reads/events.

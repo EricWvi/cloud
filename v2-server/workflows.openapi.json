@@ -658,7 +658,7 @@
       "post": {
         "operationId": "stopWorkflowNodeTurn",
         "tags": ["workflowRuns"],
-        "description": "v2-only: stops the turn an interactive root-scope Agent node is executing. The pinned Node stops a turn only by ending its session, so afterwards the node waits for completion and accepts no further turns; the run keeps running. Only the run's starter may stop (409 run_owned); without a turn in flight it returns 409 workflow_node_turn_not_running.",
+        "description": "v2-only: stops the turn an interactive root-scope Agent node is executing. The node then waits for its starter: when its session outlived the stop (a Node that negotiated turn_cancel keeps it) it accepts further turns, and when the stop ended the session it waits for completion only. The run keeps running. Only the run's starter may stop (409 run_owned); without a turn in flight it returns 409 workflow_node_turn_not_running.",
         "responses": {
           "200": {"description": "Response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WorkflowRunActionResponse"}}}},
           "400": {"$ref": "#/components/responses/WorkflowError"},

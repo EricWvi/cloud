@@ -89,6 +89,9 @@ type worker struct {
 	scope      execution.Scope
 	group      string
 	err        error
+	// stopTurn cancels the worker with execution.ErrStopTurn: only its turn should stop, and the
+	// driver keeps the session when its Node can. The first of cancel and stopTurn decides.
+	stopTurn func()
 }
 
 // Service owns all execution workers. Close must finish before the database is closed.
@@ -488,8 +491,9 @@ func (s *Service) Append(ctx context.Context, scope execution.Scope, req executi
 
 // launch is called under mu; workers use the backend's lifetime, never an HTTP request context.
 func (s *Service) launch(scope execution.Scope, session execution.Session, turn execution.Turn, group string) {
-	ctx, cancel := context.WithCancel(s.ctx)
-	w := &worker{cancel: cancel, done: make(chan struct{}), ref: turn.Ref, scope: scope, group: group}
+	ctx, cancelCause := context.WithCancelCause(s.ctx)
+	cancel := func() { cancelCause(nil) }
+	w := &worker{cancel: cancel, stopTurn: func() { cancelCause(execution.ErrStopTurn) }, done: make(chan struct{}), ref: turn.Ref, scope: scope, group: group}
 	held := s.held[session.ID]
 	s.workers[turn.Ref.TurnID] = w
 	s.groups[group] = turn.Ref.TurnID
@@ -588,6 +592,8 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		if result.NotStarted {
 			result.NotDelivered = true
 		}
+		// Read before delivery and persistence, which return the stored result without it.
+		kept := result.SessionKept && agentErr == nil
 		// A recovered session whose new Agent could not be started keeps waiting for another
 		// turn: nothing ran, and the conversation is still recorded. Only a missing checkout
 		// ends it.
@@ -628,8 +634,9 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		}
 		// Failures stay with this session: nothing here stops admission for other sessions.
 		// A held session survives a turn the Agent itself ended without completing: the driver
-		// reports no error then, and the Agent is still there to take the next turn.
-		broken := session.Target != nil && !retry && (agentErr != nil || (result.Status != execution.StatusCompleted && !held))
+		// reports no error then, and the Agent is still there to take the next turn. So does any
+		// session whose turn the caller stopped when the driver kept it (Result.SessionKept).
+		broken := session.Target != nil && !retry && (agentErr != nil || (result.Status != execution.StatusCompleted && !held && !kept))
 		if nodeLost && err == nil {
 			// The session stays open for its next turn, but the lost Node's process tree is
 			// retired now, with the supervisor's proof, rather than when the project is next used.
@@ -826,8 +833,10 @@ func (s *Service) messages(ctx context.Context, scope execution.Scope, current e
 	}
 }
 
-// Cancel ends an Agent session because the pinned Node has only EndSession cancellation.
-// Model-only cancellation stops the requested turn and leaves its conversation open.
+// Cancel stops an active Agent turn with execution.ErrStopTurn: the driver cancels only the turn
+// when the session's Node keeps sessions after a stop, and otherwise ends the session as the
+// worker then does for any turn that did not complete. Model-only cancellation stops the
+// requested turn and leaves its conversation open.
 func (s *Service) Cancel(ctx context.Context, scope execution.Scope, ref execution.Ref) (execution.Result, error) {
 	turn, err := s.readTurn(ctx, scope, ref)
 	if err != nil {
@@ -842,7 +851,8 @@ func (s *Service) Cancel(ctx context.Context, scope execution.Scope, ref executi
 	}
 	if session.Target != nil {
 		// Serialize with Append: a late retry for an already finished turn must not
-		// stop a newer turn. Once cancellation wins, no new turn can enter this session.
+		// stop a newer turn. The worker keeps the session's group until it has gone, so no new
+		// turn enters the session before it is known whether the stop kept it.
 		var staged bool
 		if s.delivery != nil {
 			work, workErr := s.readDeliveryWork(ctx, ref)
@@ -864,12 +874,34 @@ func (s *Service) Cancel(ctx context.Context, scope execution.Scope, ref executi
 				s.mu.Lock()
 				stopping = s.workers[ref.TurnID] == w
 				if stopping {
-					s.ending[ref.SessionID] = true
-					w.cancel()
+					w.stopTurn()
 				}
 				s.mu.Unlock()
 			}
 			w.terminalMu.Unlock()
+		}
+		if stopping {
+			select {
+			case <-ctx.Done():
+				return execution.Result{}, ctx.Err()
+			case <-w.done:
+			}
+			s.mu.Lock()
+			_, unsaved := s.unsaved[ref.SessionID]
+			ending := s.ending[ref.SessionID] || unsaved
+			s.mu.Unlock()
+			if !ending {
+				// The worker kept the session (or the turn ended on its own first): its stored
+				// result is the answer, and the session takes the next turn.
+				turn, err := s.readTurn(ctx, scope, ref)
+				if err != nil {
+					return execution.Result{}, err
+				}
+				if turn.Result == nil {
+					return execution.Result{}, execution.ErrStopUnconfirmed
+				}
+				return *turn.Result, nil
+			}
 		}
 		if !stopping {
 			if staged && w != nil {

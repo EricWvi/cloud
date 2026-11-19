@@ -85,6 +85,8 @@ type Driver struct {
 	serial         atomic.Uint64
 	controlTimeout time.Duration
 	mcpRefreshWait time.Duration
+	// turnCancelWait bounds the wait for TurnCancelSettled (see defaultTurnCancelWait).
+	turnCancelWait time.Duration
 	startProject   func(*projectRuntime) error
 	// wrapClient lets real-Node tests interpose on IPC before the receiver starts.
 	wrapClient func(nodeClient) nodeClient
@@ -124,7 +126,7 @@ func New(opts Options) (*Driver, error) {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, execution.ErrUnavailable
 	}
-	return &Driver{opts: opts, boot: hex.EncodeToString(nonce[:]), projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, recorded: map[string]Checkout{}, controlTimeout: 2 * time.Minute, mcpRefreshWait: 5 * time.Minute}, nil
+	return &Driver{opts: opts, boot: hex.EncodeToString(nonce[:]), projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, recorded: map[string]Checkout{}, controlTimeout: 2 * time.Minute, mcpRefreshWait: 5 * time.Minute, turnCancelWait: defaultTurnCancelWait}, nil
 }
 
 // Reattach makes a workflow workspace's checkout, prepared by an earlier process, the one its
@@ -272,6 +274,20 @@ func (d *Driver) run(ctx context.Context, scope execution.Scope, session executi
 		a.requestEnd()
 	}
 	var refreshDeadline time.Time
+	// ended ends the session for a stop, as every stop did before turn_cancel. A turn that ended
+	// meanwhile keeps its own outcome.
+	ended := func() (execution.Result, error) {
+		result, err := d.cancelledRun(session.ID, ctx.Err())
+		select {
+		case outcome := <-call.done:
+			return outcome.result, outcome.err
+		default:
+			return result, err
+		}
+	}
+	stop := ctx.Done()
+	// unsettled fires when Node has not settled the caller's stop in time (cancel-turn ADR D4).
+	var unsettled <-chan time.Time
 	for {
 		select {
 		case outcome := <-call.done:
@@ -304,14 +320,26 @@ func (d *Driver) run(ctx context.Context, scope execution.Scope, session executi
 				a.fail("mcp_update_failed", err)
 			}
 			a.requestEnd()
-		case <-ctx.Done():
-			result, err := d.cancelledRun(session.ID, ctx.Err())
-			select {
-			case outcome := <-call.done:
-				return outcome.result, outcome.err
-			default:
-				return result, err
+		case <-stop:
+			if errors.Is(context.Cause(ctx), execution.ErrStopTurn) {
+				switch a.stopTurn(call) {
+				case turnStopSent:
+					// Only the turn stops; its settlement arrives on call.done.
+					stop = nil
+					wait := time.NewTimer(d.turnCancelWait)
+					defer wait.Stop()
+					unsettled = wait.C
+					continue
+				case turnStopFinished:
+					outcome := <-call.done
+					return outcome.result, outcome.err
+				}
 			}
+			return ended()
+		case <-call.cancelFallback:
+			return ended()
+		case <-unsettled:
+			return ended()
 		}
 	}
 }

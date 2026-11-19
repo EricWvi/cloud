@@ -339,3 +339,76 @@ func TestDialRejectsUnrequestedThreadPreviews(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// turnCancelGreeting answers Hello with the given turn_cancel confirmation and capabilities, and
+// reports whether the Hello asked for turn cancellation.
+func turnCancelGreeting(conn net.Conn, confirm bool, capabilities []string, requested chan<- bool) error {
+	m, err := readFrame(conn)
+	if err != nil {
+		return err
+	}
+	var hello struct {
+		TurnCancel *bool `json:"turn_cancel"`
+	}
+	if m.Type != "hello" || json.Unmarshal(m.Payload, &hello) != nil || hello.TurnCancel != nil && !*hello.TurnCancel {
+		return errors.New("missing hello, or turn_cancel sent as false instead of omitted")
+	}
+	requested <- hello.TurnCancel != nil
+	answer := map[string]any{"selected_version": 1, "node": Identity{NodeID: "node", IncarnationID: "incarnation"}, "capabilities": capabilities}
+	if confirm {
+		answer["turn_cancel"] = true
+	}
+	payload, _ := json.Marshal(answer)
+	frame, _ := encode(Message{Type: "hello_accepted", Version: 1, Payload: payload})
+	return writeAll(conn, frame)
+}
+
+// Turn cancellation is negotiated like previews: the Controller asks, and a Node that supports it
+// confirms with both the flag and the capability. An older Node ignores the request and answers
+// without either, which keeps the session-ending stop. Any other combination fails the handshake.
+func TestDialNegotiatesTurnCancel(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		ask, confirm bool
+		capabilities []string
+		negotiated   bool
+		refused      bool
+	}{
+		{name: "not asked", capabilities: []string{"agent_session"}},
+		{name: "older Node", ask: true, capabilities: []string{"agent_session"}},
+		{name: "granted", ask: true, confirm: true, capabilities: []string{"agent_session", "turn_cancel"}, negotiated: true},
+		{name: "confirmation without capability", ask: true, confirm: true, capabilities: []string{"agent_session"}, refused: true},
+		{name: "capability without confirmation", ask: true, capabilities: []string{"agent_session", "turn_cancel"}, refused: true},
+		{name: "granted unasked", confirm: true, capabilities: []string{"agent_session", "turn_cancel"}, refused: true},
+		{name: "granted without sessions", ask: true, confirm: true, capabilities: []string{"plugin_install", "turn_cancel"}, refused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requested := make(chan bool, 1)
+			opts, done := fixture(t, func(conn net.Conn) error { return turnCancelGreeting(conn, tc.confirm, tc.capabilities, requested) })
+			opts.TurnCancel = tc.ask
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			client, err := Dial(ctx, opts)
+			if got := <-requested; got != tc.ask {
+				t.Fatalf("Hello asked for turn_cancel=%v, want %v", got, tc.ask)
+			}
+			if tc.refused {
+				if err == nil {
+					client.Close()
+					t.Fatal("accepted an inconsistent turn_cancel negotiation")
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if client.Supports("turn_cancel") != tc.negotiated {
+					t.Fatalf("negotiated turn_cancel=%v, want %v", client.Supports("turn_cancel"), tc.negotiated)
+				}
+				client.Close()
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

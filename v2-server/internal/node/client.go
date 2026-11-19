@@ -29,6 +29,10 @@ type Options struct {
 	// ThreadPreviews asks Node for live thread_preview snapshots. Node grants them only beside
 	// agent_session; Client.ThreadPreviews reports what was actually negotiated.
 	ThreadPreviews bool
+	// TurnCancel declares that this Controller understands CancelTurn, TurnCancelSettled and the
+	// per-session keep choices. Node confirms it with the turn_cancel capability only when it
+	// supports them too; Client.Supports("turn_cancel") reports what was negotiated.
+	TurnCancel bool
 }
 
 // Client owns one IPC connection and one heartbeat goroutine. One caller owns Receive;
@@ -63,6 +67,9 @@ func Dial(ctx context.Context, opts Options) (*Client, error) {
 	if opts.ThreadPreviews {
 		greeting["thread_previews"] = true
 	}
+	if opts.TurnCancel {
+		greeting["turn_cancel"] = true
+	}
 	hello, _ := json.Marshal(greeting)
 	if err = c.Send(ctx, Message{Type: "hello", Version: 1, Payload: hello}); err == nil {
 		var message Message
@@ -85,6 +92,7 @@ func (c *Client) accept(message Message) error {
 		Node         Identity `json:"node"`
 		Capabilities []string `json:"capabilities"`
 		Previews     bool     `json:"thread_previews"`
+		TurnCancel   bool     `json:"turn_cancel"`
 	}
 	if message.Type != "hello_accepted" || json.Unmarshal(message.Payload, &accepted) != nil || accepted.Version != 1 || accepted.Node.NodeID != c.options.ExpectedNodeID || strings.TrimSpace(accepted.Node.IncarnationID) == "" {
 		return errors.New("Node identity or negotiated version mismatch")
@@ -106,6 +114,11 @@ func (c *Client) accept(message Message) error {
 	}
 	if accepted.Previews && (!c.options.ThreadPreviews || !capabilities["agent_session"]) {
 		return errors.New("Node granted thread previews it cannot send")
+	}
+	// The confirmation travels with the capability, beside session support, and only to a
+	// Controller that asked: anything else is a Node this Controller cannot trust to keep sessions.
+	if accepted.TurnCancel != capabilities["turn_cancel"] || accepted.TurnCancel && (!c.options.TurnCancel || !capabilities["agent_session"]) {
+		return errors.New("Node granted turn cancellation inconsistently")
 	}
 	c.identity, c.previews = accepted.Node, accepted.Previews
 	c.capabilities = capabilities

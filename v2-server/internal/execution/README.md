@@ -40,7 +40,7 @@ chat 的 ID 是 conversation，workflow 是 run，schedule 是 occurrence；容�
 
 `Result.NotDelivered` 标出失败的一轮里提示根本没到 Agent：发给 Node 之前就被拒绝（会话已结束、已损坏或 Node 已断开，项目解析失败，或这一轮没能启动；`NotStarted` 的一轮都带它），或者 Node 不执行就拒收了这条命令（会话已结束，或等的 MCP 配置一直没到）。它和会话能否继续无关，那由 `AgentLost` 说明；发送中途失败的一轮可能已经到了 Agent，不标。工作流的交互节点据此不把这样的追问算作一轮，并提示消息未送达。
 
-`StartRequest.Lifetime` 默认 `LifetimeTurn`：没有完成的一轮结束会话。工作流的交互节点用 `LifetimeHeld`：Agent 自己结束、但没有完成的一轮（拒绝、截断、未知停止、非调用方要求的取消）不结束会话，调用方可以接着发下一轮；Agent 丢失（崩溃、事件流断开、历史读不全、会话已结束或被停止）时仍结束会话，这一轮的 `Result.AgentLost` 为 true，调用方据此知道会话已不能继续。非 workflow 调用方用 `LifetimeHeld` 返回 `ErrInvalidRequest`。
+`StartRequest.Lifetime` 默认 `LifetimeTurn`：没有完成的一轮结束会话，唯一的例外是调用方停止、driver 保留了会话的一轮（`Result.SessionKept`，不持久化）。工作流的交互节点用 `LifetimeHeld`：Agent 自己结束、但没有完成的一轮（拒绝、截断、未知停止、非调用方要求的取消）不结束会话，调用方可以接着发下一轮；Agent 丢失（崩溃、事件流断开、历史读不全、会话已结束或被停止）时仍结束会话，这一轮的 `Result.AgentLost` 为 true，调用方据此知道会话已不能继续。非 workflow 调用方用 `LifetimeHeld` 返回 `ErrInvalidRequest`。
 Start/StartModel/Append 的 context 控制本次调用，调用返回或浏览器断开不停止已开始的执行。
 `ReadAttempt` 按完整 Caller 查询已有 Turn，不派发工作。
 
@@ -72,7 +72,8 @@ StopReason 与 FailureCode 分别保留，清理失败不能改写已持久化�
 
 ## Cancel、End 与重启
 
-- 有项目的 Agent：`Cancel(ref)` 通过固定 Node 的停止命令结束整个活动会话，等待停止确认并保存真实终态；
+- 有项目的 Agent：`Cancel(ref)` 以 `ErrStopTurn` 停这一轮。会话的 Node 能在取消后保留会话（`turn_cancel`）时只停这一轮，会话照常 Append；
+  否则，或者 Node 判定不能保留，就结束整个活动会话，等待停止确认并保存真实终态，结果带 `AgentLost`，
   后续 Append 返回 `ErrSessionEnded`，页面提示新开对话。不重放历史，不悄悄另起 Agent 冒充原会话。
 - 无项目模型直连：`Cancel(ref)` 只停止本轮 provider 请求，确认后会话仍可 Append。
 - 对已终态的 turn 重复 Cancel 返回实际结果，不误停之后的轮次；与自然完成竞争时也返回实际结果，

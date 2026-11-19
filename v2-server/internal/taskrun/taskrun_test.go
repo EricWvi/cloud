@@ -18,13 +18,15 @@ import (
 
 // port models the fixed-Node rules task runs depend on: each Start makes a session owned by its
 // scope, a session runs one turn at a time, a turn ends when the test finishes it, and cancelling a
-// running turn ends the whole session.
+// running turn ends the whole session, unless keepOnCancel models a Node that keeps it.
 type port struct {
 	mu       sync.Mutex
 	next     int
 	sessions map[string]*session
 	turns    map[string]*execution.Turn
 	attempts map[string]execution.Ref
+	// keepOnCancel makes Cancel stop only the turn, as over a Node that negotiated turn_cancel.
+	keepOnCancel bool
 }
 
 type session struct {
@@ -130,9 +132,26 @@ func (p *port) runtime() *executiontest.Stub {
 				return *turn.Result, nil
 			}
 			r := p.end(s, turn, execution.StatusCancelled)
+			if p.keepOnCancel {
+				return r, nil
+			}
 			s.ended = true
 			p.publish(s, execution.Event{Kind: execution.EventSessionEnded})
 			return r, nil
+		},
+		ReadSessionFunc: func(_ context.Context, scope execution.Scope, id string) (execution.Session, error) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			s, e := p.owned(scope, id)
+			if e != nil {
+				return execution.Session{}, e
+			}
+			read := execution.Session{ID: id}
+			if s.ended {
+				at := time.Now()
+				read.EndedAt = &at
+			}
+			return read, nil
 		},
 		EndFunc: func(_ context.Context, scope execution.Scope, id string) error {
 			p.mu.Lock()
@@ -395,6 +414,40 @@ func TestStopEndsTheRunAndReturnsTheTask(t *testing.T) {
 	}
 	if _, e := f.host.Stop(f.ctx, f.member, task.ID, run.ID); !errors.Is(e, taskrun.ErrNoLiveRun) {
 		t.Fatalf("second stop = %v", e)
+	}
+}
+
+// When the session outlives a stopped turn (the Node kept it), Stop settles only the turn: the run
+// stays live and idle with the task back in 待处理, and the starter's next comment follows up in
+// the same session.
+func TestStopKeepsTheRunWhenItsSessionOutlivesTheTurn(t *testing.T) {
+	f := newFixture(t)
+	f.port.keepOnCancel = true
+	task := f.task(t, opencode)
+	run, e := f.host.Start(f.ctx, f.owner, task.ID, "start", taskrun.StartInput{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	stopped, e := f.host.Stop(f.ctx, f.member, task.ID, run.ID)
+	if e != nil || !stopped.Live() || stopped.TurnActive() || stopped.EndReason != "" || stopped.LastResult != "cancelled" {
+		t.Fatalf("stopped = %+v %v", stopped, e)
+	}
+	if got := f.await(t, task.ID, store.TaskPending); got.ActiveRun == nil || got.ActiveRun.ID != run.ID {
+		t.Fatalf("task after a kept stop = %+v", got)
+	}
+	follow, e := f.host.Comment(f.ctx, f.owner, task.ID, "follow", taskrun.CommentInput{Body: "继续", ToAgent: true})
+	if e != nil || follow.RunID != run.ID {
+		t.Fatalf("follow-up after the stop = %+v %v", follow, e)
+	}
+	again, e := f.store.TaskRun(f.ctx, f.tenant, task.ID, run.ID)
+	if e != nil || again.SessionID != run.SessionID || !again.TurnActive() {
+		t.Fatalf("run after the follow-up = %+v %v", again, e)
+	}
+	// Stopping the run's idle session ends it.
+	f.port.finish(t, again.LastTurnID, execution.StatusCompleted)
+	f.await(t, task.ID, store.TaskReview)
+	if ended, e := f.host.Stop(f.ctx, f.member, task.ID, run.ID); e != nil || ended.State != store.TaskRunEnded || ended.EndReason != store.TaskRunStopped {
+		t.Fatalf("stop of the idle run = %+v %v", ended, e)
 	}
 }
 
