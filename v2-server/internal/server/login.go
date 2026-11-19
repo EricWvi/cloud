@@ -15,8 +15,11 @@ import (
 // owner already invited may sign in. It has no password, so it is for development and demos.
 const LoginProviderEmail = "email"
 
+// LoginProviderHuaweiIDaaS signs in with Huawei IDaaS (see the idaas package).
+const LoginProviderHuaweiIDaaS = "huawei-idaas"
+
 // LoginProviders are the login methods this build implements; V2_LOGIN picks among them.
-var LoginProviders = []string{LoginProviderEmail}
+var LoginProviders = []string{LoginProviderEmail, LoginProviderHuaweiIDaaS}
 
 // SessionCookie carries the session over plain http, the Gateway's development cookie name.
 const SessionCookie = "ora_session"
@@ -78,7 +81,8 @@ func (h *handler) providers(w http.ResponseWriter, _ *http.Request) {
 }
 
 // login is the Gateway's POST /auth/login. The email login signs in at once and sends the browser
-// straight back to returnTo; an unknown address is rejected, never created. A method V2_LOGIN does
+// straight back to returnTo; an unknown address is rejected, never created. A redirect method
+// answers with its sign-in address and finishes in callback. A method V2_LOGIN does
 // not offer is unknown_provider, so turning email off leaves no way to it.
 func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 	if !h.sameOrigin(r) {
@@ -98,6 +102,10 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Provider == "" {
 		in.Provider = LoginProviderEmail
+	}
+	if p, ok := h.redirectProvider(in.Provider); ok {
+		h.startRedirectLogin(w, in.Provider, p, in.ReturnTo)
+		return
 	}
 	if in.Provider != LoginProviderEmail || !slices.Contains(h.loginProviders(), in.Provider) {
 		fault(w, http.StatusBadRequest, "unknown_provider")

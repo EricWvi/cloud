@@ -25,6 +25,8 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/boot"
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/executionruntime"
+	"github.com/wanglongan587/cloud/v2-server/internal/idaas"
+	loginpkg "github.com/wanglongan587/cloud/v2-server/internal/login"
 	"github.com/wanglongan587/cloud/v2-server/internal/nodeservices"
 	"github.com/wanglongan587/cloud/v2-server/internal/pluginmarket"
 	"github.com/wanglongan587/cloud/v2-server/internal/preparedassets"
@@ -78,7 +80,19 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	if e != nil {
 		return e
 	}
+	// -cleanup only removes Node directories and serves nothing, so it needs no login configuration.
+	var redirects map[string]loginpkg.Provider
+	if !cleanup {
+		if redirects, e = loginRedirects(login, publicURL, os.Getenv); e != nil {
+			return e
+		}
+	}
 	slog.Info("login methods", "V2_LOGIN", strings.Join(login, ","))
+	if c, ok := redirects[server.LoginProviderHuaweiIDaaS].(*idaas.Client); ok {
+		authorize, token, userinfo := c.Endpoints()
+		// The callback is what the IDaaS application must have registered, character for character.
+		slog.Info("huawei-idaas", "callback", publicURL.String()+"/auth/callback/"+server.LoginProviderHuaweiIDaaS, "authorize", authorize, "token", token, "userinfo", userinfo)
+	}
 	if login.has(server.LoginProviderEmail) && publicURL != nil && publicURL.Scheme == "https" {
 		slog.Warn("email login is on at an https address: knowing a member's address is enough to sign in as them; a deployment sets V2_LOGIN without email")
 	}
@@ -124,6 +138,10 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	}
 	for _, m := range db.AppliedMigrations() {
 		slog.Info("applied database migration", "version", m.Version, "name", m.Name)
+	}
+	if e := db.ClaimProfile(ctx, databaseProfile(login)); e != nil {
+		db.Close()
+		return e
 	}
 	db.DisableOfficialMarket(envDefault("V2_PLUGIN_MARKETPLACE_URL", "https://github.com/ora-space/marketplace") == "")
 	var preset store.Preset
@@ -339,6 +357,7 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 		RefreshOfficial:    refreshOfficial,
 		SessionTTL:         7 * 24 * time.Hour,
 		LoginProviders:     login,
+		LoginRedirects:     redirects,
 		PublicURL:          publicURL,
 		Projects:           projects,
 		Execution:          runtime,

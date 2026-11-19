@@ -84,6 +84,12 @@ func TestAdminInvitePrintsAOneTimeOwnerLink(t *testing.T) {
 }
 
 func TestAdminInviteChecksConfigurationFirst(t *testing.T) {
+	// There is no default: a forgotten V2_LOGIN must not mark a new deployment database as a
+	// development one.
+	t.Setenv("V2_LOGIN", "")
+	if err := adminInvite([]string{"-db", "invalid database URL", "-team", "x"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "V2_LOGIN") {
+		t.Fatalf("unset V2_LOGIN = %v", err)
+	}
 	t.Setenv("V2_LOGIN", "unknown")
 	if err := adminInvite([]string{"-db", "invalid database URL", "-team", "x"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "V2_LOGIN") {
 		t.Fatalf("unknown login = %v", err)

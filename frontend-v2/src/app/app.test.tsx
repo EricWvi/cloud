@@ -204,3 +204,36 @@ describe('accounts outside any workspace', () => {
     expect(await screen.findByRole('heading', { name: '登录 Ora' })).toBeInTheDocument()
   })
 })
+
+describe('redirect login', () => {
+  it('starts the provider round trip from its button', async () => {
+    const posted: string[] = []
+    fakeBackend((c) => {
+      if (c.url === '/api/v1/me') return { status: 401, data: {} }
+      if (c.url === '/auth/providers') return { status: 200, data: { providers: ['huawei-idaas'] } }
+      if (c.url === '/auth/login') return posted.push(String(c.data)), { status: 200, data: { authorizationUrl: 'about:blank' } }
+      return undefined
+    })
+    renderAt('/workflows')
+    await userEvent.click(await screen.findByRole('button', { name: '使用华为账号登录' }))
+    await waitFor(() => expect(posted).toHaveLength(1))
+    expect(JSON.parse(posted[0])).toEqual({ provider: 'huawei-idaas', returnTo: '/workflows' })
+    expect(screen.queryByLabelText('邮箱')).not.toBeInTheDocument()
+  })
+
+  it('explains a failed round trip once and drops it from the address', async () => {
+    const posted: string[] = []
+    fakeBackend((c) => {
+      if (c.url === '/api/v1/me') return { status: 401, data: {} }
+      if (c.url === '/auth/providers') return { status: 200, data: { providers: ['huawei-idaas'] } }
+      if (c.url === '/auth/login') return posted.push(String(c.data)), { status: 200, data: { authorizationUrl: 'about:blank' } }
+      return undefined
+    })
+    const router = renderAt('/?login_error=unavailable')
+    expect(await screen.findByRole('alert')).toHaveTextContent('暂时连不上登录服务，请稍后再试。')
+    await waitFor(() => expect(router.state.location.search).toBe(''))
+    await userEvent.click(await screen.findByRole('button', { name: '使用华为账号登录' }))
+    await waitFor(() => expect(posted).toHaveLength(1))
+    expect(JSON.parse(posted[0]).returnTo).not.toContain('login_error')
+  })
+})

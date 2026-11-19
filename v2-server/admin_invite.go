@@ -30,7 +30,10 @@ func adminInvite(args []string, out io.Writer) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("admin-invite takes no arguments, got %q", fs.Args())
 	}
-	if _, e := parseLogin(os.Getenv("V2_LOGIN"), false); e != nil {
+	// Its first run fixes the database's profile, so V2_LOGIN must be the server's (required, as
+	// for a server start).
+	methods, e := parseLogin(os.Getenv("V2_LOGIN"), false)
+	if e != nil {
 		return e
 	}
 	publicURL, e := parsePublicURL(os.Getenv("V2_PUBLIC_URL"))
@@ -44,6 +47,10 @@ func adminInvite(args []string, out io.Writer) error {
 		return e
 	}
 	defer db.Close()
+	// Run before the first server start, this is what fixes the database's profile.
+	if e := db.ClaimProfile(ctx, databaseProfile(methods)); e != nil {
+		return e
+	}
 	if name == "" {
 		names, e := db.TenantNames(ctx)
 		if e != nil {

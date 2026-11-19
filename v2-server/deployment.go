@@ -10,8 +10,12 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
+	"github.com/wanglongan587/cloud/v2-server/internal/idaas"
+	"github.com/wanglongan587/cloud/v2-server/internal/login"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
+	"github.com/wanglongan587/cloud/v2-server/internal/store"
 )
 
 // envDefault preserves an explicit empty value, which disables optional integrations.
@@ -83,4 +87,50 @@ func parsePublicURL(value string) (*url.URL, error) {
 	}
 	u.Path = ""
 	return u, nil
+}
+
+// loginRedirects builds the redirect login methods V2_LOGIN offers from their configuration,
+// before any database or filesystem effect. Every such method needs V2_PUBLIC_URL, from which its
+// callback address is derived; it must be https, or http on a loopback address for local
+// development against a stand-in provider.
+func loginRedirects(methods loginMethods, publicURL *url.URL, getenv func(string) string) (map[string]login.Provider, error) {
+	redirects := map[string]login.Provider{}
+	if !methods.has(server.LoginProviderHuaweiIDaaS) {
+		return redirects, nil
+	}
+	if publicURL == nil || (publicURL.Scheme != "https" && !idaas.Loopback(publicURL.Hostname())) {
+		return nil, errors.New("V2_LOGIN offers huawei-idaas, which needs an https V2_PUBLIC_URL (http only on a loopback address)")
+	}
+	var missing []string
+	for _, key := range []string{"V2_IDAAS_CLIENT_ID", "V2_IDAAS_CLIENT_SECRET"} {
+		if getenv(key) == "" {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("V2_LOGIN offers huawei-idaas but %s is not set", strings.Join(missing, " and "))
+	}
+	client, e := idaas.New(idaas.Options{
+		BaseURL:          getenv("V2_IDAAS_BASE_URL"),
+		ClientID:         getenv("V2_IDAAS_CLIENT_ID"),
+		ClientSecret:     getenv("V2_IDAAS_CLIENT_SECRET"),
+		API:              idaas.API(getenv("V2_IDAAS_API")),
+		Scope:            getenv("V2_IDAAS_SCOPE"),
+		DisplayNameField: getenv("V2_IDAAS_DISPLAY_NAME_FIELD"),
+		HTTP:             idaas.NewHTTPClient(10 * time.Second),
+	})
+	if e != nil {
+		return nil, e
+	}
+	redirects[server.LoginProviderHuaweiIDaaS] = client
+	return redirects, nil
+}
+
+// databaseProfile is what a start with these login methods makes of the database: email login
+// brings the development accounts and demo data, so only it may start a development database.
+func databaseProfile(methods loginMethods) string {
+	if methods.has(server.LoginProviderEmail) {
+		return store.ProfileDevelopment
+	}
+	return store.ProfileDeployment
 }
