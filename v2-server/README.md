@@ -884,7 +884,7 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 
 真实 PostgreSQL 测试覆盖八个并发请求返回同一个触发、不同触发各自存在、编辑后的快照不变、暂停/版本/时刻拒绝、手动重试身份、按时间倒序与同时间戳并列时的复合游标分页隔离，以及关闭数据库连接后重新读取。
 
-- 登录：没有外部 provider，也没有 attempt 和 PKCE；dev 登录固定为一个演示用户。
+- 登录：`email` 只凭邮箱、没有密码，只认 `users.json` 预设或被邀请过的邮箱，仅用于开发和演示；`huawei-idaas` 是机密客户端的授权码流程，不用 PKCE。进行中的登录只存在进程内存里（10 分钟、单次），重启后要重新登录发起；同一个人用两种方式登录是两个账号，不做账号关联。
 - 会话存在同一个库里，只存 token 的 SHA-256；没有 Gateway 现签的内部 JWT。
 - 对话与插件市场写请求检查 `Idempotency-Key`；插件市场同时保存成功响应以重放同一选择。其余写请求不检查该头，也没有执行代次隔离。定时任务配置与小队更新使用乐观版本检查，对话的创建和发消息把 `Idempotency-Key` 用作执行的 attempt ID。
 - 小队权限把 workspace `owner` 角色当作工作区管理员；把成员移出工作区（`DELETE /api/v2/tenants/{tid}/members/{uid}`）会同时结束他在本工作区小队里的编组。
