@@ -385,6 +385,34 @@ func TestNotifyRaceWithRemoval(t *testing.T) {
 	}
 }
 
+// Removing a member through the team's own operation takes their notifications with the
+// membership row, and nothing reaches them afterwards.
+func TestRemoveMemberDropsNotifications(t *testing.T) {
+	f := newSquadFixture(t)
+	ctx := f.ctx
+	owner := f.login(t, "owner", "owner")
+	alice := f.login(t, "alice", "member")
+	addProject(t, f, owner)
+	task := createTask(t, f, owner, store.TaskInput{Title: "移出前", Assignee: &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: alice}})
+	if items, _ := inbox(t, f, alice); len(items) != 1 {
+		t.Fatalf("before removal = %+v", items)
+	}
+	if e := f.store.RemoveMember(ctx, f.tenant, alice); e != nil {
+		t.Fatal(e)
+	}
+	var n int
+	if e := f.db.QueryRow(ctx, `SELECT count(*) FROM v2_notifications WHERE user_id = $1`, alice).Scan(&n); e != nil || n != 0 {
+		t.Fatalf("notifications left after RemoveMember: %d %v", n, e)
+	}
+	if _, e := f.store.CreateTaskComment(ctx, store.NewTaskComment{TenantID: f.tenant, TaskID: task.ID, AuthorID: owner,
+		CreateKey: "after", Body: "还在吗", Mentions: []store.TaskMention{{Type: "user", ID: alice}}}); e != nil {
+		t.Fatalf("comment mentioning a removed member: %v", e)
+	}
+	if e := f.db.QueryRow(ctx, `SELECT count(*) FROM v2_notifications WHERE user_id = $1`, alice).Scan(&n); e != nil || n != 0 {
+		t.Fatalf("removed member notified: %d %v", n, e)
+	}
+}
+
 func countFor(items []store.Notification, task, kind string) int {
 	n := 0
 	for _, item := range items {
