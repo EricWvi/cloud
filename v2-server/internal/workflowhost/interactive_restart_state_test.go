@@ -3,10 +3,12 @@ package workflowhost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -297,4 +299,73 @@ func TestARestartNumbersAfterASummaryWithoutSent(t *testing.T) {
 	if got, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "第三条"); err != nil || got.Sent != 2 {
 		t.Fatalf("next = %v %v, want message 2", got.Sent, err)
 	}
+}
+
+// A startup that aborts while rebuilding one run must not have resumed another first: the exit
+// would cancel the work that run had just dispatched, and the next sweep would fail it too. Here
+// the absorbed Iteration run comes first and the parked run's summary rewrite then fails: nothing
+// of the Iteration's next round exists yet, no run stays registered, and the next start resumes
+// both as if the aborted one never happened.
+func TestAnAbortedStartupHasResumedNoRun(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	parkedRun, a := f.startParked(t, interactiveChain, "初稿一")
+	rowA := f.nodeRow(t, parkedRun, "a")
+	f.exec.recordedTurns(a, rowA.ID, completed("初稿一"))
+	iterationRun := f.run(t, iterationGraph("continue", []string{"one", "two"}, 50), nil)
+	if _, err := f.host.StartRun(ctx, f.scope, iterationRun); err != nil {
+		t.Fatal(err)
+	}
+	f.exec.awaitStart(t)
+	f.await(t, iterationRun, func(_ store.WorkflowRun, rows []store.WorkflowNodeRun) bool {
+		return iterationRow(rows, "worker", 0).SessionID != nil
+	})
+
+	f.host.Close()
+	f.host = f.newHost(t)
+	var workerStarts atomic.Int32
+	f.exec.beforeStart = func(req execution.StartRequest) error {
+		if req.Caller.NodeID == "worker" {
+			workerStarts.Add(1)
+		}
+		return nil
+	}
+	f.host.moveNode = func(ctx context.Context, run, nodeRun, from, to string, merge func([]byte) ([]byte, error)) (bool, error) {
+		if nodeRun == rowA.ID && from == store.WorkflowStatusPending && to == store.WorkflowStatusPending {
+			return false, execution.ErrUnavailable
+		}
+		return f.s.MoveWorkflowEngineNode(ctx, run, nodeRun, from, to, merge)
+	}
+	ids, err := f.host.SweepInterrupted(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(ids, iterationRun) || !slices.Contains(ids, parkedRun) {
+		t.Fatalf("swept %v, want both runs", ids)
+	}
+	if err := f.host.ResumeInterrupted(ctx, []string{iterationRun, parkedRun}); !errors.Is(err, execution.ErrUnavailable) {
+		t.Fatalf("startup = %v, want it aborted by the failed summary rewrite", err)
+	}
+	rows, err := f.s.WorkflowEngineNodeRuns(ctx, iterationRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next := iterationRow(rows, "worker", 1); next.ID != "" || workerStarts.Load() != 0 {
+		t.Fatalf("round 1 row %+v, %d worker starts: the Iteration run was resumed before startup aborted", next, workerStarts.Load())
+	}
+	if f.host.state(iterationRun) != nil || f.host.state(parkedRun) != nil {
+		t.Fatal("an aborted startup left a run registered that it never resumed")
+	}
+
+	f.host.Close() // the process exits on the aborted startup
+	f.restart(t)
+	second := f.exec.awaitStart(t)
+	if f.exec.request(second).Caller.NodeID != "worker" {
+		t.Fatalf("started %+v, want the Iteration's next round", f.exec.request(second).Caller)
+	}
+	f.exec.finish(second, completed("two"))
+	if run, _ := f.await(t, iterationRun, terminal); run.Status != store.WorkflowStatusSucceeded || run.Output == nil || *run.Output != `{"failed":1,"items":["two"]}` {
+		t.Fatalf("Iteration run = %+v, want only the round the first restart interrupted lost", run)
+	}
+	f.await(t, parkedRun, awaitingInput("a"))
 }
