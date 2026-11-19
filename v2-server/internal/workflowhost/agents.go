@@ -203,7 +203,7 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 	mcp, err := h.store.ResolveWorkflowMCP(h.ctx, st.scope, d.ProjectID, cfg.MCPs)
 	if err != nil {
 		var setup *execution.MCPFailure
-		if !errors.As(err, &setup) {
+		if h.ctx.Err() == nil && !errors.As(err, &setup) {
 			reason := publicReason(err)
 			if errors.Is(err, pluginmarket.ErrCredentials) {
 				reason = pluginmarket.ErrCredentials.Error()

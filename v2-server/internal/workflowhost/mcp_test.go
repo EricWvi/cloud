@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +22,10 @@ func TestMCPResolutionInfrastructureErrorsRemainRetryable(t *testing.T) {
 		if failure.Kind != workflow.FailureSession || failure.Code != "" || detail["auto_retryable"] != true || failure.Message != "execution could not resolve MCP configuration" {
 			t.Fatalf("infrastructure error misclassified or exposed: %+v", failure)
 		}
+	}
+	unknown := mcpFailure(&execution.MCPFailure{Code: "mcp_unknown_code", PluginID: "official/acme.tools"})
+	if unknown.Kind != workflow.FailureSession || unknown.Code != "" || unknown.PluginID != "" {
+		t.Fatalf("unknown MCP code became a public configuration diagnostic: %+v", unknown)
 	}
 	for _, code := range []string{"mcp_plugin_missing", "mcp_setting_missing"} {
 		failure := mcpFailure(fmt.Errorf("resolve: %w", &execution.MCPFailure{Code: code, PluginID: "official/acme.tools"}))
@@ -43,10 +49,13 @@ func TestMCPLifecycleGateFailuresAreExplicitAndNotRetryable(t *testing.T) {
 
 func TestStartRefusalRetainsMCPDiagnostic(t *testing.T) {
 	f := newFixture(t)
+	var starts atomic.Int32
 	f.exec.beforeStart = func(execution.StartRequest) error {
-		return fmt.Errorf("start: %w", &execution.MCPFailure{Code: "mcp_node_capability_missing"})
+		starts.Add(1)
+		return fmt.Errorf("start: %w", &execution.MCPFailure{Code: "mcp_node_capability_missing", PluginID: "official/acme.tools"})
 	}
-	rid := f.run(t, twoAgents, str("check"))
+	graph := strings.Replace(twoAgents, `"roleId":"reviewer"`, `"roleId":"reviewer","retry":{"enabled":true,"maxRetries":2,"initialDelaySeconds":0}`, 1)
+	rid := f.run(t, graph, str("check"))
 	if _, err := f.host.StartRun(t.Context(), f.scope, rid); err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +67,10 @@ func TestStartRefusalRetainsMCPDiagnostic(t *testing.T) {
 	if err := json.Unmarshal(n.Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if n.SessionID != nil || payload.Detail["kind"] != "missing_agent_config" || payload.Detail["code"] != "mcp_node_capability_missing" || payload.Detail["auto_retryable"] != false {
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("Start called %d times, want 1", got)
+	}
+	if n.SessionID != nil || payload.Detail["kind"] != "missing_agent_config" || payload.Detail["code"] != "mcp_node_capability_missing" || payload.Detail["plugin_id"] != "official/acme.tools" || payload.Detail["auto_retryable"] != false {
 		t.Fatal("Start refusal lost the setup diagnostic", payload.Detail)
 	}
 }

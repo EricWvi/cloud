@@ -25,6 +25,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/executionruntime"
 	"github.com/wanglongan587/cloud/v2-server/internal/nodeservices"
+	"github.com/wanglongan587/cloud/v2-server/internal/pluginmarket"
 	"github.com/wanglongan587/cloud/v2-server/internal/projectrepos"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
@@ -211,7 +212,8 @@ func TestInteractiveMCPKeyFailureBeforeStart(t *testing.T) {
 	if n.SessionID != nil || payload.Detail["kind"] != "interactive_session" || payload.Detail["auto_retryable"] != false {
 		t.Fatal("interactive pre-start failure lost its retry policy", payload.Detail)
 	}
-	if !strings.Contains(logs.String(), rid) || !strings.Contains(logs.String(), n.ID) || strings.Contains(logs.String(), mcpFixtureSecret) {
+	f.host.workers.Wait()
+	if !strings.Contains(logs.String(), rid) || !strings.Contains(logs.String(), n.ID) || !strings.Contains(logs.String(), pluginmarket.ErrCredentials.Error()) || strings.Contains(logs.String(), mcpFixtureSecret) {
 		t.Fatal("missing run correlation or unsafe credential diagnostic")
 	}
 }

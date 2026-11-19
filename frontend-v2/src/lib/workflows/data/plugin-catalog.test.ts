@@ -1,7 +1,7 @@
 import { afterEach, expect, it } from 'vitest'
 import { http } from '@/lib/api-client'
 import { fakeBackend } from '@/test/backend'
-import { workflowPluginCatalog } from './plugin-catalog'
+import { workflowMcpCatalog, workflowPluginCatalog } from './plugin-catalog'
 
 const original = http.defaults.adapter
 afterEach(() => { http.defaults.adapter = original })
@@ -41,6 +41,15 @@ it('annotates a selected Skill with its project delivery failure', async () => {
     state: 'failed',
     failure: '技能包下载失败。',
   })
+})
+
+it('marks an installed MCP with unreadable settings as unavailable', async () => {
+  fakeBackend(() => ({ status: 200, data: { items: [{
+    id: 'official/acme.tools', name: 'Acme', pluginVersion: '1.0.0', complete: false, settingsUnavailable: true,
+  }] } }))
+  expect(await workflowMcpCatalog('t')).toMatchObject([{
+    id: 'official/acme.tools', configuration: { state: 'unavailable', errorCode: 'mcp_settings_unavailable' },
+  }])
 })
 
 it('does not substitute demo plugins on a catalog failure', async () => {

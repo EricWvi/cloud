@@ -953,7 +953,7 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 
 每个租户与插件的 revision 独立递增，卸载后保留版本计数。重新安装不会复用旧 revision，旧页面提交的设置或删除请求返回版本冲突；升级已有数据库时先从当前安装记录回填版本计数。
 
-工作流只解析启用且明确选择的 MCP。配置缺失会标出 plugin_id、setting_id 或 transport。数据库读取失败按执行失败处理。当前 Controller 在创建 Session/Turn 前拒绝非空选择，解析阶段只读包元数据和设置。驱动对旧资产检查 `session_mcp_lifecycle` 能力。带生命周期的首轮以 generation 0 和显式选择构造，追加轮携带各自的 generation 下限。可靠的轮次失败在结果写入后确认。配置目标更新、拒绝后的补发和宿主健康探测仍需接线。设置值仅供内存派发，执行记录保留无值身份。使用 `TEST_DATABASE_URL`、`V2_NODE_ASSETS_DIR` 运行 `go test -race -run TestRealWorkflowMCPLifecycleGate ./internal/workflowhost` 可验证当前门禁和禁用绑定后的真实执行。
+工作流只解析启用且明确选择的 MCP。配置缺失会标出 plugin_id、setting_id 或 transport。部署密钥缺失或轮换导致解密失败时，自动节点沿用会话重试策略，交互节点保留人工恢复。插件页会提示检查部署密钥，owner 仍可移除受影响的安装。驱动检查 Node 的 `session_mcp_lifecycle` 能力。首轮以 generation 0 和显式选择构造，追加轮携带各自的 generation 下限。设置值仅供内存派发，执行记录保留无值身份。使用 `TEST_DATABASE_URL`、`V2_NODE_ASSETS_DIR` 运行 `go test -race -run '^TestRealWorkflowMCPLifecycle$' ./internal/workflowhost` 可验证真实 Node 的生命周期行为。
 
 ### 项目 Skill 安装
 
