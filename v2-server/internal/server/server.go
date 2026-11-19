@@ -129,8 +129,8 @@ type Options struct {
 	// Deliveries reads retained turn deliveries for the change view and patch download; nil
 	// answers 503 workspace_unavailable wherever a delivery would be read.
 	Deliveries DeliveryReader
-	// WorkspaceReclaims starts reclaiming a deleted conversation's checkout right after the
-	// deletion; nil leaves the recorded reclaim to the next server start.
+	// WorkspaceReclaims previews and executes the reclaim of a deleted conversation's checkout;
+	// nil (no Agent runtime, so no checkouts) leaves a recorded reclaim to the next start.
 	WorkspaceReclaims chat.Reclaims
 	// MaxPatchBytes caps a downloadable delivery patch; zero or less uses DefaultMaxPatchBytes.
 	MaxPatchBytes int
