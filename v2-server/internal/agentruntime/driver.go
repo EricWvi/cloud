@@ -140,13 +140,33 @@ func (d *Driver) Reattach(workspaceID, cloneExecution, path string) {
 }
 
 // Run executes the admitted turn. Normal Append reuses its original live Agent conversation. A
-// turn that fails before the session's Agent was ever sent its start is marked NotStarted.
+// turn that fails before the session's Agent was ever sent its start is marked NotStarted. A
+// failed turn whose command never left for Node, or that Node refused without running it, is
+// marked NotDelivered: its prompt never reached the Agent, whatever became of the session.
 func (d *Driver) Run(ctx context.Context, scope execution.Scope, session execution.Session, turn execution.Turn, emit func(context.Context, execution.Event) error) (execution.Result, error) {
 	result, err := d.run(ctx, scope, session, turn, emit)
 	if err != nil && result.Status == execution.StatusFailed && !d.agentStarted(session.ID) {
 		result.NotStarted = true
 	}
+	if result.Status == execution.StatusFailed && !d.turnSent(session.ID, turn.Ref.TurnID) {
+		result.NotDelivered = true
+	}
 	return result, err
+}
+
+// turnSent reports whether the turn's command may have reached Node and Node has not refused it.
+// The execution service runs one turn of a session at a time, so the session's record is this
+// turn's until Run returns; a session whose preparation failed is not retained and sent nothing.
+func (d *Driver) turnSent(sid, turn string) bool {
+	d.mu.Lock()
+	a := d.sessions[sid]
+	d.mu.Unlock()
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.sent == turn
 }
 
 // agentStarted reports whether the session's Agent was sent its start. A session whose
@@ -269,7 +289,10 @@ func (d *Driver) run(ctx context.Context, scope execution.Scope, session executi
 				continue
 			}
 			if errors.Is(err, errMCPRefreshWait) {
+				// Node refused the command for its MCP generation and never queued it, so the
+				// prompt never reached the Agent; the session stays for the next turn.
 				result := failed(errMCPRefreshWait.Error())
+				result.NotDelivered = true
 				if a.publish(execution.Event{Ref: turn.Ref, Kind: execution.EventTurnEnded, Result: &result}) == nil {
 					a.complete(turnOutcome{call.id, result, nil})
 					continue

@@ -92,8 +92,9 @@ type interactiveNode struct {
 	// the turn completed before the stop reached it.
 	stopping bool
 	// undelivered means the last message the starter sent was accepted (SendNodeTurn returned)
-	// and then refused by the execution service, so it never ran. The summary says so until the
-	// next message is claimed; nothing else records the lost message.
+	// and then never reached the Agent: the execution service refused it, or accepted it and the
+	// Agent driver refused it (execution.Result.NotDelivered). The summary says so until the next
+	// message is claimed; nothing else records the lost message as such.
 	undelivered bool
 }
 
@@ -104,6 +105,14 @@ type followUp struct {
 	prompt execution.Prompt
 	// seq is the message's number among the starter's messages to the node.
 	seq int
+}
+
+// delivered reports whether a settled turn's prompt reached the Agent. Only NotDelivered says it
+// did not: the execution service sets it on NotStarted turns too, while a turn recorded before
+// the flag existed carries NotStarted alone and was counted as a turn, so it still is (its
+// summary never said the message was lost, and a rebuild must not change that silently).
+func delivered(r execution.Result) bool {
+	return !r.NotDelivered
 }
 
 // endedNormally is the end_turn rule: only a complete EndTurn answer completes without force.
@@ -232,6 +241,26 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 			h.endLingering(st, n.d.RunID, n.session)
 		}
 		h.fail(n.d, workflow.Failure{Kind: workflow.FailureInteractiveSession, Message: message})
+		return
+	}
+	if err == nil && seq > 0 && !delivered(result) {
+		// The execution service accepted the starter's message and the Agent driver then refused
+		// it before the Agent got it (the session had ended, broken or lost its Node and no new
+		// Agent could take it, or Node refused the command). It is not a turn: the node stays as
+		// its last delivered turn left it, and the summary says the message was lost, as for one
+		// refused at Append. A session the refusal ended (AgentLost) takes no further message.
+		n.undelivered = true
+		ended := result.AgentLost || n.stopping
+		n.stopping = false
+		if ended {
+			n.sessionEnded = true
+		}
+		st.mu.Unlock()
+		if ended {
+			h.endInteractive(st, n)
+		}
+		h.log.Warn("interactive workflow turn not delivered", "run", n.d.RunID, "node_run", n.d.NodeRunID, "failure", result.FailureCode, "session_ended", ended)
+		h.park(st, n)
 		return
 	}
 	n.lastStopCause = ""

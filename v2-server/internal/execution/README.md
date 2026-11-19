@@ -38,6 +38,8 @@ chat 的 ID 是 conversation，workflow 是 run，schedule 是 occurrence；容�
 
 `Result.NotStarted` 标出首轮在 Agent 启动之前就失败（项目、checkout、插件或 Skill 没准备好，或在发给 Node 之前就被拒绝：Agent 配置或模型授权没通过，或这期间会话被结束、Node 断开），和 `AgentLost` 一起出现；`FailureCode` 为 `checkout_busy`、`checkout_session_limit`、`checkout_too_deep` 时是 Node 按 checkout 拒绝了这个会话（`CheckoutRefused`）。调用方据此区分“从来没有会话”和“会话中途丢了”。
 
+`Result.NotDelivered` 标出失败的一轮里提示根本没到 Agent：发给 Node 之前就被拒绝（会话已结束、已损坏或 Node 已断开，项目解析失败，或这一轮没能启动；`NotStarted` 的一轮都带它），或者 Node 不执行就拒收了这条命令（会话已结束，或等的 MCP 配置一直没到）。它和会话能否继续无关，那由 `AgentLost` 说明；发送中途失败的一轮可能已经到了 Agent，不标。工作流的交互节点据此不把这样的追问算作一轮，并提示消息未送达。
+
 `StartRequest.Lifetime` 默认 `LifetimeTurn`：没有完成的一轮结束会话。工作流的交互节点用 `LifetimeHeld`：Agent 自己结束、但没有完成的一轮（拒绝、截断、未知停止、非调用方要求的取消）不结束会话，调用方可以接着发下一轮；Agent 丢失（崩溃、事件流断开、历史读不全、会话已结束或被停止）时仍结束会话，这一轮的 `Result.AgentLost` 为 true，调用方据此知道会话已不能继续。非 workflow 调用方用 `LifetimeHeld` 返回 `ErrInvalidRequest`。
 Start/StartModel/Append 的 context 控制本次调用，调用返回或浏览器断开不停止已开始的执行。
 `ReadAttempt` 按完整 Caller 查询已有 Turn，不派发工作。

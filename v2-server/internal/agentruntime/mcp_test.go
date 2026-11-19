@@ -139,11 +139,20 @@ func TestRefusedMCPTimeoutRetainsSession(t *testing.T) {
 	ctx := ipcContext(t)
 	session := h.session("refused-session", "workspace")
 	session.MCP = ipcMCP()
+	// ended receives every published turn end: that is what the execution service stores and the
+	// workflow host reads, not Run's return value.
+	ended := make(chan execution.Result, 4)
+	emit := func(_ context.Context, event execution.Event) error {
+		if event.Kind == execution.EventTurnEnded && event.Result != nil {
+			ended <- *event.Result
+		}
+		return nil
+	}
 	run := func(ctx context.Context, id string) <-chan ipcRunOutcome {
 		done := make(chan ipcRunOutcome, 1)
 		go func() {
 			turn := execution.Turn{Ref: execution.Ref{SessionID: session.ID, TurnID: id}, Prompt: execution.TextPrompt(id), MCPGeneration: new(int64)}
-			result, err := h.driver.Run(ctx, h.scope, session, turn, discardIPCEvent)
+			result, err := h.driver.Run(ctx, h.scope, session, turn, emit)
 			done <- ipcRunOutcome{result, err}
 		}()
 		return done
@@ -155,10 +164,18 @@ func TestRefusedMCPTimeoutRetainsSession(t *testing.T) {
 	if got := receiveIPC(t, first); got.err != nil {
 		t.Fatal(got.err)
 	}
+	receiveIPC(t, ended)
 	refuse.Store(true)
 	result := receiveIPC(t, run(ctx, "refused"))
 	if result.err != nil || result.result.FailureCode != "mcp_refresh_wait_timeout" || result.result.AgentLost {
 		t.Fatal("refused turn did not time out on its own", result.err, result.result.FailureCode)
+	}
+	// Node never queued the refused command, so the Agent never got the prompt.
+	if !result.result.NotDelivered {
+		t.Fatalf("refused turn = %+v, want it reported not delivered", result.result)
+	}
+	if stored := receiveIPC(t, ended); stored.FailureCode != "mcp_refresh_wait_timeout" || !stored.NotDelivered {
+		t.Fatalf("published end of the refused turn = %+v, want it stored as not delivered", stored)
 	}
 	// The refused submission is visible on the wire, but never accepted by Node.
 	nextIPCCommand(t, f, "submit_user_turn")

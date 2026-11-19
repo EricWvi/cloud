@@ -235,8 +235,10 @@ func TestRecoveredSessionWaitsWhenItsAgentCannotStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := awaitResult(t, f, ref); r.Status != execution.StatusFailed || r.AgentLost {
-		t.Fatalf("unstarted recovery = %+v, want a failed turn that keeps the session", r)
+	// Its new Agent never started, so the message never reached one: the workflow host does not
+	// count it as a turn and says it was not delivered.
+	if r := awaitResult(t, f, ref); r.Status != execution.StatusFailed || r.AgentLost || !r.NotDelivered {
+		t.Fatalf("unstarted recovery = %+v, want an undelivered failed turn that keeps the session", r)
 	}
 	if session, err := f.db.ReadExecutionSession(f.ctx, f.scope, first.SessionID); err != nil || session.EndedAt != nil {
 		t.Fatalf("session = %+v %v, want it still open", session, err)

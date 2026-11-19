@@ -142,7 +142,7 @@ func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDis
 			if seq, err := strconv.Atoi(strings.TrimPrefix(turn.Caller.AttemptID, prefix)); err == nil && strings.HasPrefix(turn.Caller.AttemptID, prefix) && seq > n.seq {
 				n.seq = seq
 			}
-			if turn.Result == nil {
+			if turn.Result == nil || undeliveredFollowUp(turn, prefix) {
 				continue
 			}
 			result := *turn.Result
@@ -163,6 +163,13 @@ func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDis
 	}
 	n.unsettled = unsettled && n.last != nil
 	return n, nil
+}
+
+// undeliveredFollowUp reports whether turn is a starter's message the Agent never got: the
+// execution service recorded it, but it was no turn of the conversation, and the summary's
+// last_turn_error says it was lost.
+func undeliveredFollowUp(turn execution.Turn, prefix string) bool {
+	return strings.HasPrefix(turn.Caller.AttemptID, prefix) && !delivered(*turn.Result)
 }
 
 // failParked fails a parked node that cannot continue after the restart and ends its session.

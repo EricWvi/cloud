@@ -561,6 +561,11 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		if result.Status == "" {
 			result = failedResult(ctx, execution.ErrUnavailable)
 		}
+		// A turn that never started (its recovery or its new Agent could not be set up) never
+		// reached an Agent: the driver marks the turns it refused itself, this the rest.
+		if result.NotStarted {
+			result.NotDelivered = true
+		}
 		// A recovered session whose new Agent could not be started keeps waiting for another
 		// turn: nothing ran, and the conversation is still recorded. Only a missing checkout
 		// ends it.
