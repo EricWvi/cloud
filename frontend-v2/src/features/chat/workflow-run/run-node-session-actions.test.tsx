@@ -132,6 +132,13 @@ describe('RunNodeSessionActions', () => {
     expect(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.completeAnyway'] })).toBeTruthy()
   })
 
+  it('says why a confirmation was refused when the refusal names only the unconfirmed opening turn', async () => {
+    calls.completeNode.mockRejectedValueOnce(new ContractError('workflow_node_incomplete', { blockers: [{ kind: 'turn_unconfirmed' }] }))
+    view({ session: { ...parked, turns: 1, completable: false, blockers: [{ kind: 'turn_unconfirmed' }] } })
+    fireEvent.click(screen.getByRole('button', { name: zh['workflowRun.v2.interactive.confirmComplete'] }))
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith(zh['workflowRun.v2.interactive.blocker.turn_unconfirmed']))
+  })
+
   it('does not offer force when the first turn still awaits confirmation, even with a missing deliverable', async () => {
     calls.completeNode.mockRejectedValueOnce(new ContractError('workflow_node_incomplete', { blockers: [{ kind: 'file_missing', path: 'plan.md' }] }))
     view({ session: { ...parked, turns: 1, completable: false, blockers: [{ kind: 'turn_unconfirmed' }] } })

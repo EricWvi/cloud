@@ -3,10 +3,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { useQuery } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { sampleWorkflowBackend, serveWorkflows, type WorkflowServer } from '@/lib/workflows/test/workflow-server'
 import { chatBackend, tenantId } from '../test-backend'
-import { projectRunsQuery, runSnapshotQuery, useRunStartPreflight, useRunUnappliedSettings } from './server-runs'
+import { http } from '@/lib/api-client'
+import { completeNode, projectRunsQuery, runSnapshotQuery, useRunStartPreflight, useRunUnappliedSettings } from './server-runs'
 import { serveRuns, type RunServer } from './test-run-server'
 
 const wrapper = ({ children }: { children: ReactNode }) => (
@@ -91,3 +92,24 @@ describe('the run analysis', () => {
   })
 })
 
+
+describe('completeNode', () => {
+  const previous = http.defaults.adapter
+  afterEach(() => { http.defaults.adapter = previous })
+
+  it('puts the opening turn\'s confirmation and force on the wire, never both', async () => {
+    const sent: Array<{ url: string; body: unknown }> = []
+    http.defaults.adapter = async (config) => {
+      sent.push({ url: config.url ?? '', body: typeof config.data === 'string' ? JSON.parse(config.data) : config.data })
+      return { data: { run: {} }, status: 200, statusText: 'OK', headers: {}, config }
+    }
+    await completeNode(tenantId, 'run-1', 'a', { confirmInitialTurn: true })
+    await completeNode(tenantId, 'run-1', 'a', { force: true })
+    await completeNode(tenantId, 'run-1', 'a')
+    expect(sent).toEqual([
+      { url: `/api/v2/tenants/${tenantId}/workflow-runs/run-1/nodes/a/complete`, body: { force: false, requester: 'human', confirmInitialTurn: true } },
+      { url: `/api/v2/tenants/${tenantId}/workflow-runs/run-1/nodes/a/complete`, body: { force: true, requester: 'human' } },
+      { url: `/api/v2/tenants/${tenantId}/workflow-runs/run-1/nodes/a/complete`, body: { force: false, requester: 'human' } },
+    ])
+  })
+})

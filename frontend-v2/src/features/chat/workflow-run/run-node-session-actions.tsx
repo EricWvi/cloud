@@ -101,11 +101,13 @@ export function RunNodeSessionActions({ target }: { target: InteractiveNodeTarge
       return true
     } catch (error) {
       const blockers = error instanceof ContractError && error.code === 'workflow_node_incomplete' ? refusedBlockers(error) : []
-      if (blockers.length > 0) {
+      if (blockers.some((b) => b.kind !== 'turn_unconfirmed')) {
         // Listed under the conversation instead: a toast would only repeat them, over the
         // "仍然完成" they offer.
         setRefused({ turns: session?.turns ?? 0, blockers })
       } else {
+        // Including a refusal that names only turn_unconfirmed, which the card never lists: the
+        // click must still say why nothing happened.
         toast.error(refusal(error, t))
       }
       return false
