@@ -127,6 +127,15 @@ it('keeps the generic text when the server refuses a retry for another reason', 
   expect(screen.queryByText(handlingText, { exact: false })).not.toBeInTheDocument()
 })
 
+it('explains a retry refused because the run\'s starter can no longer act, instead of the generic text', async () => {
+  failedTaskCreation()
+  api.retry.mockRejectedValueOnce(new AxiosError('conflict', '409', undefined, undefined, { status: 409, data: { code: 'starter_unavailable' } } as never))
+  mount('failed')
+  fireEvent.click(await screen.findByRole('button', { name: '重试任务创建' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('这次运行的发起人已无法在这个工作区执行（已被移出团队、账号已停用，或工作区已暂停），任务创建以发起人的身份执行，不能在这里重试；请用「再跑一次」以你的身份重新运行。')
+  expect(screen.queryByText('任务当前不可重试，请查看运行状态。')).not.toBeInTheDocument()
+})
+
 it('explains the server refusing a handling run\'s retry the page did not know about', async () => {
   failedTaskCreation()
   api.retry.mockRejectedValueOnce(new AxiosError('conflict', '409', undefined, undefined, { status: 409, data: { code: 'task_handling' } } as never))
