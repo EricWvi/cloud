@@ -1,9 +1,11 @@
 package workflowhost
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"reflect"
 	"strconv"
 	"strings"
@@ -439,4 +441,72 @@ func TestAFailedSummaryRewriteOnRestartAbortsStartup(t *testing.T) {
 	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再改一版"); err != nil {
 		t.Fatalf("follow-up after the next start: %v", err)
 	}
+}
+
+// A catalog that answers that it has nothing for the run's scope (ErrNotFound) gives a verdict
+// on the node, unlike one that cannot be read: the node fails as before the restart, its session
+// is ended, and startup goes on rather than aborting on the same row every time.
+func TestACatalogWithNothingForTheScopeFailsTheParkedNode(t *testing.T) {
+	f := newFixture(t)
+	runID, a := f.startParked(t, interactiveChain, "初稿一")
+	f.exec.recordedTurns(a, f.nodeRow(t, runID, "a").ID, completed("初稿一"))
+	f.exec.ListExecutorsFunc = func(context.Context, execution.Scope) ([]execution.Executor, error) {
+		return nil, execution.ErrNotFound
+	}
+
+	f.restart(t)
+	run, nodes := f.await(t, runID, terminal)
+	if run.Status != store.WorkflowStatusFailed || errorKind(t, node(nodes, "a")) != "interactive_session" {
+		t.Fatalf("run %s node %s, want the node failed by the catalog's answer", run.Status, node(nodes, "a").Payload)
+	}
+	if !f.exec.isClosed(a) {
+		t.Fatal("the failed node's session was left open")
+	}
+}
+
+// Any other catalog error that is not transient says nothing about the node either: startup aborts
+// at once, without waiting out the retry budget, and logs which run and node it could not
+// rebuild and why, since the same error would abort every later start.
+func TestAnOtherCatalogErrorAbortsStartupAndSaysWhere(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	runID, a := f.startParked(t, interactiveChain, "初稿一")
+	rowA := f.nodeRow(t, runID, "a")
+	f.exec.recordedTurns(a, rowA.ID, completed("初稿一"))
+	f.exec.ListExecutorsFunc = func(context.Context, execution.Scope) ([]execution.Executor, error) {
+		return nil, execution.ErrInvalidRequest
+	}
+
+	f.host.Close()
+	f.host = f.newHost(t)
+	f.host.resultRetry = executionwait.Policy{Budget: time.Hour, Interval: time.Hour}
+	var logs lockedBuffer
+	f.host.log = slog.New(slog.NewTextHandler(&logs, nil))
+	if err := f.host.Interrupt(ctx); !errors.Is(err, execution.ErrInvalidRequest) {
+		t.Fatalf("startup = %v, want it aborted by the catalog error", err)
+	}
+	if row := f.nodeRow(t, runID, "a"); row.Status != store.WorkflowStatusPending || f.exec.isClosed(a) {
+		t.Fatalf("node %+v, want the wait left for the next start", row)
+	}
+	if out := logs.String(); !strings.Contains(out, "level=ERROR") || !strings.Contains(out, runID) || !strings.Contains(out, rowA.ID) || !strings.Contains(out, execution.ErrInvalidRequest.Error()) {
+		t.Fatalf("logs = %s, want an error naming the run, the node run and the cause", out)
+	}
+}
+
+// lockedBuffer is a log destination safe for the host's goroutines.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
