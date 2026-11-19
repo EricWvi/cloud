@@ -146,8 +146,15 @@ type Result struct {
 	// was sent to Node (the Agent's configuration or model permit, or a session ended or a Node
 	// lost meanwhile). It comes with AgentLost on a session's
 	// first turn, and tells a caller that there was never a session to keep, as opposed to one
-	// that was lost while it worked.
+	// that was lost while it worked. A turn that did not start was not delivered either.
 	NotStarted bool `json:",omitempty"`
+	// NotDelivered means the turn failed and its prompt never reached the Agent: it was refused
+	// before its command was sent to Node (the session had ended, broken or lost its Node, the
+	// project could not be resolved, or the turn did not start), or Node refused the command
+	// without running it (its session had already ended, or the MCP generation it waited for
+	// never came). AgentLost still says whether the session can take another turn. A turn whose
+	// sending failed midway may have arrived, so it is not marked.
+	NotDelivered bool `json:",omitempty"`
 }
 
 // Failure codes of a turn whose session Node refused to admit to, or could not hand over, a

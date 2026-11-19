@@ -60,7 +60,11 @@ type agentSession struct {
 	broken            bool
 	publicationFailed bool
 	active            *activeTurn
-	emit              Emit
+	// sent is the ID of the latest turn whose command may have reached Node: set just before the
+	// command is written (a failed write can be ambiguous) and cleared when Node refuses that
+	// command without queueing or running it. Run reads it to mark a turn NotDelivered.
+	sent string
+	emit Emit
 	// publishMu orders history publications, so a preview never lands after a newer snapshot.
 	publishMu     sync.Mutex
 	preview       *execution.HistorySnapshot // latest pending set not yet published
@@ -359,6 +363,7 @@ func (a *agentSession) submit(admitted execution.Turn, text string, fresh bool) 
 		default:
 		}
 		a.started = true
+		a.sent = turn
 		a.mu.Unlock()
 		spec := map[string]any{
 			"node_id": a.project.nodeID(), "agent_plugin_id": plugin.id, "agent_plugin_version": plugin.version,
@@ -394,6 +399,11 @@ func (a *agentSession) submit(admitted execution.Turn, text string, fresh bool) 
 	if lifecycle {
 		command["mcp_generation"] = *floor
 	}
+	// Nothing above reached Node. From here on the write can be ambiguous, so the turn counts
+	// as sent unless Node refuses its command.
+	a.mu.Lock()
+	a.sent = turn
+	a.mu.Unlock()
 	return a.project.send("submit_user_turn", a.execution, command)
 }
 
@@ -528,6 +538,9 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 			return nil, false
 		}
 		result := failed(failure.Code)
+		// Node failed the queued command before the Agent was given it: the turn waited for an
+		// MCP generation that never came, and the session stays open.
+		result.NotDelivered = true
 		if broken || publicationFailed || a.publish(execution.Event{Ref: execution.Ref{TurnID: call.id}, Kind: execution.EventTurnEnded, Result: &result}) != nil {
 			a.fail("agent_event_write_failed", errEventStore)
 			a.requestEnd()
@@ -598,7 +611,18 @@ func (a *agentSession) observe(message node.Message) (*turnOutcome, bool) {
 			CommandID string `json:"command_id"`
 			Reason    string `json:"reason"`
 		}
-		if json.Unmarshal(message.Payload, &rejection) == nil && rejection.Reason == "mcp_update_required" {
+		parsed := json.Unmarshal(message.Payload, &rejection) == nil
+		if parsed && call != nil && call.commandID != "" && call.commandID == rejection.CommandID {
+			// Node refused the turn's command without queueing it (desktop's
+			// SessionCommandRejection: a session that already ended, or an MCP generation still
+			// to deliver), so its prompt has not reached the Agent; a resubmission sends it again.
+			a.mu.Lock()
+			if a.sent == call.id {
+				a.sent = ""
+			}
+			a.mu.Unlock()
+		}
+		if parsed && rejection.Reason == "mcp_update_required" {
 			if message.Sequence == nil && call != nil && call.updateRequired != nil && call.commandID == rejection.CommandID {
 				select {
 				case call.updateRequired <- struct{}{}:

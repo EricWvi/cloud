@@ -160,6 +160,10 @@ func TestRefusedMCPTimeoutRetainsSession(t *testing.T) {
 	if result.err != nil || result.result.FailureCode != "mcp_refresh_wait_timeout" || result.result.AgentLost {
 		t.Fatal("refused turn did not time out on its own", result.err, result.result.FailureCode)
 	}
+	// Node never queued the refused command, so the Agent never got the prompt.
+	if !result.result.NotDelivered {
+		t.Fatalf("refused turn = %+v, want it reported not delivered", result.result)
+	}
 	// The refused submission is visible on the wire, but never accepted by Node.
 	nextIPCCommand(t, f, "submit_user_turn")
 	refuse.Store(false)

@@ -213,21 +213,25 @@ func TestUnstartedRecoveryKeepsTheNodeWaiting(t *testing.T) {
 	f.exec.recordedTurns(a, node(nodes, "a").ID, completed("初稿一"))
 	f.restart(t)
 
-	// The new Agent could not be started (Node was busy): the turn failed, nothing ran, and the
-	// starter can try again in the same session.
+	// The new Agent could not be started (Node was busy): nothing ran, so the message never
+	// reached an Agent. It is no turn and is reported not delivered, as the execution service
+	// marks it, and the starter can try again in the same session.
+	f.awaitClaimable(t, runID, "a")
+	before := blockerKinds(interactivePayload(t, f.nodeRow(t, runID, "a")))
 	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再改一版"); err != nil {
 		t.Fatal(err)
 	}
 	f.exec.awaitAppend(t)
-	f.exec.finish(a, execution.Result{Status: execution.StatusFailed, FailureCode: "agent_prepare_failed", NotStarted: true})
+	f.exec.finish(a, execution.Result{Status: execution.StatusFailed, FailureCode: "agent_prepare_failed", NotStarted: true, NotDelivered: true})
 	_, nodes = f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
-		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["turns"] == float64(2)
+		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["last_turn_error"] == turnErrorNotDelivered
 	})
-	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != false || !reflect.DeepEqual(blockerKinds(p), []string{blockerTurnUnknown}) {
-		t.Fatalf("summary = %v, want the session open and the failed turn blocking completion", p)
+	if p := interactivePayload(t, node(nodes, "a")); p["turns"] != float64(1) || p["sent"] != float64(1) || p["session_ended"] != false || p["answer"] != "初稿一" || !reflect.DeepEqual(blockerKinds(p), before) {
+		t.Fatalf("summary = %v, want the session open, one turn and the message reported not delivered", p)
 	}
-	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再试一次"); err != nil {
-		t.Fatalf("retry after an unstarted recovery: %v", err)
+	f.awaitClaimable(t, runID, "a")
+	if accepted, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再试一次"); err != nil || accepted.Sent != 2 {
+		t.Fatalf("retry after an unstarted recovery = %+v %v, want message 2", accepted.Sent, err)
 	}
 	if id := f.exec.awaitAppend(t); id != a {
 		t.Fatalf("retry went to session %s, want %s", id, a)

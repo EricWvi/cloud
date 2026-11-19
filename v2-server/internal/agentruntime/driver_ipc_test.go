@@ -346,12 +346,13 @@ func TestDriverIPCTurnFailurePublishesOnceAndKeepsSession(t *testing.T) {
 		frame := node.Message{Type: "session_turn_failed", Version: 1, OperationID: command.OperationID, ExecutionID: command.ExecutionID, Sequence: &seq, Payload: raw}
 		f.in <- frame
 		event := receiveIPC(t, events)
-		if event.Kind != execution.EventTurnEnded || event.Ref.TurnID != turn || event.Result == nil || event.Result.FailureCode != payload["code"] {
+		// Node failed the queued turn before the Agent was given it.
+		if event.Kind != execution.EventTurnEnded || event.Ref.TurnID != turn || event.Result == nil || event.Result.FailureCode != payload["code"] || !event.Result.NotDelivered {
 			t.Fatalf("turn failure publication = %+v", event)
 		}
 		receiveIPC(t, f.acked)
 		got := receiveIPC(t, done)
-		if got.err != nil || got.result.Status != execution.StatusFailed || got.result.AgentLost || got.result.FailureCode != payload["code"] {
+		if got.err != nil || got.result.Status != execution.StatusFailed || got.result.AgentLost || got.result.FailureCode != payload["code"] || !got.result.NotDelivered {
 			t.Fatalf("turn failure = %+v", got)
 		}
 		f.in <- frame
