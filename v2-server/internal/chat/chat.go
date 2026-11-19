@@ -53,6 +53,10 @@ type Reclaims interface {
 // person would drop something they were not shown. Nothing is deleted.
 var ErrDeletionPreviewStale = errors.New("deletion preview stale")
 
+// ErrDiscardUnverifiable reports a discard the preview cannot vouch for: part of what it would drop
+// (a nested repository too large to digest) is not bound by the revision. Nothing is deleted.
+var ErrDiscardUnverifiable = errors.New("discard cannot be verified")
+
 // ErrReclaimUnavailable reports a conversation whose checkout this server cannot judge: it runs
 // without an Agent runtime, so it can neither preview the checkout nor verify a discard. A
 // deletion that keeps the default mode still goes ahead and leaves the reclaim to a start that
@@ -345,6 +349,9 @@ func (s *Service) Delete(ctx context.Context, scope execution.Scope, conversatio
 		}
 		if v.Revision != revision || v.Reason == workspacereclaim.ReasonDelivering {
 			return none, ErrDeletionPreviewStale
+		}
+		if v.Workspace == workspacereclaim.WorkspaceUndelivered && !v.Discardable {
+			return none, ErrDiscardUnverifiable
 		}
 	}
 	if live, ok := c.Live(); ok {

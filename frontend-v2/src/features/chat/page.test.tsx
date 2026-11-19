@@ -406,6 +406,16 @@ describe('chat page', () => {
     expect(dialog.queryByRole('list', { name: '未交付的改动' })).not.toBeInTheDocument()
   })
 
+  it('does not offer discarding a nested repository too large to confirm', async () => {
+    backend.deletion = { workspace: 'undelivered', reason: 'git_state', discardable: false, git: { stashes: 0, refs: [], repositories: ['vendor/big'] } }
+    await renderReady()
+    const dialog = await openDelete('梳理 v2 接口缺口')
+    expect(await dialog.findByText(/嵌套仓库太大，无法确认丢弃的是哪些内容/)).toBeInTheDocument()
+    expect(dialog.queryByRole('checkbox')).not.toBeInTheDocument()
+    await userEvent.click(dialog.getByRole('button', { name: '删除' }))
+    await waitFor(() => expect(backend.deletedWith['c-main']).toEqual({}))
+  })
+
   it('does not offer discarding while the last turn still delivers', async () => {
     backend.deletion = { workspace: 'undelivered', reason: 'delivering' }
     await renderReady()

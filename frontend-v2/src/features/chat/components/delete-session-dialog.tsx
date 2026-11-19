@@ -68,7 +68,10 @@ function WorkspaceNote({ preview, discard, setDiscard }: { preview: ChatDeletion
           </ul>
         </div>
       )}
-      {!delivering && (
+      {!delivering && !preview.discardable && (
+        <p className="text-muted-foreground">嵌套仓库太大，无法确认丢弃的是哪些内容，不能在这里丢弃；请先自行处理。现在删除会保留工作目录。</p>
+      )}
+      {!delivering && preview.discardable && (
         <div className="flex items-start gap-2">
           <Checkbox id="discard-undelivered" checked={discard} onCheckedChange={(checked) => setDiscard(checked === true)} className="mt-0.5" />
           <Label htmlFor="discard-undelivered" className="grid cursor-pointer gap-0.5 font-normal">
@@ -116,7 +119,7 @@ function DeleteSessionConfirm({ session, close }: { session: Session; close: () 
     }
   }, [session.id, deletionPreview, asked])
   const known = typeof preview === 'object' ? preview : undefined
-  const discarding = known?.workspace === 'undelivered' && known.reason !== 'delivering' && discard
+  const discarding = known?.workspace === 'undelivered' && known.reason !== 'delivering' && known.discardable && discard
   const download = async (deliveryId: string) => {
     setError(undefined)
     try {

@@ -297,6 +297,8 @@ export interface ChatDeletionPreview {
   latestDelivery?: string;
   revision: string;
   git?: ChatGitFindings;
+  /** Whether a discard can be confirmed: false when there is nothing to discard, a turn still delivers, or a nested repository is too large to bind into the revision (then a discard answers 409 discard_unverifiable). */
+  discardable: boolean;
 }
 
 export type ChatDeletionResultWorkspace = typeof ChatDeletionResultWorkspace[keyof typeof ChatDeletionResultWorkspace];
@@ -686,7 +688,7 @@ export const useRenameChatConversation = <TError = ErrorType<ChatError>,
     }
 
 /**
- * workspace says what happens to the conversation's checkout: reclaim (the default) removes it only when its work is recoverable from the session's deliveries and keeps it otherwise; discard removes it regardless, dropping undelivered work, and must carry the revision of the deletion preview the person saw. A discard whose preview is stale, or made while a turn runs or delivers, answers 409 deletion_preview_stale and changes nothing. The reclaim is recorded with the deletion and executed at once; the body says what came of it (pending ones finish at the next start). A server without an Agent runtime cannot judge a checkout: for a conversation that has one it answers a discard with 503 workspace_reclaim_unavailable before anything changes, and a default deletion leaves the reclaim pending (reclaim_unavailable).
+ * workspace says what happens to the conversation's checkout: reclaim (the default) removes it only when its work is recoverable from the session's deliveries and keeps it otherwise; discard removes it regardless, dropping undelivered work, and must carry the revision of the deletion preview the person saw. A discard whose preview is stale, or made while a turn runs or delivers, answers 409 deletion_preview_stale and changes nothing. The reclaim is recorded with the deletion and executed at once; the body says what came of it (pending ones finish at the next start). A server without an Agent runtime cannot judge a checkout: for a conversation that has one it answers a discard with 503 workspace_reclaim_unavailable before anything changes, and a default deletion leaves the reclaim pending (reclaim_unavailable). A discard the preview marked not discardable answers 409 discard_unverifiable.
  * @summary End the live session, delete the conversation and reclaim its checkout
  */
 export const deleteChatConversation = (

@@ -223,7 +223,7 @@ export function chatBackend(options: { unavailable?: boolean } = {}): ChatBacken
         const code = preview.status === 503 && 'code' in preview ? (preview as { code: string }).code : 'internal'
         return { status: preview.status, data: { code, params: {}, requestId: 'r' } }
       }
-      return { status: 200, data: { workspace: 'none', reason: 'no_workspace', ignored: false, undeliveredChanges: [], undeliveredTotal: 0, revision: 'rev-1', ...preview } }
+      return { status: 200, data: { workspace: 'none', reason: 'no_workspace', ignored: false, undeliveredChanges: [], undeliveredTotal: 0, revision: 'rev-1', discardable: preview?.workspace === 'undelivered' && preview.reason !== 'delivering', ...preview } }
     }
     if (action.startsWith('workspace/deliveries/') && action.endsWith('/patch')) return { status: 200, data: new Blob(['diff --git']) }
     if (method === 'PATCH') return { status: 200, data: Object.assign(c, { title: body.title }) }

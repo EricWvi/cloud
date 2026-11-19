@@ -413,7 +413,7 @@ func TestDeleteRecordsAndExecutesTheCheckoutReclaim(t *testing.T) {
 	s := storetest.Open(t)
 	user, tenant := storetest.Login(t, s, "chat-reclaim")
 	scope := execution.Scope{TenantID: tenant, UserID: user}
-	r := &reclaims{verdict: workspacereclaim.Verdict{Workspace: workspacereclaim.WorkspaceUndelivered, Reason: workspacereclaim.ReasonChanged, Revision: "r1"}}
+	r := &reclaims{verdict: workspacereclaim.Verdict{Workspace: workspacereclaim.WorkspaceUndelivered, Reason: workspacereclaim.ReasonChanged, Revision: "r1", Discardable: true}}
 	stub := &executiontest.Stub{}
 	svc := chat.New(s, stub, stub, chat.Options{Reclaims: r})
 	ctx := context.Background()
@@ -446,7 +446,7 @@ func TestDeleteRecordsAndExecutesTheCheckoutReclaim(t *testing.T) {
 	if _, e := s.ChatConversation(ctx, tenant, user, c.ConversationID); e != nil || len(r.workspaces) != 0 {
 		t.Fatalf("a refused delete changed something: %v, reclaims %v", e, r.workspaces)
 	}
-	r.verdict.Reason = workspacereclaim.ReasonChanged
+	r.verdict.Reason, r.verdict.Discardable = workspacereclaim.ReasonChanged, true
 	out, e := svc.Delete(ctx, scope, c.ConversationID, store.ReclaimDiscard, "r1")
 	if e != nil || out.Workspace != workspacereclaim.OutcomeReclaimed || out.Bytes != 7 {
 		t.Fatalf("delete = %+v, %v", out, e)

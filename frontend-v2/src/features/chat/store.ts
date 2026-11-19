@@ -555,7 +555,7 @@ export const useChatStore = create<State>()(
         deletionPreview: async (id) => {
           const session = get().sessions.find((x) => x.id === id)
           const { tenantId: tid } = get()
-          if (!session?.remote || !tid) return { workspace: 'none', reason: 'no_workspace', ignored: false, undeliveredChanges: [], undeliveredTotal: 0, revision: '' }
+          if (!session?.remote || !tid) return { workspace: 'none', reason: 'no_workspace', ignored: false, undeliveredChanges: [], undeliveredTotal: 0, revision: '', discardable: false }
           return remote.deletionPreview(tid, id)
         },
         deliveryPatch: async (id, deliveryId) => {

@@ -652,3 +652,68 @@ func TestDiscardIsStaleWhenARefMovesWithTheSameCount(t *testing.T) {
 		git(t, c.Path, "stash", "pop", "-q")
 	})
 }
+
+// nestedRepository makes vendor/lib a repository of its own with one committed file.
+func nestedRepository(t *testing.T, root, content string) string {
+	t.Helper()
+	sub := filepath.Join(root, "vendor", "lib")
+	write(t, sub, "lib.txt", content)
+	git(t, sub, "init", "-q", ".")
+	git(t, sub, "add", ".")
+	git(t, sub, "commit", "-qm", "lib")
+	return sub
+}
+
+// A nested file rewritten to the same size with its old modification time is still a change the
+// earlier preview did not show.
+func TestDiscardIsStaleWhenANestedFileIsRewrittenInPlace(t *testing.T) {
+	f := newFixture(t)
+	c := f.chat(t, st.TurnDelivered)
+	sub := nestedRepository(t, c.Path, "aaaa\n")
+	file := filepath.Join(sub, "lib.txt")
+	discardAfter(t, f, c, func() {
+		info, err := os.Stat(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		write(t, sub, "lib.txt", "bbbb\n")
+		if err := os.Chtimes(file, info.ModTime(), info.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if got, err := os.ReadFile(file); err != nil || string(got) != "bbbb\n" {
+		t.Fatalf("the nested file changed: %q, %v", got, err)
+	}
+}
+
+// A nested repository too large to bind into the revision cannot be discarded: the preview says
+// so and a discard with the current revision is refused, leaving everything.
+func TestDiscardIsRefusedWhenANestedRepositoryIsTooLarge(t *testing.T) {
+	s := st.Open(t)
+	user, tenant := st.Login(t, s, "reclaim-owner")
+	fs, err := workspacefs.NewDeliveryFS(t.TempDir(), 64<<10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fixture{s: s, scope: execution.Scope{TenantID: tenant, UserID: user}, fs: fs, remover: &diskRemover{root: filepath.Join(t.TempDir(), "w", "r")}}
+	f.r = wr.New(s, fs, f.remover)
+	c := f.chat(t, st.TurnDelivered)
+	nestedRepository(t, c.Path, strings.Repeat("x", 100<<10))
+	c.End(t, f.s)
+	ctx := context.Background()
+	if err := f.s.EndChatSession(ctx, c.SessionID, store.EndStopped, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	stub := &executiontest.Stub{}
+	svc := chat.New(f.s, stub, stub, chat.Options{Reclaims: f.r})
+	v, err := svc.DeletionPreview(ctx, f.scope, c.ConversationID)
+	if err != nil || v.Reason != wr.ReasonGitState || v.Discardable {
+		t.Fatalf("preview = %+v, %v", v, err)
+	}
+	if _, err := svc.Delete(ctx, f.scope, c.ConversationID, store.ReclaimDiscard, v.Revision); !errors.Is(err, chat.ErrDiscardUnverifiable) {
+		t.Fatalf("discard = %v, want ErrDiscardUnverifiable", err)
+	}
+	if _, err := f.s.ChatConversation(ctx, f.scope.TenantID, f.scope.UserID, c.ConversationID); err != nil || !exists(t, filepath.Join(c.Path, "vendor", "lib", "lib.txt")) {
+		t.Fatalf("a refused discard changed something: %v", err)
+	}
+}

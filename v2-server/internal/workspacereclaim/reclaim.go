@@ -79,6 +79,9 @@ type Verdict struct {
 	LatestDelivery string
 	// Revision identifies the state this verdict rests on; a discard must present it.
 	Revision string
+	// Discardable is false when the revision cannot vouch for everything a discard would drop
+	// (a nested repository too large to digest): a discard is refused until it is dealt with.
+	Discardable bool
 
 	basis store.ReclaimBasis
 }
@@ -261,7 +264,7 @@ func (r *Reclaimer) judge(ctx context.Context, c store.Checkout) (Verdict, func(
 		unlock()
 		return Verdict{}, nil, fmt.Errorf("inspect checkout: %w", err)
 	}
-	v := Verdict{Workspace: WorkspaceUndelivered, Changes: in.Changes, Total: in.Total, Git: in.Git}
+	v := Verdict{Workspace: WorkspaceUndelivered, Changes: in.Changes, Total: in.Total, Git: in.Git, Discardable: in.GitIdentityComplete}
 	switch {
 	case !d.Delivered:
 		v.Reason = ReasonLegacy
@@ -290,6 +293,11 @@ func (r *Reclaimer) judge(ctx context.Context, c store.Checkout) (Verdict, func(
 // Git state when it was inspected, which change whenever a file the snapshot takes changes.
 func seal(v Verdict, c store.Checkout, content string) Verdict {
 	v.LatestDelivery = c.Delivery.GoodDeliveryID
+	if v.Workspace != WorkspaceUndelivered || v.Reason == ReasonDelivering {
+		v.Discardable = false // nothing to discard, or not yet
+	} else if content == "" {
+		v.Discardable = true // not inspected (unverifiable): what is shown is all there is to show
+	}
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00", c.WorkspaceID, c.Delivery.LastTurnID, c.Delivery.LastStatus,
 		c.Delivery.GoodDeliveryID, c.Delivery.LastDeliveryID, v.Workspace, v.Reason, v.Total, content)

@@ -227,6 +227,7 @@ type chatDeletionPreview struct {
 	Git                *workspacefs.GitFindings `json:"git,omitempty"`
 	LatestDelivery     string                   `json:"latestDelivery,omitempty"`
 	Revision           string                   `json:"revision"`
+	Discardable        bool                     `json:"discardable"`
 }
 
 // chatDeletion tells the page, before it asks the person to confirm, what deleting the
@@ -242,7 +243,7 @@ func (h *handler) chatDeletion(w http.ResponseWriter, r *http.Request, c chatReq
 		changes = []workspacefs.Change{}
 	}
 	res := chatDeletionPreview{Workspace: v.Workspace, Reason: v.Reason, Ignored: v.Ignored,
-		UndeliveredChanges: changes, UndeliveredTotal: v.Total, LatestDelivery: v.LatestDelivery, Revision: v.Revision}
+		UndeliveredChanges: changes, UndeliveredTotal: v.Total, LatestDelivery: v.LatestDelivery, Revision: v.Revision, Discardable: v.Discardable}
 	if v.Reason == workspacereclaim.ReasonGitState {
 		res.Git = &v.Git
 	}
@@ -376,6 +377,9 @@ func chatFault(w http.ResponseWriter, op string, e error) {
 	case errors.Is(e, chat.ErrReclaimUnavailable):
 		// No Agent runtime here to judge the checkout: neither preview nor discard can be offered.
 		fault(w, http.StatusServiceUnavailable, "workspace_reclaim_unavailable")
+	case errors.Is(e, chat.ErrDiscardUnverifiable):
+		// Part of what the discard would drop is not bound by the preview; the page does not offer it.
+		fault(w, http.StatusConflict, "discard_unverifiable")
 	case errors.Is(e, chat.ErrDeletionPreviewStale):
 		// The person would drop something the preview did not show: fetch it again.
 		fault(w, http.StatusConflict, "deletion_preview_stale")
