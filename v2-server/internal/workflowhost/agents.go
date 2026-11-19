@@ -789,6 +789,32 @@ func (h *Host) resolveExecutor(scope execution.Scope, cfg workflow.AgentConfig) 
 		failure := h.sessionFailure(scope, "list executors: "+publicReason(err))
 		return resolvedExecutor{}, &failure
 	}
+	return matchExecutor(executors, cfg)
+}
+
+// recoveredExecutor is resolveExecutor for a node parked before a restart. Failing that node ends
+// a wait the starter can only replace by starting the node over, so a catalog that cannot be read
+// is no verdict on it: a transient error is retried within resultRetry's budget, and an error that
+// outlasts it, or any other one, is returned to abort startup like a session that cannot be read,
+// leaving the row for the next start. Only an executor the catalog no longer offers fails the node.
+func (h *Host) recoveredExecutor(ctx context.Context, scope execution.Scope, cfg workflow.AgentConfig) (resolvedExecutor, *workflow.Failure, error) {
+	if cfg.AgentCLI == "" {
+		return resolvedExecutor{}, &workflow.Failure{Kind: workflow.FailureMissingAgentRef, Message: "the node selects no Agent"}, nil
+	}
+	var executors []execution.Executor
+	if err := h.resultRetry.Read(ctx, func(ctx context.Context) error {
+		var err error
+		executors, err = h.catalog.ListExecutors(ctx, scope)
+		return err
+	}); err != nil {
+		return resolvedExecutor{}, nil, fmt.Errorf("list executors: %w", err)
+	}
+	executor, failure := matchExecutor(executors, cfg)
+	return executor, failure, nil
+}
+
+// matchExecutor is resolveExecutor's choice among the catalog's executors.
+func matchExecutor(executors []execution.Executor, cfg workflow.AgentConfig) (resolvedExecutor, *workflow.Failure) {
 	var first *execution.Executor
 	for i := range executors {
 		e := executors[i]
