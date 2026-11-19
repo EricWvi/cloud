@@ -207,9 +207,16 @@ func (d *Driver) run(ctx context.Context, scope execution.Scope, session executi
 		return failed("agent_prepare_failed"), err
 	}
 	a.commandMu.Lock()
-	call, fresh, err := a.begin(turn.Ref.TurnID, emit)
+	call, fresh, err := a.begin(turn.Ref.TurnID, session.MCP, emit)
 	if err != nil {
 		a.commandMu.Unlock()
+		var failure *execution.MCPFailure
+		if errors.As(err, &failure) {
+			a.requestEnd()
+			result := failed(failure.Code)
+			result.MCPFailure, result.AgentLost = failure, true
+			return result, failure
+		}
 		if errors.Is(err, execution.ErrNodeLost) {
 			return failed(execution.FailureNodeLost), err
 		}

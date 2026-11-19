@@ -1395,7 +1395,7 @@ func TestDriverIPCFirstTurnLostBeforeItsStartIsNotStarted(t *testing.T) {
 	f := receiveIPC(t, h.created)
 	sentIPC(f)
 	a.commandMu.Lock()
-	if _, fresh, err := a.begin("first", discardIPCEvent); err != nil || !fresh {
+	if _, fresh, err := a.begin("first", session.MCP, discardIPCEvent); err != nil || !fresh {
 		t.Fatalf("begin: fresh=%v err=%v", fresh, err)
 	}
 	_ = f.Close()
@@ -1430,7 +1430,7 @@ func TestDriverIPCFirstTurnDoesNotStartAnAgentAfterEnd(t *testing.T) {
 	f := receiveIPC(t, h.created)
 	sentIPC(f)
 	a.commandMu.Lock()
-	if _, fresh, err := a.begin("first", discardIPCEvent); err != nil || !fresh {
+	if _, fresh, err := a.begin("first", session.MCP, discardIPCEvent); err != nil || !fresh {
 		t.Fatalf("begin: fresh=%v err=%v", fresh, err)
 	}
 	// End runs between begin and submit: the session has not started, so it only waits for

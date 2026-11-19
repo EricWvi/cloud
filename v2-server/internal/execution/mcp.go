@@ -32,6 +32,17 @@ type MCPBinding struct {
 // MaxMCPCounter is the largest integer shared exactly by Node and JSON clients.
 const MaxMCPCounter int64 = 1<<53 - 1
 
+// SameMembers compares the immutable authorization set, independently of the versions
+// or settings a later resolution observed. Missing metadata authorizes no members.
+func (s *MCPSelection) SameMembers(other *MCPSelection) bool {
+	if s == nil || other == nil {
+		return (s == nil || len(s.Bindings) == 0) && (other == nil || len(other.Bindings) == 0)
+	}
+	return slices.EqualFunc(s.Bindings, other.Bindings, func(a, b MCPBinding) bool {
+		return a.PluginID == b.PluginID
+	})
+}
+
 // MCPPackage contains verified package bytes, never downloaded using session credentials.
 type MCPPackage struct {
 	PluginID, PluginVersion, Digest, Target string

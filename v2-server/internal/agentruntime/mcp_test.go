@@ -206,6 +206,45 @@ func TestEmptyMCPDoesNotRequireLifecycleCapability(t *testing.T) {
 	}
 }
 
+func TestLostMCPSelectionStopsExistingExecutionBeforeAppend(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	ctx := ipcContext(t)
+	session := h.session("retained", "workspace")
+	first := startIPCRun(h, ctx, session, "first", discardIPCEvent)
+	f := receiveIPC(t, h.created)
+	start := nextIPCCommand(t, f, "start_agent_session")
+	f.finishTurn(t, start, "first", "done")
+	if outcome := receiveIPC(t, first); outcome.err != nil {
+		t.Fatal(outcome.err)
+	}
+	// The fixture's live Agent represents a lifecycle execution; the business session
+	// presented on reattachment has lost its selection. No blank update may replace it.
+	h.driver.mu.Lock()
+	a := h.driver.sessions[session.ID]
+	h.driver.mu.Unlock()
+	a.commandMu.Lock()
+	a.frozen.MCP = ipcMCP()
+	a.commandMu.Unlock()
+	appendDone := startIPCRun(h, ctx, session, "second", discardIPCEvent)
+	outcome := receiveIPC(t, appendDone)
+	if outcome.result.MCPFailure == nil || outcome.result.MCPFailure.Code != "mcp_selection_invalid" || !outcome.result.AgentLost {
+		t.Fatal("session with missing authorization remained usable")
+	}
+	end := receiveIPC(t, f.sent)
+	if end.Type != "end_session" || end.ExecutionID != start.ExecutionID {
+		t.Fatalf("selection loss sent %s to %s", end.Type, end.ExecutionID)
+	}
+	select {
+	case <-a.stopped:
+		t.Fatal("stopped before physical confirmation")
+	default:
+	}
+	f.terminal(end)
+	if err := h.driver.End(ctx, session.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMCPTerminalPreservesSafeFailureDetails(t *testing.T) {
 	for _, code := range []string{"mcp_plugin_missing", "mcp_setting_missing", "mcp_http_capability_missing", "mcp_load_session_missing"} {
 		t.Run(code, func(t *testing.T) {

@@ -270,7 +270,7 @@ func (s *Service) start(ctx context.Context, scope execution.Scope, caller execu
 		if e != nil {
 			return execution.Ref{}, publicError(e)
 		}
-		if !sameJSON(session.MCP, mcp) || !reflect.DeepEqual(session.Skills, skills) || !sameJSON(old.Prompt, prompt) || !reflect.DeepEqual(session.Target, target) || (target == nil && session.Model.ID != modelID) || (target != nil && !sameAgentSelection(session.Executor, executorID, agentID, modelID)) {
+		if !session.MCP.SameMembers(mcp) || !reflect.DeepEqual(session.Skills, skills) || !sameJSON(old.Prompt, prompt) || !reflect.DeepEqual(session.Target, target) || (target == nil && session.Model.ID != modelID) || (target != nil && !sameAgentSelection(session.Executor, executorID, agentID, modelID)) {
 			return execution.Ref{}, execution.ErrConflict
 		}
 		return old.Ref, nil

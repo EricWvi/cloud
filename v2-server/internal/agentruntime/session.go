@@ -275,7 +275,7 @@ func (a *agentSession) replaceable() bool {
 	return a.ended || a.broken
 }
 
-func (a *agentSession) begin(turn string, emit Emit) (*activeTurn, bool, error) {
+func (a *agentSession) begin(turn string, selection *execution.MCPSelection, emit Emit) (*activeTurn, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.ended || a.ending {
@@ -289,6 +289,12 @@ func (a *agentSession) begin(turn string, emit Emit) (*activeTurn, bool, error) 
 	}
 	if a.broken {
 		return nil, false, execution.ErrUnavailable
+	}
+	if !a.frozen.MCP.SameMembers(selection) {
+		// The live Agent could still use the formerly authorized members. Fence all
+		// turns while holding the admission lock; the caller requests a confirmed End.
+		a.broken = true
+		return nil, false, &execution.MCPFailure{Code: "mcp_selection_invalid"}
 	}
 	if a.active != nil {
 		return nil, false, execution.ErrWorkspaceBusy
