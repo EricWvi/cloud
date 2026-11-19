@@ -150,6 +150,33 @@ test('interactive Agent: the starter talks to the parked node in its session, th
   expect(detail.nodes.find((n) => n.nodeId === 'review')!.status).toBe('succeeded')
 })
 
+test('interactive Agent: 「确认并完成」 adopts the opening turn without forcing it', async ({ page }, testInfo) => {
+  test.skip(!realAgents, 'prepared Node assets are required for a real Agent session')
+  test.setTimeout(240_000)
+  const { tenantId, pane, row, runId: readRunId } = await startRun(page, chain, '交互确认首轮')
+  await expect(pane.locator('[data-path-node="draft"]')).toContainText('等待输入', { timeout: 150_000 })
+  await pane.getByRole('button', { name: '查看节点会话' }).click()
+
+  // The request must carry confirmInitialTurn: without it v2-server refuses with turn_unconfirmed.
+  const completed = page.waitForResponse((r) => r.url().endsWith('/nodes/draft/complete') && r.request().method() === 'POST')
+  await pane.getByRole('button', { name: '确认并完成' }).click()
+  const response = await completed
+  expect(response.status()).toBe(200)
+  expect(response.request().postDataJSON()).toEqual({ force: false, requester: 'human', confirmInitialTurn: true })
+  await expect(row('成功')).toBeVisible({ timeout: 150_000 })
+  await screenshot(page, testInfo.outputPath('1c-confirmed-first-turn.png'))
+
+  const runId = await readRunId()
+  const detail = (await (await page.request.get(`/api/v2/tenants/${tenantId}/workflow-runs/${runId}`)).json()) as { nodes: { nodeId: string; status: string; payload: string | null }[] }
+  const draft = detail.nodes.find((n) => n.nodeId === 'draft')!
+  const payload = JSON.parse(draft.payload!)
+  expect(draft.status).toBe('succeeded')
+  expect(payload.interactive.turns).toBe(1)
+  expect(payload.completion_forced).toBeUndefined()
+  expect(payload.requester).toBe('human')
+  expect(detail.nodes.find((n) => n.nodeId === 'review')!.status).toBe('succeeded')
+})
+
 test('interactive Agent: a sibling running its Agent leaves the parked session open for the next message', async ({ page }, testInfo) => {
   test.skip(!realAgents, 'prepared Node assets are required for a real Agent session')
   test.setTimeout(300_000)
