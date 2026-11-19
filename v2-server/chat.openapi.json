@@ -1457,6 +1457,9 @@
           },
           "revision": {
             "type": "string"
+          },
+          "git": {
+            "$ref": "#/components/schemas/ChatGitFindings"
           }
         }
       },
@@ -1511,7 +1514,7 @@
           },
           "reason": {
             "type": "string",
-            "description": "Why kept, or why pending: delivering, removal_failed and check_failed are retried at the next start, reclaim_unavailable at the next start with an Agent runtime."
+            "description": "Why kept, or why pending: in_progress is still being removed in the background; delivering, removal_failed and check_failed are retried at the next start; reclaim_unavailable at the next start with an Agent runtime."
           },
           "releasedBytes": {
             "type": "integer",
@@ -1520,6 +1523,53 @@
           "releasedFiles": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "ChatGitFindings": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "stashes",
+          "refs",
+          "repositories"
+        ],
+        "description": "With reason git_state: what only the checkout's repository holds, which no delivery carries.",
+        "properties": {
+          "stashes": {
+            "type": "integer",
+            "description": "Entries of refs/stash."
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name",
+                "commits"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "commits": {
+                  "type": "integer",
+                  "description": "Commits it reaches that neither the base nor HEAD reaches."
+                },
+                "notCommit": {
+                  "type": "boolean",
+                  "description": "It does not peel to a commit."
+                }
+              }
+            }
+          },
+          "repositories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Nested repositories: a .git of any kind below the top level, a changed gitlink, an initialized submodule (.git/modules/<name>)."
           }
         }
       }

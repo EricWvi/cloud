@@ -15,12 +15,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/workspacefs"
@@ -58,6 +60,7 @@ const (
 	ReasonRemovalFailed      = "removal_failed"      // pending: the removal failed and is retried at startup
 	ReasonReclaimUnavailable = "reclaim_unavailable" // pending: this server has no Agent runtime to judge it
 	ReasonCheckFailed        = "check_failed"        // pending: the checkout could not be inspected (disk, mirror, Git); retried
+	ReasonInProgress         = "in_progress"         // pending: still being removed in the background
 	ReasonOperatorDiscard    = "operator_discard"    // reclaimed: an operator discarded a kept checkout
 )
 
@@ -70,6 +73,8 @@ type Verdict struct {
 	// most workspacefs.MaxReclaimChanges; Total counts them all.
 	Changes []workspacefs.Change
 	Total   int
+	// Git is what the repository holds that no delivery carries (for git_state).
+	Git workspacefs.GitFindings
 	// LatestDelivery is the newest delivered (not empty) delivery, for a patch download.
 	LatestDelivery string
 	// Revision identifies the state this verdict rests on; a discard must present it.
@@ -109,7 +114,7 @@ type Inspector interface {
 // returns workspacefs.ErrUnsafeCheckout for a path it may not delete and
 // workspacefs.ErrCheckoutInUse for a checkout a live session in this process holds.
 type Remover interface {
-	RemoveCheckout(projectID, workspaceID, path string) (workspacefs.Usage, error)
+	RemoveCheckout(ctx context.Context, projectID, workspaceID, path string) (workspacefs.Usage, error)
 }
 
 // Reclaimer judges and executes workspace reclaims, one execution per checkout at a time.
@@ -117,6 +122,11 @@ type Reclaimer struct {
 	store   Store
 	inspect Inspector
 	remover Remover
+
+	// ctx is the server's life: Start runs under it, and Close cancels it and waits.
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 
 	mu    sync.Mutex
 	locks map[string]*keyed
@@ -127,9 +137,47 @@ type keyed struct {
 	holders int
 }
 
-// New returns a Reclaimer.
+// New returns a Reclaimer. Close must be called before the store is closed.
 func New(s Store, i Inspector, r Remover) *Reclaimer {
-	return &Reclaimer{store: s, inspect: i, remover: r, locks: map[string]*keyed{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Reclaimer{store: s, inspect: i, remover: r, locks: map[string]*keyed{}, ctx: ctx, cancel: cancel}
+}
+
+// Result is what a reclaim Start began came to.
+type Result struct {
+	Outcome Outcome
+	Err     error
+}
+
+// Start executes a reclaim in the background, under the server's life rather than a request's:
+// the deletion has committed, and the removal must not stop because a client went away. The
+// channel delivers the result once. Close cancels it; a removal stopped that way stays deleting
+// and the next start finishes it.
+func (r *Reclaimer) Start(workspaceID string) <-chan Result {
+	done := make(chan Result, 1)
+	r.mu.Lock()
+	if r.ctx.Err() != nil {
+		// Stopping: the reclaim stays recorded for the next start.
+		r.mu.Unlock()
+		done <- Result{Outcome: Outcome{Workspace: OutcomePending, Reason: ReasonInProgress}}
+		return done
+	}
+	r.wg.Add(1)
+	r.mu.Unlock()
+	go func() {
+		defer r.wg.Done()
+		out, err := r.Reclaim(r.ctx, workspaceID)
+		done <- Result{out, err}
+	}()
+	return done
+}
+
+// Close cancels background executions and waits for them to stop.
+func (r *Reclaimer) Close() {
+	r.mu.Lock()
+	r.cancel()
+	r.mu.Unlock()
+	r.wg.Wait()
 }
 
 // lock serializes executions of one reclaim within this process; the process holds the data
@@ -213,13 +261,13 @@ func (r *Reclaimer) judge(ctx context.Context, c store.Checkout) (Verdict, func(
 		unlock()
 		return Verdict{}, nil, fmt.Errorf("inspect checkout: %w", err)
 	}
-	v := Verdict{Workspace: WorkspaceUndelivered, Changes: in.Changes, Total: in.Total}
+	v := Verdict{Workspace: WorkspaceUndelivered, Changes: in.Changes, Total: in.Total, Git: in.Git}
 	switch {
 	case !d.Delivered:
 		v.Reason = ReasonLegacy
 	case !lastGood:
 		v.Reason = ReasonLastUndelivered
-	case in.GitState != "":
+	case !in.Git.Empty():
 		v.Reason = ReasonGitState
 	case !in.Unchanged:
 		v.Reason = ReasonChanged
@@ -227,7 +275,12 @@ func (r *Reclaimer) judge(ctx context.Context, c store.Checkout) (Verdict, func(
 		v = Verdict{Workspace: WorkspaceRecoverable, Ignored: in.Ignored,
 			basis: store.ReclaimBasis{DeliveryID: d.LastDeliveryID, DeliveryCommit: d.LastCommit, BaseCommit: c.BaseCommit}}
 	}
-	return seal(v, c, in.Tree+"\x00"+in.GitState), unlock, nil
+	git, err := json.Marshal(in.Git)
+	if err != nil {
+		unlock()
+		return Verdict{}, nil, err
+	}
+	return seal(v, c, in.Tree+"\x00"+string(git)), unlock, nil
 }
 
 // seal fills in what every verdict carries: the newest good delivery and the revision, a digest
@@ -322,14 +375,20 @@ func (r *Reclaimer) Reclaim(ctx context.Context, workspaceID string) (Outcome, e
 		if id.Live {
 			return r.keep(ctx, rec, ReasonLive)
 		}
+		unlock, err := r.inspect.LockWorkspace(ctx, rec.Path)
+		if err != nil {
+			return Outcome{}, err
+		}
+		defer unlock()
 		basis = store.ReclaimBasis{DeliveryID: rec.DeliveryID, DeliveryCommit: rec.DeliveryCommit, BaseCommit: rec.BaseCommit}
 	}
 	return r.remove(ctx, rec, basis)
 }
 
-// remove deletes a deleting reclaim's checkout; the Remover checks the path's identity.
+// remove deletes a deleting reclaim's checkout; the Remover checks the path's identity. The
+// caller holds the delivery's lock on the checkout.
 func (r *Reclaimer) remove(ctx context.Context, rec store.WorkspaceReclaim, basis store.ReclaimBasis) (Outcome, error) {
-	usage, err := r.remover.RemoveCheckout(rec.ProjectID, rec.WorkspaceID, rec.Path)
+	usage, err := r.remover.RemoveCheckout(ctx, rec.ProjectID, rec.WorkspaceID, rec.Path)
 	switch {
 	case errors.Is(err, workspacefs.ErrUnsafeCheckout):
 		slog.Warn("workspace reclaim refused an unsafe path", "workspace", rec.WorkspaceID, "path", rec.Path)
@@ -352,7 +411,10 @@ func (r *Reclaimer) remove(ctx context.Context, rec store.WorkspaceReclaim, basi
 func (r *Reclaimer) retry(ctx context.Context, rec store.WorkspaceReclaim, reason string, cause error) (Outcome, error) {
 	slog.Warn("workspace reclaim failed; retried at the next start", "workspace", rec.WorkspaceID,
 		"attempts", rec.Attempts+1, "reason", reason, "error", cause)
-	if note := r.store.NoteWorkspaceReclaimAttempt(ctx, rec.WorkspaceID, cause.Error()); note != nil {
+	// Recorded even when the attempt failed because the server is stopping.
+	note, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if note := r.store.NoteWorkspaceReclaimAttempt(note, rec.WorkspaceID, cause.Error()); note != nil {
 		return Outcome{}, errors.Join(cause, note)
 	}
 	return Outcome{Workspace: OutcomePending, Reason: reason}, nil
@@ -402,7 +464,7 @@ func (r *Reclaimer) DiscardKept(ctx context.Context, workspaceID string) (Outcom
 	if !id.Recorded || id.Shared || id.Live {
 		return Outcome{}, fmt.Errorf("workspace reclaim %s: the recorded path is no longer this conversation's alone", workspaceID)
 	}
-	usage, err := r.remover.RemoveCheckout(rec.ProjectID, rec.WorkspaceID, rec.Path)
+	usage, err := r.remover.RemoveCheckout(ctx, rec.ProjectID, rec.WorkspaceID, rec.Path)
 	if err != nil {
 		return Outcome{}, err
 	}

@@ -31,7 +31,7 @@ type diskRemover struct {
 	enter chan struct{}
 }
 
-func (d *diskRemover) RemoveCheckout(_, _, path string) (workspacefs.Usage, error) {
+func (d *diskRemover) RemoveCheckout(ctx context.Context, _, _, path string) (workspacefs.Usage, error) {
 	d.calls.Add(1)
 	if d.enter != nil {
 		d.enter <- struct{}{}
@@ -42,7 +42,7 @@ func (d *diskRemover) RemoveCheckout(_, _, path string) (workspacefs.Usage, erro
 	if d.fail.CompareAndSwap(true, false) {
 		return workspacefs.Usage{}, errors.New("disk unavailable")
 	}
-	return workspacefs.RemoveCheckout(d.root, path)
+	return workspacefs.RemoveCheckout(ctx, d.root, path)
 }
 
 type fixture struct {
@@ -497,5 +497,80 @@ func TestReclaimRetriesWhenTheCheckCannotRun(t *testing.T) {
 	}
 	if got := f.reclaim(t, c); got.Status != store.ReclaimReclaimed || exists(t, c.Path) {
 		t.Fatalf("after the restart: %+v, checkout exists %v", got, exists(t, c.Path))
+	}
+}
+
+// git_state previews say what the repository holds instead of an empty change list.
+func TestGitStatePreviewNamesWhatTheRepositoryHolds(t *testing.T) {
+	f := newFixture(t)
+	c := f.chat(t, st.TurnDelivered)
+	write(t, c.Path, "README.md", "stashed\n")
+	git(t, c.Path, "stash", "push", "-q")
+	write(t, c.Path, "data/.git", "gitdir: /elsewhere\n")
+	v, err := f.r.Preview(t.Context(), f.scope.TenantID, f.scope.UserID, c.ConversationID)
+	if err != nil || v.Reason != wr.ReasonGitState || v.Git.Stashes != 1 || len(v.Git.Repositories) != 1 || v.Git.Repositories[0] != "data" {
+		t.Fatalf("preview = %+v, %v", v, err)
+	}
+	// Another stash changes the revision although the change list stays the same.
+	write(t, c.Path, "README.md", "stashed again\n")
+	git(t, c.Path, "stash", "push", "-q")
+	if again, err := f.r.Preview(t.Context(), f.scope.TenantID, f.scope.UserID, c.ConversationID); err != nil || again.Git.Stashes != 2 || again.Revision == v.Revision {
+		t.Fatalf("second stash = %+v, %v", again, err)
+	}
+}
+
+// An initialized submodule with uncommitted changes, and a checkout whose .git points nowhere,
+// keep the checkout: the first holds work no delivery has, the second cannot be verified.
+func TestReclaimKeepsSubmodulesAndUnverifiableCheckouts(t *testing.T) {
+	f := newFixture(t)
+	sub := f.chat(t, st.TurnDelivered)
+	lib := t.TempDir()
+	write(t, lib, "lib.go", "package lib\n")
+	git(t, lib, "init", "-q", ".")
+	git(t, lib, "add", ".")
+	git(t, lib, "commit", "-qm", "lib")
+	git(t, sub.Path, "-c", "protocol.file.allow=always", "submodule", "add", "-q", lib, "mod")
+	write(t, sub.Path, "mod/lib.go", "package lib // edited\n")
+	f.deleteChat(t, sub, store.ReclaimRecoverable)
+	if got := f.run(t, sub); got != (wr.Outcome{Workspace: wr.OutcomeKept, Reason: wr.ReasonGitState}) || !exists(t, filepath.Join(sub.Path, "mod", "lib.go")) {
+		t.Fatalf("submodule outcome = %+v", got)
+	}
+	broken := f.chat(t, st.TurnDelivered)
+	if err := os.RemoveAll(filepath.Join(broken.Path, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, broken.Path, ".git", "gitdir: /nowhere/at/all\n")
+	f.deleteChat(t, broken, store.ReclaimRecoverable)
+	if got := f.run(t, broken); got != (wr.Outcome{Workspace: wr.OutcomeKept, Reason: wr.ReasonUnverifiable}) || !exists(t, broken.Path) {
+		t.Fatalf("broken .git outcome = %+v", got)
+	}
+}
+
+// Closing the reclaimer stops a background removal; the reclaim stays deleting and the next start
+// finishes it.
+func TestBackgroundRemovalStoppedAtShutdownIsFinishedAtStart(t *testing.T) {
+	f := newFixture(t)
+	c := f.chat(t, st.TurnDelivered)
+	f.deleteChat(t, c, store.ReclaimRecoverable)
+	f.remover.block, f.remover.enter = make(chan struct{}), make(chan struct{}, 1)
+	result := f.r.Start(c.WorkspaceID)
+	<-f.remover.enter
+	closed := make(chan struct{})
+	go func() { f.r.Close(); close(closed) }()
+	time.Sleep(20 * time.Millisecond) // Close has cancelled; the removal resumes and sees it
+	close(f.remover.block)
+	<-closed
+	if res := <-result; res.Err != nil || res.Outcome.Workspace != wr.OutcomePending {
+		t.Fatalf("stopped removal = %+v", res)
+	}
+	if got := f.reclaim(t, c); got.Status != store.ReclaimDeleting || !exists(t, c.Path) {
+		t.Fatalf("after shutdown = %+v", got)
+	}
+	f.remover.block, f.remover.enter = nil, nil
+	if err := wr.New(f.s, f.fs, f.remover).Resume(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.reclaim(t, c); got.Status != store.ReclaimReclaimed || exists(t, c.Path) {
+		t.Fatalf("after start = %+v", got)
 	}
 }

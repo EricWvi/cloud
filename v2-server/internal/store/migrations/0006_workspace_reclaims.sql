@@ -39,3 +39,17 @@ CREATE TABLE v2_workspace_reclaims (
 	CHECK (status <> 'kept' OR reason <> '')
 );
 CREATE INDEX v2_workspace_reclaims_open ON v2_workspace_reclaims (requested_at) WHERE status IN ('pending', 'deleting');
+
+-- A reclaim checks which execution sessions point at a checkout (data->>'WorkspaceID').
+CREATE INDEX v2_execution_sessions_workspace ON v2_execution_sessions ((data->>'WorkspaceID'));
+
+-- The person's choice stays as recorded.
+CREATE FUNCTION v2_workspace_reclaims_keep_mode() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+	IF NEW.mode <> OLD.mode THEN
+		RAISE EXCEPTION 'workspace reclaim mode is immutable';
+	END IF;
+	RETURN NEW;
+END $$;
+CREATE TRIGGER v2_workspace_reclaims_keep_mode BEFORE UPDATE ON v2_workspace_reclaims
+	FOR EACH ROW EXECUTE FUNCTION v2_workspace_reclaims_keep_mode();

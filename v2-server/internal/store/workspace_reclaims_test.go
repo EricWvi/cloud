@@ -176,3 +176,27 @@ func TestCheckReclaimIdentitySeesLiveSharedAndChangedCheckouts(t *testing.T) {
 		t.Fatalf("different clone execution still counts: %+v, %v", id, err)
 	}
 }
+
+// The person's choice stays as recorded: no transition changes it, and the database refuses a
+// write that tries.
+func TestReclaimModeIsImmutable(t *testing.T) {
+	f := executionDatabase(t)
+	ctx := t.Context()
+	c := st.ChatWithCheckout(t, f.s, f.scope, "/checkouts/mode", st.TurnDelivered)
+	c.End(t, f.s)
+	if _, err := f.s.DeleteChatConversationReclaiming(ctx, f.scope.TenantID, f.scope.UserID, c.ConversationID, store.ReclaimRecoverable); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.MarkWorkspaceDeleting(ctx, c.WorkspaceID, store.ReclaimBasis{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.FinishWorkspaceKept(ctx, c.WorkspaceID, "why"); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := f.s.WorkspaceReclaim(ctx, c.WorkspaceID); err != nil || r.Mode != store.ReclaimRecoverable {
+		t.Fatalf("mode after transitions = %+v, %v", r, err)
+	}
+	if _, err := f.admin.Exec(ctx, `UPDATE v2_workspace_reclaims SET mode = 'discard' WHERE workspace_id = $1`, c.WorkspaceID); err == nil {
+		t.Fatal("the mode was changed")
+	}
+}

@@ -383,15 +383,30 @@ func TestTurnPromptReadsPastTheFirstPage(t *testing.T) {
 type reclaims struct {
 	verdict    workspacereclaim.Verdict
 	workspaces []string
+	slow       chan struct{} // holds Start's result until closed
+	err        error         // Start's result fails with it
 }
 
 func (r *reclaims) Preview(context.Context, string, string, string) (workspacereclaim.Verdict, error) {
 	return r.verdict, nil
 }
 
-func (r *reclaims) Reclaim(_ context.Context, workspaceID string) (workspacereclaim.Outcome, error) {
+func (r *reclaims) Start(workspaceID string) <-chan workspacereclaim.Result {
 	r.workspaces = append(r.workspaces, workspaceID)
-	return workspacereclaim.Outcome{Workspace: workspacereclaim.OutcomeReclaimed, Bytes: 7, Files: 2}, nil
+	done := make(chan workspacereclaim.Result, 1)
+	if r.slow != nil {
+		go func() {
+			<-r.slow
+			done <- workspacereclaim.Result{Outcome: workspacereclaim.Outcome{Workspace: workspacereclaim.OutcomeReclaimed}}
+		}()
+		return done
+	}
+	if r.err != nil {
+		done <- workspacereclaim.Result{Err: r.err}
+		return done
+	}
+	done <- workspacereclaim.Result{Outcome: workspacereclaim.Outcome{Workspace: workspacereclaim.OutcomeReclaimed, Bytes: 7, Files: 2}}
+	return done
 }
 
 func TestDeleteRecordsAndExecutesTheCheckoutReclaim(t *testing.T) {
@@ -485,5 +500,42 @@ func TestWithoutReclaimerAnExistingCheckoutIsNeverDiscarded(t *testing.T) {
 	}
 	if v, e := svc.DeletionPreview(ctx, scope, bare.ID); e != nil || v.Workspace != workspacereclaim.WorkspaceNone {
 		t.Fatalf("preview without checkout = %+v, %v", v, e)
+	}
+}
+
+// A reclaim that outlasts the wait is reported as in progress, one that fails after the deletion
+// as pending: either way the conversation is deleted and the request succeeds.
+func TestDeleteReportsASlowOrFailingReclaimAsPending(t *testing.T) {
+	s := storetest.Open(t)
+	user, tenant := storetest.Login(t, s, "chat-slow-reclaim")
+	scope := execution.Scope{TenantID: tenant, UserID: user}
+	stub := &executiontest.Stub{}
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		r    *reclaims
+		want workspacereclaim.Outcome
+	}{
+		{"slow", &reclaims{slow: make(chan struct{})}, workspacereclaim.Outcome{Workspace: workspacereclaim.OutcomePending, Reason: workspacereclaim.ReasonInProgress}},
+		{"failing", &reclaims{err: errors.New("database gone")}, workspacereclaim.Outcome{Workspace: workspacereclaim.OutcomePending, Reason: workspacereclaim.ReasonRemovalFailed}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := chat.New(s, stub, stub, chat.Options{Reclaims: tc.r, ReclaimWait: 50 * time.Millisecond})
+			c := storetest.ChatWithCheckout(t, s, scope, "/checkouts/"+tc.name, storetest.TurnDelivered)
+			c.End(t, s)
+			if e := s.EndChatSession(ctx, c.SessionID, store.EndStopped, time.Now()); e != nil {
+				t.Fatal(e)
+			}
+			out, e := svc.Delete(ctx, scope, c.ConversationID, store.ReclaimRecoverable, "")
+			if e != nil || out != tc.want {
+				t.Fatalf("delete = %+v, %v", out, e)
+			}
+			if _, e := s.ChatConversation(ctx, tenant, user, c.ConversationID); !errors.Is(e, store.ErrNotFound) {
+				t.Fatalf("conversation still there: %v", e)
+			}
+			if tc.r.slow != nil {
+				close(tc.r.slow)
+			}
+		})
 	}
 }

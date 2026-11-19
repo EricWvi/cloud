@@ -45,7 +45,8 @@ type Store interface {
 // implements it.
 type Reclaims interface {
 	Preview(ctx context.Context, tenant, user, conversationID string) (workspacereclaim.Verdict, error)
-	Reclaim(ctx context.Context, workspaceID string) (workspacereclaim.Outcome, error)
+	// Start executes a recorded reclaim in the background, under the server's life.
+	Start(workspaceID string) <-chan workspacereclaim.Result
 }
 
 // ErrDeletionPreviewStale reports a discard whose preview no longer matches the conversation: the
@@ -58,14 +59,16 @@ var ErrDeletionPreviewStale = errors.New("deletion preview stale")
 // can judge it.
 var ErrReclaimUnavailable = errors.New("workspace reclaim unavailable")
 
-// reclaimBudget bounds the reclaim a deletion executes before answering; what does not finish
-// stays recorded and is finished at the next start.
-const reclaimBudget = 2 * time.Minute
+// reclaimWait is how long a deletion waits for the reclaim it started before answering; a
+// checkout that takes longer goes on being removed in the background (pending, in_progress).
+const reclaimWait = 5 * time.Second
 
 // Options tune a Service.
 type Options struct {
 	// Now is the clock; nil uses time.Now.
 	Now func() time.Time
+	// ReclaimWait is how long a deletion waits for its reclaim; zero uses 5 seconds.
+	ReclaimWait time.Duration
 	// Reclaims judges and reclaims a deleted conversation's checkout. Nil (no Agent runtime)
 	// refuses previews and discards of a conversation with a checkout, and leaves a recorded
 	// reclaim to a later start that has a runtime.
@@ -79,6 +82,8 @@ type Service struct {
 	catalog execution.Catalog
 	now     func() time.Time
 	reclaim Reclaims
+	// reclaimWait is how long Delete waits for the reclaim it started.
+	reclaimWait time.Duration
 	// locks serialize work on one conversation, so two first prompts cannot both start a session.
 	// v2-server is a single process, which is what makes an in-memory lock sufficient.
 	locks keyedLocks
@@ -90,7 +95,10 @@ func New(s Store, runtime execution.Service, catalog execution.Catalog, o Option
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	return &Service{store: s, runtime: runtime, catalog: catalog, now: o.Now, reclaim: o.Reclaims}
+	if o.ReclaimWait <= 0 {
+		o.ReclaimWait = reclaimWait
+	}
+	return &Service{store: s, runtime: runtime, catalog: catalog, now: o.Now, reclaim: o.Reclaims, reclaimWait: o.ReclaimWait}
 }
 
 func (s *Service) lock(id string) func() { return s.locks.lock(id) }
@@ -353,15 +361,18 @@ func (s *Service) Delete(ctx context.Context, scope execution.Scope, conversatio
 		// runtime judges it like any other.
 		return workspacereclaim.Outcome{Workspace: workspacereclaim.OutcomePending, Reason: workspacereclaim.ReasonReclaimUnavailable}, nil
 	}
-	// The deletion has committed; the reclaim no longer depends on the request staying open.
-	budget, cancel := context.WithTimeout(context.WithoutCancel(ctx), reclaimBudget)
-	defer cancel()
-	out, e := s.reclaim.Reclaim(budget, workspace)
-	if e != nil {
-		slog.Warn("workspace reclaim stays open after deletion", "workspace", workspace, "error", e)
-		return workspacereclaim.Outcome{Workspace: workspacereclaim.OutcomePending, Reason: workspacereclaim.ReasonRemovalFailed}, nil
+	// The deletion has committed: whatever happens to the checkout from here on is reported as
+	// its outcome, never as a failed deletion.
+	select {
+	case res := <-s.reclaim.Start(workspace):
+		if res.Err != nil {
+			slog.Warn("workspace reclaim stays open after deletion", "workspace", workspace, "error", res.Err)
+			return workspacereclaim.Outcome{Workspace: workspacereclaim.OutcomePending, Reason: workspacereclaim.ReasonRemovalFailed}, nil
+		}
+		return res.Outcome, nil
+	case <-time.After(s.reclaimWait):
+		return workspacereclaim.Outcome{Workspace: workspacereclaim.OutcomePending, Reason: workspacereclaim.ReasonInProgress}, nil
 	}
-	return out, nil
 }
 
 // DeletionPreview tells the person what deleting the conversation does to its checkout.

@@ -392,6 +392,20 @@ describe('chat page', () => {
     await waitFor(() => expect(backend.deletedWith['c-style']).toEqual({ workspace: 'discard', revision: 'rev-late' }))
   })
 
+  it('names what only the repository holds when it blocks reclaiming', async () => {
+    backend.deletion = {
+      workspace: 'undelivered', reason: 'git_state', revision: 'rev-git',
+      git: { stashes: 2, refs: [{ name: 'refs/heads/side', commits: 3 }], repositories: ['vendor/lib'] },
+    }
+    await renderReady()
+    const dialog = await openDelete('梳理 v2 接口缺口')
+    const held = within(await dialog.findByRole('list', { name: '仓库里未交付的内容' }))
+    expect(held.getByText('stash：2 条')).toBeInTheDocument()
+    expect(held.getByText('refs/heads/side：3 个提交')).toBeInTheDocument()
+    expect(held.getByText('嵌套仓库：vendor/lib')).toBeInTheDocument()
+    expect(dialog.queryByRole('list', { name: '未交付的改动' })).not.toBeInTheDocument()
+  })
+
   it('does not offer discarding while the last turn still delivers', async () => {
     backend.deletion = { workspace: 'undelivered', reason: 'delivering' }
     await renderReady()

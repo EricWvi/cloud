@@ -268,6 +268,25 @@ export interface ChatUndeliveredChange {
   binary: boolean;
 }
 
+export type ChatGitFindingsRefsItem = {
+  name: string;
+  /** Commits it reaches that neither the base nor HEAD reaches. */
+  commits: number;
+  /** It does not peel to a commit. */
+  notCommit?: boolean;
+};
+
+/**
+ * With reason git_state: what only the checkout's repository holds, which no delivery carries.
+ */
+export interface ChatGitFindings {
+  /** Entries of refs/stash. */
+  stashes: number;
+  refs: ChatGitFindingsRefsItem[];
+  /** Nested repositories: a .git of any kind below the top level, a changed gitlink, an initialized submodule (.git/modules/<name>). */
+  repositories: string[];
+}
+
 export interface ChatDeletionPreview {
   workspace: ChatDeletionPreviewWorkspace;
   reason?: ChatDeletionPreviewReason;
@@ -277,6 +296,7 @@ export interface ChatDeletionPreview {
   /** The newest delivered delivery, whose patch the workspace routes download. */
   latestDelivery?: string;
   revision: string;
+  git?: ChatGitFindings;
 }
 
 export type ChatDeletionResultWorkspace = typeof ChatDeletionResultWorkspace[keyof typeof ChatDeletionResultWorkspace];
@@ -291,7 +311,7 @@ export const ChatDeletionResultWorkspace = {
 
 export interface ChatDeletionResult {
   workspace: ChatDeletionResultWorkspace;
-  /** Why kept, or why pending: delivering, removal_failed and check_failed are retried at the next start, reclaim_unavailable at the next start with an Agent runtime. */
+  /** Why kept, or why pending: in_progress is still being removed in the background; delivering, removal_failed and check_failed are retried at the next start; reclaim_unavailable at the next start with an Agent runtime. */
   reason?: string;
   releasedBytes?: number;
   releasedFiles?: number;

@@ -363,6 +363,9 @@ func runWithListener(addr, dbURL string, cleanup, fixture, testFixtures bool, li
 	var reclaims *workspacereclaim.Reclaimer
 	if driver != nil {
 		reclaims = workspacereclaim.New(db, delivery, driver)
+		// Stops background removals before the runtime and database close (defers run LIFO);
+		// a removal stopped this way stays deleting for the next start.
+		defer reclaims.Close()
 		hosts.WorkspaceReclaims = reclaims
 	}
 	if e := boot.Recover(ctx, hosts); e != nil {

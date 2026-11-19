@@ -52,6 +52,22 @@ function WorkspaceNote({ preview, discard, setDiscard }: { preview: ChatDeletion
           </ul>
         </div>
       )}
+      {preview.git && (
+        <div className="grid gap-1">
+          <p className="text-muted-foreground">只在仓库里、不在任何交付里的内容：</p>
+          <ul aria-label="仓库里未交付的内容" className="max-h-32 overflow-auto rounded-md border px-2 py-1 font-mono text-xs">
+            {preview.git.stashes > 0 && <li>stash：{preview.git.stashes} 条</li>}
+            {preview.git.refs.map((r) => (
+              <li key={r.name}>
+                {r.name}：{r.notCommit ? '不指向提交' : `${r.commits} 个提交`}
+              </li>
+            ))}
+            {preview.git.repositories.map((p) => (
+              <li key={p}>嵌套仓库：{p}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       {!delivering && (
         <div className="flex items-start gap-2">
           <Checkbox id="discard-undelivered" checked={discard} onCheckedChange={(checked) => setDiscard(checked === true)} className="mt-0.5" />

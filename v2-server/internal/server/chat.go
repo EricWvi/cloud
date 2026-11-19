@@ -219,13 +219,14 @@ type chatDeletionResult struct {
 }
 
 type chatDeletionPreview struct {
-	Workspace          string               `json:"workspace"`
-	Reason             string               `json:"reason,omitempty"`
-	Ignored            bool                 `json:"ignored"`
-	UndeliveredChanges []workspacefs.Change `json:"undeliveredChanges"`
-	UndeliveredTotal   int                  `json:"undeliveredTotal"`
-	LatestDelivery     string               `json:"latestDelivery,omitempty"`
-	Revision           string               `json:"revision"`
+	Workspace          string                   `json:"workspace"`
+	Reason             string                   `json:"reason,omitempty"`
+	Ignored            bool                     `json:"ignored"`
+	UndeliveredChanges []workspacefs.Change     `json:"undeliveredChanges"`
+	UndeliveredTotal   int                      `json:"undeliveredTotal"`
+	Git                *workspacefs.GitFindings `json:"git,omitempty"`
+	LatestDelivery     string                   `json:"latestDelivery,omitempty"`
+	Revision           string                   `json:"revision"`
 }
 
 // chatDeletion tells the page, before it asks the person to confirm, what deleting the
@@ -240,8 +241,12 @@ func (h *handler) chatDeletion(w http.ResponseWriter, r *http.Request, c chatReq
 	if changes == nil {
 		changes = []workspacefs.Change{}
 	}
-	writeJSON(w, http.StatusOK, chatDeletionPreview{Workspace: v.Workspace, Reason: v.Reason, Ignored: v.Ignored,
-		UndeliveredChanges: changes, UndeliveredTotal: v.Total, LatestDelivery: v.LatestDelivery, Revision: v.Revision})
+	res := chatDeletionPreview{Workspace: v.Workspace, Reason: v.Reason, Ignored: v.Ignored,
+		UndeliveredChanges: changes, UndeliveredTotal: v.Total, LatestDelivery: v.LatestDelivery, Revision: v.Revision}
+	if v.Reason == workspacereclaim.ReasonGitState {
+		res.Git = &v.Git
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 type chatResult struct {
