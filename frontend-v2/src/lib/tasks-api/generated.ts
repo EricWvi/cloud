@@ -448,11 +448,85 @@ export interface MySquadTaskList {
   items: MySquadTask[];
 }
 
+/**
+ * assigned: the task was assigned to the caller or a squad they belong to; mentioned: a comment @-mentioned the caller; review: a task the caller created reached review.
+ */
+export type NotificationKind = typeof NotificationKind[keyof typeof NotificationKind];
+
+
+export const NotificationKind = {
+  assigned: 'assigned',
+  mentioned: 'mentioned',
+  review: 'review',
+} as const;
+
+export type NotificationTaskStatus = typeof NotificationTaskStatus[keyof typeof NotificationTaskStatus];
+
+
+export const NotificationTaskStatus = {
+  pending: 'pending',
+  running: 'running',
+  review: 'review',
+  done: 'done',
+  cancelled: 'cancelled',
+} as const;
+
+export interface Notification {
+  id: string;
+  /** assigned: the task was assigned to the caller or a squad they belong to; mentioned: a comment @-mentioned the caller; review: a task the caller created reached review. */
+  kind: NotificationKind;
+  taskId: string;
+  taskTitle: string;
+  taskStatus: NotificationTaskStatus;
+  /**
+     * The person who caused it; null when a run did.
+     * @nullable
+     */
+  actorId: string | null;
+  /** @nullable */
+  actorName: string | null;
+  /**
+     * The mentioning comment; null for other kinds.
+     * @nullable
+     */
+  commentId: string | null;
+  /** The start of the mentioning comment; empty for other kinds. */
+  excerpt: string;
+  createdAt: string;
+  /** @nullable */
+  readAt: string | null;
+}
+
+export interface NotificationList {
+  items: Notification[];
+  /** @minimum 0 */
+  unread: number;
+}
+
+export interface NotificationReadRequest {
+  /** @maxItems 100 */
+  ids?: string[];
+  all?: boolean;
+}
+
+export interface NotificationUnread {
+  /** @minimum 0 */
+  unread: number;
+}
+
 export type StreamTaskRunEventsParams = {
 /**
  * Resume after this sequence; Last-Event-ID takes precedence.
  */
 after?: string;
+};
+
+export type ListNotificationsParams = {
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: number;
 };
 
 type SecondParameter<T extends (...args: never) => unknown> = Parameters<T>[1];
@@ -1772,3 +1846,173 @@ export function useListMySquadTasks<TData = Awaited<ReturnType<typeof listMySqua
 
   return withQueryKey(query, queryOptions.queryKey);
 }
+
+
+
+
+
+
+
+/**
+ * The caller's in-app notifications in this workspace, newest first, with how many are unread: a task was assigned to them (directly or through a squad they belong to), a comment @-mentioned them, or a task they created reached review. Only current members receive and read them; removing a member deletes theirs.
+ */
+export const listNotifications = (
+    tid: string,
+    params?: ListNotificationsParams,
+ options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
+) => {
+
+
+      return customInstance<NotificationList>(
+      {url: `/api/v2/tenants/${tid}/notifications`, method: 'GET',
+        params, signal
+    },
+      options);
+    }
+
+
+
+
+export const getListNotificationsQueryKey = (tid: string,
+    params?: ListNotificationsParams,) => {
+    return [
+    `/api/v2/tenants/${tid}/notifications`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListNotificationsQueryOptions = <TData = Awaited<ReturnType<typeof listNotifications>>, TError = ErrorType<TaskError>>(tid: string,
+    params?: ListNotificationsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listNotifications>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListNotificationsQueryKey(tid,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listNotifications>>> = ({ signal }) => listNotifications(tid,params, requestOptions, signal);
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: tid !== null && tid !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listNotifications>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ListNotificationsQueryResult = NonNullable<Awaited<ReturnType<typeof listNotifications>>>
+export type ListNotificationsQueryError = ErrorType<TaskError>
+
+
+export function useListNotifications<TData = Awaited<ReturnType<typeof listNotifications>>, TError = ErrorType<TaskError>>(
+ tid: string,
+    params: undefined |  ListNotificationsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof listNotifications>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listNotifications>>,
+          TError,
+          Awaited<ReturnType<typeof listNotifications>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListNotifications<TData = Awaited<ReturnType<typeof listNotifications>>, TError = ErrorType<TaskError>>(
+ tid: string,
+    params?: ListNotificationsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listNotifications>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listNotifications>>,
+          TError,
+          Awaited<ReturnType<typeof listNotifications>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListNotifications<TData = Awaited<ReturnType<typeof listNotifications>>, TError = ErrorType<TaskError>>(
+ tid: string,
+    params?: ListNotificationsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listNotifications>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useListNotifications<TData = Awaited<ReturnType<typeof listNotifications>>, TError = ErrorType<TaskError>>(
+ tid: string,
+    params?: ListNotificationsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listNotifications>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getListNotificationsQueryOptions(tid,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+/**
+ * Marks the caller's listed notifications read, or all of them with all=true, and returns how many stay unread. Ids that are not the caller's are ignored.
+ */
+export const readNotifications = (
+    tid: string,
+    notificationReadRequest: BodyType<NotificationReadRequest>,
+ options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
+) => {
+
+
+      return customInstance<NotificationUnread>(
+      {url: `/api/v2/tenants/${tid}/notifications/read`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: notificationReadRequest, signal
+    },
+      options);
+    }
+
+
+
+
+export const getReadNotificationsMutationKey = () => ['readNotifications'] as const;
+
+export const getReadNotificationsMutationOptions = <TError = ErrorType<TaskError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof readNotifications>>, TError,ReadNotificationsMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof readNotifications>>, TError,ReadNotificationsMutationVariables, TContext> => {
+
+const mutationKey = getReadNotificationsMutationKey();
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof readNotifications>>, ReadNotificationsMutationVariables> = (props) => {
+          const {tid,data} = props ?? {};
+
+          return  readNotifications(tid,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ReadNotificationsMutationResult = NonNullable<Awaited<ReturnType<typeof readNotifications>>>
+    export type ReadNotificationsMutationBody = BodyType<NotificationReadRequest>
+    export type ReadNotificationsMutationError = ErrorType<TaskError>
+    export type ReadNotificationsMutationVariables = {tid: string;data: BodyType<NotificationReadRequest>}
+
+    export const useReadNotifications = <TError = ErrorType<TaskError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof readNotifications>>, TError,ReadNotificationsMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof readNotifications>>,
+        TError,
+        ReadNotificationsMutationVariables,
+        TContext
+      > => {
+      return useMutation(getReadNotificationsMutationOptions(options), queryClient);
+    }
