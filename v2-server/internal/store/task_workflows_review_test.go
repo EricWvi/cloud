@@ -246,7 +246,7 @@ func TestTaskWorkflowIdleAgentAndCallerKeys(t *testing.T) {
 	}
 	other := f.login(t, "other", "member")
 	current, _ := f.store.Task(f.ctx, f.tenant, task.ID)
-	if _, err := f.store.SetTaskAssignee(f.ctx, f.tenant, task.ID, &store.TaskAssigneeRef{Type: "human", ID: other}, current.Version); err != nil {
+	if _, err := f.store.SetTaskAssignee(f.ctx, f.tenant, task.ID, "", &store.TaskAssigneeRef{Type: "human", ID: other}, current.Version); err != nil {
 		t.Fatal(err)
 	}
 	in.UserID = other
@@ -521,7 +521,7 @@ func TestTaskWorkflowAssigneePolicy(t *testing.T) {
 	if _, err := f.store.AddSquadMember(f.ctx, storetest.Access(t, f.store, f.tenant, user), squad.ID, store.SquadMemberInput{Type: store.MemberHuman, UserID: member, Version: squad.Version}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.store.SetTaskAssignee(f.ctx, f.tenant, task.ID, &store.TaskAssigneeRef{Type: store.AssigneeSquad, ID: squad.ID}, task.Version); err != nil {
+	if _, err := f.store.SetTaskAssignee(f.ctx, f.tenant, task.ID, "", &store.TaskAssigneeRef{Type: store.AssigneeSquad, ID: squad.ID}, task.Version); err != nil {
 		t.Fatal(err)
 	}
 	in := store.NewTaskWorkflow{TenantID: f.tenant, TaskID: task.ID, UserID: outsider, Key: "squad", WorkflowID: wid}

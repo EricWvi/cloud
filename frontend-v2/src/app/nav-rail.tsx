@@ -4,6 +4,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { cn } from '@/lib/utils'
 import { UserMenu } from './auth/user-menu'
 import { features } from './features'
+import { NotificationBell } from './notifications/notification-bell'
 
 /** The narrow icon column on the far left: one icon per feature page. */
 export function NavRail() {
@@ -31,7 +32,10 @@ export function NavRail() {
           <TooltipContent side="right">{f.title}</TooltipContent>
         </Tooltip>
       ))}
-      <UserMenu />
+      <div className="mt-auto flex flex-col items-center gap-2">
+        <NotificationBell />
+        <UserMenu />
+      </div>
     </nav>
   )
 }

@@ -40,7 +40,7 @@ func TestTaskWorkflowEditsPreserveSettlement(t *testing.T) {
 				}
 			case "reassign":
 				other := f.login(t, "other", "member")
-				if _, err := f.store.SetTaskAssignee(f.ctx, f.tenant, task.ID, &store.TaskAssigneeRef{Type: "human", ID: other}, cur.Version); err != nil {
+				if _, err := f.store.SetTaskAssignee(f.ctx, f.tenant, task.ID, "", &store.TaskAssigneeRef{Type: "human", ID: other}, cur.Version); err != nil {
 					t.Fatalf("reassign refused: %v", err)
 				}
 			}

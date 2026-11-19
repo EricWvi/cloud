@@ -189,9 +189,19 @@ func settleTaskWorkflow(ctx context.Context, tx pgx.Tx, tenant, runID, status, f
 	if !restore && !CanRunTransitionTask(TaskRunning, to) {
 		return ErrInvalidTransition
 	}
-	_, err = tx.Exec(ctx, `UPDATE v2_tasks SET status=$3,version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 AND status=$4
- AND EXISTS(SELECT 1 FROM v2_task_workflow_runs l WHERE l.tenant_id=$1 AND l.task_id=$2 AND l.run_id=$5 AND l.status_revision=1 AND l.task_status=$4)`, tenant, taskID, to, TaskRunning, runID)
-	return err
+	var creator string
+	var version int64
+	err = tx.QueryRow(ctx, `UPDATE v2_tasks SET status=$3,version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 AND status=$4
+ AND EXISTS(SELECT 1 FROM v2_task_workflow_runs l WHERE l.tenant_id=$1 AND l.task_id=$2 AND l.run_id=$5 AND l.status_revision=1 AND l.task_status=$4)
+ RETURNING created_by::text,version`, tenant, taskID, to, TaskRunning, runID).Scan(&creator, &version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil || restore || to != TaskReview {
+		return err
+	}
+	// A settled handling run hands the task to 待验收 like an Agent run; nobody acted by hand.
+	return notifyReview(ctx, tx, tenant, taskID, creator, "", version)
 }
 
 // LiveTaskWorkflows lists unsettled handling runs for startup recovery.
