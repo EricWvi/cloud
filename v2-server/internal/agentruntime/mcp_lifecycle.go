@@ -88,7 +88,7 @@ func (a *agentSession) mcpRequest(ctx context.Context, kind string, payload map[
 	if err := ctx.Err(); err != nil {
 		return mcpReply{}, err
 	}
-	if err := a.project.send(kind, a.execution, payload); err != nil {
+	if err := a.project.sendContext(ctx, kind, a.execution, payload); err != nil {
 		return mcpReply{}, err
 	}
 	select {

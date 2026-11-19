@@ -131,7 +131,7 @@ type Service struct {
 var _ execution.Service = (*Service)(nil)
 var _ execution.Catalog = (*Service)(nil)
 
-// New closes old persisted sessions before admitting work. Models may be empty when the
+// New reconciles persisted executions and reserves the workspaces of surviving held sessions. Models may be empty when the
 // deployment has no real provider, leaving the catalog empty until one is configured. Node
 // process recovery belongs to AgentDriver initialization; callers must construct that driver
 // before exposing this service.

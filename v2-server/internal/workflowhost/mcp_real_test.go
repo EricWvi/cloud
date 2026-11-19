@@ -202,7 +202,9 @@ func TestInteractiveMCPKeyFailureBeforeStart(t *testing.T) {
 	}
 	_, nodes := f.await(t, rid, terminal)
 	n := node(nodes, "a")
-	var payload struct{ Detail map[string]any `json:"error_detail"` }
+	var payload struct {
+		Detail map[string]any `json:"error_detail"`
+	}
 	if err := json.Unmarshal(n.Payload, &payload); err != nil {
 		t.Fatal(err)
 	}

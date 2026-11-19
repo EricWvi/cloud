@@ -200,7 +200,6 @@ test('a live workflow session preserves the explicit MCP selection after reload'
     await panel.getByRole('button', { name: '重新探测' }).click()
     expect((await probing).status()).toBe(202)
     await expect(panel).toContainText('宿主健康：健康')
-    await page.screenshot({ path: info.outputPath('1199-session-mcp.png'), animations: 'disabled' })
     const agentNode = (await detail()).nodes.find((n: { nodeId: string }) => n.nodeId === 'agent')
     const statusPath = `${base}/workflow-runs/${rid}/nodes/${agentNode.id}/mcp`
     const member = await browser.newPage({ baseURL })
@@ -213,6 +212,9 @@ test('a live workflow session preserves the explicit MCP selection after reload'
     } finally {
       await member.close()
     }
+    await expect(panel.getByRole('button', { name: '重新探测' })).toBeEnabled()
+    await expect(panel).toContainText('宿主健康：健康')
+    await page.screenshot({ path: info.outputPath('1199-session-mcp.png'), animations: 'disabled' })
   } finally {
     if (rid) await page.request.post(`${base}/workflow-runs/${rid}/cancel`)
     expect((await page.request.delete(mcpPath, { data: { identifier, revision: saved.revision } })).ok()).toBe(true)

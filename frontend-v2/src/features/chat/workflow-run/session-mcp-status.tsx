@@ -17,6 +17,7 @@ export function SessionMcpStatusPanel({ tid, rid, nodeRunId }: { tid: string; ri
   })
   const probe = useProbeWorkflowSessionMcp({ mutation: { onSettled: () => { void status.refetch() } } })
   const data = status.data
+  if (!data && status.isError) return <p role="status" className="border-b px-3 py-2 text-xs">暂时无法读取会话 MCP 状态。</p>
   if (!data?.members.length) return null
   const retry = (pluginId: string) => {
     if (data.generation !== undefined) probe.mutate({ tid, rid, nodeRunId, data: { pluginId, generation: data.generation } })
