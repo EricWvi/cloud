@@ -201,7 +201,11 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 	}
 	mcp, err := h.store.ResolveWorkflowMCP(h.ctx, st.scope, d.ProjectID, cfg.MCPs)
 	if err != nil {
-		fail(mcpFailure(err))
+		failure := mcpFailure(err)
+		if failure.Kind == workflow.FailureSession {
+			h.log.Warn("resolve workflow MCP configuration", "run", d.RunID, "node_run", d.NodeRunID, "error", err)
+		}
+		fail(failure)
 		return
 	}
 	// The role is read again here, live, as desktop does right before the session starts: the
