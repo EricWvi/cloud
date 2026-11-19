@@ -357,6 +357,7 @@ it('shows the shared official market and manages space sources', async () => {
     name: '官方市场',
   })
   expect(officialRow).toHaveTextContent('https://github.com/ora-space/marketplace')
+  expect(dialog).toHaveTextContent('官方市场由系统维护')
   expect(
     within(officialRow).getByRole('button', { name: '同步' }),
   ).toBeEnabled()
@@ -608,6 +609,8 @@ it('hides the official source when the server disables it', async () => {
   const dialog = await screen.findByRole('dialog')
   expect(await within(dialog).findByText(url, { selector: 'strong' })).toBeVisible()
   expect(within(dialog).queryByRole('article', { name: '官方市场' })).not.toBeInTheDocument()
+  // The dialog must not describe a market the deployment closed.
+  expect(within(dialog).queryByText(/官方市场/)).not.toBeInTheDocument()
 })
 
 it.each([

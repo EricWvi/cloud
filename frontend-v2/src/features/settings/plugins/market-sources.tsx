@@ -83,7 +83,12 @@ export function MarketSources({
   return (
     <DetailPanel
       title="管理市场"
-      description="官方市场由系统维护；附加市场只对当前空间可见。"
+      // A deployment can close the official market; then the dialog only offers space sources.
+      description={
+        list.data?.officialEnabled && officialUrl
+          ? '官方市场由系统维护；附加市场只对当前空间可见。'
+          : '附加市场只对当前空间可见。'
+      }
       onClose={onClose}
     >
       {list.isError && (

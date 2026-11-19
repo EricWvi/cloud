@@ -37,9 +37,12 @@ func TestFrontendBoundary(t *testing.T) {
 		body                 string
 	}{
 		{"GET", "/", "", 200, "<html>app</html>"}, {"GET", "/settings/plugins", "text/html", 200, "<html>app</html>"},
+		{"GET", "/settings/plugins/", "text/html", 200, "<html>app</html>"},
 		{"HEAD", "/settings/plugins", "text/html", 200, ""}, {"GET", "/app.js", "", 200, "javascript"},
 		{"GET", "/missing.js", "text/html", 404, ""}, {"GET", "/missing", "application/json", 404, ""},
-		{"GET", "/directory", "text/html", 404, ""}, {"GET", "/leak", "text/html", 404, ""},
+		{"GET", "/missing.js/", "text/html", 404, ""}, {"GET", "/missing/", "application/json", 404, ""},
+		{"GET", "//settings", "text/html", 404, ""}, {"GET", "/settings//plugins", "text/html", 404, ""},
+		{"GET", "/directory", "text/html", 404, ""}, {"GET", "/directory/", "text/html", 404, ""}, {"GET", "/leak", "text/html", 404, ""},
 		{"GET", "/../secret", "text/html", 404, ""}, {"GET", "/api/missing", "text/html", 418, ""},
 		{"GET", "/auth/missing", "text/html", 418, ""}, {"GET", "/internal/missing", "text/html", 418, ""},
 		{"POST", "/settings", "text/html", 405, ""},
