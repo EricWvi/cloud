@@ -94,7 +94,14 @@ func (w *Writer) rotateLocked() error {
 	}
 	for i := w.keep - 1; i >= 1; i-- {
 		_ = os.Remove(w.path + fmt.Sprintf(".%d", i))
-		_ = os.Rename(w.path+fmt.Sprintf(".%d", i-1), w.path+fmt.Sprintf(".%d", i))
+		from := w.path
+		if i > 1 {
+			from = w.path + fmt.Sprintf(".%d", i-1)
+		}
+		err := os.Rename(from, w.path+fmt.Sprintf(".%d", i))
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("rotatefile: rotate %s: %w", w.path+fmt.Sprintf(".%d", i), err)
+		}
 	}
 	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {

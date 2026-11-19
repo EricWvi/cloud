@@ -19,7 +19,9 @@ func openWriter(t *testing.T, dir string, limit int64, keep int) *Writer {
 }
 
 // Every byte written lands in exactly one file of the rotation chain: the current
-// file plus the rotated ones, in order, hold the full stream with nothing dropped.
+// file plus the rotated ones hold the most recent bounded window of the stream,
+// in order, with no gaps and nothing dropped by a rotation. Older data beyond
+// keep files is discarded by design (the #1191 budget).
 func TestWriterKeepsEveryByteAcrossRotations(t *testing.T) {
 	dir := t.TempDir()
 	w := openWriter(t, dir, 10, 3)
@@ -35,8 +37,23 @@ func TestWriterKeepsEveryByteAcrossRotations(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := readChain(t, filepath.Join(dir, "node.log"), 3)
-	if string(got) != string(all) {
-		t.Fatalf("reconstructed stream differs:\n got %d bytes\nwant %d bytes", len(got), len(all))
+	want := all[len(all)-len(got):]
+	if string(got) != string(want) {
+		t.Fatalf("retained window differs:\n got %d bytes\nwant tail %d bytes", len(got), len(want))
+	}
+	if len(got) > 3*10 {
+		t.Fatalf("retained %d bytes exceeds the keep x limit window", len(got))
+	}
+	// Rotation actually happened and bounded the current file, not merely kept bytes.
+	if info, err := os.Stat(filepath.Join(dir, "node.log.1")); err != nil {
+		t.Fatalf("expected node.log.1 after rotation: %v", err)
+	} else if info.Size() == 0 {
+		t.Fatal("node.log.1 is empty; rotation moved nothing")
+	}
+	if info, err := os.Stat(filepath.Join(dir, "node.log")); err != nil {
+		t.Fatal(err)
+	} else if info.Size() > 10 {
+		t.Fatalf("current file %d bytes exceeds the 10-byte limit", info.Size())
 	}
 	// The chain is bounded: no file beyond .<keep-1> exists.
 	if _, err := os.Stat(filepath.Join(dir, "node.log.3")); !os.IsNotExist(err) {
@@ -62,6 +79,16 @@ func TestWriterRotatesAfterAnOversizedWrite(t *testing.T) {
 	if got := readChain(t, filepath.Join(dir, "node.log"), 3); string(got) != string(big)+"z" {
 		t.Fatalf("rotation chain lost the oversized write: got %d bytes, want %d", len(got), len(big)+1)
 	}
+	if info, err := os.Stat(filepath.Join(dir, "node.log.1")); err != nil {
+		t.Fatalf("expected node.log.1 after the oversized write rotated: %v", err)
+	} else if info.Size() != int64(len(big)) {
+		t.Fatalf("node.log.1 holds %d bytes, want %d", info.Size(), len(big))
+	}
+	if info, err := os.Stat(filepath.Join(dir, "node.log")); err != nil {
+		t.Fatal(err)
+	} else if info.Size() != 1 {
+		t.Fatalf("current file holds %d bytes, want 1", info.Size())
+	}
 }
 
 // An over-limit file left by an earlier run rotates on the next write.
@@ -77,6 +104,16 @@ func TestWriterRotatesAnExistingOverLimitFile(t *testing.T) {
 	}
 	if got := readChain(t, path, 3); string(got) != strings.Repeat("z", 20)+"a" {
 		t.Fatalf("rotation chain lost an over-limit pre-existing file: %q", got)
+	}
+	if info, err := os.Stat(path + ".1"); err != nil {
+		t.Fatalf("expected node.log.1 after rotating the over-limit file: %v", err)
+	} else if info.Size() != 20 {
+		t.Fatalf("node.log.1 holds %d bytes, want 20", info.Size())
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	} else if info.Size() != 1 {
+		t.Fatalf("current file holds %d bytes, want 1", info.Size())
 	}
 }
 
