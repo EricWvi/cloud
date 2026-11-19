@@ -189,7 +189,8 @@ export function RunNodeSessionActions({ target }: { target: InteractiveNodeTarge
           </Button>
         </div>
       )}
-      {awaiting && ended && <p className="text-xs text-muted-foreground">{t('workflowRun.v2.interactive.sessionEnded')}</p>}
+      {/* The undelivered notice already says the session ended, and why it matters here. */}
+      {awaiting && ended && !undelivered && <p className="text-xs text-muted-foreground">{t('workflowRun.v2.interactive.sessionEnded')}</p>}
       {awaiting && unconfirmed && shown.length === 0 && (
         <p className="text-xs text-muted-foreground" data-interactive-confirm-hint="">{t('workflowRun.v2.interactive.confirmHint')}</p>
       )}
