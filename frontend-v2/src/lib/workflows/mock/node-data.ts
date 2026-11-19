@@ -60,9 +60,24 @@ export interface WorkflowAgentRetryPolicy {
   initialDelaySeconds: number;
 }
 
+/** One file a node declares as a completion deliverable. */
+export interface WorkflowAgentCompletionFile {
+  /** Workspace-relative POSIX path or minimal glob (`*`, `**`, `?`). */
+  path: string;
+  /** Require at least one matching existing file to differ from the node's baseline. */
+  mustChange?: boolean;
+}
+
+/** Optional `agentConfig.completion` declaration checked when the node completes. */
+export interface WorkflowAgentCompletion {
+  /** Between 1 and 32 declarations. */
+  files: WorkflowAgentCompletionFile[];
+}
+
 /** Stores the execution contract for an Agent node without relying on display labels. */
 export interface WorkflowAgentConfig {
-  schemaVersion: 3;
+  /** Shape version; declaring `completion`, `completionSignal` or auto-accept requires version 4. */
+  schemaVersion: 3 | 4;
   executor: {
     agentCli: string;
     modelId: string;
@@ -74,10 +89,19 @@ export interface WorkflowAgentConfig {
   prompt: string;
   /** Opt the node into a persistent interactive session that pauses for human input. */
   interactive?: boolean;
+  /**
+   * How an interactive node decides its settled turn is complete; absent is `end_turn`. v2 runs
+   * `agent` as `end_turn` until it can hand the Agent its completion tool.
+   */
+  completionSignal?: "agent" | "end_turn" | null;
+  /** Accept an agent signal after the turn settles without waiting for the user (not applied in v2). */
+  autoAcceptAgentCompletion?: boolean;
   /** Silence handling for this node's prompts; absent or null keeps the default timeout. */
   promptInactivity?: "timeout" | "wait" | null;
   /** Additional typed variables exposed beside the node's stable raw `output`. */
   outputContract?: WorkflowAgentOutputContract;
+  /** Optional deliverables checked when the node completes; requires schemaVersion 4. */
+  completion?: WorkflowAgentCompletion;
   /**
    * Automatic retry after retryable failures. Absent means the default policy, so graphs saved
    * before this field existed keep retrying without being rewritten. Interactive nodes never retry.

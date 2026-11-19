@@ -8,6 +8,7 @@ import (
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/executionwait"
+	"github.com/wanglongan587/cloud/v2-server/internal/pluginmarket"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
@@ -201,11 +202,15 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 	}
 	mcp, err := h.store.ResolveWorkflowMCP(h.ctx, st.scope, d.ProjectID, cfg.MCPs)
 	if err != nil {
-		failure := mcpFailure(err)
-		if failure.Kind == workflow.FailureSession {
-			h.log.Warn("resolve workflow MCP configuration", "run", d.RunID, "node_run", d.NodeRunID, "error", err)
+		var setup *execution.MCPFailure
+		if h.ctx.Err() == nil && !errors.As(err, &setup) {
+			reason := publicReason(err)
+			if errors.Is(err, pluginmarket.ErrCredentials) {
+				reason = pluginmarket.ErrCredentials.Error()
+			}
+			h.log.Warn("resolve workflow MCP", "run", d.RunID, "node_run", d.NodeRunID, "error", reason, "error_type", fmt.Sprintf("%T", err))
 		}
-		fail(failure)
+		fail(mcpFailure(err))
 		return
 	}
 	// The role is read again here, live, as desktop does right before the session starts: the
@@ -217,10 +222,10 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 		role, err := h.store.ResolveWorkflowRole(h.ctx, st.scope.TenantID, cfg.RoleID)
 		switch {
 		case errors.Is(err, store.ErrRoleNotFound):
-			h.fail(d, workflow.Failure{Kind: workflow.FailureWorkflowRoleNotFound, Message: fmt.Sprintf("role %q is not available in this workspace", cfg.RoleID)})
+			fail(workflow.Failure{Kind: workflow.FailureWorkflowRoleNotFound, Message: fmt.Sprintf("role %q is not available in this workspace", cfg.RoleID)})
 			return
 		case err != nil:
-			h.fail(d, workflow.Failure{Kind: workflow.FailureMissingAgentConfig, Message: err.Error()})
+			fail(workflow.Failure{Kind: workflow.FailureMissingAgentConfig, Message: err.Error()})
 			return
 		}
 		roleContent = role.Content
@@ -245,6 +250,11 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 	if interactive {
 		// The session outlives its turns until completion, a stop or the run's end ends it.
 		request.Lifetime = execution.LifetimeHeld
+	}
+	var baseline *fileBaseline
+	if interactive {
+		// Before the Agent can touch the checkout: what a mustChange deliverable is compared with.
+		baseline = h.captureBaseline(h.ctx, st.scope.TenantID, d.RunID, cfg.CompletionFiles)
 	}
 	a := h.beginSession(st, d, generation)
 	if a == nil {
@@ -315,10 +325,11 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 
 	if interactive {
 		// Desktop parks an interactive node after its first turn instead of ending the session.
-		n := st.track(&interactiveNode{d: d, executor: executor, cfg: cfg, task: task, session: ref.SessionID, phase: phaseTurn})
+		n := st.track(&interactiveNode{d: d, executor: executor, cfg: cfg, task: task, session: ref.SessionID, phase: phaseTurn,
+			lastOrigin: originWorkflow, baseline: baseline, baselineUnwritten: baseline != nil})
 		h.refreshSummary(st, n, store.WorkflowStatusRunning) // the starter can stop the first turn too
 		result, err := h.awaitTurn(st.scope, ref, caller)
-		h.settleInteractiveTurn(st, a, n, result, err)
+		h.settleInteractiveTurn(st, a, n, 0, result, err)
 		return
 	}
 	result, err := h.awaitTurn(st.scope, ref, caller)

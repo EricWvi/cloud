@@ -207,9 +207,23 @@ export interface WorkflowAgentRetryPolicy {
   initialDelaySeconds: number;
 }
 
+/** One file a node declares as a completion deliverable. */
+export interface WorkflowAgentCompletionFile {
+  /** Workspace-relative POSIX path or minimal glob (`*`, `**`, `?`). */
+  path: string;
+  /** Require at least one matching existing file to differ from the node's baseline. */
+  mustChange?: boolean;
+}
+
+/** Optional `agentConfig.completion` declaration checked when the node completes. */
+export interface WorkflowAgentCompletion {
+  files: WorkflowAgentCompletionFile[];
+}
+
 /** Transport-neutral execution contract for an Agent node. */
 export interface WorkflowAgentConfig {
-  schemaVersion: 3;
+  /** Shape version; declaring `completion`, `completionSignal` or auto-accept requires version 4. */
+  schemaVersion: 3 | 4;
   executor: {
     agentCli: string;
     modelId: string;
@@ -221,6 +235,12 @@ export interface WorkflowAgentConfig {
   prompt: string;
   /** Opt the node into a persistent interactive session that pauses for human input. */
   interactive?: boolean;
+  /** How an interactive node decides its settled turn is complete; absent is `end_turn`. */
+  completionSignal?: "agent" | "end_turn" | null;
+  /** Accept an agent signal after the turn settles without waiting for the user. */
+  autoAcceptAgentCompletion?: boolean;
+  /** Optional deliverables checked when the node completes; requires schemaVersion 4. */
+  completion?: WorkflowAgentCompletion;
   /** Silence handling for this node's prompts; absent or null keeps the default timeout. */
   promptInactivity?: "timeout" | "wait" | null;
   /**
@@ -429,29 +449,52 @@ export interface WorkflowNodeCompletion {
   ready: boolean;
 }
 
-/** Why v2 refuses to complete a parked interactive node right now. */
-export type WorkflowNodeInteractiveBlockerReason =
-  | "no_completed_turn"
-  | "turn_not_completed"
-  | "structured_output";
+/**
+ * Why v2 refuses to complete a parked interactive node: how its turn ended (desktop's blocker
+ * kinds), the workflow's own opening turn awaiting confirmation, or a declared deliverable.
+ */
+export type WorkflowNodeInteractiveBlockerKind =
+  | WorkflowNodeCompletionBlockerKind
+  | "turn_unconfirmed"
+  | "file_missing"
+  | "file_unchanged";
+
+/** One reason a parked interactive node cannot complete without confirmation or force. */
+export interface WorkflowNodeInteractiveBlocker {
+  kind: WorkflowNodeInteractiveBlockerKind | string;
+  /** The declaration a deliverable blocker is about. */
+  path?: string;
+  /** A safe detail, such as why an answer does not fit its schema. */
+  message?: string;
+}
 
 /** Why the starter's last message to an interactive node never ran. */
 export type WorkflowNodeInteractiveTurnError = "not_delivered";
 
 /**
  * v2's summary of an interactive Agent node's session, written as `payload.interactive` each time
- * the node parks (desktop's legacy end_turn completion only; v2 has no completion snapshot).
+ * the node parks, with its completion snapshot (desktop's default mode without the Agent
+ * completion signal).
  */
 export interface WorkflowNodeInteractiveSession {
   /** Turns that settled in the node's session. */
   turns: number;
-  /** The session was stopped and takes no further turn; completion uses the last normal answer. */
+  /** The session was stopped or lost and takes no further turn. */
   sessionEnded: boolean;
-  /** Whether completing now would be accepted. */
+  /** Whether a plain completion would be accepted now (deliverables are checked on completion). */
   completable: boolean;
-  blocker?: { reason: WorkflowNodeInteractiveBlockerReason | string; detail: string };
-  /** The answer completing would accept: the last turn that ended normally. */
+  /** What keeps the settled turn from completing; `turn_unconfirmed` alone needs only confirmation. */
+  blockers: WorkflowNodeInteractiveBlocker[];
+  /** `awaiting_user` while the starter's participation is due, `abnormal` for any other stop. */
+  parkKind?: "awaiting_user" | "abnormal" | string;
+  /** Who opened the settled turn: the workflow (the first turn) or the starter. */
+  turnOrigin?: "workflow" | "human" | string;
+  /** Why the turn stopped when it did not end normally, as desktop records it. */
+  stopCause?: string;
+  /** The answer a completion would take: the settled turn's, or what a forced one takes. */
   answer?: string;
+  /** Where `answer` comes from: `turn_window` (the settled turn) or `last_completed_turn`. */
+  answerSource?: string;
   /** Messages the starter has sent to the node so far, counting the one being run. */
   sent?: number;
   /**
@@ -570,7 +613,7 @@ export interface WorkflowNodeModelUsed {
 
 /** Agent settings v2 keeps in the graph but runs without (`payload.unapplied`). */
 export type WorkflowAgentUnappliedCapability =
-  "role" | "skill" | "mcp" | "retry" | "interactive";
+  "role" | "skill" | "mcp" | "retry" | "interactive" | "completionSignal" | "autoAcceptAgentCompletion";
 
 export interface GraphWorkflowNodeState {
   /** The branch committed for this exact node execution, not a global latest decision. */

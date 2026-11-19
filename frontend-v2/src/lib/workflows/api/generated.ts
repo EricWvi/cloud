@@ -491,7 +491,10 @@ export const WorkflowNodeCompleteRequester = {
 } as const;
 
 export interface WorkflowNodeComplete {
+  /** v2: complete despite every blocker but turn_unconfirmed; payload.completion_forced records the blockers it covered. */
   force: boolean;
+  /** v2: adopt the workflow's own opening turn, which lifts turn_unconfirmed and nothing else. Combined with force it is refused with 400 invalid_request. */
+  confirmInitialTurn?: boolean;
   requester?: WorkflowNodeCompleteRequester;
 }
 
@@ -3266,6 +3269,9 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       return useMutation(getUpdateWorkflowRunInputMutationOptions(options), queryClient);
     }
 
+/**
+ * Completes a parked interactive Agent node; only the run's starter may (409 run_owned). The gate follows desktop's default mode without the Agent completion signal: the node's payload.interactive.completion lists its blockers; the workflow's own opening turn needs confirmInitialTurn, every other blocker (how the turn ended, an output that does not fit its schema, the declared completion.files checked in the run's checkout) needs force. 409 workflow_node_incomplete lists the unresolved blockers in params.blockers ({kind, path?, message?}); 409 workflow_node_turn_changed and workflow_node_output_changed refuse, force or not, when the node's settled turn or answer is no longer the one it parked with.
+ */
 export const completeWorkflowNode = (
     tid: string,
     rid: string,

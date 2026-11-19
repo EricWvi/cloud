@@ -313,7 +313,7 @@ func (s *Seeder) Seed(ctx context.Context, scenes []string) error {
 
 // Scope resolves a preset account to its membership of the demo team; it signs nobody in.
 func (s *Seeder) Scope(ctx context.Context, email string) (execution.Scope, error) {
-	user, err := s.Store.UserByEmail(ctx, email)
+	user, err := s.Store.DemoMemberByEmail(ctx, email)
 	if err != nil {
 		return execution.Scope{}, fmt.Errorf("account %s: %w (is it in the scene's user file?)", email, err)
 	}

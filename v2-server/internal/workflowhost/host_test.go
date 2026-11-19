@@ -462,7 +462,7 @@ func TestLifecycleAuthorizesAndTranslatesRefusals(t *testing.T) {
 	if _, err := f.host.StartRun(ctx, f.scope, runID); !errors.Is(err, server.ErrWorkflowRunNotStartable) {
 		t.Fatalf("second start = %v", err)
 	}
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "out", false, "human"); !errors.Is(err, server.ErrWorkflowNodeNotAwaitingInput) {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "out", confirm); !errors.Is(err, server.ErrWorkflowNodeNotAwaitingInput) {
 		t.Fatalf("complete = %v", err)
 	}
 	if _, err := f.host.CancelRun(ctx, f.scope, runID); !errors.Is(err, store.ErrWorkflowRunState) {

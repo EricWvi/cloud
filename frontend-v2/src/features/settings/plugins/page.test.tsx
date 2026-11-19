@@ -170,7 +170,7 @@ it('keeps an unreadable MCP removable and explains which key needs attention', a
   const user = userEvent.setup()
   renderSettingsPage(<PluginsPage />)
   await user.click(await screen.findByRole('button', { name: '查看插件 GitHub 工具' }))
-  expect(await screen.findByRole('alert')).toHaveTextContent('请联系部署管理员检查密钥')
+  expect(await screen.findByText(/请管理员检查部署密钥/)).toBeVisible()
   expect(screen.queryByRole('button', { name: '保存 MCP 配置' })).not.toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: '关闭详情' }))
   const row = screen.getByRole('article', { name: 'GitHub 工具' })
@@ -372,6 +372,7 @@ it('shows the shared official market and manages space sources', async () => {
     name: '官方市场',
   })
   expect(officialRow).toHaveTextContent('https://github.com/ora-space/marketplace')
+  expect(dialog).toHaveTextContent('官方市场由系统维护')
   expect(
     within(officialRow).getByRole('button', { name: '同步' }),
   ).toBeEnabled()
@@ -623,6 +624,8 @@ it('hides the official source when the server disables it', async () => {
   const dialog = await screen.findByRole('dialog')
   expect(await within(dialog).findByText(url, { selector: 'strong' })).toBeVisible()
   expect(within(dialog).queryByRole('article', { name: '官方市场' })).not.toBeInTheDocument()
+  // The dialog must not describe a market the deployment closed.
+  expect(within(dialog).queryByText(/官方市场/)).not.toBeInTheDocument()
 })
 
 it.each([

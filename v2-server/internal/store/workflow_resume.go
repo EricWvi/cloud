@@ -109,10 +109,12 @@ func (s *Store) WorkflowResumeState(ctx context.Context, runID string) (Workflow
 // the transaction unchanged. It then closes the rounds of every cleared Loop row and soft-deletes
 // their attempts, soft-deletes every live attempt of a cleared node in any scope, applies clear to
 // the run payload and returns the run to running with no current node, no error and no finish
-// instant. Soft-deleted attempts keep counting toward attempt numbers, so the next attempt of a
-// cleared node continues the numbering. The workspace is not touched (keep-files only).
+// instant. When starter is nonempty and the run has no started_by yet, it records starter in the
+// same transaction so a refused resume never alters started_by. Soft-deleted attempts keep counting
+// toward attempt numbers, so the next attempt of a cleared node continues the numbering. The
+// workspace is not touched (keep-files only).
 func (s *Store) ResumeWorkflowEngineRun(
-	ctx context.Context, runID string,
+	ctx context.Context, runID, starter string,
 	plan func(WorkflowResumeState) ([]string, error),
 	clear func(payload []byte, cleared []string) ([]byte, error),
 ) error {
@@ -161,8 +163,10 @@ func (s *Store) ResumeWorkflowEngineRun(
 		if _, err := tx.Exec(ctx, `
 			UPDATE v2_workflow_runs
 			SET status = 'running', payload = $2, error = NULL, finished_at = NULL,
-				state = '{"current_nodes":[]}'::jsonb, updated_at = now()
-			WHERE id = $1`, runID, payload); err != nil {
+				state = '{"current_nodes":[]}'::jsonb,
+				started_by = COALESCE(started_by, NULLIF($3, '')::uuid),
+				updated_at = now()
+			WHERE id = $1`, runID, payload, starter); err != nil {
 			return fmt.Errorf("resume run: %w", err)
 		}
 		return nil

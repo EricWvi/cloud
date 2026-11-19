@@ -10,28 +10,75 @@ import (
 )
 
 func TestLoginPreflightBeforeEffects(t *testing.T) {
-	for _, login := range []string{"", "unknown", "idaas"} {
+	for _, login := range []string{"unknown", "idaas", "email,email", "email,", " , "} {
 		t.Run(login, func(t *testing.T) {
 			t.Setenv("V2_LOGIN", login)
 			root := filepath.Join(t.TempDir(), "must-not-exist")
 			t.Setenv("V2_DATA_DIR", root)
 			err := run("127.0.0.1:0", "invalid database URL", false, false, false)
-			if err == nil {
-				t.Fatal("startup accepted unsupported login")
-			}
-			if login == "idaas" && (!strings.Contains(err.Error(), "this build does not provide IDaaS login") || !strings.Contains(err.Error(), "must not fall back to email") || strings.Contains(err.Error(), "#")) {
-				t.Fatalf("integration prerequisite missing: %v", err)
+			if err == nil || !strings.Contains(err.Error(), "V2_LOGIN") {
+				t.Fatalf("startup accepted V2_LOGIN=%q: %v", login, err)
 			}
 			if _, err := os.Stat(root); !os.IsNotExist(err) {
-				t.Fatal("startup touched filesystem before rejecting deployment")
+				t.Fatal("startup touched filesystem before rejecting the login configuration")
 			}
 		})
 	}
-	if err := validateLogin("email", false); err != nil {
-		t.Fatal(err)
+}
+
+func TestLoginMustBeSet(t *testing.T) {
+	for _, value := range []string{"", "  "} {
+		t.Run("V2_LOGIN="+value, func(t *testing.T) {
+			t.Setenv("V2_LOGIN", value)
+			root := filepath.Join(t.TempDir(), "must-not-exist")
+			t.Setenv("V2_DATA_DIR", root)
+			err := run("127.0.0.1:0", "invalid database URL", false, false, false)
+			if err == nil || !strings.Contains(err.Error(), "V2_LOGIN must be set") || !strings.Contains(err.Error(), "email") {
+				t.Fatalf("startup without V2_LOGIN = %v", err)
+			}
+			if _, err := os.Stat(root); !os.IsNotExist(err) {
+				t.Fatal("startup touched filesystem before rejecting the missing V2_LOGIN")
+			}
+		})
 	}
-	if err := validateLogin("idaas", true); err == nil {
-		t.Fatal("deployment accepted fixtures")
+	got, err := parseLogin(" email ", true)
+	if err != nil || strings.Join(got, ",") != "email" {
+		t.Fatalf("parseLogin(email) = %v, %v", got, err)
+	}
+}
+
+func TestPublicURL(t *testing.T) {
+	for value, want := range map[string]string{
+		"":                         "",
+		"https://ora.example.com":  "https://ora.example.com",
+		"https://ora.example.com/": "https://ora.example.com",
+		"http://127.0.0.1:8090":    "http://127.0.0.1:8090",
+		// Stored the way browsers write Origin: lowercase host, no default port.
+		"https://Ora.Example.COM:443/": "https://ora.example.com",
+		"http://Ora.Example.com:80":    "http://ora.example.com",
+		"https://ora.example.com:8443": "https://ora.example.com:8443",
+		"http://[::1]:80/":             "http://[::1]",
+		"http://[::1]:8090":            "http://[::1]:8090",
+	} {
+		got, err := parsePublicURL(value)
+		if err != nil || (got == nil) != (want == "") || (got != nil && got.String() != want) {
+			t.Fatalf("parsePublicURL(%q) = %v, %v; want %q", value, got, err, want)
+		}
+	}
+	for _, value := range []string{"ora.example.com", "ftp://ora.example.com", "https://ora.example.com/?a=1", "https://ora.example.com/#x", "https://ora.example.com/?", "https://ora.example.com?", "https://ora.example.com/#", "https://user@ora.example.com", "https://", "https://ora.example.com/ora", "https://ora.example.com/ora/"} {
+		if _, err := parsePublicURL(value); err == nil {
+			t.Fatalf("parsePublicURL(%q) accepted", value)
+		}
+	}
+	t.Setenv("V2_LOGIN", "email")
+	t.Setenv("V2_PUBLIC_URL", "ora.example.com")
+	root := filepath.Join(t.TempDir(), "must-not-exist")
+	t.Setenv("V2_DATA_DIR", root)
+	if err := run("127.0.0.1:0", "invalid database URL", false, false, false); err == nil || !strings.Contains(err.Error(), "V2_PUBLIC_URL") {
+		t.Fatalf("startup accepted invalid V2_PUBLIC_URL: %v", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatal("startup touched filesystem before rejecting V2_PUBLIC_URL")
 	}
 }
 

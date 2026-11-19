@@ -531,7 +531,7 @@ export const workflowRunTranslations = {
     "workflowRun.v2.interactive.awaitingBadge": "等待输入",
     "workflowRun.v2.interactive.openHint": "等待输入：打开会话继续对话，或完成这一步",
     "workflowRun.v2.interactive.partialNote":
-      "当前为简化版：由发起人确认完成。停止本轮会结束这个节点的会话，停止后不能继续对话。",
+      "Agent 完成信号暂未支持，由发起人确认完成。停止本轮会结束这个节点的会话，停止后不能继续对话。",
     "workflowRun.v2.interactive.readOnly":
       "只有发起这次运行的人可以继续对话、停止或完成这一步，你可以查看。",
     "workflowRun.v2.interactive.composerLabel": "回复 Agent",
@@ -543,17 +543,33 @@ export const workflowRunTranslations = {
     "workflowRun.v2.interactive.undeliveredEnded": "上一条消息未送达，会话已结束，不能重发。",
     "workflowRun.v2.interactive.restoreDraft": "重新填入",
     "workflowRun.v2.interactive.sessionEnded":
-      "会话已结束（停止了本轮或 Agent 断开），不能继续对话；可以用最后一次正常结束的回答完成这一步。",
-    "workflowRun.v2.interactive.sessionEndedBlocked":
       "会话已结束（停止了本轮或 Agent 断开），不能继续对话。",
-    "workflowRun.v2.interactive.blocker.structured_output_ended":
-      "回答不符合这个节点要求的结构化输出，会话已结束，不能再让 Agent 修改；只能停止整个运行。",
-    "workflowRun.v2.interactive.blocker.no_completed_turn":
-      "还没有正常结束的回答，不能完成这一步；只能停止整个运行。",
-    "workflowRun.v2.interactive.blocker.turn_not_completed":
-      "上一轮没有正常结束，请继续对话让 Agent 给出完整回答后再完成。",
-    "workflowRun.v2.interactive.blocker.structured_output":
-      "回答不符合这个节点要求的结构化输出，请继续对话让 Agent 按格式回答后再完成。",
+    "workflowRun.v2.interactive.confirmComplete": "确认并完成",
+    "workflowRun.v2.interactive.confirmHint":
+      "这是工作流发起的首轮：Agent 的回答可能是在提问。确认回答就是这一步要的结果后再完成，否则继续对话。",
+    "workflowRun.v2.interactive.completeAnyway": "仍然完成",
+    "workflowRun.v2.interactive.forceTitle": "仍然完成这一步？",
+    "workflowRun.v2.interactive.forceBody":
+      "这一步还有没满足的条件：{{blockers}}。仍然完成会采用当前产出（{{source}}）并启动后继节点，同时记录这次强制完成。",
+    "workflowRun.v2.interactive.forceSource.turn_window": "这一轮的回答",
+    "workflowRun.v2.interactive.forceSource.last_completed_turn": "最后一次正常结束的回答",
+    "workflowRun.v2.interactive.forceSource.none": "没有回答，产出为空",
+    "workflowRun.v2.interactive.forceConfirm": "仍然完成",
+    "workflowRun.v2.interactive.forceCancel": "取消",
+    "workflowRun.v2.interactive.blocker.turn_unconfirmed": "首轮回答待你确认。",
+    "workflowRun.v2.interactive.blocker.turn_stopped": "本轮被停止，没有正常结束。",
+    "workflowRun.v2.interactive.blocker.turn_truncated": "本轮被截断：达到了输出上限。",
+    "workflowRun.v2.interactive.blocker.turn_refused": "Agent 拒绝了本轮请求。",
+    "workflowRun.v2.interactive.blocker.turn_unknown": "本轮没有正常结束，结果未知。",
+    "workflowRun.v2.interactive.blocker.structured_invalid": "回答不符合这个节点要求的结构化输出。",
+    "workflowRun.v2.interactive.blocker.output_missing": "本轮没有产生输出。",
+    "workflowRun.v2.interactive.blocker.file_missing": "缺少交付文件：{{path}}",
+    "workflowRun.v2.interactive.blocker.file_unchanged": "交付文件没有变更：{{path}}",
+    "workflowRun.v2.interactive.blockedHint": "可以继续对话让 Agent 补齐，或者「仍然完成」。",
+    "workflowRun.v2.interactive.blockedEndedHint": "会话已结束，只能「仍然完成」或停止整个运行。",
+    "workflowRun.v2.interactive.filesHint": "补齐或修改文件后可以再次完成。",
+    "workflowRun.v2.setting.completionSignal": "智能体显式上报完成",
+    "workflowRun.v2.setting.autoAcceptAgentCompletion": "自动接受智能体完成",
     "workflowRun.v2.sessionWaiting": "正在等待 Agent 的会话…",
     "workflowRun.v2.sessionRefused":
       "无法读取这个节点的实时会话；节点完成后会显示任务和回答。",
@@ -1141,7 +1157,7 @@ export const workflowRunTranslations = {
     "workflowRun.v2.interactive.awaitingBadge": "Awaiting input",
     "workflowRun.v2.interactive.openHint": "Awaiting input: open the session to reply or complete this step",
     "workflowRun.v2.interactive.partialNote":
-      "Simplified for now: the starter confirms completion. Stopping a turn ends this node's session, so the conversation cannot continue afterwards.",
+      "The agent completion signal is not supported yet, so the starter confirms completion. Stopping a turn ends this node's session, so the conversation cannot continue afterwards.",
     "workflowRun.v2.interactive.readOnly":
       "Only the person who started this run can continue, stop or complete this step; you can read it.",
     "workflowRun.v2.interactive.composerLabel": "Reply to the agent",
@@ -1153,17 +1169,33 @@ export const workflowRunTranslations = {
     "workflowRun.v2.interactive.undeliveredEnded": "Your last message was not delivered, and the session has ended, so it cannot be sent again.",
     "workflowRun.v2.interactive.restoreDraft": "Put it back",
     "workflowRun.v2.interactive.sessionEnded":
-      "The session has ended (the turn was stopped or the agent disconnected), so the conversation cannot continue. You can complete the step with the last answer that ended normally.",
-    "workflowRun.v2.interactive.sessionEndedBlocked":
       "The session has ended (the turn was stopped or the agent disconnected), so the conversation cannot continue.",
-    "workflowRun.v2.interactive.blocker.structured_output_ended":
-      "The answer does not match this node's structured output, and the session has ended, so the agent cannot fix it; only stopping the whole run is left.",
-    "workflowRun.v2.interactive.blocker.no_completed_turn":
-      "No answer ended normally yet, so this step cannot complete; only stopping the whole run is left.",
-    "workflowRun.v2.interactive.blocker.turn_not_completed":
-      "The last turn did not end normally. Continue the conversation until the agent gives a complete answer.",
-    "workflowRun.v2.interactive.blocker.structured_output":
-      "The answer does not match this node's structured output. Continue the conversation until the agent answers in that format.",
+    "workflowRun.v2.interactive.confirmComplete": "Confirm and complete",
+    "workflowRun.v2.interactive.confirmHint":
+      "This is the workflow's own first turn: the agent may have ended it with a question. Complete once the answer is what this step needs, or keep talking.",
+    "workflowRun.v2.interactive.completeAnyway": "Complete anyway",
+    "workflowRun.v2.interactive.forceTitle": "Complete this step anyway?",
+    "workflowRun.v2.interactive.forceBody":
+      "This step still has unmet conditions: {{blockers}}. Completing anyway takes the current output ({{source}}), starts the next nodes and records the forced completion.",
+    "workflowRun.v2.interactive.forceSource.turn_window": "this turn's answer",
+    "workflowRun.v2.interactive.forceSource.last_completed_turn": "the last answer that ended normally",
+    "workflowRun.v2.interactive.forceSource.none": "no answer, an empty output",
+    "workflowRun.v2.interactive.forceConfirm": "Complete anyway",
+    "workflowRun.v2.interactive.forceCancel": "Cancel",
+    "workflowRun.v2.interactive.blocker.turn_unconfirmed": "The first turn's answer awaits your confirmation.",
+    "workflowRun.v2.interactive.blocker.turn_stopped": "The turn was stopped before it ended normally.",
+    "workflowRun.v2.interactive.blocker.turn_truncated": "The turn was cut at its output limit.",
+    "workflowRun.v2.interactive.blocker.turn_refused": "The agent refused this turn.",
+    "workflowRun.v2.interactive.blocker.turn_unknown": "The turn did not end normally; its result is unknown.",
+    "workflowRun.v2.interactive.blocker.structured_invalid": "The answer does not match this node's structured output.",
+    "workflowRun.v2.interactive.blocker.output_missing": "The turn produced no output.",
+    "workflowRun.v2.interactive.blocker.file_missing": "Missing deliverable: {{path}}",
+    "workflowRun.v2.interactive.blocker.file_unchanged": "Deliverable not changed: {{path}}",
+    "workflowRun.v2.interactive.blockedHint": "Keep talking so the agent can fix it, or complete anyway.",
+    "workflowRun.v2.interactive.blockedEndedHint": "The session has ended: complete anyway, or stop the whole run.",
+    "workflowRun.v2.interactive.filesHint": "Add or change the files, then complete again.",
+    "workflowRun.v2.setting.completionSignal": "Agent reports completion",
+    "workflowRun.v2.setting.autoAcceptAgentCompletion": "Auto-accept agent completion",
     "workflowRun.v2.sessionWaiting": "Waiting for the Agent's session…",
     "workflowRun.v2.sessionRefused":
       "Could not follow this node's live session; the task and answer show once the node finishes.",

@@ -46,7 +46,7 @@ func (h *storeRunHost) UpdateRunInput(context.Context, server.WorkflowRunScope, 
 	return store.WorkflowRun{}, errors.New("not used")
 }
 
-func (h *storeRunHost) CompleteNode(context.Context, server.WorkflowRunScope, string, string, bool, string) (store.WorkflowRun, error) {
+func (h *storeRunHost) CompleteNode(context.Context, server.WorkflowRunScope, string, string, server.WorkflowNodeCompletion) (store.WorkflowRun, error) {
 	return store.WorkflowRun{}, errors.New("not used")
 }
 

@@ -170,7 +170,7 @@ func TestLoopExitDropsAMemberWaitingForASlot(t *testing.T) {
 	}
 	f.awaitIdle(t, runID, "LoopExit left a member waiting for a slot")
 	f.exec.noStart(t, "the writer started after LoopExit")
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err != nil {
 		t.Fatal(err)
 	}
 	f.exec.noStart(t, "the writer started once the slot was free")

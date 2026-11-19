@@ -2,10 +2,13 @@ package workflowhost
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
@@ -97,7 +100,7 @@ func TestParkedNodeSurvivesARestartAndContinues(t *testing.T) {
 		t.Fatalf("summary after the restart = %v", p)
 	}
 
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err != nil {
 		t.Fatalf("complete after the restart: %v", err)
 	}
 	b := f.exec.awaitStart(t)
@@ -168,6 +171,38 @@ func TestMissingWorkspaceFailsTheRecoveredNode(t *testing.T) {
 	if run.Status != store.WorkflowStatusFailed || errorKind(t, node(nodes, "a")) != "interactive_session" {
 		t.Fatalf("run %s node %+v, want the node to fail once its directory is gone", run.Status, node(nodes, "a"))
 	}
+	// A later turn lost the node's conversation: only a first turn is told a resume clones again.
+	if msg := errorMessage(t, node(nodes, "a")); strings.Contains(msg, "fresh clone") {
+		t.Fatalf("message %q, want the lost conversation rather than the first-turn hint", msg)
+	}
+}
+
+// A message the execution service refused before the restart left no turn behind: the summary is
+// its only record. Rewriting the summary on recovery keeps the notice and the message's number,
+// so the page still offers it back and the next message does not reuse it.
+func TestARestartKeepsTheUndeliveredNotice(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	runID, a := f.startParked(t, interactiveChain, "初稿一")
+	_, nodes := f.await(t, runID, parked("a"))
+	accept := f.refuseAppendsOf(a, execution.ErrUnavailable)
+	if accepted, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); err != nil || accepted.Sent != 1 {
+		t.Fatalf("the turn = %+v %v, want message 1", accepted.Sent, err)
+	}
+	f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["last_turn_error"] == turnErrorNotDelivered
+	})
+	f.exec.recordedTurns(a, node(nodes, "a").ID, completed("初稿一"))
+	f.restart(t)
+
+	f.await(t, runID, awaitingInput("a"))
+	if p := interactivePayload(t, f.nodeRow(t, runID, "a")); p["last_turn_error"] != turnErrorNotDelivered || p["sent"] != float64(1) || p["answer"] != "初稿一" {
+		t.Fatalf("summary after the restart = %v, want the notice about message 1 kept", p)
+	}
+	accept()
+	if accepted, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); err != nil || accepted.Sent != 2 {
+		t.Fatalf("the resent message = %+v %v, want message 2", accepted.Sent, err)
+	}
 }
 
 func TestUnstartedRecoveryKeepsTheNodeWaiting(t *testing.T) {
@@ -188,8 +223,8 @@ func TestUnstartedRecoveryKeepsTheNodeWaiting(t *testing.T) {
 	_, nodes = f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
 		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["turns"] == float64(2)
 	})
-	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != false || p["answer"] != "初稿一" {
-		t.Fatalf("summary = %v, want the session open with the earlier answer", p)
+	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != false || !reflect.DeepEqual(blockerKinds(p), []string{blockerTurnUnknown}) {
+		t.Fatalf("summary = %v, want the session open and the failed turn blocking completion", p)
 	}
 	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再试一次"); err != nil {
 		t.Fatalf("retry after an unstarted recovery: %v", err)
@@ -226,5 +261,72 @@ func TestParkedNodeThatCannotContinueFailsOnRestart(t *testing.T) {
 				t.Fatal("the session of a node that failed on restart was left open")
 			}
 		})
+	}
+}
+
+// errorMessage reads the failure message the engine recorded on a node run.
+func errorMessage(t *testing.T, n store.WorkflowNodeRun) string {
+	t.Helper()
+	var p struct {
+		ErrorDetail struct {
+			Message string `json:"message"`
+		} `json:"error_detail"`
+	}
+	if err := json.Unmarshal(n.Payload, &p); err != nil {
+		t.Fatalf("payload %s: %v", n.Payload, err)
+	}
+	return p.ErrorDetail.Message
+}
+
+// A first turn on a reattached checkout Node no longer knows (the successor of a node completed
+// after the restart) fails without a conversation to lose: its message says a resume starts on a
+// fresh clone, not that a conversation cannot continue.
+func TestAFirstTurnOnAnUnknownCheckoutSaysAResumeClonesAgain(t *testing.T) {
+	f := newFixture(t)
+	runID := f.run(t, interactiveChain, str("支付重构"))
+	if _, err := f.host.StartRun(context.Background(), f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	a := f.exec.awaitStart(t)
+	f.exec.finish(a, execution.Result{Status: execution.StatusFailed, FailureCode: execution.FailureWorkspaceMissing, AgentLost: true})
+	run, nodes := f.await(t, runID, terminal)
+	got := node(nodes, "a")
+	if run.Status != store.WorkflowStatusFailed || errorKind(t, got) != "interactive_session" || !strings.Contains(errorMessage(t, got), "fresh clone") {
+		t.Fatalf("run %s node %s, want an interactive_session failure that points at a fresh clone", run.Status, got.Payload)
+	}
+}
+
+// A node being completed at the restart had its session ended, but its row's summary still read
+// the session as open. The recovery writes the summary again, so the page reads it as awaiting
+// completion and offers no message box its session would refuse.
+func TestARestartDuringCompletionReadsTheSessionAsEnded(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	runID, a := f.startParked(t, interactiveChain, "初稿一")
+	_, nodes := f.await(t, runID, parked("a"))
+	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != false {
+		t.Fatalf("summary before the restart = %v, want the session open", p)
+	}
+	f.exec.recordedTurns(a, node(nodes, "a").ID, completed("初稿一"))
+	// The completion's End was confirmed, then the process stopped before the output was written.
+	ended := time.Now()
+	f.exec.ReadSessionFunc = func(_ context.Context, _ execution.Scope, id string) (execution.Session, error) {
+		if id != a {
+			return execution.Session{}, execution.ErrNotFound
+		}
+		return execution.Session{ID: id, EndedAt: &ended}, nil
+	}
+
+	f.restart(t)
+	_, nodes = f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["session_ended"] == true
+	})
+	// The opening turn still awaits the starter's confirmation, which then completes it.
+	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != false || p["answer"] != "初稿一" ||
+		!reflect.DeepEqual(blockerKinds(p), []string{blockerTurnUnconfirmed}) {
+		t.Fatalf("summary after the restart = %v, want the earlier answer awaiting confirmation", p)
+	}
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err != nil {
+		t.Fatalf("complete after the restart: %v", err)
 	}
 }

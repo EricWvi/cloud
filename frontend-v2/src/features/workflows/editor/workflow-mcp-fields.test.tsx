@@ -69,6 +69,12 @@ function Harness({
 }
 
 describe("workflow MCP catalog", () => {
+  it("disables adding an MCP and shows the installation hint for an empty catalog", async () => {
+    await appI18n.changeLanguage("en-US");
+    render(<Harness choices={[]} />);
+    expect(screen.getByRole("button", { name: "Add MCP" })).toBeDisabled();
+    expect(screen.getByText("Install MCPs in Settings first. Existing bindings may stay enabled.")).toBeVisible();
+  });
   it("caps enabled bindings at sixteen and allows disabling one to release capacity", async () => {
     await appI18n.changeLanguage("en-US");
     const user = userEvent.setup();
@@ -118,13 +124,6 @@ describe("workflow MCP catalog", () => {
 });
 
 describe("workflow MCP bindings", () => {
-  it("disables Add MCP and points to Settings when the catalog is empty", async () => {
-    await appI18n.changeLanguage("en-US");
-    render(<Harness choices={[]} />);
-    expect(screen.getByRole("button", { name: "Add MCP" })).toBeDisabled();
-    expect(screen.getByText("Install MCPs in Settings first. Existing bindings may stay enabled.")).toBeVisible();
-  });
-
   it("adds same-name plugins by ID, prevents duplicates, toggles, and removes", async () => {
     await appI18n.changeLanguage("en-US");
     const user = userEvent.setup();

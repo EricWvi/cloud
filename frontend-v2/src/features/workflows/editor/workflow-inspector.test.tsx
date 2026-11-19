@@ -945,8 +945,8 @@ describe("WorkflowInspector unapplied-setting hints", () => {
     expect(screen.queryByTestId("workflow-unapplied-interactive")).toBeNull();
     const note = screen.getByTestId("workflow-interactive-partial");
     expect(note).toHaveTextContent("简化版");
-    expect(note).toHaveTextContent("当前按 end_turn 完成");
-    expect(note).toHaveTextContent("Agent 完成信号和确认门禁暂未支持");
+    expect(note).toHaveTextContent("首轮要点「确认并完成」");
+    expect(note).toHaveTextContent("Agent 完成信号暂未支持");
     // Switching the mode off removes the note with it.
     await user.click(screen.getByRole("switch", { name: "交互模式" }));
     expect(screen.queryByTestId("workflow-interactive-partial")).toBeNull();
@@ -1003,7 +1003,7 @@ describe("WorkflowInspector unapplied-setting hints", () => {
 function serveProviders(providers: string[]) {
   fakeBackend((c) =>
     c.url === "/auth/providers"
-      ? { status: 200, data: { providers, default: providers[0] } }
+      ? { status: 200, data: { providers } }
       : undefined,
   );
 }
@@ -1011,9 +1011,9 @@ function serveProviders(providers: string[]) {
 describe("WorkflowInspector deployed install", () => {
   // Roles live in the workspace's server catalog, so the picker stays available in a deployed
   // install; only browser-local settings are hidden there.
-  it("keeps the role field for idaas and preserves the stored roleId when editing", async () => {
+  it("keeps the role field in a deployed install and preserves the stored roleId when editing", async () => {
     await appI18n.changeLanguage("zh-CN");
-    serveProviders(["idaas"]);
+    serveProviders(["huawei-idaas"]);
     const user = userEvent.setup();
     const updates: string[] = [];
     render(

@@ -3,6 +3,7 @@ import {
   WORKFLOW_ANNOTATION_THEMES,
   type WorkflowAnnotationNode,
 } from "./annotation-data";
+import { workflowAgentCompletionIssues } from "./agent-completion";
 import { validateWorkflowAgentRetry } from "./agent-retry";
 import { WORKFLOW_NODE_KINDS, type WorkflowAgentConfig } from "./node-data";
 import type { DemoWorkflow } from "./fixtures";
@@ -122,6 +123,24 @@ function isWorkflowAnnotation(value: unknown): value is WorkflowAnnotationNode {
   );
 }
 
+/**
+ * Whether a config carries a field of the version-4 shape. The editor and the validator share this
+ * predicate so removing the last completion file never downgrades a node that still carries a
+ * completion policy or its auto-accept flag.
+ */
+export function agentConfigNeedsSchemaVersion4(
+  config: Pick<
+    WorkflowAgentConfig,
+    "completion" | "completionSignal" | "autoAcceptAgentCompletion"
+  >,
+): boolean {
+  return (
+    config.completion != null ||
+    config.completionSignal != null ||
+    config.autoAcceptAgentCompletion != null
+  );
+}
+
 /** Validates the serialized Agent contract before a definition can be edited or run. */
 function isWorkflowAgentConfig(value: unknown): value is WorkflowAgentConfig {
   if (typeof value !== "object" || value === null) {
@@ -129,7 +148,16 @@ function isWorkflowAgentConfig(value: unknown): value is WorkflowAgentConfig {
   }
   const config = value as Partial<WorkflowAgentConfig>;
   return (
-    config.schemaVersion === 3 &&
+    (config.schemaVersion === 3 || config.schemaVersion === 4) &&
+    // Version 3 forbids every field that belongs to the version-4 shape.
+    (config.schemaVersion === 4 ||
+      !agentConfigNeedsSchemaVersion4(config as WorkflowAgentConfig)) &&
+    (config.completionSignal == null ||
+      config.completionSignal === "agent" ||
+      config.completionSignal === "end_turn") &&
+    (config.autoAcceptAgentCompletion === undefined ||
+      typeof config.autoAcceptAgentCompletion === "boolean") &&
+    workflowAgentCompletionIssues(config.completion).length === 0 &&
     typeof config.executor === "object" &&
     config.executor !== null &&
     typeof config.executor.agentCli === "string" &&

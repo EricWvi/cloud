@@ -3,8 +3,8 @@
 [English](deployment.en.md)
 
 依据：[Cloud 单进程（A1）](https://github.com/ora-space/specs/blob/main/decisions/cloud/lifecycle/0-single-process-cloud-on-enterprise-intranet.md) D2/D5/D6 和[登录与会话（A6）](https://github.com/ora-space/specs/blob/main/decisions/cloud/login/0-idaas-or-email-login-with-shared-web-and-desktop-sessions.md)。
-当前构建不提供 IDaaS 登录，`V2_LOGIN=idaas` 在访问数据前拒绝启动，不能作为可用部署上线，
-不得回落到 email。数据库迁移在启动时自动执行。正式部署须使用支持所需能力的版本，
+部署只开华为 IDaaS 登录（`V2_LOGIN=huawei-idaas`），不开邮箱登录。IDaaS 登录已实现，但尚未在内网 IDaaS 上完成真实登录验证，
+验证通过前不作为正式部署上线。数据库迁移在启动时自动执行。正式部署须使用支持所需能力的版本，
 并配置经过验证的 HTTPS 入口。
 
 ## 在外网构建
@@ -38,11 +38,19 @@ PostgreSQL、IDaaS、模型和内部 Git/S3 服务。Git 和系统库须预先�
 
 在进程管理器的受保护配置中设置以下变量，不将密钥写入包或命令日志：
 
-- `V2_LOGIN=idaas`：唯一部署登录方式；当前构建不提供此能力，启动会明确拒绝。
-  启用 IDaaS 后，前端从 `/auth/providers` 识别部署模式，只隐藏只写浏览器的「模型连接」页；角色目录由服务端提供，设置页「角色」与工作流角色字段照常显示。
-- `V2_PUBLIC_URL`：部署公开 HTTPS 地址，只写根地址、不带路径（见「HTTPS 入口」）；
-  `V2_IDAAS_BASE_URL`、`V2_IDAAS_CLIENT_ID`、`V2_IDAAS_CLIENT_SECRET` 是 A6 规定的部署配置；
-  当前构建尚不支持 IDaaS 登录。
+- `V2_LOGIN=huawei-idaas`：部署只写这一项，不要包含 `email`（邮箱登录没有密码，知道邮箱就能冒充成员；它也是开发数据库的标志，见下文「数据库类型」）。
+  `/auth/providers` 不含 `email` 时，前端按部署模式处理，只隐藏只写浏览器的「模型连接」页；角色目录由服务端提供，设置页「角色」与工作流角色字段照常显示。
+- `V2_PUBLIC_URL`：浏览器访问 Cloud 的公开 HTTPS 地址，只写根地址、不带路径（见「HTTPS 入口」），带路径拒绝启动。IDaaS 回调地址固定为
+  `<V2_PUBLIC_URL>/auth/callback/huawei-idaas`，只由它得出、不看请求头，启动日志会打印出来，必须与 IDaaS 应用登记的完全一致；
+  带 Cookie 的写请求只接受这个 origin，会话 Cookie 为 `__Host-ora_session`（`Secure`）。邀请链接也由它拼出。
+- `V2_IDAAS_CLIENT_ID`、`V2_IDAAS_CLIENT_SECRET`：IDaaS 应用的客户端 ID 与密钥，缺一个拒绝启动；密钥只放受保护配置。
+- `V2_IDAAS_BASE_URL`：IDaaS 地址，默认 `https://uniportal.huawei.com`；测试环境 `https://uniportal-beta.huawei.com`。
+- `V2_IDAAS_API`：调用 IDaaS 的哪套接口，默认 `oauth2`（集成指导与官方示例使用的接口：授权带 `display=page`，换令牌与取用户信息为 JSON 请求，
+  失败以响应里的 `errorCode` 表示）；`oauth2-v1` 为旧的 `/oauth2/v1/` 表单接口。现场确认可用的一套后固定下来。
+- `V2_IDAAS_SCOPE`：默认 `base.profile`。`V2_IDAAS_DISPLAY_NAME_FIELD`：用户信息里作显示名的字段，默认 `displayName`
+  （`cn=张三, en=Zhang San` 取中文名，没有取英文名；字段缺失时显示 uuid）。
+- IDaaS 控制台登记：认证模式 `client_secret_post`，不开 PKCE；回调地址照启动日志填写；用户信息附加字段申请 `displayName`（不申请则只返回 uuid），
+  `uid`、`email` 可一并申请备用，不需要手机号。Cloud 只用 `uuid` 认人（账号来源 `huawei-corp`）。
 - `V2_DATABASE_URL`：专用 PostgreSQL 连接，按企业要求启用 TLS 和最小权限。
 - `V2_ADDR`：明文 HTTP 监听地址，默认 `127.0.0.1:8090`。只允许企业 HTTPS 入口连接，绑定方式见「HTTPS 入口」；
   v2-server 自身不终止 TLS。部署必须使用 HTTPS，不得将这里的 HTTP 监听直接当作正式用户入口。
@@ -59,8 +67,26 @@ PostgreSQL、IDaaS、模型和内部 Git/S3 服务。Git 和系统库须预先�
   改变连接、模型或凭据绑定可能让旧对话不能继续；在变更前通知用户，保留历史并新建对话。
 
 `start.sh` 从自身位置确定 `V2_FRONTEND_DIR` 和 `V2_NODE_ASSETS_DIR`，校验包文件后执行服务。
-不能传入 `-fixture-check`、`-test-fixtures`、`-cleanup` 作为部署启动方式。程序不会加载开发用户 preset、
-准备 demo 项目或预热 demo Node；当前构建因不提供 IDaaS 登录而直接阻止部署启动。
+`-fixture-check`、`-test-fixtures` 要求开了邮箱登录，部署启动会拒绝。`-cleanup` 可以用：先停止服务，再以同样的配置执行
+`start.sh -cleanup`（不需要 IDaaS 配置），它只删除已登记且确认停止的 Node 与对话目录，保留仓库镜像和数据库历史。部署启动不加载开发用户 preset、
+不准备 demo 项目、不预热 demo Node。
+
+**数据库类型**：库在第一次启动（或第一次运行 `admin-invite`）时记下自己是开发库（开了邮箱登录）还是部署库（没开）。之后以另一种方式
+启动会被拒绝：开发库不能不开邮箱启动（否则演示团队和预置账号会出现在部署里），部署库不能开着邮箱启动（否则会写入演示数据、开出无密码登录）。
+要换就新建数据库，不要把开发库改作部署用。
+
+## 第一个管理员
+
+部署库里没有任何账号。在 Cloud 所在机器上，用与服务相同的环境变量运行（必须带上 `V2_LOGIN=huawei-idaas`：第一次运行会决定库的类型）：
+
+```sh
+./bin/cloud admin-invite -team <团队名>
+```
+
+它直连数据库，确保这个团队存在，写一条角色为管理员、24 小时内有效、只能用一次的邀请链接并打印（`<V2_PUBLIC_URL>/invite/<令牌>`），然后退出，
+不启动服务。第一个打开链接、用华为账号登录并点「加入」的人成为管理员；之后由他在「设置 → 小队 → 成员与邀请」生成成员邀请链接。
+库里只有一个团队时可以省略 `-team`。唯一的管理员离开时，同样用这条命令找回。没有任何 HTTP 接口能生成管理员链接。
+它和服务启动一样先执行尚未应用的数据库迁移，所以用与服务同一版本的程序运行；升级后第一次运行它也会顺带升级 schema。
 
 企业 CA 必须安装到运行主机的系统信任库（按企业发行版流程更新信任库），Git 和 Go HTTPS 均使用
 系统 CA。不得关闭 TLS 校验。
@@ -69,19 +95,18 @@ PostgreSQL、IDaaS、模型和内部 Git/S3 服务。Git 和系统库须预先�
 
 HTTPS 由企业现有的入口（网关或反向代理）终止。v2-server 不配置 TLS，离线包也不带反向代理：
 IDaaS 回调域名和证书本来就归企业入口管理。v2-server 在 `V2_ADDR` 上只提供明文 HTTP，
-不读取 `X-Forwarded-*` 等转发头。提供 IDaaS 登录的目标版本只从 `V2_PUBLIC_URL` 得到公开地址，
-在它为 https 时给会话 Cookie 加 `Secure` 和 `__Host-` 前缀，并只接受来自该地址的带会话写请求；
-当前构建尚不具备这些行为。
+不读取 `X-Forwarded-*` 等转发头。它只从 `V2_PUBLIC_URL` 得到公开地址，
+在它为 https 时给会话 Cookie 加 `Secure` 和 `__Host-` 前缀，并只接受来自该地址的带会话写请求。
 
 入口必须满足：
 
 - 不改写路径：浏览器请求的路径原样到达 v2-server，不加也不去掉路径前缀。页面、`/api` 和 `/auth`
   都挂在根路径，前端请求也用 `/` 开头的绝对路径，所以公开地址只能是根地址
   （例如 `https://ora.example.com`），不能放在路径前缀下。v2-server 不读取 `Host`，入口改写 `Host`
-  不影响它。目标版本按 `Origin` 判断带会话的写请求，入口不得改写 `Origin`。
-- 不改写 `Set-Cookie`（不加 `Domain`，不改 `Path`）：目标版本的 `__Host-` Cookie 一旦被加上 `Domain`
+  不影响它。v2-server 按 `Origin` 判断带会话的写请求，入口不得改写 `Origin`。
+- 不改写 `Set-Cookie`（不加 `Domain`，不改 `Path`）：`__Host-` Cookie 一旦被加上 `Domain`
   或改了 `Path`，浏览器就会拒收，登录保持不住。
-- 只转发到一个 v2-server 进程，不在多个实例间做负载均衡：v2-server 是单进程服务，目标版本把进行中的
+- 只转发到一个 v2-server 进程，不在多个实例间做负载均衡：v2-server 是单进程服务，进行中的
   登录保存在进程内存里。
 - 不缓冲 `text/event-stream` 响应。对话、任务执行、工作流运行和工作流节点的实时更新都走 SSE，
   路径分别以 `/chat/conversations/{cid}/events`、`/tasks/{taskid}/runs/{rid}/events`、
@@ -101,8 +126,8 @@ IDaaS 回调域名和证书本来就归企业入口管理。v2-server 在 `V2_AD
 - 请求体上限不小于 v2-server 自身的上限。最大的是 6 MiB，用于工作流定义、草稿和版本，以及启动运行、
   填写表单、节点追问等工作流运行请求；技能和角色的创建、更新与导入为 2 MiB，其余接口更小。
   入口不得另外截断请求体，否则保存大的工作流或启动运行会在入口失败。
-- IDaaS 回调：目标版本把回调地址固定为 `<V2_PUBLIC_URL>/auth/callback/huawei-idaas`，只由
-  `V2_PUBLIC_URL` 得出，启动日志会打印；入口须把这个路径连同查询串原样转发。当前构建还没有这条路由。
+- IDaaS 回调：回调地址固定为 `<V2_PUBLIC_URL>/auth/callback/huawei-idaas`，只由
+  `V2_PUBLIC_URL` 得出，启动日志会打印；入口须把这个路径连同查询串原样转发。
 
 入口到 `V2_ADDR` 这一跳是未加密的 HTTP，使用 HTTP/1.1；v2-server 不支持明文 HTTP/2（h2c）。
 入口与 v2-server 在同一主机时，`V2_ADDR` 绑定 `127.0.0.1:<端口>`；不在同一主机时，绑定内网地址，
@@ -124,8 +149,7 @@ IDaaS 回调域名和证书本来就归企业入口管理。v2-server 在 `V2_AD
 
 ## 首次内网验收
 
-仅对已提供 IDaaS 登录的目标版本执行以下完整验收，并遵循该版本的管理员初始化说明；
-本构建仅供部署预检，不能上线，也不能以邮箱登录或模型 fixture 替代现场验收。
+邮箱登录或模型 fixture 不能替代现场验收。管理员初始化见上文「第一个管理员」。
 
 1. 准备专用 PostgreSQL、持久数据卷、已登记的 IDaaS 应用、管理员和第二名员工账号，以及一个真实项目、
    可用模型连接、含可安装工作流插件的内部 Git 仓库和对应 S3 包。确认包与目标 Linux 架构匹配，执行
@@ -138,7 +162,7 @@ IDaaS 回调域名和证书本来就归企业入口管理。v2-server 在 `V2_AD
 3. 记录「向现场确认的入口信息」，按「HTTPS 入口」配置入口和 `V2_ADDR`。在入口所在主机执行
    `curl -sS -m 5 http://<V2_ADDR>/healthz`，应返回含 `"status":"ok"` 的 JSON；在另一台内网机器执行
    同一命令，应超时或连接被拒。入口与 v2-server 同机时，`ss -ltn` 中该端口只显示 `127.0.0.1:<端口>`。
-4. 在验收实例按目标版本说明完成迁移和 IDaaS 管理员初始化，再邀请第二名员工登录并加入团队。
+4. 在验收实例按「第一个管理员」完成 IDaaS 管理员初始化（数据库迁移在启动时自动完成），再邀请第二名员工登录并加入团队。
    从浏览器经入口访问 `V2_PUBLIC_URL`，确认 web 与 `/api` 同源，开发者工具「网络」面板的协议列显示 `h2`，
    IDaaS 回调跳回登记的公开 HTTPS 地址，会话 Cookie 名带 `__Host-` 前缀，并带 `Secure`、`HttpOnly` 和
    `SameSite=Lax`；核对不存在预置演示账号、项目或内容。

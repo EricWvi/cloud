@@ -13,11 +13,13 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
 
-// Interactive Agent nodes, desktop's legacy end_turn completion (desktop@ebd5b725
+// Interactive Agent nodes, desktop's default mode without the Agent completion signal (desktop@ebd5b725
 // docs/workflows/workflow-runs.md "Interactive nodes"): after its first turn the node parks as
 // pending with its session open; the run's starter sends further turns into the same session or
-// completes the node, which accepts the last answer that ended normally. The Agent completion
-// signal, confirmation gates, forced completion and deliverable checks are not implemented.
+// completes the node through the completion gate of completion.go: the turn the node parked with
+// must have ended normally and, for the workflow's own opening turn, be confirmed; force covers
+// the other blockers and leaves an audit. The Agent completion signal is not implemented: a node
+// configured for it completes as end_turn (workflow.CompletionSignalAgent).
 //
 // How a turn ended never fails the node (workflow-runs.md:125-126, 152-155): a refused, truncated,
 // unknown or unrequested cancelled turn keeps it parked with its held session open, so the starter
@@ -45,18 +47,6 @@ const (
 	phaseCompleting
 )
 
-// Blocker reasons a parked node reports and a completion refuses with.
-const (
-	// blockerNoCompletedTurn: the session ended (stopped or lost) before any turn ended normally,
-	// so there is no answer to accept and no way to produce one.
-	blockerNoCompletedTurn = "no_completed_turn"
-	// blockerTurnNotCompleted: the session is open but its last turn did not end normally
-	// (refused, truncated, unreadable); another turn can fix it.
-	blockerTurnNotCompleted = "turn_not_completed"
-	// blockerStructuredOutput: the accepted answer does not satisfy the node's output schema.
-	blockerStructuredOutput = "structured_output"
-)
-
 // turnErrorNotDelivered is payload.interactive.last_turn_error for a message the starter sent
 // that never reached the node's session.
 const turnErrorNotDelivered = "not_delivered"
@@ -76,6 +66,20 @@ type interactiveNode struct {
 	turns, seq int
 	// last is the latest settled turn; accepted the latest one that ended normally.
 	last, accepted *execution.Result
+	// lastOrigin says who opened last (originWorkflow for the first turn), lastSeq the number of
+	// the message that opened it (0 for the first turn). lastStopCause is why last stopped when
+	// the snapshot cannot tell from its result alone (the starter's stop, a lost result).
+	lastOrigin    string
+	lastSeq       int
+	lastStopCause string
+	// unsettled means the latest turn ended without a readable result: last is an earlier turn
+	// and the current one has no answer.
+	unsettled bool
+	// baseline is what a mustChange deliverable is compared with, nil without one.
+	baseline *fileBaseline
+	// baselineUnwritten means the baseline is not in the payload yet: the first summary write,
+	// at dispatch, carries it, and later writes leave the stored one in place.
+	baselineUnwritten bool
 	// sessionEnded means the session accepts no further turn: the starter stopped a turn (the
 	// pinned Node stops a turn only by ending its session) or the Agent was lost.
 	sessionEnded bool
@@ -98,9 +102,11 @@ type followUp struct {
 	node   *interactiveNode
 	caller execution.Caller
 	prompt execution.Prompt
+	// seq is the message's number among the starter's messages to the node.
+	seq int
 }
 
-// endedNormally is the legacy end_turn rule: only a complete EndTurn answer can be accepted.
+// endedNormally is the end_turn rule: only a complete EndTurn answer completes without force.
 func endedNormally(r execution.Result) bool {
 	return r.Status == execution.StatusCompleted && r.AnswerComplete && r.StopReason == "end_turn"
 }
@@ -116,50 +122,53 @@ func (st *runState) track(n *interactiveNode) *interactiveNode {
 	return n
 }
 
-// blocker reports why n cannot complete now, or "" with the answer and structured value a
-// completion would write. Callers hold st.mu.
-func (n *interactiveNode) blocker() (reason, detail, answer string, structured any) {
-	accepted := n.accepted
-	if !n.sessionEnded && (n.last == nil || !endedNormally(*n.last)) {
-		stop := "no turn settled"
-		if n.last != nil {
-			stop = fmt.Sprintf("the last turn ended as %s (%s)", n.last.Status, n.last.StopReason)
-		}
-		return blockerTurnNotCompleted, stop + "; send another message so the Agent can finish", "", nil
-	}
-	if accepted == nil {
-		return blockerNoCompletedTurn, "no turn ended normally before the session stopped, so there is no answer to accept; cancel the run instead", "", nil
-	}
-	if n.cfg.Structured != nil {
-		value, err := workflow.ParseStructuredOutput(accepted.Answer, n.cfg.Structured)
-		if err != nil {
-			return blockerStructuredOutput, err.Error(), "", nil
-		}
-		structured = value
-	}
-	return "", "", accepted.Answer, structured
-}
-
-// summary is payload.interactive, what the run page shows about a parked node. Callers hold st.mu.
+// summary is payload.interactive, what the run page shows about a parked node: the completion
+// snapshot and the answer a completion would take. Callers hold st.mu.
 func (n *interactiveNode) summary() map[string]any {
-	reason, detail, _, _ := n.blocker()
+	snap := n.snapshot()
 	// sent numbers the starter's messages claimed so far; last_turn_error is about the latest
 	// one, so a page can tell whether a notice concerns a message it sent itself.
-	s := map[string]any{"turns": n.turns, "sent": n.seq, "session_ended": n.sessionEnded, "completable": reason == ""}
-	if reason != "" {
-		s["blocker"] = map[string]any{"reason": reason, "detail": detail}
-	}
+	s := map[string]any{"turns": n.turns, "sent": n.seq, "session_ended": n.sessionEnded,
+		"completable": len(snap.Blockers) == 0, "completion": snap}
 	if n.last != nil {
 		s["last_stop_reason"] = n.last.StopReason
 	}
 	if n.undelivered {
 		s["last_turn_error"] = turnErrorNotDelivered
 	}
-	if n.accepted != nil {
-		// Members who cannot read the starter's session still see what completing would accept.
-		s["answer"] = n.accepted.Answer
+	// Members who cannot read the starter's session still see what completing would take: the
+	// settled turn's answer, or what a forced completion would take instead.
+	if answer, source := n.candidate(snap); source != outputWithoutTurn {
+		s["answer"], s["answer_source"] = answer, source
 	}
 	return s
+}
+
+// candidate is the answer a completion of snap takes and where it comes from: the settled turn's
+// for a turn the starter can confirm or complete, otherwise the forced choice. Callers hold st.mu.
+func (n *interactiveNode) candidate(snap completionSnapshot) (string, string) {
+	for _, b := range snap.Blockers {
+		if b.Kind != blockerTurnUnconfirmed {
+			g, _ := n.gate(snap, nil, approval{force: true})
+			source, _ := g.forced["output_source"].(string)
+			return g.answer, source
+		}
+	}
+	if n.last == nil || n.unsettled {
+		return "", outputWithoutTurn
+	}
+	return n.last.Answer, outputTurnWindow
+}
+
+// summaryKeys are the payload keys a park or refresh writes; the first one also records the
+// baseline. Callers hold st.mu.
+func (n *interactiveNode) summaryKeys() map[string]any {
+	keys := map[string]any{"interactive": n.summary()}
+	if n.baseline != nil && n.baselineUnwritten {
+		keys["completion_baseline"] = n.baseline
+		n.baselineUnwritten = false
+	}
+	return keys
 }
 
 // settleInteractiveTurn records how a turn of n ended and parks the node again; a turn's outcome
@@ -173,7 +182,10 @@ func (n *interactiveNode) summary() map[string]any {
 // other session that could not start, resumable once the cause is gone, instead of parking with
 // neither a conversation nor an answer. A session that was lost after its Agent started still
 // parks, as desktop keeps a crashed turn awaiting input.
-func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interactiveNode, result execution.Result, err error) {
+//
+// seq is the number of the starter's message that opened the turn, 0 for the workflow's own first
+// turn.
+func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interactiveNode, seq int, result execution.Result, err error) {
 	if cancelling, last := st.endTurn(a, nil); cancelling {
 		h.end(st.scope, n.session)
 		if last {
@@ -207,20 +219,38 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 		// unknown to Node): nothing can continue the conversation or produce what it was asked for.
 		// As for a first turn that could not be set up, the session keeps its slot until its End
 		// is confirmed (the execution service has ended it, so End is idempotent).
+		message := "the run's checkout no longer exists, so the node's conversation cannot continue"
+		if n.turns == 0 {
+			// Only a reattached checkout Node no longer knows fails a first turn this way, such
+			// as the successor of a node completed after the restart: it never had a conversation
+			// to lose, and the record was dropped with it, so a resume from the failure clones.
+			message = "Node no longer knows the run's checkout; resuming from the failure starts the node on a fresh clone"
+		}
 		lingering := st.dropInteractive(n)
 		st.mu.Unlock()
 		if lingering {
 			h.endLingering(st, n.d.RunID, n.session)
 		}
-		h.fail(n.d, workflow.Failure{Kind: workflow.FailureInteractiveSession, Message: "the run's checkout no longer exists, so the node's conversation cannot continue"})
+		h.fail(n.d, workflow.Failure{Kind: workflow.FailureInteractiveSession, Message: message})
 		return
 	}
+	n.lastStopCause = ""
+	if n.stopping {
+		n.lastStopCause = stopUserStopped
+	}
+	n.unsettled = err != nil
 	if err == nil {
 		n.turns++
 		n.last = &result
+		n.lastSeq, n.lastOrigin = seq, originHuman
+		if seq == 0 {
+			n.lastOrigin = originWorkflow
+		}
 		if endedNormally(result) {
 			n.accepted = &result
 		}
+	} else if !n.stopping {
+		n.lastStopCause = stopSessionLost
 	}
 	ended := err != nil || result.AgentLost || n.stopping
 	n.stopping = false
@@ -245,10 +275,15 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 // page reads the node as an interactive session from it, from its first turn on.
 func (h *Host) refreshSummary(st *runState, n *interactiveNode, status string) {
 	st.mu.Lock()
-	keys := map[string]any{"interactive": n.summary()}
+	keys := n.summaryKeys()
 	st.mu.Unlock()
 	if _, err := h.store.MoveWorkflowEngineNode(h.ctx, n.d.RunID, n.d.NodeRunID, status, status,
 		func(node []byte) ([]byte, error) { return workflow.MergePayload(node, keys) }); err != nil {
+		if _, ok := keys["completion_baseline"]; ok {
+			st.mu.Lock()
+			n.baselineUnwritten = true // the next write records it
+			st.mu.Unlock()
+		}
 		h.log.Error("record the session summary of an interactive workflow node", "run", n.d.RunID, "node_run", n.d.NodeRunID, "error", err)
 	}
 	h.hub.Publish(n.d.RunID)
@@ -265,7 +300,8 @@ func (h *Host) moveEngineNode(ctx context.Context, runID, nodeRunID, from, to st
 // meanwhile (a sibling failed it) has no use for the node: its session ends and the row closes.
 func (h *Host) park(st *runState, n *interactiveNode) {
 	st.mu.Lock()
-	keys := map[string]any{"interactive": n.summary(), "task": n.task}
+	keys := n.summaryKeys()
+	keys["task"] = n.task
 	st.mu.Unlock()
 	var moved bool
 	writeUncertain := false
@@ -366,7 +402,7 @@ func (h *Host) SendNodeTurn(ctx context.Context, scope server.WorkflowRunScope, 
 	// starts running; if this one is refused too, the park writes the notice again.
 	undelivered := n.undelivered
 	n.undelivered = false
-	keys := map[string]any{"interactive": n.summary()}
+	keys := n.summaryKeys()
 	st.mu.Unlock()
 
 	moved, err := h.store.MoveWorkflowEngineNode(ctx, runID, n.d.NodeRunID, store.WorkflowStatusPending, store.WorkflowStatusRunning,
@@ -402,7 +438,7 @@ func (h *Host) SendNodeTurn(ctx context.Context, scope server.WorkflowRunScope, 
 	h.workers.Add(1)
 	go func() {
 		defer h.settled(runID, st)
-		h.runFollowUp(st, a, followUp{node: n, caller: caller, prompt: execution.TextPrompt(content)})
+		h.runFollowUp(st, a, followUp{node: n, caller: caller, prompt: execution.TextPrompt(content), seq: sent})
 	}()
 	st.mu.Unlock()
 	run, err := h.store.WorkflowRun(ctx, scope.TenantID, runID)
@@ -465,7 +501,7 @@ func (h *Host) runFollowUp(st *runState, a *attemptState, f followUp) {
 		return
 	}
 	result, err := h.awaitTurn(st.scope, ref, f.caller)
-	h.settleInteractiveTurn(st, a, n, result, err)
+	h.settleInteractiveTurn(st, a, n, f.seq, result, err)
 }
 
 // appendTurn waits out ErrWorkspaceBusy while the session's previous turn finishes cleaning up:
@@ -545,17 +581,22 @@ func (st *runState) turnOf(ctx context.Context, nodeID string) (execution.Ref, e
 	}
 }
 
-// CompleteNode completes a parked interactive node as desktop's legacy end_turn completion: it
-// accepts the last answer that ended normally (validated against the node's output schema),
-// ends the session, then writes the output once and schedules successors. force is accepted for
-// contract compatibility but forced completion is not implemented, so it changes nothing.
-func (h *Host) CompleteNode(ctx context.Context, scope server.WorkflowRunScope, runID, nodeID string, _ bool, _ string) (store.WorkflowRun, error) {
+// CompleteNode completes a parked interactive node through the completion gate (completion.go):
+// the snapshot the node parked with must still describe its settled turn, the live deliverable
+// checks join its blockers, confirmInitialTurn lifts only the opening turn's turn_unconfirmed and
+// force covers every other blocker, leaving payload.completion_forced. It then ends the session,
+// checks the snapshot again, writes the output once and schedules successors. The requester is
+// always the human starter.
+func (h *Host) CompleteNode(ctx context.Context, scope server.WorkflowRunScope, runID, nodeID string, req server.WorkflowNodeCompletion) (store.WorkflowRun, error) {
 	st, err := h.starter(ctx, scope, runID)
 	if err != nil {
 		return store.WorkflowRun{}, err
 	}
 	if st == nil {
 		return store.WorkflowRun{}, server.ErrWorkflowNodeNotAwaitingInput
+	}
+	if req.Force && req.ConfirmInitialTurn {
+		return store.WorkflowRun{}, server.ErrWorkflowNodeCompletionInvalid
 	}
 	st.mu.Lock()
 	n, err := st.nodeOf(nodeID)
@@ -566,14 +607,10 @@ func (h *Host) CompleteNode(ctx context.Context, scope server.WorkflowRunScope, 
 		st.mu.Unlock()
 		return store.WorkflowRun{}, err
 	}
-	reason, detail, answer, structured := n.blocker()
-	if reason != "" {
-		st.mu.Unlock()
-		return store.WorkflowRun{}, &server.WorkflowNodeIncomplete{Reason: reason, Detail: detail}
-	}
+	// The claim keeps any turn from settling until the completion commits or gives it back.
 	n.phase = phaseCompleting
-	accepted, gone := *n.accepted, n.sessionGone
-	keys := completionKeys(accepted, n.executor, n.cfg, n.task)
+	snap := n.snapshot()
+	files, baseline := n.cfg.CompletionFiles, n.baseline
 	st.mu.Unlock()
 	// release gives the claim back and republishes the summary, which may have changed while the
 	// claim was held (the session ended); a row that is no longer pending is left as it is.
@@ -582,6 +619,28 @@ func (h *Host) CompleteNode(ctx context.Context, scope server.WorkflowRunScope, 
 		n.phase = phaseParked
 		st.mu.Unlock()
 		h.refreshSummary(st, n, store.WorkflowStatusPending)
+	}
+	refuse := func(err error) (store.WorkflowRun, error) {
+		release()
+		return store.WorkflowRun{}, err
+	}
+
+	// The park recorded the turn the starter saw; a node whose turn or answer is no longer that
+	// one refuses, force or not, and the page reloads the run.
+	row, err := h.nodeRow(ctx, scope.TenantID, runID, n.d.NodeRunID)
+	if err != nil {
+		return refuse(err)
+	}
+	if err := stale(nodeID, storedSnapshot(row.Payload), snap); err != nil {
+		return refuse(err)
+	}
+	fileBlockers, warnings := h.fileBlockers(ctx, scope.TenantID, runID, files, baseline)
+	st.mu.Lock()
+	g, err := n.gate(snap, fileBlockers, approval{confirmInitialTurn: req.ConfirmInitialTurn, force: req.Force})
+	gone := n.sessionGone
+	st.mu.Unlock()
+	if err != nil {
+		return refuse(err)
 	}
 
 	// Desktop revalidates after shutting the session down: no turn can slip in between the
@@ -617,9 +676,27 @@ func (h *Host) CompleteNode(ctx context.Context, scope server.WorkflowRunScope, 
 		}
 	}
 	st.mu.Lock()
-	keys["interactive"] = map[string]any{"turns": n.turns, "session_ended": true, "completable": true, "answer": answer}
+	after := n.snapshot()
+	source := n.last
+	if g.forced != nil && g.forced["output_source"] == outputLastNormal {
+		source = n.accepted
+	}
 	st.mu.Unlock()
-	completion := workflow.Completion{Output: &answer, Structured: structured, Keys: keys}
+	if err := stale(nodeID, &snap, after); err != nil {
+		return refuse(err)
+	}
+	var result execution.Result
+	if source != nil {
+		result = *source
+	}
+	snap.Warnings = dedupe(append(snap.Warnings, warnings...))
+	keys := completionKeys(result, n.executor, n.cfg, n.task)
+	keys["interactive"] = map[string]any{"turns": n.turns, "session_ended": true, "completable": true, "answer": g.answer, "completion": snap}
+	keys["requester"] = requesterHuman
+	if g.forced != nil {
+		keys["completion_forced"] = g.forced
+	}
+	completion := workflow.Completion{Output: &g.answer, Structured: g.structured, Keys: keys}
 	// The run outlives the request: a disconnecting client must not abandon the successor wave,
 	// nor the reads that settle the claim once the completion may have committed.
 	settle := context.WithoutCancel(ctx)
@@ -695,16 +772,22 @@ func (h *Host) closeOrphan(n *interactiveNode) bool {
 
 // nodeStatus reads one attempt's stored status.
 func (h *Host) nodeStatus(ctx context.Context, tenant, runID, nodeRunID string) (string, error) {
+	row, err := h.nodeRow(ctx, tenant, runID, nodeRunID)
+	return row.Status, err
+}
+
+// nodeRow reads one attempt's stored row.
+func (h *Host) nodeRow(ctx context.Context, tenant, runID, nodeRunID string) (store.WorkflowNodeRun, error) {
 	nodes, err := h.store.WorkflowRunNodes(ctx, tenant, runID)
 	if err != nil {
-		return "", err
+		return store.WorkflowNodeRun{}, err
 	}
 	for _, row := range nodes {
 		if row.ID == nodeRunID {
-			return row.Status, nil
+			return row, nil
 		}
 	}
-	return "", store.ErrWorkflowNodeRunNotFound
+	return store.WorkflowNodeRun{}, store.ErrWorkflowNodeRunNotFound
 }
 
 // endParked ends the session of every tracked node for a run that is closing. Callers have marked

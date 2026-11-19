@@ -6,22 +6,13 @@ import { Input } from '@/components/ui/input'
 import { ActionError } from '../components/page-parts'
 import { getListMcpQueryKey, updateMcpSettings, type McpInstallation } from '@/lib/mcp-api/generated'
 
-interface McpSettingsProps {
+/** Edits changed settings only, keeping stored secrets out of the form. */
+export function McpSettings({ installation, tenantId, spaceId, canManage }: {
   installation: McpInstallation
   tenantId: string
   spaceId: string
   canManage: boolean
-}
-
-/** Edits readable settings and keeps stored secrets out of the form. */
-export function McpSettings(props: McpSettingsProps) {
-  if (props.installation.settingsUnavailable) {
-    return <p role="alert" className="text-sm text-destructive">无法读取 MCP 配置，请联系部署管理员检查密钥。</p>
-  }
-  return <McpSettingsForm {...props} />
-}
-
-function McpSettingsForm({ installation, tenantId, spaceId, canManage }: McpSettingsProps) {
+}) {
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [cleared, setCleared] = useState<string[]>([])
   const [saved, setSaved] = useState(false)
@@ -70,6 +61,7 @@ function McpSettingsForm({ installation, tenantId, spaceId, canManage }: McpSett
       save.reset()
     },
   })
+  if (installation.settingsUnavailable) return <p role="status">服务暂时无法解密此插件的设置，请管理员检查部署密钥。</p>
   const pending = save.isPending || reload.isPending
   const change = (id: string, value: string) => {
     setEditRevision((current) => current ?? installation.revision)

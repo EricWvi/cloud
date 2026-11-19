@@ -19,9 +19,13 @@ var ErrNotFound = errors.New("not found")
 // Store is the v2-server database.
 type Store struct {
 	pool             *pgxpool.Pool
+	mcpChanged       func(tenant, plugin string)
 	officialDisabled bool
 	migrated         []AppliedMigration
 }
+
+// SetMCPChangeObserver registers a post-commit wakeup before the store is shared with workers.
+func (s *Store) SetMCPChangeObserver(observer func(tenant, plugin string)) { s.mcpChanged = observer }
 
 // DisableOfficialMarket configures catalog visibility before the store is shared with workers.
 // It retains durable snapshots for a later re-enable, while preventing new installs from them.
@@ -131,13 +135,15 @@ func (s *Store) Logout(ctx context.Context, token string) error {
 	return nil
 }
 
-// SessionUser returns the active user behind a live session, or ErrNotFound.
+// SessionUser returns the active user behind a live session, or ErrNotFound. Disabling or
+// deleting the account ends every session at the next request.
 func (s *Store) SessionUser(ctx context.Context, token string) (User, error) {
 	var u User
 	e := s.pool.QueryRow(ctx, `
 		SELECT u.id, u.display_name, u.status, u.version, u.created_at, u.deleted_at
 		FROM sessions s JOIN users u ON u.id = s.user_id
-		WHERE s.token_hash = $1 AND s.expires_at > now() AND u.deleted_at IS NULL`, hash(token)).
+		WHERE s.token_hash = $1 AND s.expires_at > now()
+			AND u.status = 'active' AND u.deleted_at IS NULL`, hash(token)).
 		Scan(&u.ID, &u.DisplayName, &u.Status, &u.Version, &u.CreatedAt, &u.DeletedAt)
 	if errors.Is(e, pgx.ErrNoRows) {
 		return User{}, ErrNotFound

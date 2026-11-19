@@ -18,8 +18,7 @@ type fakeRunHost struct {
 	lastInput                              *string
 	lastVariables                          map[string]json.RawMessage
 	lastNodeID                             string
-	lastForce                              bool
-	lastRequester                          string
+	lastCompletion                         server.WorkflowNodeCompletion
 	err                                    error
 }
 
@@ -43,12 +42,11 @@ func (f *fakeRunHost) UpdateRunInput(_ context.Context, scope server.WorkflowRun
 	return f.run(runID, store.WorkflowStatusPending)
 }
 
-func (f *fakeRunHost) CompleteNode(_ context.Context, scope server.WorkflowRunScope, runID, nodeID string, force bool, requester string) (store.WorkflowRun, error) {
+func (f *fakeRunHost) CompleteNode(_ context.Context, scope server.WorkflowRunScope, runID, nodeID string, completion server.WorkflowNodeCompletion) (store.WorkflowRun, error) {
 	f.completed++
 	f.lastScope = scope
 	f.lastNodeID = nodeID
-	f.lastForce = force
-	f.lastRequester = requester
+	f.lastCompletion = completion
 	return f.run(runID, store.WorkflowStatusRunning)
 }
 
@@ -110,8 +108,12 @@ func TestWorkflowRunLifecycleRoutesDelegateToBridge(t *testing.T) {
 	if status != 200 || completed["run"] == nil {
 		t.Fatalf("complete = %d %v", status, completed)
 	}
-	if host.completed != 1 || host.lastNodeID != "agent-1" || !host.lastForce || host.lastRequester != "human" {
+	if host.completed != 1 || host.lastNodeID != "agent-1" || host.lastCompletion != (server.WorkflowNodeCompletion{Force: true}) {
 		t.Fatalf("complete bridge call = %+v", host)
+	}
+	status, completed = call("POST", base+"/nodes/agent-1/complete", map[string]any{"force": false, "confirmInitialTurn": true})
+	if status != 200 || completed["run"] == nil || host.lastCompletion != (server.WorkflowNodeCompletion{ConfirmInitialTurn: true}) {
+		t.Fatalf("confirm = %d %v, bridge %+v", status, completed, host.lastCompletion)
 	}
 
 	// A malformed id never reaches the bridge.
@@ -250,7 +252,10 @@ func TestWorkflowNodeTurnRefusals(t *testing.T) {
 		{"turn while busy", server.ErrWorkflowNodeNotAwaitingInput, "workflow_node_not_awaiting_input", 400, "/turns", map[string]any{"content": "x"}},
 		{"nothing to stop", server.ErrWorkflowNodeTurnNotRunning, "workflow_node_turn_not_running", 409, "/stop", nil},
 		{"stop unconfirmed", server.ErrWorkflowRunStopUnconfirmed, "workflow_run_stop_unconfirmed", 503, "/stop", nil},
-		{"incomplete", &server.WorkflowNodeIncomplete{Reason: "structured_output", Detail: "missing approved"}, "workflow_node_incomplete", 409, "/complete", map[string]any{"force": false}},
+		{"incomplete", &server.WorkflowNodeIncomplete{Blockers: []server.WorkflowNodeBlocker{{Kind: "turn_unconfirmed"}, {Kind: "file_missing", Path: "plan.md"}}}, "workflow_node_incomplete", 409, "/complete", map[string]any{"force": false}},
+		{"turn changed", &server.WorkflowNodeTurnChanged{NodeID: "agent-1", Expected: &server.WorkflowNodeTurnKey{UserSeq: 0, EndedSeq: 1}, Actual: &server.WorkflowNodeTurnKey{UserSeq: 1, EndedSeq: 2}}, "workflow_node_turn_changed", 409, "/complete", map[string]any{"force": true}},
+		{"output changed", &server.WorkflowNodeOutputChanged{NodeID: "agent-1", Expected: "sha256:a", Actual: "sha256:b"}, "workflow_node_output_changed", 409, "/complete", map[string]any{"force": true}},
+		{"confirm with force", server.ErrWorkflowNodeCompletionInvalid, "invalid_request", 400, "/complete", map[string]any{"force": true, "confirmInitialTurn": true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			host := &fakeTurnHost{fakeRunHost: fakeRunHost{err: tc.err}}
@@ -262,8 +267,14 @@ func TestWorkflowNodeTurnRefusals(t *testing.T) {
 				t.Fatalf("refusal = %d %v", status, failure)
 			}
 			if tc.code == "workflow_node_incomplete" {
-				if params := failure["params"].(map[string]any); params["reason"] != "structured_output" || params["detail"] != "missing approved" {
-					t.Fatalf("params = %v", params)
+				blockers, _ := failure["params"].(map[string]any)["blockers"].([]any)
+				if len(blockers) != 2 || blockers[0].(map[string]any)["kind"] != "turn_unconfirmed" || blockers[1].(map[string]any)["path"] != "plan.md" {
+					t.Fatalf("params = %v", failure["params"])
+				}
+			}
+			if tc.code == "workflow_node_turn_changed" {
+				if params := failure["params"].(map[string]any); params["expected"].(map[string]any)["endedSeq"] != float64(1) || params["actual"].(map[string]any)["userSeq"] != float64(1) {
+					t.Fatalf("params = %v", failure["params"])
 				}
 			}
 		})

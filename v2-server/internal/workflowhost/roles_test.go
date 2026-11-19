@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
+	"github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
 
 // reviewBranchesWithRoleOnBothBranches puts a role on the branch that this run will not take:
@@ -160,5 +162,90 @@ func TestRoleReferenceResolvesCaseInsensitivelyAndByID(t *testing.T) {
 			f.exec.finish(f.exec.awaitStart(t), completed("可以合并"))
 			f.await(t, runID, terminal)
 		})
+	}
+}
+
+func TestInteractiveRoleLookupDatabaseErrorIsNotAutoRetryable(t *testing.T) {
+	for _, kind := range []workflow.FailureKind{workflow.FailureWorkflowRoleNotFound, workflow.FailureMissingAgentConfig} {
+		interactiveFailure := (workflow.Failure{Kind: kind, Message: "role lookup failed"}).Interactive()
+		detail := interactiveFailure.Detail(1, false, time.UnixMilli(1_700_000_000_000))
+		if interactiveFailure.Kind != kind || detail["auto_retryable"] != false {
+			t.Fatalf("Interactive(%s) = %+v (detail=%v), want same kind with auto_retryable=false", kind, interactiveFailure, detail)
+		}
+	}
+	sessionConverted := (workflow.Failure{Kind: workflow.FailureSession, Message: "setup failed"}).Interactive()
+	if sessionConverted.Kind != workflow.FailureInteractiveSession {
+		t.Fatalf("Interactive(session) = %+v, want interactive_session", sessionConverted)
+	}
+
+	f, admin := newFixtureWithAdmin(t)
+	ctx := context.Background()
+	graph := strings.Replace(
+		interactiveChain,
+		`"prompt":"起草：{{#start.input#}}","interactive":true`,
+		`"prompt":"起草：{{#start.input#}}","interactive":true,"roleId":"reviewer","retry":{"enabled":true,"maxRetries":2,"initialDelaySeconds":0}`,
+		1,
+	)
+	runID := f.run(t, graph, str("角色库故障"))
+
+	entered, release := f.holdDispatchOf(t, "a")
+	if _, err := f.host.StartRun(ctx, f.scope, runID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("interactive Agent dispatch never started")
+	}
+	// Break v2_roles inside this test's isolated schema after StartRun's preflight passes so
+	// ResolveWorkflowRole hits a database query error inside runAgent without falling back to public.v2_roles.
+	if _, err := admin.Exec(ctx, `ALTER TABLE v2_roles RENAME COLUMN content TO broken_content`); err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	run, nodes := f.await(t, runID, terminal)
+	if run.Status != store.WorkflowStatusFailed {
+		t.Fatalf("run = %+v, want failed", run)
+	}
+	a := node(nodes, "a")
+	if a.Status != store.WorkflowStatusFailed {
+		t.Fatalf("node a = %+v, want failed", a)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(a.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"retry_wait", "auto_retry", "retry_chain"} {
+		if _, ok := payload[key]; ok {
+			t.Fatalf("interactive role error attempt carries %s: %s", key, a.Payload)
+		}
+	}
+	var detail struct {
+		ErrorDetail struct {
+			Kind          string `json:"kind"`
+			Message       string `json:"message"`
+			Resumable     bool   `json:"resumable"`
+			AutoRetryable bool   `json:"auto_retryable"`
+		} `json:"error_detail"`
+	}
+	if err := json.Unmarshal(a.Payload, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.ErrorDetail.Kind != string(workflow.FailureMissingAgentConfig) || !detail.ErrorDetail.Resumable || detail.ErrorDetail.AutoRetryable {
+		t.Fatalf("error_detail = %+v, want missing_agent_config resumable=true auto_retryable=false", detail.ErrorDetail)
+	}
+	if detail.ErrorDetail.Message == "" {
+		t.Fatal("error_detail.message is empty")
+	}
+	history, err := f.s.WorkflowRunFailedAttempts(ctx, f.scope.TenantID, runID)
+	if err != nil || len(history) != 0 {
+		t.Fatalf("failed history = %+v %v, want no auto-retry replacements", history, err)
+	}
+	f.exec.mu.Lock()
+	started := len(f.exec.started)
+	f.exec.mu.Unlock()
+	if started != 0 {
+		t.Fatalf("started = %d, want no session started", started)
 	}
 }

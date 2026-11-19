@@ -43,7 +43,7 @@ const agent: WorkflowNodeData = {
   },
 }
 
-const summary = { turns: 1, sessionEnded: false, completable: true, answer: '初稿' }
+const summary = { turns: 1, sessionEnded: false, completable: true, blockers: [], answer: '初稿' }
 
 function card(state: GraphWorkflowNodeState) {
   return view(

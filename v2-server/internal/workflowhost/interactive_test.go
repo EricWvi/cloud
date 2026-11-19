@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -61,6 +62,35 @@ func interactivePayload(t *testing.T, n store.WorkflowNodeRun) map[string]any {
 	return p.Interactive
 }
 
+// blockerKinds lists the kinds in a summary's completion snapshot.
+func blockerKinds(p map[string]any) []string {
+	kinds := []string{}
+	completion, _ := p["completion"].(map[string]any)
+	blockers, _ := completion["blockers"].([]any)
+	for _, b := range blockers {
+		kind, _ := b.(map[string]any)["kind"].(string)
+		kinds = append(kinds, kind)
+	}
+	return kinds
+}
+
+// refusedWith reports whether err refuses a completion with exactly kinds.
+func refusedWith(err error, kinds ...string) bool {
+	var incomplete *server.WorkflowNodeIncomplete
+	if !errors.As(err, &incomplete) || len(incomplete.Blockers) != len(kinds) {
+		return false
+	}
+	for i, b := range incomplete.Blockers {
+		if b.Kind != kinds[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// confirm completes the workflow's opening turn of a node.
+var confirm = server.WorkflowNodeCompletion{ConfirmInitialTurn: true}
+
 // startParked starts graph and finishes A's first turn with answer, returning A's session.
 func (f *fixture) startParked(t *testing.T, graph, answer string) (string, string) {
 	t.Helper()
@@ -88,7 +118,9 @@ func TestInteractiveNodeParksAfterItsFirstTurn(t *testing.T) {
 	if rowA.SessionID == nil || *rowA.SessionID != a || rowA.Output != nil || rowA.FinishedAt != nil {
 		t.Fatalf("parked A = %+v, want its session bound and no output yet", rowA)
 	}
-	if p := interactivePayload(t, rowA); p["turns"] != float64(1) || p["completable"] != true || p["session_ended"] != false || p["answer"] != "初稿一" {
+	// The workflow's own first turn awaits confirmation before it can complete.
+	if p := interactivePayload(t, rowA); p["turns"] != float64(1) || p["completable"] != false || !reflect.DeepEqual(blockerKinds(p), []string{blockerTurnUnconfirmed}) ||
+		p["session_ended"] != false || p["answer"] != "初稿一" {
 		t.Fatalf("parked summary = %v", p)
 	}
 	if f.exec.isClosed(a) {
@@ -122,7 +154,7 @@ func TestFollowUpTurnsRunInTheSameSession(t *testing.T) {
 			t.Fatalf("turn during a turn = %v", err)
 		}
 		// Nor can the starter complete the node while its turn runs, even after a refused turn.
-		if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); !errors.Is(err, server.ErrWorkflowNodeNotAwaitingInput) {
+		if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); !errors.Is(err, server.ErrWorkflowNodeNotAwaitingInput) {
 			t.Fatalf("completion during a turn = %v", err)
 		}
 		if f.exec.isClosed(a) {
@@ -159,7 +191,7 @@ func TestCompletionWritesTheOutputOnceAndReleasesTheSuccessor(t *testing.T) {
 	f.exec.finish(a, completed("定稿"))
 	f.await(t, runID, parked("a"))
 
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err != nil {
 		t.Fatal(err)
 	}
 	if !f.exec.isClosed(a) {
@@ -170,7 +202,7 @@ func TestCompletionWritesTheOutputOnceAndReleasesTheSuccessor(t *testing.T) {
 		t.Fatalf("B did not read the accepted answer through the selector:\n%s", text)
 	}
 	// Completing again, or talking to a completed node, is refused.
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); !errors.Is(err, server.ErrWorkflowNodeNotAwaitingInput) {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); !errors.Is(err, server.ErrWorkflowNodeNotAwaitingInput) {
 		t.Fatalf("second completion = %v", err)
 	}
 	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "还有"); !errors.Is(err, server.ErrWorkflowNodeNotAwaitingInput) {
@@ -194,12 +226,12 @@ func TestStructuredCompletionRefusesANonconformingAnswer(t *testing.T) {
 	ctx := context.Background()
 	runID, a := f.startParked(t, interactiveStructured, "我觉得可以")
 	_, nodes := f.await(t, runID, parked("a"))
-	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != false || p["blocker"].(map[string]any)["reason"] != blockerStructuredOutput {
+	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != false || !reflect.DeepEqual(blockerKinds(p), []string{blockerStructuredInvalid}) {
 		t.Fatalf("summary = %v, want the structured blocker", p)
 	}
-	var incomplete *server.WorkflowNodeIncomplete
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); !errors.As(err, &incomplete) || incomplete.Reason != blockerStructuredOutput {
-		t.Fatalf("completion = %v, want structured_output", err)
+	// Confirming the opening turn does not lift an output that does not fit.
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); !refusedWith(err, blockerStructuredInvalid) {
+		t.Fatalf("completion = %v, want structured_invalid", err)
 	}
 	if f.exec.isClosed(a) {
 		t.Fatal("a refused completion ended the session")
@@ -215,7 +247,7 @@ func TestStructuredCompletionRefusesANonconformingAnswer(t *testing.T) {
 	f.exec.awaitAppend(t)
 	f.exec.finish(a, completed(`{"approved": true}`))
 	f.await(t, runID, parked("a"))
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); err != nil {
 		t.Fatal(err)
 	}
 	b := f.exec.awaitStart(t)
@@ -231,9 +263,12 @@ func TestOnlyTheStarterTalksToTheNode(t *testing.T) {
 	otherID, _ := storetest.Login(t, f.s, "interactive-reader")
 	other := server.WorkflowRunScope{TenantID: f.scope.TenantID, UserID: otherID}
 	for name, call := range map[string]func() error{
-		"turn":     func() error { _, err := f.host.SendNodeTurn(ctx, other, runID, "a", "我来"); return err },
-		"stop":     func() error { _, err := f.host.StopNodeTurn(ctx, other, runID, "a"); return err },
-		"complete": func() error { _, err := f.host.CompleteNode(ctx, other, runID, "a", false, "human"); return err },
+		"turn": func() error { _, err := f.host.SendNodeTurn(ctx, other, runID, "a", "我来"); return err },
+		"stop": func() error { _, err := f.host.StopNodeTurn(ctx, other, runID, "a"); return err },
+		"complete": func() error {
+			_, err := f.host.CompleteNode(ctx, other, runID, "a", confirm)
+			return err
+		},
 	} {
 		if err := call(); !errors.Is(err, server.ErrWorkflowRunOwned) {
 			t.Fatalf("%s by another member = %v, want run owned", name, err)
@@ -244,7 +279,7 @@ func TestOnlyTheStarterTalksToTheNode(t *testing.T) {
 	}
 }
 
-func TestStopEndsTheSessionAndCompletesWithTheLastNormalTurn(t *testing.T) {
+func TestStopEndsTheSessionAndForceCompletesWithTheLastNormalTurn(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	runID, a := f.startParked(t, interactiveChain, "初稿一")
@@ -265,13 +300,14 @@ func TestStopEndsTheSessionAndCompletesWithTheLastNormalTurn(t *testing.T) {
 	if run.Status != "awaitingInput" {
 		t.Fatalf("stopping the turn moved the run to %s", run.Status)
 	}
-	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != true || p["completable"] != true || p["answer"] != "初稿一" {
+	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != true || p["completable"] != false || p["answer"] != "初稿一" {
 		t.Fatalf("summary after stop = %v", p)
 	}
 	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再来"); !errors.Is(err, server.ErrWorkflowNodeSessionEnded) {
 		t.Fatalf("turn after stop = %v", err)
 	}
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); err != nil {
+	// The stopped turn needs force, which takes the last normal answer (see completion_test.go).
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", server.WorkflowNodeCompletion{Force: true}); err != nil {
 		t.Fatal(err)
 	}
 	b := f.exec.awaitStart(t)
@@ -306,11 +342,11 @@ func TestStoppedFirstTurnCannotComplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, nodes = f.await(t, runID, parked("a"))
-	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != false || p["blocker"].(map[string]any)["reason"] != blockerNoCompletedTurn {
+	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != false || !reflect.DeepEqual(blockerKinds(p), []string{blockerTurnStopped}) ||
+		p["completion"].(map[string]any)["stopCause"] != stopUserStopped || p["completion"].(map[string]any)["parkKind"] != parkAwaitingUser {
 		t.Fatalf("summary = %v", p)
 	}
-	var incomplete *server.WorkflowNodeIncomplete
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); !errors.As(err, &incomplete) || incomplete.Reason != blockerNoCompletedTurn {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); !refusedWith(err, blockerTurnStopped) {
 		t.Fatalf("completion = %v", err)
 	}
 	if r := node(nodes, "a"); r.Status != store.WorkflowStatusPending || errorKind(t, r) != "" {
@@ -365,7 +401,10 @@ func TestCompletionAndFollowUpRaceHasOneWinner(t *testing.T) {
 		ctx := context.Background()
 		runID, a := f.startParked(t, interactiveChain, "初稿一")
 		completeErr, turnErr := race(
-			func() error { _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); return err },
+			func() error {
+				_, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm)
+				return err
+			},
 			func() error { _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再改"); return err },
 		)
 		switch {
@@ -401,7 +440,10 @@ func TestCompletionAndCancelRaceEndsCancelled(t *testing.T) {
 		ctx := context.Background()
 		runID, a := f.startParked(t, interactiveChain, "初稿一")
 		completeErr, cancelErr := race(
-			func() error { _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); return err },
+			func() error {
+				_, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm)
+				return err
+			},
 			func() error { _, err := f.host.CancelRun(ctx, f.scope, runID); return err },
 		)
 		if cancelErr != nil {
@@ -457,6 +499,12 @@ func TestSiblingFailureClosesTheParkedNode(t *testing.T) {
 	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
 }
 
+// agentEndedBlockers is the blocker each of agentEndedTurns parks with.
+var agentEndedBlockers = map[string]string{
+	"refusal": blockerTurnRefused, "max_tokens": blockerTurnTruncated, "max_turn_requests": blockerTurnTruncated,
+	"unknown stop": blockerTurnUnknown, "unasked cancel": blockerTurnStopped, "cut at a limit": blockerTurnStopped,
+}
+
 // The results the Agent driver emits for a turn the Agent itself ended without completing
 // (agentruntime turnResult): the held session stays open, so none of them ends or fails the node.
 var agentEndedTurns = map[string]execution.Result{
@@ -470,8 +518,8 @@ var agentEndedTurns = map[string]execution.Result{
 
 // Desktop keeps a stopped, truncated, refused or unknown turn awaiting input
 // (workflow-runs.md:125-126): a first turn that did not end normally parks with its session open,
-// completion is refused with turn_not_completed, and the starter keeps talking until a turn ends
-// normally.
+// a completion is refused with the blocker naming how the turn ended (first-turn ADR D1), and the
+// starter keeps talking until a turn ends normally.
 func TestAgentEndedFirstTurnParksAndTheConversationContinues(t *testing.T) {
 	for name, result := range agentEndedTurns {
 		t.Run(name, func(t *testing.T) {
@@ -485,15 +533,15 @@ func TestAgentEndedFirstTurnParksAndTheConversationContinues(t *testing.T) {
 			f.exec.finish(a, result)
 			run, nodes := f.await(t, runID, awaitingInput("a"))
 			p := interactivePayload(t, node(nodes, "a"))
-			if run.Status != "awaitingInput" || p["completable"] != false || p["session_ended"] != false || p["blocker"].(map[string]any)["reason"] != blockerTurnNotCompleted || errorKind(t, node(nodes, "a")) != "" {
+			want := agentEndedBlockers[name]
+			if run.Status != "awaitingInput" || p["completable"] != false || p["session_ended"] != false || !reflect.DeepEqual(blockerKinds(p), []string{want}) || errorKind(t, node(nodes, "a")) != "" {
 				t.Fatalf("run %s, summary %v: want parked, open and not completable", run.Status, p)
 			}
 			if f.exec.isClosed(a) {
 				t.Fatal("a turn the Agent ended closed the held session")
 			}
-			var incomplete *server.WorkflowNodeIncomplete
-			if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", true, "human"); !errors.As(err, &incomplete) || incomplete.Reason != blockerTurnNotCompleted {
-				t.Fatalf("completion (even with force) = %v", err)
+			if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); !refusedWith(err, want) {
+				t.Fatalf("completion = %v, want %s", err, want)
 			}
 			if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "换个说法"); err != nil {
 				t.Fatal(err)
@@ -511,8 +559,7 @@ func TestAgentEndedFirstTurnParksAndTheConversationContinues(t *testing.T) {
 }
 
 // A follow-up the Agent ends without completing blocks completion on the earlier answer too: the
-// last turn decides, as long as the session is open (turn_not_completed), and the next normal
-// turn lifts it.
+// last turn decides, and the next normal turn lifts it.
 func TestUnfinishedTurnBlocksCompletionButNotTheConversation(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -524,11 +571,12 @@ func TestUnfinishedTurnBlocksCompletionButNotTheConversation(t *testing.T) {
 		f.exec.awaitAppend(t)
 		f.exec.finish(a, agentEndedTurns[name])
 		_, nodes := f.await(t, runID, parked("a"))
-		if p := interactivePayload(t, node(nodes, "a")); p["completable"] != false || p["session_ended"] != false || p["answer"] != "初稿一" {
+		// While the session is open, a forced completion would take this turn's own answer.
+		if p := interactivePayload(t, node(nodes, "a")); p["completable"] != false || p["session_ended"] != false ||
+			p["answer"] != agentEndedTurns[name].Answer || p["answer_source"] != outputTurnWindow {
 			t.Fatalf("after %s summary = %v", name, p)
 		}
-		var incomplete *server.WorkflowNodeIncomplete
-		if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); !errors.As(err, &incomplete) || incomplete.Reason != blockerTurnNotCompleted {
+		if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); !refusedWith(err, agentEndedBlockers[name]) {
 			t.Fatalf("after %s completion = %v", name, err)
 		}
 	}
@@ -544,8 +592,8 @@ func TestUnfinishedTurnBlocksCompletionButNotTheConversation(t *testing.T) {
 }
 
 // A first turn that lost its Agent (a crash or a dropped stream: the driver reports AgentLost)
-// parks too, never failing the node; with no normal answer it cannot complete, and cancelling the
-// run is the way out, as after a stop (D7).
+// parks too, never failing the node; it cannot complete without force, and cancelling the run is
+// the other way out, as after a stop (D7).
 func TestLostFirstTurnParksWithoutAnAnswer(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -557,11 +605,11 @@ func TestLostFirstTurnParksWithoutAnAnswer(t *testing.T) {
 	f.exec.finish(a, execution.Result{Status: execution.StatusFailed, FailureCode: "agent_transport_closed", AgentLost: true})
 	run, nodes := f.await(t, runID, awaitingInput("a"))
 	p := interactivePayload(t, node(nodes, "a"))
-	if run.Status != "awaitingInput" || p["session_ended"] != true || p["completable"] != false || p["blocker"].(map[string]any)["reason"] != blockerNoCompletedTurn || errorKind(t, node(nodes, "a")) != "" {
+	if run.Status != "awaitingInput" || p["session_ended"] != true || p["completable"] != false || !reflect.DeepEqual(blockerKinds(p), []string{blockerTurnUnknown}) ||
+		p["completion"].(map[string]any)["parkKind"] != parkAbnormal || errorKind(t, node(nodes, "a")) != "" {
 		t.Fatalf("run %s, summary %v: want parked with the session ended", run.Status, p)
 	}
-	var incomplete *server.WorkflowNodeIncomplete
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); !errors.As(err, &incomplete) || incomplete.Reason != blockerNoCompletedTurn {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); !refusedWith(err, blockerTurnUnknown) {
 		t.Fatalf("completion = %v", err)
 	}
 	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "还在吗"); !errors.Is(err, server.ErrWorkflowNodeSessionEnded) {
@@ -585,7 +633,9 @@ func TestLostFollowUpKeepsTheEarlierAnswer(t *testing.T) {
 	f.exec.awaitAppend(t)
 	f.exec.finish(a, execution.Result{Status: execution.StatusInterrupted, FailureCode: "session_lost", AgentLost: true})
 	_, nodes := f.await(t, runID, parked("a"))
-	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != true || p["completable"] != true || p["answer"] != "初稿一" {
+	// The lost turn blocks a plain completion; force would take the earlier normal answer.
+	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != true || p["completable"] != false ||
+		!reflect.DeepEqual(blockerKinds(p), []string{blockerTurnUnknown}) || p["answer"] != "初稿一" || p["answer_source"] != outputLastNormal {
 		t.Fatalf("summary = %v", p)
 	}
 	if !f.exec.isClosed(a) {
@@ -610,7 +660,9 @@ func TestUnreadableTurnEndsTheSessionAndParks(t *testing.T) {
 	_, nodes := f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
 		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["session_ended"] == true
 	})
-	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != true || p["answer"] != "初稿一" || !f.exec.isClosed(a) {
+	// No turn settled: the snapshot has no turn identity, and force would take the earlier answer.
+	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != false || !reflect.DeepEqual(blockerKinds(p), []string{blockerTurnUnknown}) ||
+		p["completion"].(map[string]any)["turnKey"] != nil || p["answer"] != "初稿一" || !f.exec.isClosed(a) {
 		t.Fatalf("summary = %v, closed = %v", p, f.exec.isClosed(a))
 	}
 }
@@ -641,7 +693,7 @@ func TestSiblingStartLeavesTheParkedSessionOpen(t *testing.T) {
 		t.Fatal("an automatic node held its session")
 	}
 	_, nodes := f.await(t, runID, parked("draft"))
-	if p := interactivePayload(t, node(nodes, "draft")); f.exec.isClosed(draft) || p["session_ended"] != false || p["completable"] != true || p["turns"] != float64(1) {
+	if p := interactivePayload(t, node(nodes, "draft")); f.exec.isClosed(draft) || p["session_ended"] != false || p["completable"] != false || p["turns"] != float64(1) {
 		t.Fatalf("the sibling's start touched the parked session: closed = %v, summary = %v", f.exec.isClosed(draft), p)
 	}
 	// The follow-up runs beside the sibling's executing turn, in the node's own session.
@@ -668,7 +720,7 @@ func TestSiblingStartLeavesTheParkedSessionOpen(t *testing.T) {
 	if p := interactivePayload(t, node(nodes, "draft")); p["turns"] != float64(2) || p["answer"] != "二稿" || p["session_ended"] != false {
 		t.Fatalf("summary after the follow-up = %v", p)
 	}
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "draft", false, "human"); err != nil {
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "draft", confirm); err != nil {
 		t.Fatal(err)
 	}
 	run, nodes := f.await(t, runID, terminal)
@@ -720,7 +772,10 @@ func TestSiblingFailureDuringCompletionClosesTheNode(t *testing.T) {
 		return end(ctx, scope, id)
 	}
 	completed := make(chan error, 1)
-	go func() { _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", false, "human"); completed <- err }()
+	go func() {
+		_, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm)
+		completed <- err
+	}()
 	<-ending
 	failC()
 	f.await(t, runID, func(r store.WorkflowRun, n []store.WorkflowNodeRun) bool {

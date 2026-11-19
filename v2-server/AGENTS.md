@@ -10,7 +10,7 @@ over Cloud's durability machinery. It does not follow the specs process.
   `api/openapi.json` for v2. A route the contract lacks lives here only, is listed under "契约之外" in
   `README.md` as a candidate for Cloud, and is exempt from the check.
 - **Login mirrors the Gateway's browser routes** (`/auth/providers`, `/auth/login`, `/auth/logout`,
-  the `ora_session` cookie) with only a development provider.
+  the session cookie), offering the login methods `V2_LOGIN` names.
 - **Simplified on purpose.** One process, one PostgreSQL database, no tenant isolation beyond
   membership checks. Write down every simplification in `README.md` so nobody mistakes it for Cloud behavior.
 - **Schema changes are migrations.** `internal/store/migrations/NNNN_snake_name.sql`, applied

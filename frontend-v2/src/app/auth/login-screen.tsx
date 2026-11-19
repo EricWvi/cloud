@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
+import { useLocation, useNavigate } from 'react-router'
 import { OraMark } from '@/components/ora-mark'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -9,14 +10,41 @@ import { getProviders, startLogin } from '@/lib/auth-api'
 
 const LABELS: Record<string, string> = { github: '使用 GitHub 登录', 'huawei-idaas': '使用华为账号登录' }
 
+/** Why a redirect login came back without a session; v2-server sends the category, never details. */
+const LOGIN_ERRORS: Record<string, string> = {
+  failed: '登录没有成功，请重试。',
+  unavailable: '暂时连不上登录服务，请稍后再试。',
+  disabled: '账号已停用，请联系管理员。',
+}
+
 /**
- * The login screen the session gate shows in place. v2-server offers one provider, `email`: the
- * address alone signs in whoever the startup preset lists or an owner invited, so the form says
- * plainly that this is a demo where knowing an address is enough. That form only appears when the
- * Gateway lists `email`; against a Gateway that offers only real providers the screen shows their
- * buttons and no address field, rather than an entry that could only fail as `unknown_provider`.
+ * Reads `login_error` once and removes it from the address, so neither a reload nor the next
+ * login's returnTo carries it.
+ */
+function useLoginError(): string {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const code = new URLSearchParams(location.search).get('login_error')
+  const [error] = useState(() => (code === null ? '' : LOGIN_ERRORS[code] ?? LOGIN_ERRORS.failed))
+  useEffect(() => {
+    if (code === null) return
+    const params = new URLSearchParams(location.search)
+    params.delete('login_error')
+    const search = params.toString()
+    navigate({ pathname: location.pathname, search: search ? `?${search}` : '', hash: location.hash }, { replace: true })
+  }, [code, location.pathname, location.search, location.hash, navigate])
+  return error
+}
+
+/**
+ * The login screen the session gate shows in place, with the methods V2_LOGIN offers in its order.
+ * `email` signs in by address alone, whoever the startup preset lists or an owner invited, so its
+ * form says plainly that knowing an address is enough; it only appears when the server lists
+ * `email`. Every other method is a button that leaves for that provider's sign-in page; a failed
+ * round trip comes back with `?login_error=<category>`, shown here once.
  */
 export function LoginScreen({ returnTo }: { returnTo: string }) {
+  const loginError = useLoginError()
   const providers = useQuery({ queryKey: ['auth', 'providers'], queryFn: getProviders, retry: false })
   const [email, setEmail] = useState('')
   const login = useMutation({
@@ -45,6 +73,7 @@ export function LoginScreen({ returnTo }: { returnTo: string }) {
           <OraMark className="size-10" />
           <h1 className="text-xl font-semibold tracking-tight">登录 Ora</h1>
         </div>
+        {loginError && <p role="alert" className="text-sm text-destructive">{loginError}</p>}
         {providers.isPending && <p className="text-sm text-muted-foreground">加载中…</p>}
         {providers.isError && <p className="text-sm text-destructive">无法获取登录方式，请稍后重试。</p>}
         {emailOffered && (
