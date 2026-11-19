@@ -77,6 +77,9 @@ type interactiveNode struct {
 	unsettled bool
 	// baseline is what a mustChange deliverable is compared with, nil without one.
 	baseline *fileBaseline
+	// baselineUnwritten means the baseline is not in the payload yet: the first summary write,
+	// at dispatch, carries it, and later writes leave the stored one in place.
+	baselineUnwritten bool
 	// sessionEnded means the session accepts no further turn: the starter stopped a turn (the
 	// pinned Node stops a turn only by ending its session) or the Agent was lost.
 	sessionEnded bool
@@ -157,11 +160,13 @@ func (n *interactiveNode) candidate(snap completionSnapshot) (string, string) {
 	return n.last.Answer, outputTurnWindow
 }
 
-// summaryKeys are the payload keys a park or refresh writes. Callers hold st.mu.
+// summaryKeys are the payload keys a park or refresh writes; the first one also records the
+// baseline. Callers hold st.mu.
 func (n *interactiveNode) summaryKeys() map[string]any {
 	keys := map[string]any{"interactive": n.summary()}
-	if n.baseline != nil {
+	if n.baseline != nil && n.baselineUnwritten {
 		keys["completion_baseline"] = n.baseline
+		n.baselineUnwritten = false
 	}
 	return keys
 }
@@ -274,6 +279,11 @@ func (h *Host) refreshSummary(st *runState, n *interactiveNode, status string) {
 	st.mu.Unlock()
 	if _, err := h.store.MoveWorkflowEngineNode(h.ctx, n.d.RunID, n.d.NodeRunID, status, status,
 		func(node []byte) ([]byte, error) { return workflow.MergePayload(node, keys) }); err != nil {
+		if _, ok := keys["completion_baseline"]; ok {
+			st.mu.Lock()
+			n.baselineUnwritten = true // the next write records it
+			st.mu.Unlock()
+		}
 		h.log.Error("record the session summary of an interactive workflow node", "run", n.d.RunID, "node_run", n.d.NodeRunID, "error", err)
 	}
 	h.hub.Publish(n.d.RunID)

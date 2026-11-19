@@ -234,8 +234,8 @@ func TestDeliverablesBlockCompletion(t *testing.T) {
 	}
 	runID, _ := f.startParked(t, interactiveDeliverables, "初稿一")
 	_, nodes := f.await(t, runID, parked("a"))
-	if baseline := payloadOf(t, node(nodes, "a"))["completion_baseline"].(map[string]any); baseline["source"] != baselineCheckout || len(baseline["files"].(map[string]any)) != 1 {
-		t.Fatalf("baseline = %v, want out/a.md recorded from the checkout", baseline)
+	if baseline := payloadOf(t, node(nodes, "a"))["completion_baseline"].(map[string]any); baseline["source"] != baselineCheckout || len(baseline["declarations"].(map[string]any)) != 1 || baseline["declarations"].(map[string]any)["out/*.md"] == "" {
+		t.Fatalf("baseline = %v, want out/*.md's digest recorded from the checkout", baseline)
 	}
 	var incomplete *server.WorkflowNodeIncomplete
 	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", confirm); !errors.As(err, &incomplete) ||

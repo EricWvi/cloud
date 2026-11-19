@@ -326,7 +326,7 @@ func (h *Host) runAgent(st *runState, d workflow.AgentDispatch, generation uint6
 	if interactive {
 		// Desktop parks an interactive node after its first turn instead of ending the session.
 		n := st.track(&interactiveNode{d: d, executor: executor, cfg: cfg, task: task, session: ref.SessionID, phase: phaseTurn,
-			lastOrigin: originWorkflow, baseline: baseline})
+			lastOrigin: originWorkflow, baseline: baseline, baselineUnwritten: baseline != nil})
 		h.refreshSummary(st, n, store.WorkflowStatusRunning) // the starter can stop the first turn too
 		result, err := h.awaitTurn(st.scope, ref, caller)
 		h.settleInteractiveTurn(st, a, n, 0, result, err)

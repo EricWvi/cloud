@@ -48,6 +48,24 @@ func (f CompletionFile) Matches(path string) bool {
 // Literal reports whether the declaration names exactly one path, without a wildcard.
 func (f CompletionFile) Literal() bool { return !strings.ContainsAny(f.Path, "*?") }
 
+// Prefix is the directory every match of a wildcard declaration lies under: its segments before
+// the first one with a wildcard, slash-joined, "" for the checkout root. A literal declaration's
+// prefix is its parent directory.
+func (f CompletionFile) Prefix() string {
+	segments := f.segments
+	if len(segments) == 0 {
+		segments = strings.Split(f.Path, "/")
+	}
+	end := len(segments) - 1
+	for i, segment := range segments[:end] {
+		if strings.ContainsAny(segment, "*?") {
+			end = i
+			break
+		}
+	}
+	return strings.Join(segments[:end], "/")
+}
+
 // NewCompletionFile parses one declaration; tests and callers outside graph parsing use it.
 func NewCompletionFile(path string, mustChange bool) (CompletionFile, error) {
 	segments, reason := parseCompletionGlob(path)
