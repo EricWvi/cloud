@@ -38,6 +38,7 @@ func TestWorkflowFormRetryRefusals(t *testing.T) {
 	}{
 		{"handling run", store.ErrTaskHandlingRun, "task_handling"},
 		{"decomposition run", store.ErrTaskDecompositionRun, "task_decomposition"},
+		{"starter unavailable", store.ErrStarterUnavailable, "starter_unavailable"},
 		{"not retryable", store.ErrWorkflowRunState, "workflow_form_closed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

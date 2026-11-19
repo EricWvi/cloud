@@ -84,6 +84,7 @@ type Driver struct {
 	projectLocks   map[string]*sync.Mutex
 	serial         atomic.Uint64
 	controlTimeout time.Duration
+	mcpRefreshWait time.Duration
 	startProject   func(*projectRuntime) error
 	// wrapClient lets real-Node tests interpose on IPC before the receiver starts.
 	wrapClient func(nodeClient) nodeClient
@@ -123,7 +124,7 @@ func New(opts Options) (*Driver, error) {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, execution.ErrUnavailable
 	}
-	return &Driver{opts: opts, boot: hex.EncodeToString(nonce[:]), projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, recorded: map[string]Checkout{}, controlTimeout: 2 * time.Minute}, nil
+	return &Driver{opts: opts, boot: hex.EncodeToString(nonce[:]), projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, recorded: map[string]Checkout{}, controlTimeout: 2 * time.Minute, mcpRefreshWait: 5 * time.Minute}, nil
 }
 
 // Reattach makes a workflow workspace's checkout, prepared by an earlier process, the one its
@@ -141,13 +142,33 @@ func (d *Driver) Reattach(workspaceID, cloneExecution, path string) {
 }
 
 // Run executes the admitted turn. Normal Append reuses its original live Agent conversation. A
-// turn that fails before the session's Agent was ever sent its start is marked NotStarted.
+// turn that fails before the session's Agent was ever sent its start is marked NotStarted. A
+// failed turn whose command never left for Node, or that Node refused without running it, is
+// marked NotDelivered: its prompt never reached the Agent, whatever became of the session.
 func (d *Driver) Run(ctx context.Context, scope execution.Scope, session execution.Session, turn execution.Turn, emit func(context.Context, execution.Event) error) (execution.Result, error) {
 	result, err := d.run(ctx, scope, session, turn, emit)
 	if err != nil && result.Status == execution.StatusFailed && !d.agentStarted(session.ID) {
 		result.NotStarted = true
 	}
+	if result.Status == execution.StatusFailed && !d.turnSent(session.ID, turn.Ref.TurnID) {
+		result.NotDelivered = true
+	}
 	return result, err
+}
+
+// turnSent reports whether the turn's command may have reached Node and Node has not refused it.
+// The execution service runs one turn of a session at a time, so the session's record is this
+// turn's until Run returns; a session whose preparation failed is not retained and sent nothing.
+func (d *Driver) turnSent(sid, turn string) bool {
+	d.mu.Lock()
+	a := d.sessions[sid]
+	d.mu.Unlock()
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.sent == turn
 }
 
 // agentStarted reports whether the session's Agent was sent its start. A session whose
@@ -250,6 +271,7 @@ func (d *Driver) run(ctx context.Context, scope execution.Scope, session executi
 		a.fail(code, err)
 		a.requestEnd()
 	}
+	var refreshDeadline time.Time
 	for {
 		select {
 		case outcome := <-call.done:
@@ -260,10 +282,28 @@ func (d *Driver) run(ctx context.Context, scope execution.Scope, session executi
 			}
 			return outcome.result, outcome.err
 		case <-call.updateRequired:
-			if err := a.reconcileTurn(ctx, call, turn, text); err != nil {
-				a.fail("mcp_update_failed", err)
-				a.requestEnd()
+			if refreshDeadline.IsZero() {
+				refreshDeadline = time.Now().Add(d.mcpRefreshWait)
 			}
+			err := a.reconcileTurn(ctx, refreshDeadline, call, turn, text)
+			// Service.Cancel owns the physical stop and its confirmation.
+			if err == nil || ctx.Err() != nil {
+				continue
+			}
+			if errors.Is(err, errMCPRefreshWait) {
+				// Node refused the command for its MCP generation and never queued it, so the
+				// prompt never reached the Agent; the session stays for the next turn.
+				result := failed(errMCPRefreshWait.Error())
+				result.NotDelivered = true
+				if a.publish(execution.Event{Ref: turn.Ref, Kind: execution.EventTurnEnded, Result: &result}) == nil {
+					a.complete(turnOutcome{call.id, result, nil})
+					continue
+				}
+				a.fail("agent_event_write_failed", errEventStore)
+			} else {
+				a.fail("mcp_update_failed", err)
+			}
+			a.requestEnd()
 		case <-ctx.Done():
 			result, err := d.cancelledRun(session.ID, ctx.Err())
 			select {

@@ -92,8 +92,9 @@ type interactiveNode struct {
 	// the turn completed before the stop reached it.
 	stopping bool
 	// undelivered means the last message the starter sent was accepted (SendNodeTurn returned)
-	// and then refused by the execution service, so it never ran. The summary says so until the
-	// next message is claimed; nothing else records the lost message.
+	// and then never reached the Agent: the execution service refused it, or accepted it and the
+	// Agent driver refused it (execution.Result.NotDelivered). The summary says so until the next
+	// message is claimed; nothing else records the lost message as such.
 	undelivered bool
 }
 
@@ -104,6 +105,14 @@ type followUp struct {
 	prompt execution.Prompt
 	// seq is the message's number among the starter's messages to the node.
 	seq int
+}
+
+// delivered reports whether a settled turn's prompt reached the Agent. Only NotDelivered says it
+// did not: the execution service sets it on NotStarted turns too, while a turn recorded before
+// the flag existed carries NotStarted alone and was counted as a turn, so it still is (its
+// summary never said the message was lost, and a rebuild must not change that silently).
+func delivered(r execution.Result) bool {
+	return !r.NotDelivered
 }
 
 // endedNormally is the end_turn rule: only a complete EndTurn answer completes without force.
@@ -234,6 +243,26 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 		h.fail(n.d, workflow.Failure{Kind: workflow.FailureInteractiveSession, Message: message})
 		return
 	}
+	if err == nil && seq > 0 && !delivered(result) {
+		// The execution service accepted the starter's message and the Agent driver then refused
+		// it before the Agent got it (the session had ended, broken or lost its Node and no new
+		// Agent could take it, or Node refused the command). It is not a turn: the node stays as
+		// its last delivered turn left it, and the summary says the message was lost, as for one
+		// refused at Append. A session the refusal ended (AgentLost) takes no further message.
+		n.undelivered = true
+		ended := result.AgentLost || n.stopping
+		n.stopping = false
+		if ended {
+			n.sessionEnded = true
+		}
+		st.mu.Unlock()
+		if ended {
+			h.endInteractive(st, n)
+		}
+		h.log.Warn("interactive workflow turn not delivered", "run", n.d.RunID, "node_run", n.d.NodeRunID, "failure", result.FailureCode, "session_ended", ended)
+		h.park(st, n)
+		return
+	}
 	n.lastStopCause = ""
 	if n.stopping {
 		n.lastStopCause = stopUserStopped
@@ -272,23 +301,35 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 }
 
 // refreshSummary rewrites payload.interactive of n's row, which has status, in place: the run
-// page reads the node as an interactive session from it, from its first turn on.
+// page reads the node as an interactive session from it, from its first turn on. A failed write
+// is only logged: the next write of the node records the summary again. It is not retried like a
+// park, which would hold a completion's request for as long as storage is out.
 func (h *Host) refreshSummary(st *runState, n *interactiveNode, status string) {
+	if err := h.writeSummary(h.ctx, st, n, status); err != nil {
+		h.log.Error("record the session summary of an interactive workflow node", "run", n.d.RunID, "node_run", n.d.NodeRunID, "error", err)
+	}
+	h.hub.Publish(n.d.RunID)
+}
+
+// writeSummary is refreshSummary's write, returning its error to callers that cannot go on
+// without it.
+func (h *Host) writeSummary(ctx context.Context, st *runState, n *interactiveNode, status string) error {
 	st.mu.Lock()
 	keys := n.summaryKeys()
 	st.mu.Unlock()
-	if _, err := h.store.MoveWorkflowEngineNode(h.ctx, n.d.RunID, n.d.NodeRunID, status, status,
+	if _, err := h.moveEngineNode(ctx, n.d.RunID, n.d.NodeRunID, status, status,
 		func(node []byte) ([]byte, error) { return workflow.MergePayload(node, keys) }); err != nil {
 		if _, ok := keys["completion_baseline"]; ok {
 			st.mu.Lock()
 			n.baselineUnwritten = true // the next write records it
 			st.mu.Unlock()
 		}
-		h.log.Error("record the session summary of an interactive workflow node", "run", n.d.RunID, "node_run", n.d.NodeRunID, "error", err)
+		return fmt.Errorf("record the session summary of node run %s: %w", n.d.NodeRunID, err)
 	}
-	h.hub.Publish(n.d.RunID)
+	return nil
 }
 
+// moveEngineNode is store.MoveWorkflowEngineNode, or moveNode where a test replaces it.
 func (h *Host) moveEngineNode(ctx context.Context, runID, nodeRunID, from, to string, merge func(node []byte) ([]byte, error)) (bool, error) {
 	if h.moveNode != nil {
 		return h.moveNode(ctx, runID, nodeRunID, from, to, merge)

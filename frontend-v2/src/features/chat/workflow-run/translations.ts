@@ -131,6 +131,8 @@ export const workflowRunTranslations = {
       "这次运行停在确认表单上，表单还没有提交，不能从失败处继续；请用「再跑一次」重新运行。",
     "workflowRun.resume.refused.run_settling":
       "上一次执行还在收尾（例如刚停止的节点还没完全结束），请稍后再试。",
+    "workflowRun.resume.refused.starter_unavailable":
+      "这次运行的发起人已无法在这个工作区执行（已被移出团队、账号已停用，或工作区已暂停），智能体都以发起人的身份执行，无法从失败处继续；请用「再跑一次」以你的身份重新运行。",
     "workflowRun.resume.refused.review_form_retry":
       "要重跑的节点包含已经提交的确认表单，不能从失败处继续；任务创建失败了，请在确认页点击「重试任务创建」重新创建任务。",
     "workflowRun.resume.refused.review_form_submitted":
@@ -457,6 +459,9 @@ export const workflowRunTranslations = {
     "workflowRun.errorKind.interactive_session": "交互会话未能建立",
     "workflowRun.errorHint.interactive_session":
       "交互节点不会自动重试；检查智能体进程与网络后续跑",
+    "workflowRun.errorKind.starter_unavailable": "运行的发起人已不可用",
+    "workflowRun.errorHint.starter_unavailable":
+      "发起人已无法在这个工作区执行（已被移出团队、账号已停用，或工作区已暂停），智能体以发起人的身份执行，不会自动重试；请用「再跑一次」重新运行",
     "workflowRun.errorKind.agent_refusal": "智能体拒绝了请求",
     "workflowRun.errorHint.agent_refusal":
       "智能体拒绝了请求；可直接续跑让它带着失败信息重试，或调整提示词后发布新版本",
@@ -540,7 +545,8 @@ export const workflowRunTranslations = {
     "workflowRun.v2.interactive.stop": "停止本轮",
     "workflowRun.v2.interactive.complete": "完成",
     "workflowRun.v2.interactive.undelivered": "上一条消息未送达，请重发。",
-    "workflowRun.v2.interactive.undeliveredEnded": "上一条消息未送达，会话已结束，不能重发。",
+    "workflowRun.v2.interactive.undeliveredEnded":
+      "上一条消息未送达，会话也已结束，不能重发。可以用上一轮的回答完成这一步；要重新开始这一步，请先停止运行，再「从失败处继续」。",
     "workflowRun.v2.interactive.restoreDraft": "重新填入",
     "workflowRun.v2.interactive.sessionEnded":
       "会话已结束（停止了本轮或 Agent 断开），不能继续对话。",
@@ -717,6 +723,8 @@ export const workflowRunTranslations = {
       "This run stopped at a review form that was never submitted, so it cannot resume; use “Run again” to run it anew.",
     "workflowRun.resume.refused.run_settling":
       "The previous execution is still winding down (a stopped node has not finished ending); try again shortly.",
+    "workflowRun.resume.refused.starter_unavailable":
+      "The member who started this run can no longer act in this workspace (removed, account disabled, or the workspace paused). Its agents run as that member, so it cannot resume; use “Run again” to run it as yourself.",
     "workflowRun.resume.refused.review_form_retry":
       "The nodes to rerun include a submitted review form, so this run cannot resume; its task creation failed, so use “Retry task creation” on the review page to create the tasks again.",
     "workflowRun.resume.refused.review_form_submitted":
@@ -1071,6 +1079,10 @@ export const workflowRunTranslations = {
       "Interactive session could not start",
     "workflowRun.errorHint.interactive_session":
       "Interactive nodes never retry automatically; check the agent process and network, then resume",
+    "workflowRun.errorKind.starter_unavailable":
+      "Run starter unavailable",
+    "workflowRun.errorHint.starter_unavailable":
+      "The member who started this run can no longer act in this workspace (removed, account disabled, or the workspace paused); agents run as that member, so this never retries automatically. Use “Run again” to run it anew",
     "workflowRun.errorKind.agent_refusal": "Agent refused the request",
     "workflowRun.errorHint.agent_refusal":
       "The agent refused; resume to let it retry with the failure context, or adjust the prompt and publish a new version",
@@ -1166,7 +1178,8 @@ export const workflowRunTranslations = {
     "workflowRun.v2.interactive.stop": "Stop this turn",
     "workflowRun.v2.interactive.complete": "Complete",
     "workflowRun.v2.interactive.undelivered": "Your last message was not delivered. Send it again.",
-    "workflowRun.v2.interactive.undeliveredEnded": "Your last message was not delivered, and the session has ended, so it cannot be sent again.",
+    "workflowRun.v2.interactive.undeliveredEnded":
+      "Your last message was not delivered, and the session has also ended, so it cannot be sent again. You can complete this step with the previous answer; to start this step again, stop the run, then resume from the failure.",
     "workflowRun.v2.interactive.restoreDraft": "Put it back",
     "workflowRun.v2.interactive.sessionEnded":
       "The session has ended (the turn was stopped or the agent disconnected), so the conversation cannot continue.",

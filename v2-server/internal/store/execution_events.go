@@ -214,6 +214,10 @@ type RecoveredSession struct {
 	Session execution.Session
 	// Caller is the session's first turn's caller: the workflow run that owns it.
 	Caller execution.Caller
+	// CloneExecution is the clone execution of the checkout the session's conversation ran in,
+	// bound when it first survived a restart; empty when its checkout had none. Only
+	// RecoverExecutions sets it.
+	CloneExecution string
 }
 
 // parkedInteractiveSession is the SQL condition, on the session aliased s, that the session is the
@@ -281,6 +285,17 @@ func (s *Store) recoverExecutions(ctx context.Context, deliver bool) ([]Recovere
 			if err := json.Unmarshal(caller, &kept[i].Caller); err != nil {
 				return fmt.Errorf("read recovered session caller: %w", err)
 			}
+			// The first restart a session survives binds it to its workspace's current clone. That is
+			// the clone its conversation ran in unless the record moved before this restart: Node lost
+			// its ledger while this server kept running, a later node found the clone unknown, and the
+			// run cloned again. The session is then bound to the new clone and continues there without
+			// its earlier edits, and nothing corrects the binding later. Binding when the session's
+			// Agent first starts on a checkout would close that gap; it is a known limit (README).
+			if err := tx.QueryRow(ctx, `UPDATE v2_execution_sessions s SET clone_execution = CASE WHEN s.clone_execution <> '' THEN s.clone_execution
+					ELSE COALESCE((SELECT w.clone_execution FROM v2_workspaces w WHERE w.id = s.data->>'WorkspaceID'), '') END
+				WHERE s.id = $1 RETURNING s.clone_execution`, kept[i].Session.ID).Scan(&kept[i].CloneExecution); err != nil {
+				return fmt.Errorf("bind recovered session checkout: %w", err)
+			}
 		}
 		for _, session := range sessions {
 			var tid string
@@ -329,22 +344,60 @@ func (s *Store) ParkedWorkflowSessions(ctx context.Context) ([]RecoveredSession,
 	if err != nil {
 		return nil, fmt.Errorf("list parked workflow sessions: %w", err)
 	}
+	parked, err := collectWorkflowSessions(rows)
+	if err != nil {
+		return nil, fmt.Errorf("list parked workflow sessions: %w", err)
+	}
+	return parked, nil
+}
+
+// RunningWorkflowSessions lists, for every running workflow run, the session of its most recently
+// created Agent node run, open or already ended. A run's sessions share one workspace, which only
+// the process that started them remembers. A run the restart sweep then absorbs (an interrupted
+// Iteration, a pending LoopExit cleanup) resumes with no parked node to remember it by, and its
+// later nodes must start on the run's checkout, not a fresh one. Runs owned by a task (its
+// handling runs and decomposition runs) are left out: their owners settle them on startup before
+// the sweep, a settled one is never resumed in place, and a decomposition kept at a submitted
+// review runs no further Agent (see package boot).
+func (s *Store) RunningWorkflowSessions(ctx context.Context) ([]RecoveredSession, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT ON (n.run_id) s.data, s.tenant_id::text, s.user_id::text,
+			(SELECT t.caller FROM v2_execution_turns t WHERE t.session_id = s.id ORDER BY t.position LIMIT 1)
+		FROM v2_workflow_node_runs n
+		JOIN v2_workflow_runs r ON r.id = n.run_id
+		JOIN v2_execution_sessions s ON s.id = n.session_id AND s.tenant_id = n.tenant_id
+		WHERE r.status = 'running' AND r.deleted_at IS NULL
+			AND NOT EXISTS (SELECT 1 FROM v2_task_workflow_runs tw WHERE tw.run_id = r.id)
+			AND NOT EXISTS (SELECT 1 FROM v2_task_decompositions d WHERE d.workflow_run_id = r.id)
+		ORDER BY n.run_id, n.created_at DESC, n.id DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list running workflow sessions: %w", err)
+	}
+	running, err := collectWorkflowSessions(rows)
+	if err != nil {
+		return nil, fmt.Errorf("list running workflow sessions: %w", err)
+	}
+	return running, nil
+}
+
+// collectWorkflowSessions reads rows of session data, tenant, user and first caller, leaving out
+// sessions that are not workflow Agent sessions a recovery can serve.
+func collectWorkflowSessions(rows pgx.Rows) ([]RecoveredSession, error) {
 	defer rows.Close()
-	var parked []RecoveredSession
+	var sessions []RecoveredSession
 	for rows.Next() {
 		var raw, caller []byte
 		var r RecoveredSession
 		if err := rows.Scan(&raw, &r.Scope.TenantID, &r.Scope.UserID, &caller); err != nil {
-			return nil, fmt.Errorf("list parked workflow sessions: %w", err)
+			return nil, err
 		}
 		if err := json.Unmarshal(raw, &r.Session); err != nil || caller == nil || json.Unmarshal(caller, &r.Caller) != nil {
 			continue // not a workflow Agent session this recovery can serve
 		}
 		if r.Session.Target != nil {
-			parked = append(parked, r)
+			sessions = append(sessions, r)
 		}
 	}
-	return parked, rows.Err()
+	return sessions, rows.Err()
 }
 
 // LatestHistory returns the settled records of a session's latest history snapshot, the

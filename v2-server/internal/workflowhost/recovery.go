@@ -42,8 +42,9 @@ func parkedInteractive(g *workflow.Graph, row store.WorkflowNodeRun) bool {
 }
 
 // recoverParked rebuilds the process-local state of the run's parked interactive nodes, so the
-// starter can send a turn, stop it or complete the node again. A node whose executor no longer
-// resolves, or whose session is gone, cannot continue and fails like a lost session.
+// starter can send a turn, stop it or complete the node again. A node whose executor the catalog
+// no longer offers, or whose session is gone, cannot continue and fails like a lost session; a
+// catalog or session that cannot be read aborts startup instead (see recoveredExecutor).
 func (h *Host) recoverParked(ctx context.Context, st *runState, run store.WorkflowEngineRun) error {
 	g, err := workflow.ParseGraph(run.Graph)
 	if err != nil {
@@ -72,8 +73,13 @@ func (h *Host) recoverParked(ctx context.Context, st *runState, run store.Workfl
 		st.track(n)
 		// The row's summary was written before the restart and may lag the session: a node being
 		// completed then had its session ended without the summary saying so, and the page would
-		// offer a message box its session refuses. Write it again from the rebuilt node.
-		h.refreshSummary(st, n, store.WorkflowStatusPending)
+		// offer a message box its session refuses. Write it again from the rebuilt node; a write
+		// that fails aborts startup like a session that cannot be read, rather than serving a
+		// summary the node contradicts.
+		if err := h.writeSummary(ctx, st, n, store.WorkflowStatusPending); err != nil {
+			return err
+		}
+		h.hub.Publish(run.Run.ID)
 		if n.sessionEnded && !n.sessionGone {
 			// The node's session ended before the restart (a stop, a lost Agent) but its End was
 			// never confirmed, so nothing retries it and it would keep its slot until the node
@@ -89,7 +95,10 @@ func (h *Host) recoverParked(ctx context.Context, st *runState, run store.Workfl
 // the node and returns nil when it cannot continue.
 func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDispatch, row store.WorkflowNodeRun) (*interactiveNode, error) {
 	cfg := d.Node.Agent()
-	executor, failure := h.resolveExecutor(st.scope, cfg)
+	executor, failure, err := h.recoveredExecutor(ctx, st.scope, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("resolve the executor of node run %s: %w", row.ID, err)
+	}
 	if failure != nil {
 		return nil, h.failParked(st, d, *row.SessionID, failure.Interactive())
 	}
@@ -142,7 +151,7 @@ func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDis
 			if seq, err := strconv.Atoi(strings.TrimPrefix(turn.Caller.AttemptID, prefix)); err == nil && strings.HasPrefix(turn.Caller.AttemptID, prefix) && seq > n.seq {
 				n.seq = seq
 			}
-			if turn.Result == nil {
+			if turn.Result == nil || undeliveredFollowUp(turn, prefix) {
 				continue
 			}
 			result := *turn.Result
@@ -163,6 +172,13 @@ func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDis
 	}
 	n.unsettled = unsettled && n.last != nil
 	return n, nil
+}
+
+// undeliveredFollowUp reports whether turn is a starter's message the Agent never got: the
+// execution service recorded it, but it was no turn of the conversation, and the summary's
+// last_turn_error says it was lost.
+func undeliveredFollowUp(turn execution.Turn, prefix string) bool {
+	return strings.HasPrefix(turn.Caller.AttemptID, prefix) && !delivered(*turn.Result)
 }
 
 // failParked fails a parked node that cannot continue after the restart and ends its session.

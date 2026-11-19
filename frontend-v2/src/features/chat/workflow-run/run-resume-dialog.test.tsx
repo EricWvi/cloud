@@ -90,6 +90,7 @@ describe('RunResumeDialog refusal texts', () => {
     ['task_decomposition', '这次运行是任务的拆分运行，拆分已按它的结果结算，不能从失败处继续；请回到任务页重新拆分。'],
     ['review_form_retry', '要重跑的节点包含已经提交的确认表单，不能从失败处继续；任务创建失败了，请在确认页点击「重试任务创建」重新创建任务。'],
     ['review_form_submitted', '要重跑的节点包含已经提交的确认表单，表单不能重新填写，不能从失败处继续；请用「再跑一次」重新运行。'],
+    ['starter_unavailable', '这次运行的发起人已无法在这个工作区执行（已被移出团队、账号已停用，或工作区已暂停），智能体都以发起人的身份执行，无法从失败处继续；请用「再跑一次」以你的身份重新运行。'],
   ])('explains %s', async (reason, text) => {
     runs.preview = { resumable: false, reason, runningNodeIds: [], rollback: 'keep', failedNodes: [], restartContainerNodeIds: [], clearNodeIds: [] }
     const i18n = createWorkflowI18n(['zh-CN'], { 'zh-CN': workflowRunTranslations['zh-CN'] })
@@ -136,6 +137,8 @@ describe('resume eligibility', () => {
   it('reads a refusal only with a known reason', () => {
     expect(resumeRefusalOf({ reason: 'run_settling', runningNodeIds: [] })).toEqual({ reason: 'run_settling', runningNodeIds: [] })
     expect(resumeRefusalOf({ reason: 'node_running', runningNodeIds: ['d', 3] })).toEqual({ reason: 'node_running', runningNodeIds: ['d'] })
+    // A starter who left the workspace refuses the resume after the dialog was opened, too.
+    expect(resumeRefusalOf({ reason: 'starter_unavailable', runningNodeIds: [] })).toEqual({ reason: 'starter_unavailable', runningNodeIds: [] })
     expect(resumeRefusalOf({ reason: 'something_new' })).toBeUndefined()
   })
 

@@ -19,12 +19,12 @@ const attempt: WorkflowNodeAttemptFailure = {
 }
 
 // The instance starts in zh-CN, as the page does; the en-US case switches it.
-const view = (locale: WorkflowLocale) => {
+const view = (locale: WorkflowLocale, attempts: WorkflowNodeAttemptFailure[] = [attempt]) => {
   const i18n = createWorkflowI18n(['zh-CN', 'en-US'], workflowRunTranslations)
   void i18n.changeLanguage(locale)
   return render(
     <I18nextProvider i18n={i18n}>
-      <RunActFailedAttempts attempts={[attempt]} runId="run-1" />
+      <RunActFailedAttempts attempts={attempts} runId="run-1" />
     </I18nextProvider>,
   )
 }
@@ -36,5 +36,15 @@ describe('RunActFailedAttempts', () => {
   ] as const)('labels the replaced attempt’s session in %s', (locale, label) => {
     view(locale)
     expect(screen.getByText(label)).toBeTruthy()
+  })
+
+  it.each([
+    ['zh-CN', '运行的发起人已不可用'],
+    ['en-US', 'Run starter unavailable'],
+  ] as const)('names an attempt refused because the starter left in %s, not as a session failure', (locale, label) => {
+    // The attempt a resume replaced after the starter came back to the workspace.
+    view(locale, [{ ...attempt, kind: 'starter_unavailable', sessionId: undefined, replacedBy: 'manual_resume' }])
+    expect(screen.getByText(label, { exact: false })).toBeTruthy()
+    expect(screen.queryByText('智能体会话失败', { exact: false })).toBeNull()
   })
 })

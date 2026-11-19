@@ -50,6 +50,11 @@ const (
 	// ResumeRefusedSettling: v2 only. The execution bridge is still starting or ending an Agent
 	// turn of this run (a cancellation's turn has not finished ending), so the resume must wait.
 	ResumeRefusedSettling = "run_settling"
+	// ResumeRefusedStarterUnavailable: v2 only. The run's recorded starter, whose identity every
+	// Agent of the run executes under, is no longer an active member of the workspace (removed,
+	// or the account disabled). Resuming would start each Agent under that identity and fail it,
+	// so the resume is refused until the starter is back; a new run starts under its own starter.
+	ResumeRefusedStarterUnavailable = "starter_unavailable"
 )
 
 // ResumeState is what resume planning reads about a run: its stored status, every live attempt

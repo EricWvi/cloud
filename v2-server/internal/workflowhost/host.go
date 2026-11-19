@@ -266,11 +266,38 @@ func (h *Host) SweepInterrupted(ctx context.Context) ([]string, error) {
 }
 
 // ResumeInterrupted continues boot-eligible workflows after snapshots of old turns are retained.
+//
+// It works in two phases. The first rebuilds every recoverable run (its starter, its registration
+// and its parked interactive nodes) and is where startup can still abort: an executor, session or
+// summary write that fails there returns an error, and the process exits to try again on its next
+// start. Nothing has been resumed yet then, so no run loses work an abort would interrupt: had an
+// earlier run already dispatched its next round, the exit would cancel it, and the next sweep
+// would fail that round too. Only once every run is rebuilt does the second phase resume them.
 func (h *Host) ResumeInterrupted(ctx context.Context, ids []string) error {
+	type prepared struct {
+		id string
+		st *runState
+	}
+	var runs []prepared
+	// abort drops what the first phase registered, so no run is left counted as starting
+	// without ever being resumed.
+	abort := func(id string, err error) error {
+		for _, r := range runs {
+			r.st.started()
+			h.mu.Lock()
+			if h.runs[r.id] == r.st {
+				delete(h.runs, r.id)
+			}
+			h.mu.Unlock()
+		}
+		h.log.Error("startup aborted before resuming interrupted workflow runs; the next start recovers them again",
+			"run", id, "error", err)
+		return err
+	}
 	for _, id := range ids {
 		current, err := h.store.WorkflowEngineContext(ctx, id)
 		if err != nil {
-			return fmt.Errorf("read interrupted run %s: %w", id, err)
+			return abort(id, fmt.Errorf("read interrupted run %s: %w", id, err))
 		}
 		// The sweep fails every run it cannot resume (no durable starter), so only absorbed
 		// Iteration or pending LoopExit runs are still running here.
@@ -279,7 +306,7 @@ func (h *Host) ResumeInterrupted(ctx context.Context, ids []string) error {
 		}
 		actor, err := h.store.WorkflowStarter(ctx, id)
 		if err != nil {
-			return fmt.Errorf("read starter of recoverable workflow %s: %w", id, err)
+			return abort(id, fmt.Errorf("read starter of recoverable workflow %s: %w", id, err))
 		}
 		if actor == "" {
 			// Defensive: the sweep already excludes unstartered runs; reaching here means the
@@ -293,20 +320,22 @@ func (h *Host) ResumeInterrupted(ctx context.Context, ids []string) error {
 			// Sessions kept for its parked nodes have nothing left to talk to; other runs' new
 			// sessions are left alone.
 			if err := h.endUnparkedSessions(ctx, id); err != nil {
-				return err
+				return abort(id, err)
 			}
 			continue
 		}
 		st := h.register(id, execution.Scope{TenantID: current.Run.TenantID, UserID: actor})
+		runs = append(runs, prepared{id, st})
 		if err := h.recoverParked(ctx, st, current); err != nil {
-			st.started()
-			return fmt.Errorf("recover the interactive nodes of %s: %w", id, err)
+			return abort(id, fmt.Errorf("recover the interactive nodes of %s: %w", id, err))
 		}
-		err = h.engine.Resume(ctx, id)
-		st.started()
-		h.forgetFinished(id, st)
+	}
+	for _, r := range runs {
+		err := h.engine.Resume(ctx, r.id)
+		r.st.started()
+		h.forgetFinished(r.id, r.st)
 		if err != nil {
-			h.log.Error("recover interrupted workflow", "run", id, "error", err)
+			h.log.Error("recover interrupted workflow", "run", r.id, "error", err)
 		}
 	}
 	reviews, err := h.store.RecoverableFormRuns(ctx)

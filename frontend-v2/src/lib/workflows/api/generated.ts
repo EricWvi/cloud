@@ -429,6 +429,7 @@ export const WorkflowRunResumePreviewReason = {
   task_handling: 'task_handling',
   task_decomposition: 'task_decomposition',
   run_settling: 'run_settling',
+  starter_unavailable: 'starter_unavailable',
 } as const;
 
 /**
@@ -906,7 +907,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     }
 
 /**
- * v2 only, candidate for Cloud. Retries the failed task creation of a failed run's submitted review form. 409 workflow_form_closed when the run is not failed or the form was not submitted; 409 task_handling for a task's handling run (owner decision D30) and 409 task_decomposition for a task decomposition's run (D32), which the task starts again instead.
+ * v2 only, candidate for Cloud. Retries the failed task creation of a failed run's submitted review form. 409 workflow_form_closed when the run is not failed or the form was not submitted; 409 task_handling for a task's handling run (owner decision D30) and 409 task_decomposition for a task decomposition's run (D32), which the task starts again instead; 409 starter_unavailable when the run's recorded starter can no longer act in the workspace (removed or account disabled), as for resume, leaving the run unchanged.
  */
 export const retryWorkflowFormTasks = (
     tid: string,
@@ -3142,7 +3143,7 @@ export function usePreviewWorkflowRunResume<TData = Awaited<ReturnType<typeof pr
 
 
 /**
- * v2 only, candidate for Cloud. Resumes a failed or cancelled run in place from its failed nodes, keeping the workspace files, desktop's resume_from_failure. A refusal is 409 workflow_run_not_resumable with params.reason (run_not_ended, node_running, node_stuck, no_failed_node, review_form, review_form_retry, review_form_submitted, task_handling, task_decomposition, run_settling) and params.runningNodeIds. task_handling refuses a task's handling run (owner decision D25) and task_decomposition a task decomposition's run (D32); the task starts handling or decomposing again instead.
+ * v2 only, candidate for Cloud. Resumes a failed or cancelled run in place from its failed nodes, keeping the workspace files, desktop's resume_from_failure. A refusal is 409 workflow_run_not_resumable with params.reason (run_not_ended, node_running, node_stuck, no_failed_node, review_form, review_form_retry, review_form_submitted, task_handling, task_decomposition, run_settling, starter_unavailable) and params.runningNodeIds. task_handling refuses a task's handling run (owner decision D25) and task_decomposition a task decomposition's run (D32); the task starts handling or decomposing again instead. starter_unavailable refuses a run whose recorded starter, whose identity its Agents execute under, is no longer an active member of the workspace (removed, or the account disabled); a new run starts under its own starter.
  */
 export const resumeWorkflowRun = (
     tid: string,

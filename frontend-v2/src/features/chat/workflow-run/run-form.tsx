@@ -103,6 +103,17 @@ export function RunForm({ tenantId, runId, runStatus, nodeError, taskLink }: { t
   return <FormEditor key={query.data.id} form={query.data} tenantId={tenantId} runStatus={runStatus} ownedText={taskOwnedRetryText(taskLink)} />
 }
 
+/** What a 409 refusal of the task creation retry says when its starter can no longer act. */
+const starterUnavailableRetryText = '这次运行的发起人已无法在这个工作区执行（已被移出团队、账号已停用，或工作区已暂停），任务创建以发起人的身份执行，不能在这里重试；请用「再跑一次」以你的身份重新运行。'
+
+/** Why the task creation retry failed: the starter or task link a 409 names, else a generic text. */
+function retryRefusalText(error: unknown): string {
+  if (isAxiosError(error) && error.response?.status === 409 && (error.response.data as { code?: unknown } | undefined)?.code === 'starter_unavailable') {
+    return starterUnavailableRetryText
+  }
+  return taskOwnedRetryText(refusedTaskLink(error)) ?? '任务当前不可重试，请查看运行状态。'
+}
+
 /** The task link a 409 refusal of the task creation retry names (D30, D32), if any. */
 function refusedTaskLink(error: unknown): RunTaskLink | undefined {
   if (!isAxiosError(error) || error.response?.status !== 409) return undefined
@@ -376,7 +387,7 @@ function FormEditor({ form, tenantId, runStatus, ownedText }: { form: WorkflowFo
           <p className="min-w-0 flex-1 text-sm">{ownedText !== undefined ? `确认已保存，但任务没有建成。${ownedText}` : '确认已保存，但任务没有建成。重试只会补建任务，不需要重新判定。'}</p>
           {ownedText === undefined && <Button variant="outline" size="sm" disabled={retry.isPending} onClick={() => retry.mutate()}><RotateCcw />{retry.isPending ? '正在重试…' : '重试任务创建'}</Button>}
         </div>}
-        {retry.isError && <p role="alert" className="mt-2 text-sm text-destructive">{taskOwnedRetryText(refusedTaskLink(retry.error)) ?? '任务当前不可重试，请查看运行状态。'}</p>}
+        {retry.isError && <p role="alert" className="mt-2 text-sm text-destructive">{retryRefusalText(retry.error)}</p>}
 
         {notice && form.status === 'open' && <p role="status" className="mt-3 text-sm text-muted-foreground">{notice}</p>}
       </section>

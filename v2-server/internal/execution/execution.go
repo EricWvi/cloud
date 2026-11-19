@@ -146,8 +146,15 @@ type Result struct {
 	// was sent to Node (the Agent's configuration or model permit, or a session ended or a Node
 	// lost meanwhile). It comes with AgentLost on a session's
 	// first turn, and tells a caller that there was never a session to keep, as opposed to one
-	// that was lost while it worked.
+	// that was lost while it worked. A turn that did not start was not delivered either.
 	NotStarted bool `json:",omitempty"`
+	// NotDelivered means the turn failed and its prompt never reached the Agent: it was refused
+	// before its command was sent to Node (the session had ended, broken or lost its Node, the
+	// project could not be resolved, or the turn did not start), or Node refused the command
+	// without running it (its session had already ended, or the MCP generation it waited for
+	// never came). AgentLost still says whether the session can take another turn. A turn whose
+	// sending failed midway may have arrived, so it is not marked.
+	NotDelivered bool `json:",omitempty"`
 }
 
 // Failure codes of a turn whose session Node refused to admit to, or could not hand over, a
@@ -221,7 +228,7 @@ type Session struct {
 
 // Recovery is what a driver needs to bring a held session back after its Agent was lost with the
 // server process. The new Agent is a new provider session: it learns the conversation from
-// Handoff, which lists tool calls by name and outcome only, and has no prompt cache.
+// Handoff, which lists tool calls by title and outcome only, and has no prompt cache.
 type Recovery struct {
 	// Handoff is sent ahead of the turn's prompt as its own block. It is context for the Agent
 	// only: the turn records the prompt alone, and the page never shows the block.

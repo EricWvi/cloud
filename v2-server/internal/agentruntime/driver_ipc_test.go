@@ -155,7 +155,7 @@ func newIPCHarnessWith(t *testing.T, bindings map[string]nodeservices.Binding, h
 	root := t.TempDir()
 	config := Project{MirrorPath: filepath.Join(root, "mirror.git"), Commit: "0123456789012345678901234567890123456789", SnapshotRef: "refs/snapshots/demo"}
 	h := &ipcHarness{created: make(chan *fakeNodeIPC, 16), config: config, scope: execution.Scope{TenantID: "tenant", UserID: "user"}}
-	d := &Driver{opts: Options{Root: filepath.Join(root, "projects"), Bindings: bindings, ResolveProject: func(context.Context, execution.Scope, string) (Project, error) { return config, nil }}, boot: "fake", projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, recorded: map[string]Checkout{}, controlTimeout: time.Second}
+	d := &Driver{opts: Options{Root: filepath.Join(root, "projects"), Bindings: bindings, ResolveProject: func(context.Context, execution.Scope, string) (Project, error) { return config, nil }}, boot: "fake", projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, recorded: map[string]Checkout{}, controlTimeout: time.Second, mcpRefreshWait: 5 * time.Minute}
 	h.driver = d
 	d.startProject = func(p *projectRuntime) error {
 		if err := os.MkdirAll(filepath.Join(p.root, "w", "n"), 0700); err != nil {
@@ -346,12 +346,13 @@ func TestDriverIPCTurnFailurePublishesOnceAndKeepsSession(t *testing.T) {
 		frame := node.Message{Type: "session_turn_failed", Version: 1, OperationID: command.OperationID, ExecutionID: command.ExecutionID, Sequence: &seq, Payload: raw}
 		f.in <- frame
 		event := receiveIPC(t, events)
-		if event.Kind != execution.EventTurnEnded || event.Ref.TurnID != turn || event.Result == nil || event.Result.FailureCode != payload["code"] {
+		// Node failed the queued turn before the Agent was given it.
+		if event.Kind != execution.EventTurnEnded || event.Ref.TurnID != turn || event.Result == nil || event.Result.FailureCode != payload["code"] || !event.Result.NotDelivered {
 			t.Fatalf("turn failure publication = %+v", event)
 		}
 		receiveIPC(t, f.acked)
 		got := receiveIPC(t, done)
-		if got.err != nil || got.result.Status != execution.StatusFailed || got.result.AgentLost || got.result.FailureCode != payload["code"] {
+		if got.err != nil || got.result.Status != execution.StatusFailed || got.result.AgentLost || got.result.FailureCode != payload["code"] || !got.result.NotDelivered {
 			t.Fatalf("turn failure = %+v", got)
 		}
 		f.in <- frame

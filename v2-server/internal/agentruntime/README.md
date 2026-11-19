@@ -20,7 +20,7 @@ err = driver.Close(ctx)
 
 每项目一个 Node、一组 Git/插件/模型服务和一个 IPC Receive dispatcher。不同 `WorkspaceID` 对应不同 clone 执行和 checkout；同 workflow run 由上层给相同 WorkspaceID。Node 可并发接收 clone，实际 Git 步骤串行；不同 checkout 的 Agent session 可以同时运行。同一 workflow run 的多个 session 可以同时留在它的 checkout 上（例如等待输入的交互节点和之后开始的节点），各自 End；其他调用方的 WorkspaceID 各不相同，一个 checkout 只有一个 session。这依赖 Node 的 `shared_checkout_sessions` 能力，握手时必须具备：同一 `checkout_execution_id` 最多 8 个未结束的 Agent 会话，超出的那个会话以 `agent_failed` 加 `checkout_session_limit`（另有 `checkout_busy`、`checkout_too_deep`）结束，这一轮的失败码就是这个代码，控制会话和其他会话不受影响。workflow 的 Skill 投影是 checkout 上各个存活 session 所选 Skill 的并集。同名的是同一个包版本或同一篇文档时共用；不同时，后开始的 session 以 `workflow_skill_name_conflict` 启动失败，不替换兄弟 Agent 可能正在读的文件。带 `Recovery` 的会话（重启或 Node 丢失后的下一轮）起新 Agent 前也重新投影：撞上活着的兄弟时同样以 `workflow_skill_name_conflict` 失败，并报 `NotStarted`，执行服务只让这一轮失败、会话仍待恢复，兄弟结束后再发一次就能起来。投影记录（`workflow-skills-<digest>.json`）跨 incarnation 和进程保留，而存活兄弟只算当前 incarnation 的：重启或 Node 丢失后的第一次投影会去掉还没重新投影的兄弟的 Skill。这些兄弟的 Agent 已经随旧 incarnation 丢了，没有谁在读这些文件，它们各自下一轮开始前会重新投影（并和活着的兄弟比对）。同一会话 ID 换成新执行后，旧执行停下时只删自己登记的 `owners` / `projected` 条目（`holders`），不会把新执行的 Skill 从兄弟并集里带走。
 
-Agent 自己结束的一轮（`end_turn` 之外的停止原因）不返回错误，物理会话仍可接 `submit_user_turn`；会话在轮次中结束（`agent_session_ended`）时返回 `ErrSessionEnded`，结果带 `AgentLost`，历史读取失败时同样带 `AgentLost`，上层据此区分“这一轮没完成”和“会话已不在”。
+Agent 自己结束的一轮（`end_turn` 之外的停止原因）不返回错误，物理会话仍可接 `submit_user_turn`；会话在轮次中结束（`agent_session_ended`）时返回 `ErrSessionEnded`，结果带 `AgentLost`，历史读取失败时同样带 `AgentLost`，上层据此区分“这一轮没完成”和“会话已不在”。失败的一轮如果命令还没写给 Node 就被拒绝（`begin` 发现会话已结束、已损坏或 Node 已断开，项目解析失败等），或者 Node 用 `session_command_rejected` 拒收了这一轮的命令、用 `mcp_refresh_wait_timeout` 让排队的命令失败，结果带 `NotDelivered`：提示没到 Agent。命令一开始写就算已发送（写到一半失败也可能已经到了），不标。
 
 启动服务后仅对内置 Demo 快照提前准备一份未使用的 checkout。直接对话核对快照后独占领取，再加载用户技能；成功回复后后台补一份。预备尚未完成时要等剩余时间；并发领取时没有空余副本的对话仍单独创建。Git 操作总数不减少。重启不重用旧副本，沿用现有目录清理策略。
 
@@ -65,6 +65,8 @@ Agent 把被切断的模型请求当成网络失败原样重发（OpenCode 0.6.1
 固定 Node 的版本见 `scripts/prepare-node.sh` 的 `source_commit`。驱动为生命周期会话构造带 `mcp_lifecycle:true` 的首轮，追加轮携带准入事务返回的 `mcp_generation`；可靠的 `SessionTurnFailed` 在结果写入后确认。Controller 在首轮前读取已提交的完整目标并安装精确版本。配置事务提交后唤醒选中该插件的会话；驱动核对 Node 的 desired generation、发送完整更新并等待确认。若 Node 返回 `mcp_update_required`，驱动先核对已提交目标，再重发相同的 command 和 turn。
 
 包安装帧只携带归档身份与摘要。设置通过 Start 或 Update 的私有帧送入 Node，驱动在首轮派发后只保留选择身份。只读状态与手动探测通过当前 Node 的 incarnation、execution 和 request ID 关联响应。MCP 失败保留稳定 code 以及可选 `plugin_id`、`setting_id`、`transport`，工作流将其映射为可手动恢复、禁止自动重试的配置失败。`TestRealWorkflowMCPLifecycle` 使用本地 stdio MCP 及真实 Node/OpenCode，检查繁忙轮次保留原设置、后续轮次使用新设置和宿主探测结果。
+
+如果从准入到冷启动之间有设置提交，首轮使用所选成员的最新配置，启动后立即同步已提交的 generation；已移除或缺设置的成员在启动前返回对应的配置错误。追加轮收到 `mcp_update_required` 后从第一次拒绝起最多等待 300 秒。超过期限时本轮以 `mcp_refresh_wait_timeout` 结束，会话可继续接收后续轮次。用户主动停止则沿用工作流 Agent 的停止确认流程。
 
 重新加载界面后，状态查询仍使用原会话及其显式选择。若 Node 进程已经丢失，原 provider session 无法用当前协议重新绑定，后续轮次以 `agent_transport_closed` 结束。普通会话沿用已有的历史交接逻辑。
 
