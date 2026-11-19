@@ -44,86 +44,142 @@ type notice struct {
 	comment string
 	// source names the event within the task, so a retried write cannot notify twice.
 	source string
+	// recipients are the people the event concerns, before the access check.
+	recipients []string
 }
 
-// notify records the notice for each recipient who may see the task now, by the same decision as
-// every tenant route: a recipient who is not a current active member gets nothing. Identifiers are
-// compared in canonical lower case, since a request may spell a UUID in upper case.
-//
-// The recipient's membership row is locked FOR KEY SHARE before the access check and held until
-// the change commits. A concurrent removal then either committed first, and the recipient is
-// skipped, or waits for this transaction; the notification's foreign key can never fail and roll
-// back the comment or status change that caused it.
+// notify records one notice; see notifyAll.
 func notify(ctx context.Context, q dbTX, n notice, recipients ...string) error {
-	actor := strings.ToLower(n.actor)
-	n.actor = actor
-	seen := map[string]bool{}
-	for _, user := range recipients {
-		user = strings.ToLower(user)
-		if user == "" || user == actor || seen[user] {
-			continue
+	n.recipients = recipients
+	return notifyAll(ctx, q, n)
+}
+
+// notifyAll records every notice of one transaction for each recipient who may see the task now,
+// by the same decision as every tenant route: a recipient who is not a current active member gets
+// nothing. Identifiers are compared in canonical lower case, since a request may spell a UUID in
+// upper case. A transaction that notifies passes all its notices in one call.
+//
+// The recipients' membership rows are locked FOR KEY SHARE before the access check and held until
+// the change commits, so a concurrent removal either committed first, and the recipient is
+// skipped, or waits; the notification's foreign key can never fail and roll back the comment or
+// status change that caused it. They are locked by one statement in user_id order, the order
+// RemoveMember locks owner and member rows in, so the two cannot wait on each other.
+func notifyAll(ctx context.Context, q dbTX, notices ...notice) error {
+	if len(notices) == 0 {
+		return nil
+	}
+	tenant := notices[0].tenant
+	wanted := map[string]bool{}
+	for i := range notices {
+		n := &notices[i]
+		if n.tenant != tenant {
+			return fmt.Errorf("notifications for two tenants in one transaction")
 		}
-		seen[user] = true
-		if !accessUUID.MatchString(user) {
-			continue
+		n.actor = strings.ToLower(n.actor)
+		keep := []string{}
+		seen := map[string]bool{}
+		for _, user := range n.recipients {
+			user = strings.ToLower(user)
+			if user == "" || user == n.actor || seen[user] || !accessUUID.MatchString(user) {
+				continue
+			}
+			seen[user] = true
+			keep = append(keep, user)
+			wanted[user] = true
 		}
-		var held bool
-		if e := q.QueryRow(ctx, `
-			SELECT EXISTS (SELECT 1 FROM memberships WHERE tenant_id = $1 AND user_id = $2 FOR KEY SHARE)`,
-			n.tenant, user).Scan(&held); e != nil {
-			return fmt.Errorf("lock recipient membership: %w", e)
+		n.recipients = keep
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	users := make([]string, 0, len(wanted))
+	for user := range wanted {
+		users = append(users, user)
+	}
+	rows, e := q.Query(ctx, `
+		SELECT user_id::text FROM memberships WHERE tenant_id = $1 AND user_id = ANY($2::uuid[])
+		ORDER BY user_id FOR KEY SHARE`, tenant, users)
+	if e != nil {
+		return fmt.Errorf("lock recipient memberships: %w", e)
+	}
+	held := map[string]bool{}
+	for rows.Next() {
+		var user string
+		if e := rows.Scan(&user); e != nil {
+			rows.Close()
+			return fmt.Errorf("lock recipient memberships: %w", e)
 		}
-		if !held {
-			continue
-		}
-		if _, e := tenantAccess(ctx, q, n.tenant, user); errors.Is(e, ErrNotFound) {
+		held[user] = true
+	}
+	rows.Close()
+	if e := rows.Err(); e != nil {
+		return fmt.Errorf("lock recipient memberships: %w", e)
+	}
+	allowed := map[string]bool{}
+	for user := range held {
+		if _, e := tenantAccess(ctx, q, tenant, user); errors.Is(e, ErrNotFound) {
 			continue
 		} else if e != nil {
 			return e
 		}
-		if _, e := q.Exec(ctx, `
-			INSERT INTO v2_notifications (tenant_id, user_id, kind, task_id, actor_id, comment_id, source)
-			VALUES ($1, $2, $3, $4, NULLIF($5, '')::uuid, NULLIF($6, '')::uuid, $7)
-			ON CONFLICT (user_id, kind, task_id, source) DO NOTHING`,
-			n.tenant, user, n.kind, n.task, n.actor, n.comment, n.source); e != nil {
-			return fmt.Errorf("record notification: %w", e)
+		allowed[user] = true
+	}
+	for _, n := range notices {
+		for _, user := range n.recipients {
+			if !allowed[user] {
+				continue
+			}
+			if _, e := q.Exec(ctx, `
+				INSERT INTO v2_notifications (tenant_id, user_id, kind, task_id, actor_id, comment_id, source)
+				VALUES ($1, $2, $3, $4, NULLIF($5, '')::uuid, NULLIF($6, '')::uuid, $7)
+				ON CONFLICT (user_id, kind, task_id, source) DO NOTHING`,
+				n.tenant, user, n.kind, n.task, n.actor, n.comment, n.source); e != nil {
+				return fmt.Errorf("record notification: %w", e)
+			}
 		}
 	}
 	return nil
 }
 
-// notifyAssigned tells whoever a new assignment puts the task in front of: the person, or every
-// current human member of the squad. An Agent assignee has nobody to tell.
-func notifyAssigned(ctx context.Context, q dbTX, tenant, task, actor string, ref TaskAssigneeRef, version int64) error {
-	var recipients []string
+// assignedNotice is the notice for a new assignment, addressed to whoever it puts the task in
+// front of: the person, or every current human member of the squad. An Agent assignee has nobody
+// to tell.
+func assignedNotice(ctx context.Context, q dbTX, tenant, task, actor string, ref TaskAssigneeRef, version int64) (notice, error) {
+	n := notice{tenant: tenant, task: task, kind: NotifyAssigned, actor: actor, source: fmt.Sprintf("assign:%d", version)}
 	switch ref.Type {
 	case AssigneeHuman:
-		recipients = []string{ref.ID}
+		n.recipients = []string{ref.ID}
 	case AssigneeSquad:
 		rows, e := q.Query(ctx, `
 			SELECT m.user_id::text FROM v2_squad_members m JOIN v2_squads s ON s.id = m.squad_id
 			WHERE s.tenant_id = $1 AND m.squad_id = $2 AND m.member_type = 'human' AND m.ended_at IS NULL`,
 			tenant, ref.ID)
 		if e != nil {
-			return fmt.Errorf("list squad members to notify: %w", e)
+			return n, fmt.Errorf("list squad members to notify: %w", e)
 		}
 		for rows.Next() {
 			var user string
 			if e := rows.Scan(&user); e != nil {
 				rows.Close()
-				return e
+				return n, e
 			}
-			recipients = append(recipients, user)
+			n.recipients = append(n.recipients, user)
 		}
 		rows.Close()
 		if e := rows.Err(); e != nil {
-			return e
+			return n, e
 		}
-	default:
-		return nil
 	}
-	return notify(ctx, q, notice{tenant: tenant, task: task, kind: NotifyAssigned, actor: actor,
-		source: fmt.Sprintf("assign:%d", version)}, recipients...)
+	return n, nil
+}
+
+// notifyAssigned records the notice for one new assignment.
+func notifyAssigned(ctx context.Context, q dbTX, tenant, task, actor string, ref TaskAssigneeRef, version int64) error {
+	n, e := assignedNotice(ctx, q, tenant, task, actor, ref, version)
+	if e != nil {
+		return e
+	}
+	return notifyAll(ctx, q, n)
 }
 
 // notifyReview tells the task's creator that it reached 待验收 at this version.

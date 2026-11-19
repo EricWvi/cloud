@@ -413,6 +413,88 @@ func TestRemoveMemberDropsNotifications(t *testing.T) {
 	}
 }
 
+// A comment that mentions an owner and a member, written while RemoveMember removes that member.
+// Both lock the same two membership rows. The interleaving that inverts the order is set up on
+// purpose: RemoveMember holds the lower id and waits for the higher one, and only then does the
+// comment start. A comment that locked in mention order (higher first) would deadlock with it,
+// and PostgreSQL would roll one of them back; locking in id order, it simply waits.
+func TestNotifyManyRacesWithRemoveMember(t *testing.T) {
+	f := newSquadFixture(t)
+	ctx := f.ctx
+	owner := f.login(t, "owner", "owner")
+	addProject(t, f, owner)
+	task := createTask(t, f, owner, store.TaskInput{Title: "并发移出多人"})
+	author := f.login(t, "author", "member")
+	member := f.login(t, "leaver", "member")
+	lower, higher := owner, member
+	if member < owner {
+		lower, higher = member, owner
+	}
+
+	watcher, e := pgx.Connect(ctx, os.Getenv("TEST_DATABASE_URL"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer func() { _ = watcher.Close(ctx) }()
+	waitBlocked := func(n int) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			var blocked int
+			if e := watcher.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
+				WHERE wait_event_type = 'Lock' AND datname = current_database()`).Scan(&blocked); e != nil {
+				t.Fatal(e)
+			}
+			if blocked >= n {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected %d blocked sessions, have %d", n, blocked)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	// Another transaction shares the higher row, so RemoveMember stops between its two rows.
+	hold, e := f.db.Begin(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer func() { _ = hold.Rollback(ctx) }()
+	if _, e := hold.Exec(ctx, `SELECT 1 FROM memberships WHERE tenant_id = $1 AND user_id = $2 FOR KEY SHARE`, f.tenant, higher); e != nil {
+		t.Fatal(e)
+	}
+	removed := make(chan error, 1)
+	go func() { removed <- f.store.RemoveMember(ctx, f.tenant, member) }()
+	waitBlocked(1)
+
+	// The comment mentions the higher id first, the opposite of RemoveMember's order.
+	commented := make(chan error, 1)
+	go func() {
+		_, e := f.store.CreateTaskComment(ctx, store.NewTaskComment{TenantID: f.tenant, TaskID: task.ID, AuthorID: author,
+			CreateKey: "race", Body: "两位看一下",
+			Mentions: []store.TaskMention{{Type: "user", ID: higher}, {Type: "user", ID: lower}}})
+		commented <- e
+	}()
+	waitBlocked(2)
+	if e := hold.Commit(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if e := <-removed; e != nil {
+		t.Fatalf("RemoveMember rolled back: %v", e)
+	}
+	if e := <-commented; e != nil {
+		t.Fatalf("the comment rolled back: %v", e)
+	}
+	var n int
+	if e := f.db.QueryRow(ctx, `SELECT count(*) FROM v2_notifications WHERE user_id = $1`, member).Scan(&n); e != nil || n != 0 {
+		t.Fatalf("removed member kept %d notifications (%v)", n, e)
+	}
+	if e := f.db.QueryRow(ctx, `SELECT count(*) FROM v2_notifications WHERE user_id = $1 AND kind = 'mentioned'`, owner).Scan(&n); e != nil || n != 1 {
+		t.Fatalf("owner got %d mention notifications (%v)", n, e)
+	}
+}
+
 func countFor(items []store.Notification, task, kind string) int {
 	n := 0
 	for _, item := range items {

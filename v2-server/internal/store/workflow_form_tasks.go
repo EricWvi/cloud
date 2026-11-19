@@ -62,6 +62,7 @@ func (s *Store) CreateWorkflowFormTasks(ctx context.Context, runID, nodeRunID st
 			return err
 		}
 		results := []FormTaskResult{}
+		var notices []notice
 		for _, item := range items {
 			if utf8.RuneCountInString(item.Title) > 200 || item.Title == "" || utf8.RuneCountInString(item.Description) > 4000 {
 				return fmt.Errorf("invalid task text")
@@ -96,14 +97,20 @@ func (s *Store) CreateWorkflowFormTasks(ctx context.Context, runID, nodeRunID st
 				}
 				id = &created
 				action = "created"
-				if err := notifyAssigned(ctx, tx, r.tenant, created, f.SubmittedBy, *item.Assignee, 1); err != nil {
+				n, err := assignedNotice(ctx, tx, r.tenant, created, f.SubmittedBy, *item.Assignee, 1)
+				if err != nil {
 					return err
 				}
+				// Recorded together after the loop, so the recipients' rows are locked in one order.
+				notices = append(notices, n)
 				if _, err := tx.Exec(ctx, `UPDATE v2_workflow_finding_tasks SET task_id=$4 WHERE tenant_id=$1 AND project_id=$2 AND finding_key=$3`, r.tenant, project, item.Key, *id); err != nil {
 					return err
 				}
 			}
 			results = append(results, FormTaskResult{Key: item.Key, TaskID: *id, Action: action})
+		}
+		if err := notifyAll(ctx, tx, notices...); err != nil {
+			return err
 		}
 		payload, err := fold(r.payload, node, results)
 		if err != nil {
