@@ -24,6 +24,8 @@ describe('notification bell', () => {
   let inboxStatus: number
   let pageSize: number
   let inboxReads: string[]
+  let pageStatus: Record<string, number>
+  let holdPage: Record<string, Promise<void>>
 
   beforeEach(() => {
     items = [
@@ -35,22 +37,27 @@ describe('notification bell', () => {
     inboxStatus = 200
     pageSize = 30
     inboxReads = []
+    pageStatus = {}
+    holdPage = {}
     const unread = () => items.filter(n => !n.readAt).length
+    const readInbox = async (params: { cursor?: string } | undefined) => {
+      const key = params?.cursor ?? 'first'
+      inboxReads.push(key)
+      await holdPage[key]
+      const status = pageStatus[key] ?? inboxStatus
+      if (status !== 200) return { status, data: { code: 'not_found', params: {}, requestId: 'r' } }
+      // The cursor is opaque to the page; the fake uses the index of the next item.
+      const start = Number(params?.cursor ?? 0)
+      const page = items.slice(start, start + pageSize)
+      const nextCursor = start + pageSize < items.length ? String(start + pageSize) : ''
+      return { status: 200, data: { items: page, unread: unread(), nextCursor } }
+    }
     seen = fakeBackend((c) => {
       if (c.url === '/api/v1/me') return { status: 200, data: demoUser }
       if (c.url === '/api/v1/me/tenants') {
         return { status: 200, data: { items: [{ id: tenantId, name: '演示团队', status: 'active', role: 'member' }], nextCursor: '' } }
       }
-      if (c.url === inbox && c.method === 'get') {
-        // The cursor is opaque to the page; the fake uses the index of the next item.
-        const params = c.params as { cursor?: string } | undefined
-        inboxReads.push(params?.cursor ?? 'first')
-        if (inboxStatus !== 200) return { status: inboxStatus, data: { code: 'not_found', params: {}, requestId: 'r' } }
-        const start = Number(params?.cursor ?? 0)
-        const page = items.slice(start, start + pageSize)
-        const nextCursor = start + pageSize < items.length ? String(start + pageSize) : ''
-        return { status: 200, data: { items: page, unread: unread(), nextCursor } }
-      }
+      if (c.url === inbox && c.method === 'get') return readInbox(c.params as { cursor?: string } | undefined)
       if (c.url === `${inbox}/read`) {
         const body = JSON.parse(c.data as string) as { ids?: string[]; all?: boolean }
         reads.push(body)
@@ -191,6 +198,72 @@ describe('notification bell', () => {
     expect(within(reopened).queryByText('旧任务')).not.toBeInTheDocument()
     await userEvent.click(within(reopened).getByRole('button', { name: '加载更多' }))
     expect(await within(reopened).findByText('修登录页')).toBeInTheDocument()
+    act(() => focusManager.setFocused(undefined))
+  })
+
+  it('hides everything when an older page is refused, until the newest page loads again', async () => {
+    pageSize = 1
+    pageStatus = { '1': 404 }
+    renderAt('/')
+    await userEvent.click(await screen.findByRole('button', { name: '提醒，2 条未读' }))
+    const list = await screen.findByRole('list', { name: '提醒列表' })
+    expect(within(list).getByText('写周报')).toBeInTheDocument()
+    // Removed from the team, and the first refusal comes from the next page, not the newest one.
+    await userEvent.click(await within(list).findByRole('button', { name: '加载更多' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: /^提醒/ })).not.toBeInTheDocument())
+    expect(screen.queryByText('写周报')).not.toBeInTheDocument()
+
+    // A failing poll of the newest page does not bring it back.
+    inboxStatus = 503
+    const before = inboxReads.length
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await waitFor(() => expect(inboxReads.length).toBeGreaterThan(before))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(screen.queryByRole('button', { name: /^提醒/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('写周报')).not.toBeInTheDocument()
+
+    // Only a successful read of the newest page does.
+    inboxStatus = 200
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    expect(await screen.findByRole('button', { name: '提醒，2 条未读' }, { timeout: 10_000 })).toBeInTheDocument()
+    act(() => focusManager.setFocused(undefined))
+  }, 20_000)
+
+  it('drops an older page that arrives after the list closed', async () => {
+    pageSize = 1
+    let release = () => {}
+    holdPage = { '1': new Promise<void>(resolve => { release = resolve }) }
+    renderAt('/')
+    await userEvent.click(await screen.findByRole('button', { name: '提醒，2 条未读' }))
+    const list = await screen.findByRole('list', { name: '提醒列表' })
+    await userEvent.click(await within(list).findByRole('button', { name: '加载更多' }))
+    await waitFor(() => expect(inboxReads).toContain('1'))
+    // Closed while the second page is still on its way; it answers only afterwards.
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('list', { name: '提醒列表' })).not.toBeInTheDocument())
+    act(() => release())
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    inboxReads = []
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await waitFor(() => expect(inboxReads).toEqual(['first']))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(inboxReads).toEqual(['first'])
+
+    // Reopened, the list starts from the newest page again.
+    await userEvent.click(screen.getByRole('button', { name: '提醒，2 条未读' }))
+    const reopened = await screen.findByRole('list', { name: '提醒列表' })
+    expect(within(reopened).queryByText('修登录页')).not.toBeInTheDocument()
+    expect(within(reopened).getByRole('button', { name: '加载更多' })).toBeEnabled()
     act(() => focusManager.setFocused(undefined))
   })
 

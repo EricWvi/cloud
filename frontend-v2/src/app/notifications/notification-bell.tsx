@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useInfiniteQuery, useMutation, useQueryClient, type InfiniteData } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type InfiniteData, type QueryClient } from '@tanstack/react-query'
 import { isAxiosError } from 'axios'
 import { Bell } from 'lucide-react'
 import { useNavigate } from 'react-router'
@@ -14,18 +14,25 @@ const POLL_MS = 15000
 /** Notifications per page; older ones load on demand, so every unread one can be reached. */
 const PAGE_SIZE = 30
 
-const notificationsKey = (tenantId: string) => ['notifications', tenantId] as const
+/**
+ * Two queries, so the badge's poll and the history a person pages through never share a cache:
+ * the newest page, polled for the badge and the list's top; and older pages, read only while the
+ * list is open and the person asked for them, never polled, dropped when the list closes.
+ */
+const newestKey = (tenantId: string) => ['notifications', tenantId, 'newest'] as const
+const olderKey = (tenantId: string) => ['notifications', tenantId, 'older'] as const
 
 /** One page of the inbox, or the record that the server refused it. */
 type InboxPage = NotificationList & { denied?: true }
-type Inbox = InfiniteData<InboxPage, string>
+type Older = InfiniteData<InboxPage, string>
 
 const deniedPage: InboxPage = { items: [], unread: 0, nextCursor: '', denied: true }
 
 /**
  * The server no longer lets the caller read this workspace's inbox (removed from the team). The
- * refusal becomes the cached data instead of an error, so it replaces every page read before and
- * a later failure (503, network) cannot bring them back; only a successful read replaces it.
+ * refusal becomes the newest page's cached data instead of an error, whichever page met it, so it
+ * replaces what was read before and a later failure (503, network) cannot bring it back; only a
+ * successful read of the newest page replaces it.
  */
 const lostAccess = (error: unknown) =>
   isAxiosError(error) && (error.response?.status === 403 || error.response?.status === 404)
@@ -37,6 +44,16 @@ async function readPage(tenantId: string, cursor: string, signal: AbortSignal): 
     if (lostAccess(error)) return deniedPage
     throw error
   }
+}
+
+/** An older page; a refusal there hides the whole inbox, recorded where the badge reads it. */
+async function readOlder(client: QueryClient, tenantId: string, cursor: string, signal: AbortSignal): Promise<InboxPage> {
+  const page = await readPage(tenantId, cursor, signal)
+  if (page.denied) {
+    client.setQueryData(newestKey(tenantId), deniedPage)
+    void client.cancelQueries({ queryKey: olderKey(tenantId) })
+  }
+  return page
 }
 
 const formatTime = (iso: string): string =>
@@ -53,42 +70,58 @@ export function NotificationBell() {
   const [open, setOpen] = useState(false)
   const navigate = useNavigate()
   const client = useQueryClient()
-  const inbox = useInfiniteQuery({
-    queryKey: notificationsKey(tenantId),
-    queryFn: ({ pageParam, signal }) => readPage(tenantId, pageParam, signal),
-    initialPageParam: '',
-    getNextPageParam: last => last.nextCursor || undefined,
+  // Older pages are asked for with 加载更多 and forgotten when the list closes.
+  const [browsing, setBrowsing] = useState(false)
+  const newest = useQuery({
+    queryKey: newestKey(tenantId),
+    queryFn: ({ signal }) => readPage(tenantId, '', signal),
     enabled: !!tenantId,
     refetchInterval: POLL_MS,
   })
-  const lost = inbox.data?.pages[0]?.denied === true
-  // A refetch reads every loaded page again. Closing the list keeps only the newest page, so the
-  // badge's poll costs one request; reopening can load older pages again.
+  const lost = newest.data?.denied === true
+  const start = newest.data?.nextCursor ?? ''
+  const older = useInfiniteQuery({
+    // Keyed by where the newest page ends, so a newer poll restarts the history after it.
+    queryKey: [...olderKey(tenantId), start],
+    queryFn: ({ pageParam, signal }) => readOlder(client, tenantId, pageParam, signal),
+    initialPageParam: start,
+    getNextPageParam: last => last.nextCursor || undefined,
+    enabled: open && browsing && !!start && !lost,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  })
+  // Opening or closing the list starts the history over. A page still in flight would otherwise
+  // land after the list closed: cancel it and drop the history, so nothing but the newest page is
+  // read until the person pages again.
   const setListOpen = (next: boolean) => {
     setOpen(next)
-    if (next) return
-    client.setQueryData<Inbox>(notificationsKey(tenantId), prev =>
-      prev && prev.pages.length > 1 ? { pages: prev.pages.slice(0, 1), pageParams: prev.pageParams.slice(0, 1) } : prev)
+    setBrowsing(false)
+    void client.cancelQueries({ queryKey: olderKey(tenantId) })
+    client.removeQueries({ queryKey: olderKey(tenantId) })
   }
   const markRead = useMutation({
     mutationFn: (body: { ids?: string[]; all?: boolean }) => readNotifications(tenantId, body),
     onSuccess: ({ unread }, body) => {
       const now = new Date().toISOString()
-      client.setQueryData<Inbox>(notificationsKey(tenantId), prev => prev && {
-        ...prev,
-        pages: prev.pages.map((page, i) => ({
-          ...page,
-          unread: i === 0 ? unread : page.unread,
-          items: page.items.map(n => (body.all || body.ids?.includes(n.id)) && !n.readAt ? { ...n, readAt: now } : n),
-        })),
+      const mark = (page: InboxPage): InboxPage => ({
+        ...page,
+        items: page.items.map(n => (body.all || body.ids?.includes(n.id)) && !n.readAt ? { ...n, readAt: now } : n),
       })
+      client.setQueryData<InboxPage>(newestKey(tenantId), prev => prev && { ...mark(prev), unread })
+      client.setQueriesData<Older>({ queryKey: olderKey(tenantId) }, prev => prev && { ...prev, pages: prev.pages.map(mark) })
     },
   })
-  // Hidden, not unmounted: the query keeps polling, so the bell comes back if access does.
+  // Hidden, not unmounted: the newest page keeps polling, so the bell comes back if access does.
   if (!tenantId || lost) return null
-  const pages = inbox.data?.pages ?? []
-  const items = pages.flatMap(page => page.items)
-  const unread = pages[0]?.unread ?? 0
+  const olderPages = browsing ? older.data?.pages ?? [] : []
+  const items = [...(newest.data?.items ?? []), ...olderPages.flatMap(page => page.items)]
+  const unread = newest.data?.unread ?? 0
+  const hasMore = browsing ? older.hasNextPage || older.isPending : start !== ''
+  const loadingMore = browsing && (older.isPending || older.isFetchingNextPage)
+  const loadMore = () => {
+    if (!browsing) setBrowsing(true)
+    else void older.fetchNextPage()
+  }
   const label = unread > 0 ? `提醒，${unread} 条未读` : '提醒'
 
   const openTask = (n: Notification) => {
@@ -124,7 +157,7 @@ export function NotificationBell() {
           </button>
         </header>
         {items.length === 0
-          ? <p className="px-3 py-8 text-center text-xs text-muted-foreground">{inbox.isError ? '提醒加载失败' : '暂无提醒'}</p>
+          ? <p className="px-3 py-8 text-center text-xs text-muted-foreground">{newest.isError ? '提醒加载失败' : '暂无提醒'}</p>
           : (
               <ul aria-label="提醒列表" className="max-h-96 overflow-y-auto py-1">
                 {items.map(n => (
@@ -144,15 +177,15 @@ export function NotificationBell() {
                     </button>
                   </li>
                 ))}
-                {inbox.hasNextPage && (
+                {hasMore && (
                   <li className="px-3 py-1.5">
                     <button
                       type="button"
-                      disabled={inbox.isFetchingNextPage}
-                      onClick={() => void inbox.fetchNextPage()}
+                      disabled={loadingMore}
+                      onClick={loadMore}
                       className="w-full rounded-md py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
                     >
-                      {inbox.isFetchingNextPage ? '加载中…' : '加载更多'}
+                      {loadingMore ? '加载中…' : '加载更多'}
                     </button>
                   </li>
                 )}
