@@ -408,3 +408,35 @@ func TestAnUnreadableCatalogOnRestartAbortsStartupAndKeepsTheWait(t *testing.T) 
 		t.Fatalf("follow-up once the catalog is back: %v", err)
 	}
 }
+
+// The recovery's rewrite of a parked node's summary goes through the storage seam, and a write that
+// fails aborts startup like a session that cannot be read, instead of serving a row whose summary
+// the rebuilt node contradicts. The next start rewrites it and recovers the node.
+func TestAFailedSummaryRewriteOnRestartAbortsStartup(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	runID, a := f.startParked(t, interactiveChain, "初稿一")
+	rowA := f.nodeRow(t, runID, "a")
+	f.exec.recordedTurns(a, rowA.ID, completed("初稿一"))
+
+	f.host.Close()
+	f.host = f.newHost(t)
+	// Interrupt rebuilds the node on its own goroutine, so tried needs no lock.
+	tried := false
+	f.host.moveNode = func(ctx context.Context, run, nodeRun, from, to string, merge func([]byte) ([]byte, error)) (bool, error) {
+		if nodeRun == rowA.ID && from == store.WorkflowStatusPending && to == store.WorkflowStatusPending {
+			tried = true
+			return false, execution.ErrUnavailable
+		}
+		return f.s.MoveWorkflowEngineNode(ctx, run, nodeRun, from, to, merge)
+	}
+	if err := f.host.Interrupt(ctx); !errors.Is(err, execution.ErrUnavailable) || !tried {
+		t.Fatalf("startup whose summary rewrite failed = %v (rewrite tried: %v), want it aborted", err, tried)
+	}
+
+	f.restart(t)
+	f.await(t, runID, awaitingInput("a"))
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再改一版"); err != nil {
+		t.Fatalf("follow-up after the next start: %v", err)
+	}
+}

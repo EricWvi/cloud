@@ -73,8 +73,13 @@ func (h *Host) recoverParked(ctx context.Context, st *runState, run store.Workfl
 		st.track(n)
 		// The row's summary was written before the restart and may lag the session: a node being
 		// completed then had its session ended without the summary saying so, and the page would
-		// offer a message box its session refuses. Write it again from the rebuilt node.
-		h.refreshSummary(st, n, store.WorkflowStatusPending)
+		// offer a message box its session refuses. Write it again from the rebuilt node; a write
+		// that fails aborts startup like a session that cannot be read, rather than serving a
+		// summary the node contradicts.
+		if err := h.writeSummary(ctx, st, n, store.WorkflowStatusPending); err != nil {
+			return err
+		}
+		h.hub.Publish(run.Run.ID)
 		if n.sessionEnded && !n.sessionGone {
 			// The node's session ended before the restart (a stop, a lost Agent) but its End was
 			// never confirmed, so nothing retries it and it would keep its slot until the node
