@@ -3,12 +3,14 @@
 package agentruntime
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/workspacefs"
@@ -50,7 +52,7 @@ func skillCheckouts(t *testing.T, root string) []string {
 func TestRemoveCheckoutWithoutRuntimeForgetsSkillIndex(t *testing.T) {
 	d, root, keep, gone := removalFixture(t)
 	d.recorded["ws"] = Checkout{Path: gone, CloneExecution: "c-1"}
-	usage, err := d.RemoveCheckout("project", "ws", gone)
+	usage, err := d.RemoveCheckout(t.Context(), "project", "ws", gone)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +79,7 @@ func TestRemoveCheckoutRefusesAdmittedSessionAndDropsCachedCheckout(t *testing.T
 		checkouts: map[string]*checkout{"ws": {path: gone}},
 		owners:    map[string]map[string]*execution.Skills{"ws": {"session": nil}}}
 	d.projects["project"] = p
-	if _, err := d.RemoveCheckout("project", "ws", gone); !errors.Is(err, workspacefs.ErrCheckoutInUse) {
+	if _, err := d.RemoveCheckout(t.Context(), "project", "ws", gone); !errors.Is(err, workspacefs.ErrCheckoutInUse) {
 		t.Fatalf("err = %v, want workspacefs.ErrCheckoutInUse", err)
 	}
 	if _, err := os.Stat(gone); err != nil {
@@ -87,7 +89,7 @@ func TestRemoveCheckoutRefusesAdmittedSessionAndDropsCachedCheckout(t *testing.T
 		t.Fatalf("skill checkouts changed while in use: %v", got)
 	}
 	delete(p.owners, "ws")
-	if _, err := d.RemoveCheckout("project", "ws", gone); err != nil {
+	if _, err := d.RemoveCheckout(t.Context(), "project", "ws", gone); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := p.checkouts["ws"]; ok {
@@ -100,7 +102,7 @@ func TestRemoveCheckoutRefusesAdmittedSessionAndDropsCachedCheckout(t *testing.T
 
 func TestRemoveCheckoutRefusesPathOfAnotherProject(t *testing.T) {
 	d, _, _, gone := removalFixture(t)
-	if _, err := d.RemoveCheckout("other-project", "ws", gone); !errors.Is(err, workspacefs.ErrUnsafeCheckout) {
+	if _, err := d.RemoveCheckout(t.Context(), "other-project", "ws", gone); !errors.Is(err, workspacefs.ErrUnsafeCheckout) {
 		t.Fatalf("err = %v, want ErrUnsafeCheckout", err)
 	}
 	if _, err := os.Stat(gone); err != nil {
@@ -122,5 +124,67 @@ func TestProjectSkillsSkipsAVanishedCheckout(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(live, ".claude", "skills", "lint")); err != nil {
 		t.Fatalf("the live checkout did not get its link: %v", err)
+	}
+}
+
+// While a removal measures and deletes, the project's skill lock is free: sessions of the same
+// project can attach skills (and start) instead of waiting for a large directory to go.
+func TestRemoveCheckoutDoesNotHoldTheSkillLockWhileDeleting(t *testing.T) {
+	d, root, keep, gone := removalFixture(t)
+	p := &projectRuntime{driver: d, id: "project", root: root, checkouts: map[string]*checkout{}, owners: map[string]map[string]*execution.Skills{}}
+	d.projects["project"] = p
+	deleting, release := make(chan struct{}), make(chan struct{})
+	removeCheckoutDir = func(ctx context.Context, root, path string) (workspacefs.Usage, error) {
+		close(deleting)
+		<-release
+		return workspacefs.RemoveCheckout(ctx, root, path)
+	}
+	defer func() { removeCheckoutDir = workspacefs.RemoveCheckout }()
+	done := make(chan error, 1)
+	go func() {
+		_, err := d.RemoveCheckout(t.Context(), "project", "ws", gone)
+		done <- err
+	}()
+	<-deleting
+	attached := make(chan error, 1)
+	go func() { attached <- p.attachSkills(keep) }()
+	select {
+	case err := <-attached:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("attaching skills waited for the checkout removal")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Without a runtime the removal holds the project lock while it rewrites the skill list, and a
+// runtime being created for the project waits for it.
+func TestProjectRuntimeCreationWaitsForTheSkillListRewrite(t *testing.T) {
+	d, _, _, _ := removalFixture(t)
+	lock := d.projectLock("project")
+	lock.Lock()
+	created := make(chan struct{})
+	d.startProject = func(*projectRuntime) error { return errors.New("not started in this test") }
+	go func() {
+		_, _ = d.project(t.Context(), "project", Project{})
+		close(created)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	d.mu.Lock()
+	_, exists := d.projects["project"]
+	d.mu.Unlock()
+	if exists {
+		t.Fatal("a runtime was inserted while the project lock was held")
+	}
+	lock.Unlock()
+	select {
+	case <-created:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runtime creation never proceeded")
 	}
 }

@@ -3,6 +3,7 @@
 package agentruntime
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,52 +11,74 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/workspacefs"
 )
 
+// removeCheckoutDir removes the directory; tests replace it to hold a removal open.
+var removeCheckoutDir = workspacefs.RemoveCheckout
+
+// projectLock is the lock that stands in for a project's skillsMu while the project has no
+// runtime: d.project takes it before inserting a new projectRuntime, so a runtime cannot appear
+// while its skill list is rewritten. Locks stay for the Driver's life; there is one per project.
+func (d *Driver) projectLock(id string) *sync.Mutex {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.projectLocks == nil {
+		d.projectLocks = map[string]*sync.Mutex{}
+	}
+	l := d.projectLocks[id]
+	if l == nil {
+		l = &sync.Mutex{}
+		d.projectLocks[id] = l
+	}
+	return l
+}
+
 // RemoveCheckout deletes a workspace's checkout of the project, for a conversation the person
-// deleted. It first detaches everything this process still holds for the checkout: a session
-// admitted to it refuses the removal with workspacefs.ErrCheckoutInUse; otherwise the cached checkout, the
-// reattach record and the skill projection's list of checkouts drop it, the list under the same
-// lock projection holds, so a projection never meets a checkout that vanished halfway. The
-// directory itself is removed by workspacefs.RemoveCheckout inside the project's checkout root;
-// ErrUnsafeCheckout from it means the recorded path is not one this process may delete.
-func (d *Driver) RemoveCheckout(projectID, workspaceID, path string) (workspacefs.Usage, error) {
+// deleted. It first detaches everything this process holds for the checkout, briefly: under the
+// project's skillsMu (or, without a runtime, the project lock) it refuses with
+// workspacefs.ErrCheckoutInUse a checkout a live session is admitted to, otherwise drops it from
+// p.checkouts (under p.mu), from the reattach records and from skill-checkouts.json, and releases
+// the locks. Measuring and removing then run without them, so sessions of the project start
+// meanwhile; the caller holds the delivery's lock on the checkout (lock order: LockWorkspace,
+// skillsMu, p.mu). workspacefs.ErrUnsafeCheckout means the recorded path is not one to delete.
+func (d *Driver) RemoveCheckout(ctx context.Context, projectID, workspaceID, path string) (workspacefs.Usage, error) {
 	if projectID == "" || workspaceID == "" {
 		return workspacefs.Usage{}, workspacefs.ErrUnsafeCheckout
 	}
+	if err := d.detachCheckout(projectID, workspaceID, path); err != nil {
+		return workspacefs.Usage{}, err
+	}
 	root := filepath.Join(d.opts.Root, digest(projectID)[:16])
-	// d.mu is held while the project is looked up and, when it has no runtime, while its skill
-	// list is rewritten: a runtime created meanwhile would otherwise attach a checkout to the list
-	// that this rewrite then loses.
+	return removeCheckoutDir(ctx, filepath.Join(root, "w", "r"), path)
+}
+
+func (d *Driver) detachCheckout(projectID, workspaceID, path string) error {
+	root := filepath.Join(d.opts.Root, digest(projectID)[:16])
+	lock := d.projectLock(projectID)
+	lock.Lock()
 	d.mu.Lock()
 	p := d.projects[projectID]
 	delete(d.recorded, workspaceID)
-	if p == nil {
-		err := forgetSkillCheckout(root, path)
-		d.mu.Unlock()
-		if err != nil {
-			return workspacefs.Usage{}, err
-		}
-		return workspacefs.RemoveCheckout(filepath.Join(root, "w", "r"), path)
-	}
 	d.mu.Unlock()
+	if p == nil {
+		defer lock.Unlock()
+		return forgetSkillCheckout(root, path)
+	}
+	// The runtime exists, so its skillsMu guards the list; the project lock is not needed.
+	lock.Unlock()
 	p.skillsMu.Lock()
+	defer p.skillsMu.Unlock()
 	p.mu.Lock()
 	if len(p.owners[workspaceID]) > 0 {
 		p.mu.Unlock()
-		p.skillsMu.Unlock()
-		return workspacefs.Usage{}, workspacefs.ErrCheckoutInUse
+		return workspacefs.ErrCheckoutInUse
 	}
 	delete(p.checkouts, workspaceID)
 	p.mu.Unlock()
-	err := forgetSkillCheckout(root, path)
-	p.skillsMu.Unlock()
-	if err != nil {
-		return workspacefs.Usage{}, err
-	}
-	return workspacefs.RemoveCheckout(filepath.Join(root, "w", "r"), path)
+	return forgetSkillCheckout(root, path)
 }
 
 // forgetSkillCheckout drops path from the project's skill-checkouts.json, the checkouts market

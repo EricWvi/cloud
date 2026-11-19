@@ -174,12 +174,29 @@ func (d *Driver) project(ctx context.Context, id string, config Project) (*proje
 		}
 		p := d.projects[id]
 		if p == nil {
+			// A checkout removal rewrites the project's skill list under this lock while the
+			// project has no runtime: wait for it before a runtime (and its skillsMu) appears.
+			d.mu.Unlock()
+			lock := d.projectLock(id)
+			lock.Lock()
+			d.mu.Lock()
+			if d.closed {
+				d.mu.Unlock()
+				lock.Unlock()
+				return nil, execution.ErrUnavailable
+			}
+			if p = d.projects[id]; p != nil {
+				lock.Unlock()
+				d.mu.Unlock()
+				continue
+			}
 			lifetime, cancel := context.WithCancel(context.Background())
 			p = &projectRuntime{driver: d, id: id, root: filepath.Join(d.opts.Root, digest(id)[:16]), configuration: config,
 				ready: make(chan struct{}), ctx: lifetime, cancel: cancel, loopDone: make(chan struct{}), dead: make(chan struct{}),
 				controls: map[string]*controlWait{}, agents: map[string]*agentSession{}, checkouts: map[string]*checkout{}, installs: map[string]*installation{}, owners: map[string]map[string]*execution.Skills{}, holders: map[string]*agentSession{}, projected: map[string]bool{}, acknowledged: map[string]uint64{}}
 			d.projects[id] = p
 			go p.initialize()
+			lock.Unlock()
 		}
 		d.mu.Unlock()
 		select {
