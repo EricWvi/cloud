@@ -54,7 +54,7 @@ Agent 把被切断的模型请求当成网络失败原样重发（OpenCode 0.6.1
 
 ## 恢复与清理
 
-项目目录使用稳定 ID 摘要，并在启动 Node 前 fsync `project-runtime.json` 登记。`New` 返回前调用 `Recover`，通过 `node.RecoverRuntime` 获取既有 runtime 锁、清理已识别的自有进程并确认没有未知残留；它不删 checkout、JSONL 或 Node SQLite。调用方须先完成此步骤，再把旧 SQL session 标为 ended/interrupted，之后才开放服务。未知目录、symlink、登记不一致或停止未确认都使启动失败。
+项目目录使用稳定 ID 摘要，并在启动 Node 前 fsync `project-runtime.json` 登记。`New` 返回前调用 `Recover`，通过 `node.RecoverRuntime` 获取既有 runtime 锁、清理已识别的自有进程并确认没有未知残留（Node 被强杀后留下的带本项目尝试标记的后台作业，先由临时启动一次的项目 Node 杀掉，见 `internal/node`）；它不删 checkout、JSONL 或 Node SQLite。调用方须先完成此步骤，再把旧 SQL session 标为 ended/interrupted，之后才开放服务。未知目录、symlink、登记不一致或停止未确认都使启动失败。
 
 `Cleanup(ctx, root)` 和 `Driver.Cleanup(ctx)` 只在所有登记目录均确认停止后删除这些目录；未知条目会使整个操作失败且不删除。调用方必须持有整个数据目录的单进程锁。镜像仓库和 PostgreSQL 历史必须位于 Root 之外。Node socket 对路径长度有限制，Root 应放在原生 Linux 短路径中；New 会在创建目录或进程前检查包含项目目录的 Node 控制 socket 完整路径，超限时提示缩短 `V2_DATA_DIR`。
 

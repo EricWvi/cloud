@@ -731,7 +731,11 @@ HTTP 集成测试按 `chat.openapi.json` 验证 JSON 响应，向注入点传入
 
 保证等级仍是 BestEffort，只在 Linux 上提供。以下进程 Node 找不到，会在会话结束后继续运行、继续写工作区：清空或改写了自己环境的孤儿进程（例如 Agent 起的 PostgreSQL、nginx 会用进程标题覆盖环境区域）、经 `sudo` 等换了用户的进程、经 `docker run` 或 `systemd-run` 由别的服务代为启动的进程。v2 的 `-cleanup` 和工作区回收都不按 cwd 杀进程，不补这个缺口。
 
-Node 进程本身被杀（崩溃、OOM、SIGKILL）时，v2 用不上 Node 的重启恢复：Node 重启后会先杀掉带标记的进程再报告中断，但 v2 在重新启动这个项目的 Node 之前，要先确认运行目录里没有不认识的进程（见 [`internal/node`](internal/node/README.md)，等 3 秒）。Agent 的后台作业还活着、cwd 又在工作区里，这一步就失败，同一项目的新会话以 `agent_prepare_failed` 结束，作业一直运行到自己退出，期间仍可能写工作区；作业退出后项目照常恢复。
+Node 进程本身被杀（崩溃、OOM、SIGKILL）时，它来不及杀后台作业，作业带着标记留在工作区里。Node 的重启恢复会在开放控制 socket 之前杀掉账本里没确认停止的尝试的带标记进程，v2 借它收口：清理项目的运行目录时（见 [`internal/node`](internal/node/README.md)），等 3 秒后仍有进程留在运行目录里、其中有带这个项目 Node 账本里尝试标记的进程，v2 就用上一次的 Node 可执行文件和配置把这个项目的 Node 启动一次，等它开放控制 socket 就停掉它，然后照旧确认运行目录里已没有进程。杀作业的是 Node，v2 只给自己复制进运行目录的 Node、reaper 发信号；带别的项目或别的 Node 尝试标记的进程不算这个项目的，不会因为它们启动 Node，也不会被这次启动杀掉。
+
+清理在这些时候进行：崩溃时正在执行的一轮以 Node 丢失结束后，执行服务立即结束这个会话；同项目的下一个会话、删除对话、v2-server 启动（v2 和 Node 一起被杀之后）和 `-cleanup`。所以崩溃那一轮的会话在作业被杀之后才确认停止，这一轮的交付照常进行，不和作业抢写；同项目的新会话在作业被杀之后才开始，不再以 `agent_prepare_failed` 失败，只多花一次 Node 启动的时间（实测约 1 秒，最多等 20 秒）。会话空闲时（两轮之间）Node 崩溃，没有轮次结束来触发清理，作业运行到这个项目下次被用到或 v2-server 重启。与 desktop 的差异：desktop 在 Node 退出后重新启动它，重启恢复随即杀掉作业；v2 的项目 Node 按需启动，所以由清理来启动它。
+
+以下情况和以前一样：项目保持不可用（新会话以 `agent_prepare_failed` 结束，v2-server 启动时则启动失败），直到进程自己退出。运行目录里留下的进程都没有这个项目的标记（例如清空了环境、父进程又已退出的孤儿，Node 也认不出它；或者用户自己的 shell），v2 不启动 Node；Node 启动失败、20 秒内没开放控制 socket，或者启动了却没杀掉作业（例如读 `environ` 卡住），也不算清理完成。cwd 不在运行目录里的作业本来就不挡 v2 的清理，会在这个项目的 Node 下次启动时被杀。
 
 部署前提是 Node 与 Agent 以同一用户运行，或 Node 有 `CAP_SYS_PTRACE`，否则 Node 读不到 Agent 进程的环境，停止多半记为 `stop_unconfirmed`（Node 启动时只告警）。v2 生成的 Node 配置不设 `process.workload_uid`，Node 和 Agent 都以 v2-server 自己的用户运行，这个前提总是成立；把 Agent 改成以别的用户运行时要同时满足它。
 
