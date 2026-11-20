@@ -887,3 +887,40 @@ func TestDiscardIsRefusedWhenNestedRepositoriesExhaustTheBudget(t *testing.T) {
 		t.Fatalf("a refused discard removed the conversation: %v", err)
 	}
 }
+
+// A nested worktree whose .git is a directory naming a shared repository in commondir: a branch
+// committed in the shared repository through another, since removed, worktree leaves the nested
+// worktree as it was, and only the shared repository records it.
+func TestDiscardIsStaleWhenASharedRepositoryNamedByCommondirChanges(t *testing.T) {
+	f := newFixture(t)
+	c := f.chat(t, st.TurnDelivered)
+	write(t, c.Path, ".gitignore", "*.log\nstore.git/\n")
+	lib := t.TempDir()
+	write(t, lib, "lib.txt", "lib\n")
+	git(t, lib, "init", "-q", ".")
+	git(t, lib, "add", ".")
+	git(t, lib, "commit", "-qm", "lib")
+	store := filepath.Join(c.Path, "store.git")
+	git(t, c.Path, "clone", "-q", "--bare", lib, store)
+	wt := filepath.Join(c.Path, "wt")
+	git(t, store, "worktree", "add", "-q", "--detach", wt)
+	// Turn the worktree's gitfile into the admin directory itself, naming the shared repository.
+	if err := os.Remove(filepath.Join(wt, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(store, "worktrees", "wt"), filepath.Join(wt, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, wt, ".git/commondir", "../../store.git\n")
+	if got := git(t, wt, "rev-parse", "--git-common-dir"); !strings.HasSuffix(got, "store.git") {
+		t.Fatalf("the nested worktree does not use the shared repository: %s", got)
+	}
+	staleAfter(t, f, c, func() {
+		tmp := filepath.Join(t.TempDir(), "tmp")
+		git(t, store, "worktree", "add", "-q", "-b", "only-here", tmp)
+		write(t, tmp, "new.txt", "the only copy\n")
+		git(t, tmp, "add", "new.txt")
+		git(t, tmp, "commit", "-qm", "new work")
+		git(t, store, "worktree", "remove", "--force", tmp)
+	})
+}

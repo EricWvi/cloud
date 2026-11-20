@@ -273,6 +273,9 @@ func (s *DeliveryFS) gitIdentity(ctx context.Context, st *staged, g GitFindings)
 	if err != nil {
 		return "", false, err
 	}
+	// digested lists the subtrees already bound, so a Git directory several repositories share
+	// (or one inside a repository's own subtree) is read once.
+	var digested []string
 	for _, repo := range g.Repositories {
 		if err := ctx.Err(); err != nil {
 			return "", false, err
@@ -291,13 +294,20 @@ func (s *DeliveryFS) gitIdentity(ctx context.Context, st *staged, g GitFindings)
 			}
 			d.tree(modules, name)
 			modules.Close()
+			if real, err := filepath.EvalSymlinks(filepath.Join(layout.CommonDir(), "modules", name)); err == nil {
+				if rel, err := filepath.Rel(realRoot, real); err == nil && filepath.IsLocal(rel) {
+					digested = append(digested, filepath.ToSlash(rel))
+				}
+			}
 			continue
 		}
 		d.tree(root, repo)
-		// A gitfile or link names Git directories elsewhere: bound only when they are inside the
-		// checkout (and so deleted with it); outside, a discard could not show what it drops.
-		info, err := root.Lstat(path.Join(repo, ".git"))
-		if err != nil || info.IsDir() {
+		digested = append(digested, repo)
+		// The repository's Git directories may lie elsewhere: a gitfile or a link points at them,
+		// and a .git directory may name a shared one in commondir. Bound only when they are inside
+		// the checkout (and so deleted with it), each once; outside, or not resolving, a discard
+		// could not show what it drops.
+		if _, err := root.Lstat(path.Join(repo, ".git")); err != nil {
 			continue
 		}
 		layout, err := gitexclude.Resolve(filepath.Join(st.root, filepath.FromSlash(repo)))
@@ -316,14 +326,29 @@ func (s *DeliveryFS) gitIdentity(ctx context.Context, st *staged, g GitFindings)
 				d.incomplete("nested Git directory outside the checkout", nil)
 				continue
 			}
-			fmt.Fprintf(h, "points at %s\x00", filepath.ToSlash(rel))
-			d.tree(root, filepath.ToSlash(rel))
+			rel = filepath.ToSlash(rel)
+			if within(rel, digested) {
+				continue
+			}
+			fmt.Fprintf(h, "points at %s\x00", rel)
+			d.tree(root, rel)
+			digested = append(digested, rel)
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		return "", false, err
 	}
 	return hex.EncodeToString(h.Sum(nil)), d.complete, nil
+}
+
+// within reports that rel is one of dirs or below one.
+func within(rel string, dirs []string) bool {
+	for _, d := range dirs {
+		if rel == d || strings.HasPrefix(rel, d+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // digester writes the bytes of files into h within a budget of content bytes and entries. Once

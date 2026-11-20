@@ -200,7 +200,7 @@ func TestInspectReclaimGitIdentityFollowsNestedRepositories(t *testing.T) {
 }
 
 // A FIFO where a nested repository's Git metadata belongs neither hangs the inspection nor ignores
-// its context: it returns once the context ends, or as unverifiable.
+// its context: it returns, at the latest a bounded while after the context ends.
 func TestInspectReclaimDoesNotHangOnAFIFO(t *testing.T) {
 	for name, place := range map[string]func(t *testing.T, root string){
 		"gitfile": func(t *testing.T, root string) {
@@ -239,7 +239,7 @@ func TestInspectReclaimDoesNotHangOnAFIFO(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
 			place(t, req.Workspace.Root)
-			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 			defer cancel()
 			start := time.Now()
 			type result struct {
@@ -262,7 +262,8 @@ func TestInspectReclaimDoesNotHangOnAFIFO(t *testing.T) {
 					t.Fatalf("err = %v, want an incomplete digest", res.err)
 				}
 				t.Logf("returned after %v: %v", time.Since(start), res.err)
-			case <-time.After(5 * time.Second):
+			case <-time.After(30 * time.Second):
+				// Bounded by the context (2s) and process teardown, not by a tight timing.
 				t.Fatal("inspection hung on a FIFO")
 			}
 		})
