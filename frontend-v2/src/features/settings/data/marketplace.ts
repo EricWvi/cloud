@@ -50,6 +50,18 @@ export function marketplaceError(error: unknown): unknown {
 }
 
 /**
+ * How often to refetch the marketplace catalog. The catalog only lands once the marketplace's
+ * first sync finishes, which takes seconds on a fresh database, so an unsynced catalog keeps
+ * polling and a synced one stops: without this a page opened right after startup shows an empty
+ * listing that never recovers on its own.
+ */
+export function marketCatalogRefetchInterval(
+  data: { syncedAt?: string | null } | undefined,
+): number | false {
+  return data?.syncedAt ? false : 3000
+}
+
+/**
  * Reads the current workspace's marketplace catalog and Space selections through generated Cloud
  * clients. Writes are owner-only in v2 and carry a per-request idempotency key plus the current
  * selection version.
@@ -76,7 +88,12 @@ export function usePluginMarketplace() {
   const catalog = useGetApiV1TenantsTidSpacesSpaceIdPluginsCatalog(
     tenantId,
     spaceId,
-    { query: { enabled: tenantId !== '' && spaceId !== '' } },
+    {
+      query: {
+        enabled: tenantId !== '' && spaceId !== '',
+        refetchInterval: (query) => marketCatalogRefetchInterval(query.state.data),
+      },
+    },
   )
   const selections = useGetApiV1TenantsTidSpacesSpaceIdPlugins(
     tenantId,
