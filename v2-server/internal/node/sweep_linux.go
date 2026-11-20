@@ -24,6 +24,11 @@ import (
 // control socket it kills every live process carrying the mark of an attempt its ledger has not
 // confirmed stopped. Cleanup therefore lets the root's own Node do that once, instead of killing
 // anything itself, and then checks the root exactly as strictly as before.
+//
+// v2's classification only decides whether that Node start is worth it; it never chooses what
+// is killed and never makes cleanup succeed. It may therefore be a stricter subset of Node's
+// rule: a process it misses keeps cleanup failing closed, as before this sweep existed, and a
+// process it wrongly counts costs one Node start after which the strict wait still fails.
 
 // attemptMark is the environment variable Node gives every process of a session attempt. Its
 // value lists the attempt, after those of enclosing Nodes, separated by colons.
@@ -55,11 +60,15 @@ type observed struct {
 
 // claimedByLedger reports whether the process pid is one that the restart recovery of the Node
 // whose attempts scope describes kills: it carries the mark of one of those attempts, runs as
-// the attempt's user and started inside its window, or its parent is such a process. This is
-// Node's own rule; a process cleared of its environment is reached only through a live claimed
-// parent, so an orphaned one is not, and neither is a process of another root's Node, whose
-// attempts have no record here. A parent that started after its child is a reused PID and lends
-// nothing. lookup returns false for a process that has gone or cannot be read.
+// the attempt's user and started inside its window, or its parent is such a process. A process
+// cleared of its environment is reached only through a live claimed parent, so an orphaned one
+// is not, and neither is a process of another root's Node, whose attempts have no record here.
+// A parent that started after its child is a reused PID and lends nothing. lookup returns false
+// for a process that has gone or cannot be read.
+//
+// This is a conservative subset of Node's rule (safe, see above). Unlike Node it also requires
+// the attempt's user, reads only the first ORA_SESSION_ATTEMPT entry, does not read a zombie
+// leader's environment through its threads, and reads procfs without pinning the process.
 func claimedByLedger(pid int, lookup func(int) (observed, bool), scope func(attempt string) (markScope, bool)) bool {
 	var child *observed
 	for hops := 0; hops < 64 && pid > 1; hops++ {
@@ -167,9 +176,17 @@ func anyClaimedByLedger(paths Paths, pids []int) bool {
 
 // sweepMarked starts the root's Node once, from the executable and configuration its last
 // incarnation ran with, and stops it as soon as its control socket appears: Node binds it only
-// after its restart recovery killed the marked processes of unconfirmed attempts. It signals
-// nothing itself but the Node it started. The caller holds the root's lock and has stopped every
-// owned process, so this Node is the only one on the root.
+// after its restart recovery has run once over the attempts its ledger has not confirmed
+// stopped, killing the marked processes it finds. A bound socket does not mean every leftover is
+// gone (an attempt can end that pass Unknown, or be skipped while a restore is unconfirmed), so
+// the caller's strict wait afterwards decides, never this sweep. It signals nothing but the Node
+// it started. The caller holds the root's lock and has stopped every owned process, so this Node
+// is the only one on the root.
+//
+// The configuration names files of the nodeservices instance that wrote it, such as the TLS
+// identity Node validates at startup. They stay until the stop is confirmed, so they are there
+// whenever leftovers can be; if they are gone, Node exits before binding and cleanup fails as
+// before.
 func sweepMarked(ctx context.Context, paths Paths, grace time.Duration) error {
 	binary := filepath.Join(paths.Root, "nb")
 	for _, path := range []string{binary, paths.Config} {
