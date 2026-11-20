@@ -32,6 +32,8 @@ PostgreSQL、IDaaS、模型和内部 Git/S3 服务。Git 和系统库须预先�
 ## 主机与配置
 
 使用专用非 root 系统账号运行 Cloud。第一版 Agent 与 Cloud 同用户、不隔离，仅适用于互相信任的成员。
+Node 结束会话时要读 Agent 进程的环境，才能杀掉 Agent 起的后台作业（开发服务器、Gradle、sccache 这类守护进程也会被杀），
+这要求 Node 与 Agent 同用户或 Node 有 `CAP_SYS_PTRACE`；同用户运行满足它，见 [README](../README.md) 的「会话结束时杀掉的进程」。
 准备 PostgreSQL 和专用数据库、数据库身份；不要使用演示数据库或演示凭据。启动时自动执行尚未应用的
 版本化迁移，数据库身份需要在该库中建表的权限。由引入迁移之前的版本创建的数据库不能升级，启动会拒绝；
 须删除并重建该库。

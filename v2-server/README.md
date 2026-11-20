@@ -719,11 +719,21 @@ HTTP 集成测试按 `chat.openapi.json` 验证 JSON 响应，向注入点传入
 - 只选 `keep_session_on_cancel`，不选 `keep_session_on_failure`：失败的一轮仍然结束会话，等失败原因能上报（circus#1138）再打开。
 - 等 `TurnCancelSettled` 用固定窗口加「收到消息就重新计时」近似 D4，没有按确认进度判断，并且设了总上限（见上）。
 - 随后反正会结束会话的调用方（取消工作流运行、自动执行的工作流节点、定时对话的取消）也先走 `CancelTurn`，再 `End`：结果和直接结束一样，只是多一次往返，停止多花 Node 结算的时间（最多 G + Q）。
-- 升级锁定的 Node 会把 `V2_DATA_DIR` 下保留的 Node 账本迁到 v15（desktop#793 的新命令与事件）；锁定更早 Node 的 v2 打不开它。把 v2 回滚到锁定旧 Node 的版本之前，要先停掉 v2 并清掉 Node 账本（各项目目录下的 Node 数据库），和其他账本升级一样。
+- 升级锁定的 Node 会把 `V2_DATA_DIR` 下保留的 Node 账本迁到 v16（desktop#802 的停止证明 `lock_processes_and_marks` 和尝试范围标志；从 v14 升级的账本经过 desktop#793 的 v15 一次升到 v16）。迁移是单向的：锁定更早 Node 的 v2（包括锁定 desktop#793 合并 `2fc5e2ca`、只认到 v15 的版本）打不开它。把 v2 回滚到锁定旧 Node 的版本之前，要先停掉 v2 并清掉 Node 账本（各项目目录下的 Node 数据库），和其他账本升级一样。
 - 还在准备工作区（Agent 尚未启动）时停止，照旧结束会话。
 - 提交刚写给 Node、Node 的 `mcp_update_required` 拒绝还没到时停止，这一轮还没被标为被拒，于是照常发 `CancelTurn`，Node 回 `unknown`，退回 `EndSession` 结束会话：结果安全，和不保留会话时一样，只是这次没能保留会话。
 - 任务运行的「停止」按请求到达服务端时的状态判断要停的是不是一轮：页面还显示「正在执行」、而那一轮在请求到达前已经结束时，这个「停止」会结束空闲运行。要彻底区分，得让 Stop 带上目标轮次 ID（契约改动），v2 不做。
 - 会话能否保留由 Node 判定：Agent 版本不在 Node 的轮次边界清单里，或这一轮不满足静止条件时，结论是 `session_ending`，会话照旧结束。
+
+#### 会话结束时杀掉的进程
+
+会话以任何方式结束时（「结束会话」、删除对话、没能保留会话的「停止一轮」、工作流节点结束会话或取消运行、服务关闭），Node 在报告会话已停止之前，杀掉这个会话的 Agent 起的、带尝试环境标记（`ORA_SESSION_ATTEMPT`）的所有进程，所以 v2 收到停止确认之后再交付、回收工作区或开始后继节点时，不会再有这些进程写工作区。停止时 Agent 工具起的后台作业也会被杀，包括开发服务器、Gradle、sccache 这类守护进程；需要在会话结束后继续运行的进程，要在 Ora 之外启动。轮次之间、保留了会话的「停止一轮」不杀任何进程，后台作业一直运行到会话结束。这是 desktop#802 的行为，依据是 specs 的 `decisions/node/agent-runtime/20261120-attempt-mark-in-session-stop-evidence.md`；Node 把这种停止证据记为 `lock_processes_and_marks`，v2 不读这个值。
+
+保证等级仍是 BestEffort，只在 Linux 上提供。以下进程 Node 找不到，会在会话结束后继续运行、继续写工作区：清空或改写了自己环境的孤儿进程（例如 Agent 起的 PostgreSQL、nginx 会用进程标题覆盖环境区域）、经 `sudo` 等换了用户的进程、经 `docker run` 或 `systemd-run` 由别的服务代为启动的进程。v2 的 `-cleanup` 和工作区回收都不按 cwd 杀进程，不补这个缺口。
+
+Node 进程本身被杀（崩溃、OOM、SIGKILL）时，v2 用不上 Node 的重启恢复：Node 重启后会先杀掉带标记的进程再报告中断，但 v2 在重新启动这个项目的 Node 之前，要先确认运行目录里没有不认识的进程（见 [`internal/node`](internal/node/README.md)，等 3 秒）。Agent 的后台作业还活着、cwd 又在工作区里，这一步就失败，同一项目的新会话以 `agent_prepare_failed` 结束，作业一直运行到自己退出，期间仍可能写工作区；作业退出后项目照常恢复。
+
+部署前提是 Node 与 Agent 以同一用户运行，或 Node 有 `CAP_SYS_PTRACE`，否则 Node 读不到 Agent 进程的环境，停止多半记为 `stop_unconfirmed`（Node 启动时只告警）。v2 生成的 Node 配置不设 `process.workload_uid`，Node 和 Agent 都以 v2-server 自己的用户运行，这个前提总是成立；把 Agent 改成以别的用户运行时要同时满足它。
 
 ### 回合交付
 
@@ -783,7 +793,7 @@ Session、Turn、连续事件、完整结果和 Caller attempt 保存在 Postgre
 
 有项目 Cancel 只停这一轮、会话照常 Append（Node 协商了 `turn_cancel` 并保留了会话，见「停止一轮」），否则结束整个物理会话，确认停止后后续 Append 返回 `ErrSessionEnded`；
 纯模型 Cancel 只停止当前轮，之后可继续。取消已经结束的旧轮只返回原结果，不停止后来的轮次。
-End 确认停止后持久化会话结束，历史仍可读。启动先恢复并停止旧 Node，再把未完成轮记为 interrupted、
+End 确认停止后持久化会话结束，历史仍可读；停止时 Agent 工具起的后台作业也会被杀，包括开发服务器、Gradle、sccache 这类守护进程，范围和缺口见「会话结束时杀掉的进程」。启动先恢复并停止旧 Node，再把未完成轮记为 interrupted、
 将旧会话全部结束；不重放 prompt 或恢复 Agent 上下文。页面领域继续通过同一执行接口接入。
 
 fixture 只替代模型，Git、Node、OpenCode / Claude Code 与 shell 工具都实际执行：
@@ -924,7 +934,7 @@ npm run e2e -- e2e/workflow-runs.spec.ts e2e/workflow-containers.spec.ts e2e/sch
 
 - **同一运行的 Agent 并发执行**（与 desktop 相同，列在这里说明做法；Loop 轮次失败时的处理除外，见本条末尾）：同一波就绪的 Agent 各自启动（受下面的会话上限约束），每个尝试是一个独立的执行会话，共用运行的目录，轮次同时执行；交互节点的后续消息同样不等其他节点。同一目录最多 8 个未结束的会话（Node 的 `shared_checkout_sessions` 上限，等待输入的交互节点会话也算在内），执行桥按这个上限限流：运行的未结束会话已满时，新尝试在启动会话前等待，有会话结束（普通尝试结束会话、交互节点完成、停止或随运行关闭）再开始；取消运行或关闭它所在的 Loop 轮次时，等待中的尝试不再启动。会话等 End 得到确认（成功，或报会话不存在、已结束）才让出名额：运行还在执行时，没确认的会话继续占名额，后台从 1 秒起、翻倍到 30 秒重试 End；运行已失败、取消（包括停止未确认、运行还开着的取消）或结束时不再重试，名额直接让出，会话留给项目里的下一次 End——每次没得到停止证明的 End 都会让执行服务重建项目的 Node，连带结束同项目的其他会话，不该为一个用不上的名额提早触发。End 一直确认不了的会话在运行执行期间一直占着名额：8 个名额都被这样的会话占着时，新尝试一直显示「等待会话名额」，不报错；取消运行或重启进程可以解开（重启时先证明旧 Node 进程已停）。重启只保留合法的交互等待（见「交互等待跨重启」）：它们重启后继续占名额，新 Agent 要到下一轮才起，这样计数偏保守；重启前会话已结束、End 没确认的停住节点，恢复时再 End 一次，确认后让出名额。Node 仍拒绝某个会话时只有它自己失败，普通 Agent 节点以 `session` 失败并照常自动重试，交互节点首轮被拒以 `interactive_session` 失败（可从失败处继续）。每个尝试启动前、以及解析完执行器即将 `Start` 前各确认一次运行仍在执行：运行已经结束时它还没有启动任何东西，直接收为 `cancelled`。已经在执行的兄弟不受另一个节点让运行失败的影响，迟到结果照常记录（desktop 同样如此）；Loop 轮次因子节点失败关闭时，已在执行的同轮兄弟收为 `cancelled`，执行桥随即停掉它们的 turn（不等停止确认），迟到结果不再写入；desktop 让它们执行完本轮，这里有意偏离（见 `internal/workflow/README.md`）。代价是被停的 turn 可能在运行目录里留下写了一半的文件：续跑保留文件、从第 1 轮重开 Loop，就从这些文件开始。
 - **prompt**：按 desktop 的 `assemble_workflow_prompt` 组装 `workspace_root`、`current_workflow_step`、`workflow_context`，按运行冻结的 locale 选文案；选择角色且角色正文非空白时，按 desktop 的模板在 `workspace_root` 之后、`current_workflow_step` 之前插入 `<system_instructions>`（角色说明、引用名、正文），选择 Skill 时附加 `required_skills`；启用 `injectLastFailure`（默认开启）且同一节点、同一 Iteration 项存在可注入的上一次失败尝试（不区分 Loop 轮次：续跑从第 1 轮重放时，第 1 轮会拿到后面轮次的失败，和 desktop 一致）（`structured_output`、`agent_refusal`、`unknown_stop_reason`、`multiple_outputs`）时，在 `required_skills` 之后追加上次失败的文字说明（`structured_output` 另附截断的原输出），写入 `agentPrompt`（`workflowhost/prompt.go`），同一段文字也记在尝试的 `payload.injected_failure_context` 里、显示在节点详情中，同租户成员亦可在重跑或续跑尝试的 `turn_ended.prompt` 里看到。节点 prompt 的 `{{#…#}}` 先按变量池渲染，渲染失败的节点以 `prompt_template` 失败，不启动 Agent。公共执行服务在接受 prompt 之后才在 Node 里克隆运行目录，也不暴露它的路径，所以 `workspace_root` 写 `.`（Agent 进程的工作目录就是运行目录），不写 desktop 的绝对路径。
-- **会话绑定时机**：`Start` 返回 turn 引用即视为 prompt 已被接受，随后把 session 绑定到节点尝试（desktop 同样在 prompt 被接受后才发布绑定）；绑定被拒（尝试已不在运行）时结束该会话。turn 结束后执行桥结束会话，对话历史保留。
+- **会话绑定时机**：`Start` 返回 turn 引用即视为 prompt 已被接受，随后把 session 绑定到节点尝试（desktop 同样在 prompt 被接受后才发布绑定）；绑定被拒（尝试已不在运行）时结束该会话。turn 结束后执行桥结束会话，对话历史保留；节点的 Agent 在后台起的作业（开发服务器、Gradle、sccache 这类守护进程）随会话被杀，不会留给后继节点，见「会话结束时杀掉的进程」。
 - **结果映射**：只有 `completed` 且答案完整（`AnswerComplete`）才可能成功，再按 desktop 的停止原因映射：`end_turn`、`max_tokens`、`max_turn_requests` 成功；`refusal` 为 `agent_refusal`；缺少停止原因为 `session_ended_without_stop_reason`；其他为 `unknown_stop_reason`。turn 失败、取消、中断或答案不完整一律以 `session` 失败，失败节点保留已有的回答。
 - **取消**：先用发起运行的用户身份同时取消所有活动 turn，全部确认后再关闭运行；还在 Start 的尝试不拖住别的停止，它的 Start 一返回就取消它。任一停止未确认（包括等 Start 超时）时返回 `503 workflow_run_stop_unconfirmed`，运行保持打开但不再推进；已确认停止的兄弟不会提前关闭运行，最后一个 turn 结束后才由执行桥关闭为已取消；超时后才返回的 Start 由它的尝试自己取消。
 - **运行发起者持久化**：启动门禁内保存 started_by，表单默认确认人为实际发起者。执行中的尝试仍只在进程内记录；取消等 Start 超时后补发的停止在后台进行，进程关闭时最多再等它们约 `StopTimeout` + `execution.TurnStopSettleLimit`（默认 30 + 60 = 90 秒）：补发的停止先等 Node 结算只停这一轮的停止（最多 60 秒），等不到才结束会话并等停止确认；普通 Agent 执行重启后中断，冻结表单及提交后的确定性任务步骤可以恢复。拆分运行同样恢复已提交的审核，但停在未提交表单的拆分运行会在重启时取消（见上文拆分的“重启”）；任务的处理运行在重启时一律取消。
