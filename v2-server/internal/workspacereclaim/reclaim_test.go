@@ -1118,3 +1118,83 @@ func TestReclaimRetriesPassingGitFailures(t *testing.T) {
 		})
 	}
 }
+
+// A deadline that ends while HEAD is being resolved leaves the reclaim as it was (pending, for
+// the next attempt), never kept.
+func TestReclaimLeavesAHEADThatTimesOutPending(t *testing.T) {
+	f := newFixture(t)
+	c := f.chat(t, st.TurnDelivered)
+	f.deleteChat(t, c, store.ReclaimRecoverable)
+	restore := workspacefs.InjectGitFault(func(args []string) error {
+		if strings.Join(args, " ") == "rev-parse -q --verify HEAD^{commit}" {
+			time.Sleep(300 * time.Millisecond)
+			return errors.New("signal: killed")
+		}
+		return nil
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+	_, err := f.r.Reclaim(ctx, c.WorkspaceID)
+	cancel()
+	restore()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the deadline", err)
+	}
+	if r := f.reclaim(t, c); r.Status != store.ReclaimPending || !exists(t, c.Path) {
+		t.Fatalf("after the deadline: %+v", r)
+	}
+	if err := wr.New(f.s, f.fs, f.remover).Resume(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.reclaim(t, c); r.Status != store.ReclaimReclaimed {
+		t.Fatalf("after the restart: %+v", r)
+	}
+}
+
+// HEAD's branch is recorded but broken: cut short (loose or packed), or naming a blob. Git skips
+// or cannot use it, and the default reclaim keeps the checkout with the commit's objects.
+func TestReclaimKeepsAHEADWhoseBranchIsBroken(t *testing.T) {
+	for name, tc := range map[string]struct {
+		packed bool
+		value  func(commit, blob string) string
+	}{
+		"loose ref cut short":  {false, func(commit, _ string) string { return commit[:12] }},
+		"packed ref cut short": {true, func(commit, _ string) string { return commit[:12] }},
+		"loose ref to a blob":  {false, func(_, blob string) string { return blob }},
+		"packed ref to a blob": {true, func(_, blob string) string { return blob }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			c := f.chat(t, st.TurnDelivered)
+			write(t, c.Path, "README.md", "only on main\n")
+			git(t, c.Path, "commit", "-qm", "unique", "README.md")
+			commit := git(t, c.Path, "rev-parse", "HEAD")
+			blob := git(t, c.Path, "rev-parse", "HEAD:README.md")
+			git(t, c.Path, "restore", "--source=HEAD~1", "--staged", "--worktree", "README.md")
+			value := tc.value(commit, blob)
+			if tc.packed {
+				git(t, c.Path, "pack-refs", "--all")
+				packed, err := os.ReadFile(filepath.Join(c.Path, ".git", "packed-refs"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				edited := strings.Replace(string(packed), commit+" refs/heads/main", value+" refs/heads/main", 1)
+				if edited == string(packed) {
+					t.Fatalf("main is not packed: %s", packed)
+				}
+				write(t, c.Path, ".git/packed-refs", edited)
+			} else {
+				write(t, c.Path, ".git/refs/heads/main", value+"\n")
+			}
+			f.deleteChat(t, c, store.ReclaimRecoverable)
+			if got := f.run(t, c); got != (wr.Outcome{Workspace: wr.OutcomeKept, Reason: wr.ReasonUnverifiable}) {
+				t.Fatalf("outcome %+v", got)
+			}
+			// Git refuses this repository now; the objects are still there as files.
+			for _, object := range []string{commit, blob} {
+				if !exists(t, filepath.Join(c.Path, ".git", "objects", object[:2], object[2:])) {
+					t.Fatalf("object %s went", object)
+				}
+			}
+		})
+	}
+}

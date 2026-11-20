@@ -181,6 +181,10 @@ func (s *DeliveryFS) gitState(ctx context.Context, st *staged, target string) (G
 	// The Agent's own repository, found from the checkout the way Git finds it, with hooks,
 	// fsmonitor, filters and global or system configuration overridden on the command line.
 	agent := deliveryGit{binary: s.git, dir: st.root, env: []string{"GIT_CEILING_DIRECTORIES=" + filepath.Dir(st.root)}}
+	// Malformed ref files first: Git may fail on them with a message that says nothing of objects.
+	if err := checkRecordedRefs(layout, nil); err != nil {
+		return g, err
+	}
 	refs, err := agent.run(ctx, nil, MaxDiffBytes, "for-each-ref", "--format=%(refname)%00%(objecttype)%00%(*objecttype)")
 	if err != nil {
 		return g, corrupt(err)
@@ -748,7 +752,8 @@ func refValue(root, ref string, depth int) (string, bool, error) {
 // checkRecordedRefs reads the refs the repository records as files (loose refs under refs/ of
 // its common and its own Git directory, and packed-refs) without following links or blocking, and
 // requires each to be a well-formed object ID or symbolic ref, and each object ID ref to be one
-// for-each-ref listed: a ref Git could not read is not taken for one that is absent. A reftable
+// for-each-ref listed (when listed is not nil): a ref Git could not read is not taken for one that
+// is absent. A reftable
 // cannot be read this way and counts as unverifiable.
 func checkRecordedRefs(layout gitexclude.Layout, listed map[string]bool) error {
 	dirs := []string{layout.CommonDir()}
@@ -776,7 +781,7 @@ func checkRecordedRefs(layout gitexclude.Layout, listed map[string]bool) error {
 				if !validCommit(value) {
 					return fmt.Errorf("%w: ref %s is malformed", ErrUnverifiable, name)
 				}
-				if !listed[name] {
+				if listed != nil && !listed[name] {
 					return fmt.Errorf("%w: ref %s cannot be read", ErrUnverifiable, name)
 				}
 				return nil

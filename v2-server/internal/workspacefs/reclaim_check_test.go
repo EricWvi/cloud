@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -380,5 +381,28 @@ func TestInspectReclaimRetriesAPassingHEADReadError(t *testing.T) {
 	}
 	if _, err := f.InspectReclaim(t.Context(), req.Workspace, req.MirrorPath, ""); err != nil {
 		t.Fatalf("after the fault: %v", err)
+	}
+}
+
+// A HEAD that cannot be resolved because time ran out is not a verdict on the checkout: the
+// inspection returns the context's error, never ErrUnverifiable.
+func TestInspectReclaimDoesNotJudgeAHEADThatTimesOut(t *testing.T) {
+	f, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
+	defer workspacefs.InjectGitFault(func(args []string) error {
+		if strings.Join(args, " ") == "rev-parse -q --verify HEAD^{commit}" {
+			time.Sleep(300 * time.Millisecond) // Git hangs past the deadline and is killed
+			return errors.New("signal: killed")
+		}
+		return nil
+	})()
+	unlock, err := f.LockWorkspace(t.Context(), req.Workspace.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := f.InspectReclaim(ctx, req.Workspace, req.MirrorPath, ""); err == nil || errors.Is(err, workspacefs.ErrUnverifiable) {
+		t.Fatalf("err = %v, want a retryable error", err)
 	}
 }
