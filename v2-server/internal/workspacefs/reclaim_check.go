@@ -182,7 +182,7 @@ func (s *DeliveryFS) gitState(ctx context.Context, st *staged, target string) (G
 	agent := deliveryGit{binary: s.git, dir: st.root, env: []string{"GIT_CEILING_DIRECTORIES=" + filepath.Dir(st.root)}}
 	refs, err := agent.run(ctx, nil, MaxDiffBytes, "for-each-ref", "--format=%(refname)%00%(objecttype)%00%(*objecttype)")
 	if err != nil {
-		return g, err
+		return g, corrupt(err)
 	}
 	stop := []string{"--not", st.base}
 	if _, err := agent.value(ctx, "rev-parse", "--verify", "-q", "HEAD^{commit}"); err == nil {
@@ -209,7 +209,7 @@ func (s *DeliveryFS) gitState(ctx context.Context, st *staged, target string) (G
 		}
 		count, err := agent.value(ctx, append(append([]string{"rev-list", "--count", name + "^{commit}"}, stop...), "--")...)
 		if err != nil {
-			return g, err
+			return g, corrupt(err)
 		}
 		if n, err := strconv.Atoi(count); err == nil && n > 0 {
 			g.Refs = append(g.Refs, RefFinding{Name: name, Commits: n})
@@ -252,7 +252,7 @@ func (s *DeliveryFS) gitIdentity(ctx context.Context, st *staged, g GitFindings)
 		agent := deliveryGit{binary: s.git, dir: st.root, env: []string{"GIT_CEILING_DIRECTORIES=" + filepath.Dir(st.root)}}
 		refs, err := agent.run(ctx, nil, MaxDiffBytes, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(*objectname)")
 		if err != nil {
-			return "", false, err
+			return "", false, corrupt(err)
 		}
 		h.Write(refs)
 		head, _ := agent.value(ctx, "rev-parse", "-q", "--verify", "HEAD")
@@ -260,7 +260,7 @@ func (s *DeliveryFS) gitIdentity(ctx context.Context, st *staged, g GitFindings)
 		if g.Stashes > 0 {
 			stashes, err := agent.run(ctx, nil, MaxDiffBytes, "rev-list", "--walk-reflogs", "refs/stash")
 			if err != nil {
-				return "", false, err
+				return "", false, corrupt(err)
 			}
 			h.Write(stashes)
 		}
@@ -518,10 +518,14 @@ func (s *DeliveryFS) headAndIndex(ctx context.Context, agent deliveryGit, st *st
 		return false
 	}
 	headEntries := map[string]entry{}
-	if _, err := agent.value(ctx, "rev-parse", "-q", "--verify", "HEAD^{commit}"); err == nil {
+	present, err := s.headPresent(ctx, agent, st)
+	if err != nil {
+		return false, 0, false, err
+	}
+	if present {
 		head, err := listing(agent, "ls-tree", "-r", "-z", "--full-tree", "HEAD")
 		if err != nil {
-			return false, 0, false, err
+			return false, 0, false, fmt.Errorf("%w: read HEAD's tree: %w", ErrUnverifiable, err)
 		}
 		for _, line := range strings.Split(string(head), "\x00") {
 			meta, path, ok := strings.Cut(line, "\t")
@@ -580,6 +584,96 @@ func (s *DeliveryFS) headAndIndex(ctx context.Context, agent deliveryGit, st *st
 		}
 	}
 	return headDiffers, headCommits, indexDiffers, nil
+}
+
+// corrupt marks a Git failure that comes from the repository's content (an object it names is
+// missing or unreadable) as ErrUnverifiable, which retrying cannot change; other failures stay as
+// they are and are retried.
+func corrupt(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	for _, sign := range []string{"missing object", "bad object", "not a valid object", "invalid object", "unable to read", "Could not parse object", "corrupt"} {
+		if strings.Contains(msg, sign) {
+			return fmt.Errorf("%w: %w", ErrUnverifiable, err)
+		}
+	}
+	return err
+}
+
+// headPresent tells whether HEAD names a commit to compare, failing closed: only a symbolic HEAD
+// naming a ref that does not exist (an unborn branch) has no commit. A detached HEAD, or one
+// naming an existing ref, that does not resolve to a readable commit makes the checkout
+// unverifiable; it is never taken for a missing HEAD.
+func (s *DeliveryFS) headPresent(ctx context.Context, agent deliveryGit, st *staged) (bool, error) {
+	if _, err := agent.value(ctx, "rev-parse", "-q", "--verify", "HEAD^{commit}"); err == nil {
+		return true, nil
+	}
+	ref, err := agent.value(ctx, "symbolic-ref", "-q", "HEAD")
+	if err != nil {
+		// Detached (exit 1) with an OID that does not resolve, or a HEAD Git cannot read.
+		return false, fmt.Errorf("%w: HEAD does not resolve to a commit: %w", ErrUnverifiable, err)
+	}
+	recorded, err := refRecorded(st.root, ref)
+	if err != nil {
+		return false, err
+	}
+	if recorded {
+		return false, fmt.Errorf("%w: HEAD names %s, which does not resolve to a commit", ErrUnverifiable, ref)
+	}
+	return false, nil // unborn: nothing committed yet
+}
+
+// refRecorded reports whether the repository records ref at all, as a loose ref or in
+// packed-refs, read as files under its common Git directory. A repository with a reftable
+// cannot be read this way and counts as unverifiable.
+func refRecorded(root, ref string) (bool, error) {
+	if !strings.HasPrefix(ref, "refs/") || !filepath.IsLocal(ref) {
+		return false, fmt.Errorf("%w: HEAD names %q", ErrUnverifiable, ref)
+	}
+	layout, err := gitexclude.Resolve(root)
+	if err != nil {
+		return false, fmt.Errorf("%w: %w", ErrUnverifiable, err)
+	}
+	common, err := os.OpenRoot(layout.CommonDir())
+	if err != nil {
+		return false, err
+	}
+	defer common.Close()
+	if _, err := common.Lstat("reftable"); err == nil {
+		return false, fmt.Errorf("%w: the repository uses a reftable", ErrUnverifiable)
+	}
+	if _, err := common.Lstat(ref); err == nil {
+		return true, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	info, err := common.Lstat("packed-refs")
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxTreeListing {
+		return false, fmt.Errorf("%w: packed-refs is not a regular file within limits", ErrUnverifiable)
+	}
+	f, err := common.OpenFile("packed-refs", os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	packed, err := io.ReadAll(io.LimitReader(f, maxTreeListing))
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(string(packed), "\n") {
+		if _, name, ok := strings.Cut(line, " "); ok && strings.TrimSpace(name) == ref {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // nestedGit lists every entry named .git below the checkout's top level, whatever its kind

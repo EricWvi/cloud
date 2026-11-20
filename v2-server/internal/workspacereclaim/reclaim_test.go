@@ -971,3 +971,39 @@ func TestReclaimKeepsWorkOnlyHEADOrTheIndexHolds(t *testing.T) {
 		})
 	}
 }
+
+// A detached HEAD whose commit cannot be read is not "no HEAD": the default reclaim keeps the
+// checkout as unverifiable. An unborn branch has nothing committed and is still reclaimed.
+func TestReclaimFailsClosedOnAnUnreadableHEAD(t *testing.T) {
+	t.Run("detached HEAD with its commit missing", func(t *testing.T) {
+		f := newFixture(t)
+		c := f.chat(t, st.TurnDelivered)
+		base := c.Repository.Base
+		git(t, c.Path, "checkout", "-q", "--detach")
+		write(t, c.Path, "README.md", "only in this commit\n")
+		git(t, c.Path, "commit", "-qam", "unique")
+		commit := git(t, c.Path, "rev-parse", "HEAD")
+		tree := git(t, c.Path, "rev-parse", "HEAD^{tree}")
+		blob := git(t, c.Path, "rev-parse", "HEAD:README.md")
+		git(t, c.Path, "restore", "--source="+base, "--staged", "--worktree", "README.md")
+		if err := os.Remove(filepath.Join(c.Path, ".git", "objects", commit[:2], commit[2:])); err != nil {
+			t.Fatal(err)
+		}
+		f.deleteChat(t, c, store.ReclaimRecoverable)
+		if got := f.run(t, c); got != (wr.Outcome{Workspace: wr.OutcomeKept, Reason: wr.ReasonUnverifiable}) {
+			t.Fatalf("outcome %+v", got)
+		}
+		for _, object := range []string{tree, blob} {
+			git(t, c.Path, "cat-file", "-e", object) // the checkout and what is left of the commit stay
+		}
+	})
+	t.Run("unborn branch", func(t *testing.T) {
+		f := newFixture(t)
+		c := f.chat(t, st.TurnDelivered)
+		git(t, c.Path, "symbolic-ref", "HEAD", "refs/heads/not-yet")
+		f.deleteChat(t, c, store.ReclaimRecoverable)
+		if got := f.run(t, c); got.Workspace != wr.OutcomeReclaimed {
+			t.Fatalf("outcome %+v", got)
+		}
+	})
+}

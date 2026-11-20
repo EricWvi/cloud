@@ -288,3 +288,43 @@ func TestInspectReclaimDoesNotHangOnAFIFO(t *testing.T) {
 		})
 	}
 }
+
+// HEAD fails closed: a detached HEAD or a branch whose commit cannot be read makes the checkout
+// unverifiable; only an unborn branch (a ref that does not exist) has no HEAD to compare.
+func TestInspectReclaimFailsClosedOnAnUnreadableHEAD(t *testing.T) {
+	brokenCommit := func(t *testing.T, root string) string {
+		deliveryWrite(t, root, "README.md", "only in this commit\n")
+		deliveryGit(t, root, "commit", "-qm", "unique", "README.md")
+		commit := deliveryGit(t, root, "rev-parse", "HEAD")
+		deliveryGit(t, root, "restore", "--source=HEAD~1", "--staged", "--worktree", "README.md")
+		if err := os.Remove(filepath.Join(root, ".git", "objects", commit[:2], commit[2:])); err != nil {
+			t.Fatal(err)
+		}
+		return commit
+	}
+	for name, tc := range map[string]struct {
+		setup        func(t *testing.T, root string)
+		unverifiable bool
+	}{
+		"detached": {func(t *testing.T, root string) {
+			deliveryGit(t, root, "checkout", "-q", "--detach")
+			brokenCommit(t, root)
+		}, true},
+		"existing branch": {func(t *testing.T, root string) { brokenCommit(t, root) }, true},
+		"unborn branch":   {func(t *testing.T, root string) { deliveryGit(t, root, "symbolic-ref", "HEAD", "refs/heads/not-yet") }, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
+			tc.setup(t, req.Workspace.Root)
+			unlock, err := f.LockWorkspace(t.Context(), req.Workspace.Root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlock()
+			_, err = f.InspectReclaim(t.Context(), req.Workspace, req.MirrorPath, "")
+			if got := errors.Is(err, workspacefs.ErrUnverifiable); got != tc.unverifiable || (!tc.unverifiable && err != nil) {
+				t.Fatalf("err = %v, want unverifiable %v", err, tc.unverifiable)
+			}
+		})
+	}
+}
