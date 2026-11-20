@@ -38,7 +38,10 @@ the target host beforehand; operating system dependencies are not bundled.
 ## Host and configuration
 
 Use a dedicated non-root account. Agents run as the Cloud account without isolation; the first
-release is suitable only for mutually trusted members. Provision a dedicated PostgreSQL database
+release is suitable only for mutually trusted members. To kill the background jobs an Agent
+started (development servers and daemons such as Gradle or sccache included) when a session ends,
+Node reads the Agent processes' environments, which requires the same user or `CAP_SYS_PTRACE`;
+the shared account satisfies it (see "会话结束时杀掉的进程" in the [README](../README.md)). Provision a dedicated PostgreSQL database
 and identity without demo credentials. Pending versioned migrations run automatically at startup, so
 the database identity needs permission to create tables in that database. A database created by a
 version before migrations cannot be upgraded and startup refuses it; drop and recreate it.
