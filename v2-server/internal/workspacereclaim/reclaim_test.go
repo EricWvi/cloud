@@ -1257,3 +1257,36 @@ func TestReclaimKeepsADamagedPackedRefs(t *testing.T) {
 		})
 	}
 }
+
+// HEAD's own commit, only on a detached HEAD, is damaged: cut to half its size (cat-file still
+// reads its type, rev-parse reports it corrupt) or emptied. The default reclaim keeps the
+// checkout instead of retrying for ever.
+func TestReclaimKeepsAHEADWhoseCommitIsCorrupt(t *testing.T) {
+	for name, cut := range map[string]func(raw []byte) []byte{
+		"cut to half": func(raw []byte) []byte { return raw[:len(raw)/2] },
+		"emptied":     func([]byte) []byte { return nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			c := f.chat(t, st.TurnDelivered)
+			git(t, c.Path, "checkout", "-q", "--detach")
+			git(t, c.Path, "commit", "-q", "--allow-empty", "-m", "unique")
+			head := git(t, c.Path, "rev-parse", "HEAD")
+			file := filepath.Join(c.Path, ".git", "objects", head[:2], head[2:])
+			raw, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(file, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(file, cut(raw), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			f.deleteChat(t, c, store.ReclaimRecoverable)
+			if got := f.run(t, c); got != (wr.Outcome{Workspace: wr.OutcomeKept, Reason: wr.ReasonUnverifiable}) || !exists(t, file) {
+				t.Fatalf("outcome %+v", got)
+			}
+		})
+	}
+}

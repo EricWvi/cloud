@@ -635,6 +635,16 @@ func ioTrouble(msg string) bool {
 	return false
 }
 
+// objectDamage reports a diagnostic in which Git says an object file itself is damaged.
+func objectDamage(msg string) bool {
+	for _, sign := range []string{"corrupt loose object", "is corrupt", "inflate", "is empty", "unable to unpack", "bad object", "hash mismatch"} {
+		if strings.Contains(msg, sign) {
+			return true
+		}
+	}
+	return false
+}
+
 // headPresent tells whether HEAD names a commit to compare, failing closed: only a symbolic HEAD
 // naming a ref that does not exist (an unborn branch) has no commit. A detached HEAD, or one
 // naming an existing ref, that does not resolve to a readable commit makes the checkout
@@ -684,15 +694,22 @@ func (s *DeliveryFS) headPresent(ctx context.Context, agent deliveryGit, st *sta
 	if !validCommit(oid) {
 		return false, fmt.Errorf("%w: HEAD does not name an object", ErrUnverifiable)
 	}
-	// Why HEAD did not resolve decides. cat-file -t says why with a diagnostic; every diagnostic
-	// seen so far counts: any I/O or permission trouble means the failure may pass (retried with the
-	// original error). Only an object reported absent, or one that is not a commit, with no such
-	// trouble anywhere, is a lasting state of the checkout. Silence proves nothing and is retried.
+	// Why HEAD did not resolve decides, from every diagnostic of rev-parse and cat-file -t, in this
+	// order: I/O or permission trouble may pass (retried with the original error); an object file
+	// Git calls damaged, an object reported absent, or one that is not a commit is a lasting state
+	// of the checkout (unverifiable); anything else, silence included, is retried.
 	kind, err := agent.value(ctx, "cat-file", "-t", oid)
-	trouble := ioTrouble(resolveErr.Error()) || (err != nil && ioTrouble(err.Error()))
+	said := resolveErr.Error()
+	if err != nil {
+		said += "\n" + err.Error()
+	}
 	switch {
-	case trouble:
+	case ioTrouble(said):
 		return false, resolveErr
+	case objectDamage(said):
+		// cat-file -t may still read the type from a half-written object; rev-parse reading it
+		// whole is what reports the damage.
+		return false, fmt.Errorf("%w: HEAD's commit %s is damaged: %w", ErrUnverifiable, oid, resolveErr)
 	case err == nil && kind != "commit":
 		return false, fmt.Errorf("%w: HEAD names a %s, not a commit", ErrUnverifiable, kind)
 	case err != nil && strings.Contains(err.Error(), "could not get object info"):
