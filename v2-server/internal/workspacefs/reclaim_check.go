@@ -30,6 +30,13 @@ type GitFindings struct {
 	// Repositories are nested repositories: a .git of any kind below the top level, a gitlink the
 	// snapshot changed, or an initialized submodule under .git/modules/.
 	Repositories []string `json:"repositories"`
+	// HeadDiffers reports a HEAD beyond the base whose tree differs from the delivery's on a path
+	// it tracks; HeadCommits counts its commits beyond the base.
+	HeadDiffers bool `json:"headDiffers"`
+	HeadCommits int  `json:"headCommits,omitempty"`
+	// IndexDiffers reports an index with a conflict, or an entry whose blob or mode differs from
+	// the delivery's at the same path.
+	IndexDiffers bool `json:"indexDiffers"`
 }
 
 // RefFinding is one ref that points at work beyond the base and HEAD.
@@ -43,7 +50,7 @@ type RefFinding struct {
 
 // Empty reports that the repository holds nothing beyond the snapshot.
 func (g GitFindings) Empty() bool {
-	return g.Stashes == 0 && len(g.Refs) == 0 && len(g.Repositories) == 0
+	return g.Stashes == 0 && len(g.Refs) == 0 && len(g.Repositories) == 0 && !g.HeadDiffers && !g.IndexDiffers
 }
 
 // inspectTimeout bounds one InspectReclaim.
@@ -122,7 +129,7 @@ func (s *DeliveryFS) InspectReclaim(ctx context.Context, ws Workspace, mirrorPat
 		out.Total = strings.Count(string(status), "\x00") / 2
 		out.Changes = all.Files[:min(len(all.Files), MaxReclaimChanges)]
 	}
-	if out.Git, err = s.gitState(ctx, st); err != nil {
+	if out.Git, err = s.gitState(ctx, st, target); err != nil {
 		return out, err
 	}
 	if out.GitIdentity, out.GitIdentityComplete, err = s.gitIdentity(ctx, st, out.Git); err != nil {
@@ -136,7 +143,7 @@ func (s *DeliveryFS) InspectReclaim(ctx context.Context, ws Workspace, mirrorPat
 // and HEAD (or not commits), changed gitlinks in the snapshot, nested repositories of any kind
 // (ignored directories included) and initialized submodules. A .git that cannot be resolved makes
 // the checkout unverifiable; one that is absent has no refs to lose.
-func (s *DeliveryFS) gitState(ctx context.Context, st *staged) (GitFindings, error) {
+func (s *DeliveryFS) gitState(ctx context.Context, st *staged, target string) (GitFindings, error) {
 	g := GitFindings{Refs: []RefFinding{}, Repositories: []string{}}
 	raw, err := st.git.run(ctx, nil, MaxDiffBytes, "diff-tree", "-r", "--no-renames", "-z", st.baseTree, st.tree)
 	if err != nil {
@@ -207,6 +214,9 @@ func (s *DeliveryFS) gitState(ctx context.Context, st *staged) (GitFindings, err
 		if n, err := strconv.Atoi(count); err == nil && n > 0 {
 			g.Refs = append(g.Refs, RefFinding{Name: name, Commits: n})
 		}
+	}
+	if g.HeadDiffers, g.HeadCommits, g.IndexDiffers, err = s.headAndIndex(ctx, agent, st, target); err != nil {
+		return g, err
 	}
 	// A submodule is both a changed gitlink and a nested .git: name it once.
 	seen := map[string]bool{}
@@ -450,6 +460,126 @@ func (d *digester) tree(r *os.Root, dir string) {
 	if err != nil {
 		d.incomplete(dir, err)
 	}
+}
+
+// maxTreeListing bounds a listing of the HEAD tree, the index or the delivery's tree.
+const maxTreeListing = 64 << 20
+
+// headAndIndex compares what HEAD and the index hold with the delivery's tree target, since
+// neither is in the snapshot (which reads the working tree). HEAD is fine when it is the base or
+// one of its ancestors, or when every path its tree tracks has the same mode and object in the
+// target or in the base, whose snapshot the mirror keeps (untracked files the delivery added do
+// not matter; content only an intermediate commit
+// held does not count, as for refs). The index is fine when it has no conflict and every entry
+// has the same mode and object as the target or the base at its path, or as HEAD (an unstaged change: HEAD's
+// content is the base's or the delivery's when HEAD is fine); an intent-to-add entry (the empty
+// blob) only needs the path in the target, since its content is the working tree's. Paths under Ora's
+// materialized skill roots that the delivery left out are skipped, as the delivery strips them.
+func (s *DeliveryFS) headAndIndex(ctx context.Context, agent deliveryGit, st *staged, target string) (headDiffers bool, headCommits int, indexDiffers bool, err error) {
+	listing := func(g deliveryGit, args ...string) ([]byte, error) {
+		raw, err := g.run(ctx, nil, maxTreeListing, args...)
+		if errors.Is(err, ErrTooLarge) {
+			return nil, fmt.Errorf("%w: %w", ErrUnverifiable, err)
+		}
+		return raw, err
+	}
+	raw, err := listing(st.git, "ls-tree", "-r", "-z", "--full-tree", target)
+	if err != nil {
+		return false, 0, false, err
+	}
+	type entry struct{ mode, oid string }
+	delivered := map[string]entry{}
+	for _, line := range strings.Split(string(raw), "\x00") {
+		meta, path, ok := strings.Cut(line, "\t")
+		if f := strings.Fields(meta); ok && len(f) == 3 {
+			delivered[path] = entry{f[0], f[2]}
+		}
+	}
+	baseRaw, err := listing(st.git, "ls-tree", "-r", "-z", "--full-tree", st.baseTree)
+	if err != nil {
+		return false, 0, false, err
+	}
+	based := map[string]entry{}
+	for _, line := range strings.Split(string(baseRaw), "\x00") {
+		meta, path, ok := strings.Cut(line, "\t")
+		if f := strings.Fields(meta); ok && len(f) == 3 {
+			based[path] = entry{f[0], f[2]}
+		}
+	}
+	stripped := func(path string) bool {
+		if _, ok := delivered[path]; ok {
+			return false
+		}
+		for _, root := range materializedRoots {
+			if strings.HasPrefix(path, root+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	headEntries := map[string]entry{}
+	if _, err := agent.value(ctx, "rev-parse", "-q", "--verify", "HEAD^{commit}"); err == nil {
+		head, err := listing(agent, "ls-tree", "-r", "-z", "--full-tree", "HEAD")
+		if err != nil {
+			return false, 0, false, err
+		}
+		for _, line := range strings.Split(string(head), "\x00") {
+			meta, path, ok := strings.Cut(line, "\t")
+			if f := strings.Fields(meta); ok && len(f) == 3 {
+				headEntries[path] = entry{f[0], f[2]}
+			}
+		}
+		if _, err := agent.value(ctx, "merge-base", "--is-ancestor", "HEAD", st.base); err != nil {
+			for path, e := range headEntries {
+				if !stripped(path) && delivered[path] != e && based[path] != e {
+					headDiffers = true
+					break
+				}
+			}
+			if headDiffers {
+				if n, err := agent.value(ctx, "rev-list", "--count", "HEAD", "--not", st.base, "--"); err == nil {
+					headCommits, _ = strconv.Atoi(n)
+				}
+			}
+		}
+	}
+	index, err := listing(agent, "ls-files", "--stage", "-z")
+	if err != nil {
+		return false, 0, false, err
+	}
+	empty, err := agent.value(ctx, "hash-object", "-t", "blob", "/dev/null")
+	if err != nil {
+		return false, 0, false, err
+	}
+	for _, line := range strings.Split(string(index), "\x00") {
+		meta, path, ok := strings.Cut(line, "\t")
+		f := strings.Fields(meta)
+		if !ok || len(f) != 3 {
+			continue
+		}
+		if f[2] != "0" {
+			indexDiffers = true // a conflict stage
+			break
+		}
+		if stripped(path) {
+			continue
+		}
+		staged := entry{f[0], f[1]}
+		got, inTarget := delivered[path]
+		switch {
+		case staged == got, staged == based[path]:
+		case f[1] == empty && inTarget:
+			// intent-to-add, or an empty staged file whose path the delivery has
+		case !headDiffers && headEntries[path] == staged:
+			// unstaged: the entry is HEAD's, whose content the base or the delivery holds
+		default:
+			indexDiffers = true
+		}
+		if indexDiffers {
+			break
+		}
+	}
+	return headDiffers, headCommits, indexDiffers, nil
 }
 
 // nestedGit lists every entry named .git below the checkout's top level, whatever its kind

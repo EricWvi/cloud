@@ -98,6 +98,20 @@ func TestInspectReclaimFindsWorkOnlyTheRepositoryHolds(t *testing.T) {
 			deliveryGit(t, root, "commit", "-qm", "agent commit")
 			deliveryGit(t, root, "update-ref", "ORIG_HEAD", "HEAD~1")
 		}, workspacefs.GitFindings{}},
+		"staged only": {func(t *testing.T, root string) {
+			deliveryWrite(t, root, "README.md", "staged only\n")
+			deliveryGit(t, root, "add", "README.md")
+			deliveryWrite(t, root, "README.md", "hello\nworld\n")
+		}, workspacefs.GitFindings{IndexDiffers: true}},
+		"committed only": {func(t *testing.T, root string) {
+			deliveryWrite(t, root, "README.md", "committed only\n")
+			deliveryGit(t, root, "commit", "-qm", "agent", "README.md")
+			deliveryGit(t, root, "restore", "--source=HEAD~1", "--staged", "--worktree", "README.md")
+		}, workspacefs.GitFindings{HeadDiffers: true, HeadCommits: 1}},
+		"intent to add and unstaged edits are fine": {func(t *testing.T, root string) {
+			deliveryWrite(t, root, "later.txt", "later\n")
+			deliveryGit(t, root, "add", "-N", "later.txt")
+		}, workspacefs.GitFindings{}},
 		"gitlink": {func(t *testing.T, root string) {
 			sub := filepath.Join(root, "vendor", "lib")
 			deliveryWrite(t, sub, "lib.go", "package lib\n")
@@ -124,7 +138,12 @@ func TestInspectReclaimFindsWorkOnlyTheRepositoryHolds(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
 			tc.setup(t, req.Workspace.Root)
-			got := inspect(t, f, req, "").Git
+			// Compared with a delivery of the checkout as it now is, as reclaiming does.
+			snap, err := deliver(t, f, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := inspect(t, f, req, snap.Commit).Git
 			want := tc.want
 			if want.Refs == nil {
 				want.Refs = []workspacefs.RefFinding{}
