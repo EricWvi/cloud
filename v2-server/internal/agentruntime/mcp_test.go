@@ -11,6 +11,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
@@ -70,7 +71,7 @@ func TestMCPStartReadsChangesCommittedAfterAdmission(t *testing.T) {
 			session.MCP = ipcMCP()
 			id := session.MCP.Bindings[0].PluginID
 			h.driver.opts.ReadMCPTarget = func(_ context.Context, _ execution.Scope, _ string, _ *execution.MCPSelection, known int64) (*execution.MCPTarget, error) {
-				if known >= 0 {
+				if known >= 1 {
 					return nil, nil
 				}
 				if code != "" {
@@ -98,6 +99,22 @@ func TestMCPStartReadsChangesCommittedAfterAdmission(t *testing.T) {
 			if !bytes.Contains(start.Payload, []byte("changed-before-start")) || bytes.Contains(start.Payload, []byte("MCP_SECRET_MARKER")) {
 				t.Fatal("startup did not use the latest authorized settings")
 			}
+			member := map[string]any{"state": "configured", "plugin_id": id, "plugin_version": "1.0.0", "configuration_revision": 0}
+			for generation, kind := range []string{"get_session_mcp_state", "update_session_mcp"} {
+				select {
+				case message := <-f.sent:
+					var request struct {
+						ID         string `json:"request_id"`
+						Generation int
+					}
+					if message.Type != kind || json.Unmarshal(message.Payload, &request) != nil || request.Generation != generation {
+						t.Fatalf("after startup got %s generation %d, want %s generation %d", message.Type, request.Generation, kind, generation)
+					}
+					f.reply(message, "session_mcp_reply", map[string]any{"request_id": request.ID, "node": f.id, "result": "accepted", "state": map[string]any{"desired": map[string]any{"generation": generation, "members": []any{member}}}})
+				case <-time.After(time.Second):
+					t.Fatalf("startup did not send %s before periodic reconciliation", kind)
+				}
+			}
 			f.finishTurn(t, start, "first", "done")
 			if outcome := receiveIPC(t, done); outcome.err != nil {
 				t.Fatal(outcome.err)
@@ -106,8 +123,36 @@ func TestMCPStartReadsChangesCommittedAfterAdmission(t *testing.T) {
 	}
 }
 
+func TestMCPSyncWaitHonorsCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		session := &agentSession{mcpSync: make(chan struct{}, 1), project: &projectRuntime{driver: &Driver{}}}
+		session.project.driver.opts.ReadMCPTarget = func(context.Context, execution.Scope, string, *execution.MCPSelection, int64) (*execution.MCPTarget, error) {
+			return nil, nil
+		}
+		session.mcpSync <- struct{}{}
+		defer func() { <-session.mcpSync }()
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- session.syncMCP(ctx, nil, 0) }()
+		synctest.Wait()
+		cancel()
+		synctest.Wait()
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("waiting for MCP sync: %v", err)
+			}
+		default:
+			t.Fatal("cancelled sync still waits for the other reconciliation")
+		}
+	})
+}
+
 func TestRefusedMCPTimeoutRetainsSession(t *testing.T) {
 	var refuse atomic.Bool
+	primed := make(chan struct{}, 1)
+	deadlines := make(chan time.Time, 2)
+	var reconciles atomic.Int32
 	failedRead := make(chan struct{}, 1)
 	h := newIPCHarness(t, func(f *fakeNodeIPC, m node.Message) bool {
 		if m.Type == "submit_user_turn" && refuse.Load() {
@@ -128,11 +173,25 @@ func TestRefusedMCPTimeoutRetainsSession(t *testing.T) {
 			return &execution.MCPTarget{Configured: *ipcMCP()}, nil
 		}
 		if refuse.Load() {
+			if attempt := reconciles.Add(1); attempt <= 2 {
+				deadline, _ := ctx.Deadline()
+				deadlines <- deadline
+				if attempt == 1 {
+					return nil, nil
+				}
+				<-ctx.Done()
+				failedRead <- struct{}{}
+				return nil, nil
+			}
 			select {
 			case failedRead <- struct{}{}:
 			default:
 			}
 			return nil, execution.ErrUnavailable
+		}
+		select {
+		case primed <- struct{}{}:
+		default:
 		}
 		return nil, nil
 	}
@@ -165,6 +224,7 @@ func TestRefusedMCPTimeoutRetainsSession(t *testing.T) {
 		t.Fatal(got.err)
 	}
 	receiveIPC(t, ended)
+	receiveIPC(t, primed)
 	refuse.Store(true)
 	result := receiveIPC(t, run(ctx, "refused"))
 	if result.err != nil || result.result.FailureCode != "mcp_refresh_wait_timeout" || result.result.AgentLost {
@@ -174,10 +234,18 @@ func TestRefusedMCPTimeoutRetainsSession(t *testing.T) {
 	if !result.result.NotDelivered {
 		t.Fatalf("refused turn = %+v, want it reported not delivered", result.result)
 	}
+	firstDeadline, secondDeadline := receiveIPC(t, deadlines), receiveIPC(t, deadlines)
+	if got := reconciles.Load(); got != 2 {
+		t.Fatalf("late successful reconciliation resubmitted the turn: %d reconciliations", got)
+	}
+	if firstDeadline.IsZero() || !firstDeadline.Equal(secondDeadline) {
+		t.Fatalf("second refusal moved the deadline by %v", secondDeadline.Sub(firstDeadline))
+	}
 	if stored := receiveIPC(t, ended); stored.FailureCode != "mcp_refresh_wait_timeout" || !stored.NotDelivered {
 		t.Fatalf("published end of the refused turn = %+v, want it stored as not delivered", stored)
 	}
 	// The refused submission is visible on the wire, but never accepted by Node.
+	nextIPCCommand(t, f, "submit_user_turn")
 	nextIPCCommand(t, f, "submit_user_turn")
 	refuse.Store(false)
 	last := run(ctx, "next")
