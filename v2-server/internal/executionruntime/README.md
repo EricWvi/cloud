@@ -75,6 +75,8 @@ OpenAI 协议的 `fixture` 与 Messages 协议的 `messages-fixture` 分别生�
 冻结 agent 配置、Messages grant、Bash 工具写 marker，再在同一会话上 Append 一轮。
 `TestRealEndKillsTheAgentsBackgroundJob` 让 OpenCode 的 bash 工具留下一个 5 秒后写文件的后台作业，
 断言一轮结束后它还活着、`End` 返回时它已被 Node 杀掉，之后也不再写文件（锁定的 Node 停止会话时杀带尝试标记的进程）。
+`TestRealNodeCrashLetsTheRestartedNodeKillTheBackgroundJob` 在作业运行、这一轮还没结束时 SIGKILL 项目的 Node，分别用同项目的新会话和
+结束这个会话收口：新会话正常完成、它的 Agent 请求模型时作业已死，`End` 得到确认时作业已死，之后都不再写文件（清理让项目 Node 的重启恢复杀掉作业）。
 缺资产会明确 skip，不能将普通测试或编译通过称作真实 Agent 验收。
 
 ## 外部 provider 验收
