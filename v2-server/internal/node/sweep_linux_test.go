@@ -3,6 +3,7 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"math"
@@ -30,14 +31,20 @@ func TestMain(m *testing.M) {
 
 // standInConfig is what a test writes as the root's configuration for the stand-in Node.
 type standInConfig struct {
-	// Mode is "kill" (kill what the ledger claims, then serve), "ignore" (serve without
-	// killing anything), "fail" (exit before serving) or "hang" (ignore SIGTERM and never serve).
+	// Mode is "kill" (kill the marked processes, then serve), "ignore" (serve without killing
+	// anything), "fail" (exit before serving) or "hang" (ignore SIGTERM and never serve).
 	Mode string `json:"mode"`
 }
 
-// sweepStandIn models Node's restart recovery for cleanup: it records that it ran, kills the
-// processes in its root that its ledger claims (by the same rule cleanup uses to decide to start
-// it), binds the control socket only after that, and serves until SIGTERM.
+// sweepStandIn models Node's restart recovery for cleanup: it records that it ran, kills every
+// process of its user whose environment lists an attempt recorded under its home, binds the
+// control socket only after that, and serves until SIGTERM.
+//
+// Its rule is deliberately cruder than Node's and independent of claimedByLedger, so these tests
+// do not check v2's classifier against itself: it ignores the attempt's start window, user and
+// parent links. Those are covered by TestClaimedByLedgerIsAConservativeSubsetOfNodesRule, and
+// agreement with the real Node by TestRealNodeCrashLetsTheRestartedNodeKillTheBackgroundJob in
+// internal/executionruntime, which only covers a marked job of the Node's own user.
 func sweepStandIn() int {
 	config := os.Args[1]
 	root := filepath.Dir(config)
@@ -61,17 +68,8 @@ func sweepStandIn() int {
 	}
 	terminated := make(chan os.Signal, 1)
 	signal.Notify(terminated, syscall.SIGTERM)
-	if opts.Mode == "kill" {
-		pids, err := processesInRoot(root)
-		if err != nil {
-			return 2
-		}
-		scope := func(attempt string) (markScope, bool) { return readMarkScope(filepath.Join(root, "n"), attempt) }
-		for _, pid := range pids {
-			if claimedByLedger(pid, observeProcess, scope) {
-				_ = syscall.Kill(pid, syscall.SIGKILL)
-			}
-		}
+	if opts.Mode == "kill" && killMarked(filepath.Join(root, "n", "session-attempts")) != nil {
+		return 2
 	}
 	listener, err := net.Listen("unix", ControlSocket(root))
 	if err != nil {
@@ -80,6 +78,41 @@ func sweepStandIn() int {
 	defer listener.Close()
 	<-terminated
 	return 0
+}
+
+// killMarked SIGKILLs every readable process whose environment has an ORA_SESSION_ATTEMPT entry
+// naming one of the attempts recorded in directory.
+func killMarked(directory string) error {
+	records, err := os.ReadDir(directory)
+	if err != nil {
+		return err
+	}
+	var entries [][]byte
+	for _, record := range records {
+		if attempt, ok := strings.CutSuffix(record.Name(), ".mark"); ok {
+			entries = append(entries, []byte("ORA_SESSION_ATTEMPT="+attempt+"\x00"))
+		}
+	}
+	processes, err := os.ReadDir("/proc")
+	if err != nil {
+		return err
+	}
+	for _, process := range processes {
+		pid, err := strconv.Atoi(process.Name())
+		if err != nil {
+			continue
+		}
+		environ, err := os.ReadFile(filepath.Join("/proc", process.Name(), "environ"))
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if bytes.Contains(append([]byte{0}, environ...), append([]byte{0}, entry...)) {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	}
+	return nil
 }
 
 func TestMarkedAttemptsReadsTheMarkEntryOnly(t *testing.T) {
@@ -124,7 +157,11 @@ func TestReadMarkScopeOnlyReadsThisLedgersRecords(t *testing.T) {
 	}
 }
 
-func TestClaimedByLedgerFollowsNodesRule(t *testing.T) {
+// v2's classification only decides whether to start the root's Node, never what is killed, so
+// it may be stricter than Node's rule: unlike Node it also requires the attempt's user ("another
+// user"). Too strict falls back to the old fail-closed cleanup; too loose costs one Node start
+// after which the strict wait still fails.
+func TestClaimedByLedgerIsAConservativeSubsetOfNodesRule(t *testing.T) {
 	const uid = 1000
 	scopes := map[string]markScope{"mine": {Since: 100, UID: uid}}
 	scope := func(attempt string) (markScope, bool) { s, ok := scopes[attempt]; return s, ok }
