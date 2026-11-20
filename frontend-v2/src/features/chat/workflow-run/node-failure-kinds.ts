@@ -53,9 +53,11 @@ export const HINT_PROMISES_INJECTION_KINDS: ReadonlySet<string> = new Set([
  * "check the agent process and network" text.
  *
  * Matching runs on v2-server's stable, test-covered messages (workflowhost/interactive.go): a
- * reattached checkout Node no longer knows (a restart dropped its ledger/clone record) on the
- * first turn, a checkout that no longer exists on a later turn, and a session setup the Agent
- * refused. v2-server is temporary; when Cloud serves the contract the codes will align.
+ * reattached checkout Node no longer knows (its clone record was dropped, e.g. the ledger was
+ * cleared or a read failed after restart) on the first turn, a checkout that no longer exists on
+ * a later turn, and a session that could not be set up (project/plugin/model config, or Node
+ * refused it on the directory). v2-server is temporary; when Cloud serves the contract the codes
+ * will align.
  */
 export type InteractiveSessionScenario =
   | "checkout_unknown"

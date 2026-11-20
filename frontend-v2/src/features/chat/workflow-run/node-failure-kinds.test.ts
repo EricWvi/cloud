@@ -18,7 +18,7 @@ describe("interactiveSessionScenario", () => {
     ).toBe("workspace_gone");
   });
 
-  it("classifies a session setup the agent refused", () => {
+  it("classifies a session that could not be set up", () => {
     expect(
       interactiveSessionScenario(
         "Node refused the Agent session on the run's directory: checkout_unavailable",
