@@ -1071,3 +1071,50 @@ func TestReclaimRetriesAPassingHEADReadError(t *testing.T) {
 		t.Fatalf("after the restart: %+v", r)
 	}
 }
+
+// Passing Git failures while judging (HEAD not resolving for an I/O error, on a branch or
+// detached; a permission error that Git follows with a generic object complaint) leave the
+// reclaim pending as check_failed, and the next start without the fault reclaims it.
+func TestReclaimRetriesPassingGitFailures(t *testing.T) {
+	for name, tc := range map[string]struct {
+		detached bool
+		fails    func(args []string) bool
+		message  string
+	}{
+		"HEAD on a branch does not resolve": {false, func(a []string) bool { return strings.Join(a, " ") == "rev-parse -q --verify HEAD^{commit}" },
+			"fatal: unable to read HEAD: Input/output error"},
+		"detached HEAD does not resolve": {true, func(a []string) bool { return strings.Join(a, " ") == "rev-parse -q --verify HEAD^{commit}" },
+			"fatal: unable to read HEAD: Input/output error"},
+		"refs unreadable with a permission error": {false, func(a []string) bool {
+			return len(a) > 1 && a[0] == "for-each-ref" && strings.Contains(a[1], "objecttype")
+		}, "error: unable to open loose object 0123: Permission denied\nfatal: missing object 0123 for refs/heads/main"},
+		"HEAD's tree unreadable with a permission error": {false, func(a []string) bool { return len(a) > 0 && a[0] == "ls-tree" && a[len(a)-1] == "HEAD" },
+			"error: unable to open loose object 4567: Permission denied\nfatal: not a tree object"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			c := f.chat(t, st.TurnDelivered)
+			if tc.detached {
+				git(t, c.Path, "checkout", "-q", "--detach")
+			}
+			f.deleteChat(t, c, store.ReclaimRecoverable)
+			restore := workspacefs.InjectGitFault(func(args []string) error {
+				if tc.fails(args) {
+					return errors.New(tc.message)
+				}
+				return nil
+			})
+			got := f.run(t, c)
+			restore()
+			if got != (wr.Outcome{Workspace: wr.OutcomePending, Reason: wr.ReasonCheckFailed}) || !exists(t, c.Path) {
+				t.Fatalf("with the fault = %+v", got)
+			}
+			if err := wr.New(f.s, f.fs, f.remover).Resume(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if r := f.reclaim(t, c); r.Status != store.ReclaimReclaimed || exists(t, c.Path) {
+				t.Fatalf("after the restart: %+v", r)
+			}
+		})
+	}
+}
