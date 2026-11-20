@@ -3,6 +3,7 @@ package executionruntime
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
@@ -34,6 +35,27 @@ func isHeld(f *runtimeFixture, sid string) bool {
 	f.service.mu.Lock()
 	defer f.service.mu.Unlock()
 	return f.service.held[sid]
+}
+
+// waitNotHeld returns once the session is dropped from the held list. conclude writes the
+// database's ended marker before it clears the in-memory list, so a turn that read the ended
+// marker may still briefly observe the session held; polling treats that clear as the
+// eventually-consistent state it is.
+func waitNotHeld(t *testing.T, f *runtimeFixture, sid string) {
+	t.Helper()
+	for {
+		f.service.mu.Lock()
+		held := f.service.held[sid]
+		f.service.mu.Unlock()
+		if !held {
+			return
+		}
+		select {
+		case <-f.ctx.Done():
+			t.Fatal("a session ended in the background is still listed as held")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 }
 
 // A held session outlives a turn its Agent ended without completing, but not a result the
@@ -85,9 +107,7 @@ func TestRuntimeHeldSessionEndsWhenItsResultCannotBeStored(t *testing.T) {
 		t.Fatalf("recovered result of a held session that was ended: %+v", result)
 	}
 	waitSessionEnded(t, f, first.SessionID)
-	if isHeld(f, first.SessionID) {
-		t.Fatal("a session ended in the background is still listed as held")
-	}
+	waitNotHeld(t, f, first.SessionID)
 }
 
 func TestRuntimeEndForgetsAHeldSession(t *testing.T) {
