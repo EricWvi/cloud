@@ -1290,3 +1290,22 @@ func TestReclaimKeepsAHEADWhoseCommitIsCorrupt(t *testing.T) {
 		})
 	}
 }
+
+// A stale lock an interrupted Git left under refs/ is not a ref: a clean, delivered conversation
+// is still reclaimed.
+func TestReclaimIgnoresStaleRefLocks(t *testing.T) {
+	for name, content := range map[string]func(head string) string{
+		"empty lock":      func(string) string { return "" },
+		"lock with an ID": func(head string) string { return head + "\n" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			c := f.chat(t, st.TurnDelivered)
+			write(t, c.Path, ".git/refs/heads/main.lock", content(git(t, c.Path, "rev-parse", "HEAD")))
+			f.deleteChat(t, c, store.ReclaimRecoverable)
+			if got := f.run(t, c); got.Workspace != wr.OutcomeReclaimed {
+				t.Fatalf("outcome %+v", got)
+			}
+		})
+	}
+}

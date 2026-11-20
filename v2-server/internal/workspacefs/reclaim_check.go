@@ -10,7 +10,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"slices"
@@ -657,31 +656,28 @@ func (s *DeliveryFS) headPresent(ctx context.Context, agent deliveryGit, st *sta
 	if ctx.Err() != nil {
 		return false, ctx.Err()
 	}
-	// Only HEAD's direct target matters: a HEAD naming an existing alias that dangles is not
-	// unborn, so the symbolic ref is not followed further.
-	ref, err := agent.value(ctx, "symbolic-ref", "--no-recurse", "-q", "HEAD")
-	var exit *exec.ExitError
+	// HEAD's own file says what it is (read without Git, so no newer Git option is needed): a
+	// symbolic ref names its direct target, otherwise it holds an object ID. Only the direct target
+	// matters: a HEAD naming an existing alias that dangles is not unborn.
+	layout, err := gitexclude.Resolve(st.root)
+	if err != nil {
+		return false, fmt.Errorf("%w: %w", ErrUnverifiable, err)
+	}
+	gitdir, err := os.OpenRoot(layout.GitDir())
+	if err != nil {
+		return false, err
+	}
+	raw, err := readSmall(gitdir, "HEAD")
+	gitdir.Close()
+	if err != nil {
+		return false, err
+	}
+	head := strings.TrimSpace(raw)
 	var oid string
-	switch {
-	case errors.As(err, &exit) && exit.ExitCode() == 1:
-		// Detached: HEAD holds the object ID itself.
-		layout, err := gitexclude.Resolve(st.root)
-		if err != nil {
-			return false, fmt.Errorf("%w: %w", ErrUnverifiable, err)
+	if ref, ok := strings.CutPrefix(head, "ref: "); ok {
+		if !validRefName(ref) {
+			return false, fmt.Errorf("%w: HEAD names %q", ErrUnverifiable, ref)
 		}
-		gitdir, err := os.OpenRoot(layout.GitDir())
-		if err != nil {
-			return false, err
-		}
-		raw, err := readSmall(gitdir, "HEAD")
-		gitdir.Close()
-		if err != nil {
-			return false, err
-		}
-		oid = strings.TrimSpace(raw)
-	case err != nil:
-		return false, err // Git could not read HEAD this time: retried
-	default:
 		value, recorded, err := refValue(st.root, ref, 0)
 		if err != nil {
 			return false, err
@@ -690,6 +686,8 @@ func (s *DeliveryFS) headPresent(ctx context.Context, agent deliveryGit, st *sta
 			return false, nil // unborn: nothing committed yet
 		}
 		oid = value
+	} else {
+		oid = head
 	}
 	if !validCommit(oid) {
 		return false, fmt.Errorf("%w: HEAD does not name an object", ErrUnverifiable)
@@ -712,11 +710,49 @@ func (s *DeliveryFS) headPresent(ctx context.Context, agent deliveryGit, st *sta
 		return false, fmt.Errorf("%w: HEAD's commit %s is damaged: %w", ErrUnverifiable, oid, resolveErr)
 	case err == nil && kind != "commit":
 		return false, fmt.Errorf("%w: HEAD names a %s, not a commit", ErrUnverifiable, kind)
-	case err != nil && strings.Contains(err.Error(), "could not get object info"):
+	case err != nil && strings.Contains(err.Error(), "could not get object info") && objectAbsent(layout, oid):
+		// Older Git says the same of an object it may not read, so the absence is confirmed on disk.
 		return false, fmt.Errorf("%w: HEAD's commit %s is missing", ErrUnverifiable, oid)
 	default:
 		return false, resolveErr
 	}
+}
+
+// objectAbsent confirms on disk that the repository has no copy of oid it merely could not read:
+// the loose object's directory is readable and holds no such file, every pack and index can be
+// opened, and there are no alternates to look in. Anything that cannot be confirmed counts as not
+// absent, so the caller retries.
+func objectAbsent(layout gitexclude.Layout, oid string) bool {
+	objects, err := os.OpenRoot(filepath.Join(layout.CommonDir(), "objects"))
+	if err != nil {
+		return false
+	}
+	defer objects.Close()
+	if _, err := objects.Lstat("info/alternates"); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if _, err := objects.Lstat(oid[:2]); err == nil {
+		if _, err := fs.ReadDir(objects.FS(), oid[:2]); err != nil {
+			return false
+		}
+		if _, err := objects.Lstat(oid[:2] + "/" + oid[2:]); !errors.Is(err, fs.ErrNotExist) {
+			return false
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	packs, err := fs.ReadDir(objects.FS(), "pack")
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	for _, p := range packs {
+		f, err := objects.OpenFile("pack/"+p.Name(), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			return false
+		}
+		f.Close()
+	}
+	return true
 }
 
 // refValue reads what the repository records for ref (a loose file, else its packed-refs line),
@@ -818,6 +854,9 @@ func checkRecordedRefs(layout gitexclude.Layout, listed map[string]bool) error {
 				if e.IsDir() {
 					return nil
 				}
+				if !validRefName(p) {
+					return nil // not a ref to Git (a stale .lock, say)
+				}
 				content, err := readSmall(r, p)
 				if err != nil {
 					return err
@@ -873,6 +912,28 @@ func checkRecordedRefs(layout gitexclude.Layout, listed map[string]bool) error {
 		}
 	}
 	return nil
+}
+
+// validRefName reports whether Git would take name as a ref (git check-ref-format's rules): no
+// component empty, starting with a dot or ending in ".lock", no "..", no "@{", no control
+// characters, space or any of ~ ^ : ? * [ \, not "@", not ending in "/" or ".". A file under
+// refs/ with another name (a stale lock left by an interrupted Git) is not a ref.
+func validRefName(name string) bool {
+	if name == "@" || name == "" || strings.HasSuffix(name, "/") || strings.HasSuffix(name, ".") ||
+		strings.Contains(name, "..") || strings.Contains(name, "@{") {
+		return false
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f || strings.ContainsRune(" ~^:?*[\\", r) {
+			return false
+		}
+	}
+	for _, part := range strings.Split(name, "/") {
+		if part == "" || strings.HasPrefix(part, ".") || strings.HasSuffix(part, ".lock") {
+			return false
+		}
+	}
+	return true
 }
 
 // readSmall reads a regular file of Git metadata within maxTreeListing, without following a link
