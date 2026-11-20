@@ -197,7 +197,7 @@ test('a live workflow session preserves the explicit MCP selection after reload'
   let installation = (await list()).find((item: { id: string }) => item.id === identifier)
   if (!installation) {
     const me = await (await page.request.get('/api/v1/me')).json()
-    execFileSync('go', ['run', './internal/workflowhost/testdata/mcpfixture/install', tid, me.id, sid], {
+    execFileSync('go', ['run', './internal/workflowhost/cmd/install-mcp-fixture', tid, me.id, sid], {
       cwd: fileURLToPath(new URL('../../v2-server/', import.meta.url)),
       env: { ...process.env,
         E2E_DATABASE_URL: process.env.E2E_DATABASE_URL ?? 'postgres://ora:ora-local@127.0.0.1:55432/ora_v2_e2e?sslmode=disable' },
