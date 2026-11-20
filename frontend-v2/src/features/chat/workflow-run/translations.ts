@@ -458,7 +458,20 @@ export const workflowRunTranslations = {
     "workflowRun.errorHint.session": "检查智能体进程与网络后续跑",
     "workflowRun.errorKind.interactive_session": "交互会话未能建立",
     "workflowRun.errorHint.interactive_session":
-      "交互节点不会自动重试；检查智能体进程与网络后续跑",
+      "交互节点不会自动重试；可在顶部点击「从失败处继续」重跑这个节点，或点击「再跑一次」创建新运行",
+    "workflowRun.errorKind.interactive_session.checkout_unknown":
+      "Node 已不认识本运行的 checkout（它的 clone 记录丢失）",
+    "workflowRun.errorHint.interactive_session.checkout_unknown":
+      "从失败处继续会在新的 clone 上开始：之前节点的结果仍保留，但它们在旧目录里未提交的文件改动不在新 clone 上",
+    "workflowRun.errorKind.interactive_session.workspace_gone": "工作区已不存在",
+    "workflowRun.errorHint.interactive_session.workspace_gone":
+      "交互节点的工作区已丢失，会话无法继续；从失败处继续会在新的 clone 上重新开始，之前的改动不会保留",
+    "workflowRun.errorKind.interactive_session.setup_refused": "交互会话未能建立",
+    "workflowRun.errorHint.interactive_session.setup_refused":
+      "交互会话没能建立（准备项目、插件或模型配置失败，或 Node 在该目录上拒绝了会话），交互节点不会自动重试；修复后从失败处继续",
+    "workflowRun.errorServerDetail": "服务端原因",
+    "workflowRun.errorServerDetailHint":
+      "服务端返回的原始原因，供排查。",
     "workflowRun.errorKind.starter_unavailable": "运行的发起人已不可用",
     "workflowRun.errorHint.starter_unavailable":
       "发起人已无法在这个工作区执行（已被移出团队、账号已停用，或工作区已暂停），智能体以发起人的身份执行，不会自动重试；请用「再跑一次」重新运行",
@@ -1078,7 +1091,22 @@ export const workflowRunTranslations = {
     "workflowRun.errorKind.interactive_session":
       "Interactive session could not start",
     "workflowRun.errorHint.interactive_session":
-      "Interactive nodes never retry automatically; check the agent process and network, then resume",
+      "Interactive nodes never retry automatically; resume this node from the failure, or run the workflow again",
+    "workflowRun.errorKind.interactive_session.checkout_unknown":
+      "Node no longer knows this run's checkout (its clone record was lost)",
+    "workflowRun.errorHint.interactive_session.checkout_unknown":
+      "Resuming from the failure starts the node on a fresh clone: earlier nodes' results are kept, but their uncommitted file edits in the old directory are not on the fresh clone",
+    "workflowRun.errorKind.interactive_session.workspace_gone":
+      "The workspace no longer exists",
+    "workflowRun.errorHint.interactive_session.workspace_gone":
+      "The interactive node's workspace is gone, so its session cannot continue; resuming from the failure starts over on a fresh clone, and previous changes are not kept",
+    "workflowRun.errorKind.interactive_session.setup_refused":
+      "Interactive session could not start",
+    "workflowRun.errorHint.interactive_session.setup_refused":
+      "The interactive session could not be set up (preparing the project, plugins or model config failed, or Node refused the session on that directory); interactive nodes never retry automatically. Fix it, then resume from the failure",
+    "workflowRun.errorServerDetail": "Server reason",
+    "workflowRun.errorServerDetailHint":
+      "The raw reason the server returned, for debugging.",
     "workflowRun.errorKind.starter_unavailable":
       "Run starter unavailable",
     "workflowRun.errorHint.starter_unavailable":
