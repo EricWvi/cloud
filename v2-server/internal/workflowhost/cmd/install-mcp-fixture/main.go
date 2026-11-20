@@ -1,4 +1,4 @@
-// Command install seeds the workflow stdio MCP in a Playwright test database.
+// Command install-mcp-fixture seeds the workflow stdio MCP in a Playwright test database.
 package main
 
 import (
