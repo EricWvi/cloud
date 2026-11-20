@@ -61,14 +61,22 @@ Stop 先停 Node，再按可执行文件路径清理残留：Node 被强杀后 r
 （Node 退出才让它开始清理）、在等待 Root 内其他进程之前（被它杀的 Git 进程正是那一步会报的残留）。
 升级前的 Root 里可能还有旧的 host、guardian 进程，名单里同样保留它们。残留清理用 Linux pidfd，避免 PID 重用误杀；
 只信号本 Root 专属可执行文件，归属不明、cwd 仍在 Root 内的进程先等一个宽限期让它自己退出（Node 可能先于正在停止的 Agent 退出），仍在则失败并保持不可用，不按 cwd 或全局名字杀进程。
+宽限期后留下的进程里有本 Root 的 Node 会杀的进程时（被强杀的 Node 留下的 Agent 后台作业），清理先让这个 Node 杀掉它们：
+进程环境的 `ORA_SESSION_ATTEMPT` 列出某个尝试，`<Root>/n/session-attempts/<尝试>.mark` 记有这个尝试的范围，进程的用户和启动时刻落在范围里，
+或者它的父进程是这样的进程（Node 自己的规则，见 desktop 的 `docs/node/session-stop.md`）。清理删掉旧控制 socket，用 Root 里的 `nb` 和
+`config.json` 启动 Node（最多等 20 秒），控制 socket 出现时它的重启恢复已杀掉这些进程，随即停掉它（SIGTERM，宽限期后 SIGKILL），
+再停一遍专属进程、重新等待 Root 内进程。只启动一次；仍有进程就照旧失败。别的 Root 的尝试在这里没有记录，带它们标记的进程不会触发启动。
 确认进程退出后只删除 Node/旧 host 目录下的 socket，数据库和仓库内容保留；清理失败可重试，成功后才释放独占锁。
 依赖 `golang.org/x/sys/unix` 的 pidfd；不支持 pidfd 的系统不能假称完成残留回收。
 
 `RecoverRuntime(ctx, root, grace)` 使用同一独占锁和进程归属检查，在不启动新 Node 的情况下确认旧进程
-退出；保留 checkout、历史和数据库，完成后释放锁。上层必须先完成此恢复，再对外发布重启后的业务状态。
+退出（只有上面那种残留会让清理临时启动一次 Node，它随即停掉，不留下运行中的 Node）；保留 checkout、历史和数据库，完成后释放锁。上层必须先完成此恢复，再对外发布重启后的业务状态。
 活动 runtime 持有锁时恢复会拒绝，不接管其他服务的运行目录。
 
 真实测试覆盖双 Workspace 独立运行、重复监督拒绝、停止一个不影响另一个、正常重启保留文件，
 杀死监督进程后由新监督进程清理残留 Node/reaper 再恢复，以及升级前的 Root 启动后旧 host 目录被删除、只有一个 reaper。
+`sweep_linux_test.go` 用测试二进制充当 `nb`，覆盖残留进程的归类（本账本的标记、嵌套标记、别的 Root 的尝试、范围之外、清空环境的子进程和孤儿、PID 重用的父进程），
+以及清理只在有本账本的残留时启动一次 Node、它杀掉后清理成功，没杀掉或起不来时清理失败、作业不被 v2 杀。真实 Node 上的崩溃收口见 `internal/executionruntime` 的
+`TestRealNodeCrashLetsTheRestartedNodeKillTheBackgroundJob`。
 尚未装配到 v2-server；clone/插件/Agent 编排、Git/模型服务、数据库 ACK 顺序和 M4 适配继续由后续实现承接。
 这些用例还不是 Agent 工具执行后的进程清理验收，低层连接取消不能直接绑定到页面观察请求。

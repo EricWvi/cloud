@@ -23,12 +23,51 @@ var ownedExecutables = []string{"nb", "rb", "hb", "gb"}
 
 // cleanOwned signals only executables copied into this private root. pidfds prevent PID-reuse
 // signals; remaining unclassified processes in the root block cleanup instead of being killed.
+// Leftovers that the root's own Node kills in its restart recovery get that chance once (see
+// sweepMarked); the root is called clean only after the same strict check finds none.
+func cleanOwned(ctx context.Context, paths Paths, grace time.Duration) error {
+	if err := stopOwned(ctx, paths, grace); err != nil {
+		return err
+	}
+	// A process escaping the reaper must not be silently called cleaned. Do not kill by cwd:
+	// it could be a user's shell; keep the Workspace unavailable for explicit investigation.
+	// Node may exit before an Agent it was stopping has finished exiting, so such a process
+	// gets the same grace to go away on its own before cleanup counts it as a leftover.
+	leftovers, err := awaitUnowned(ctx, paths.Root, grace)
+	if err != nil {
+		return err
+	}
+	if len(leftovers) != 0 && anyClaimedByLedger(paths, leftovers) {
+		// The sweep's own outcome proves nothing: only the repeated check below does.
+		sweepErr := sweepMarked(ctx, paths, grace)
+		err := stopOwned(ctx, paths, grace)
+		if err == nil {
+			leftovers, err = awaitUnowned(ctx, paths.Root, grace)
+		}
+		if err != nil {
+			return errors.Join(err, sweepErr)
+		}
+		if len(leftovers) != 0 {
+			return errors.Join(leftoverError(leftovers), sweepErr)
+		}
+	}
+	if len(leftovers) != 0 {
+		return leftoverError(leftovers)
+	}
+	return removeSockets(paths)
+}
+
+func leftoverError(pids []int) error {
+	return fmt.Errorf("runtime cleanup unconfirmed: process %d remains in workspace", pids[0])
+}
+
+// stopOwned stops every process running one of the root's owned executables.
 //
 // Names are handled in ownedExecutables order. The reaper comes after Node because Node's exit
 // closes the reaper's pipe, which is what makes it kill the Git process groups Node registered
 // and then exit on its own; it comes before the wait for unowned processes because those Git
 // processes are exactly what that wait would otherwise report as leftovers.
-func cleanOwned(ctx context.Context, paths Paths, grace time.Duration) error {
+func stopOwned(ctx context.Context, paths Paths, grace time.Duration) error {
 	for _, name := range ownedExecutables {
 		entries, err := os.ReadDir("/proc")
 		if err != nil {
@@ -75,13 +114,12 @@ func cleanOwned(ctx context.Context, paths Paths, grace time.Duration) error {
 			}
 		}
 	}
-	// A process escaping the reaper must not be silently called cleaned. Do not kill by cwd:
-	// it could be a user's shell; keep the Workspace unavailable for explicit investigation.
-	// Node may exit before an Agent it was stopping has finished exiting, so such a process
-	// gets the same grace to go away on its own before cleanup counts it as a leftover.
-	if err := awaitUnowned(ctx, paths.Root, grace); err != nil {
-		return err
-	}
+	return nil
+}
+
+// removeSockets deletes the control sockets left under Node's and the retired host's homes, and
+// nothing else: databases and checkouts stay.
+func removeSockets(paths Paths) error {
 	for _, root := range []string{paths.NodeHome, paths.HostHome} {
 		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 			if os.IsNotExist(err) {
@@ -102,43 +140,43 @@ func cleanOwned(ctx context.Context, paths Paths, grace time.Duration) error {
 	return nil
 }
 
-// awaitUnowned waits up to grace for every process running from or inside root to exit.
-func awaitUnowned(ctx context.Context, root string, grace time.Duration) error {
+// awaitUnowned waits up to grace for every process running from or inside root to exit, and
+// returns those still there after it.
+func awaitUnowned(ctx context.Context, root string, grace time.Duration) ([]int, error) {
 	deadline := time.Now().Add(grace)
 	for {
-		pid, err := processInRoot(root)
-		if err != nil || pid == "" {
-			return err
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("runtime cleanup unconfirmed: process %s remains in workspace", pid)
+		pids, err := processesInRoot(root)
+		if err != nil || len(pids) == 0 || time.Now().After(deadline) {
+			return pids, err
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
 }
 
-// processInRoot returns a process whose working directory is inside root or whose executable
-// is one copied into it, or "" when there is none.
-func processInRoot(root string) (string, error) {
+// processesInRoot returns the processes whose working directory is inside root or whose
+// executable is one copied into it.
+func processesInRoot(root string) ([]int, error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
+	var pids []int
 	for _, entry := range entries {
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
 			continue
 		}
 		cwd, cwdErr := os.Readlink(filepath.Join("/proc", entry.Name(), "cwd"))
 		exe, exeErr := os.Readlink(filepath.Join("/proc", entry.Name(), "exe"))
 		if (cwdErr == nil && within(root, cwd)) || (exeErr == nil && ownedExecutable(root, exe)) {
-			return entry.Name(), nil
+			pids = append(pids, pid)
 		}
 	}
-	return "", nil
+	return pids, nil
 }
 
 func ownedExecutable(root, exe string) bool {
