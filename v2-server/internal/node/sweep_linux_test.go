@@ -31,7 +31,7 @@ func TestMain(m *testing.M) {
 // standInConfig is what a test writes as the root's configuration for the stand-in Node.
 type standInConfig struct {
 	// Mode is "kill" (kill what the ledger claims, then serve), "ignore" (serve without
-	// killing anything) or "fail" (exit before serving).
+	// killing anything), "fail" (exit before serving) or "hang" (ignore SIGTERM and never serve).
 	Mode string `json:"mode"`
 }
 
@@ -52,8 +52,12 @@ func sweepStandIn() int {
 	}
 	_, _ = starts.WriteString("start\n")
 	_ = starts.Close()
-	if opts.Mode == "fail" {
+	switch opts.Mode {
+	case "fail":
 		return 1
+	case "hang":
+		signal.Ignore(syscall.SIGTERM)
+		select {}
 	}
 	terminated := make(chan os.Signal, 1)
 	signal.Notify(terminated, syscall.SIGTERM)
@@ -356,4 +360,27 @@ func ownedRunning(t *testing.T, paths Paths) []int {
 		}
 	}
 	return owned
+}
+
+// A caller whose ctx ends while the sweeping Node starts must still get it stopped and reaped:
+// RecoverRuntime releases the root's lock right after cleanup returns.
+func TestCleanupReapsTheSweepingNodeWhenTheCallerGivesUp(t *testing.T) {
+	const attempt = "7d0c2a4e-5b7f-4c1e-9a43-0f6e2d1b8c90"
+	paths := sweepRoot(t, "hang")
+	writeMark(t, paths.NodeHome, attempt, 0, uint32(os.Geteuid()))
+	job := startJob(t, paths.Repositories, attempt)
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	if err := cleanOwned(ctx, paths, 50*time.Millisecond); err == nil {
+		t.Fatal("cleanup succeeded although the sweeping Node never served and the job lives")
+	}
+	if pids := ownedRunning(t, paths); len(pids) != 0 {
+		t.Fatalf("the sweeping Node is still running after cleanup returned: %v", pids)
+	}
+	if got := sweepStarts(t, paths); got != 1 {
+		t.Fatalf("Node started %d times for the sweep, want 1", got)
+	}
+	if !job.alive() {
+		t.Fatal("cleanup killed the job itself")
+	}
 }

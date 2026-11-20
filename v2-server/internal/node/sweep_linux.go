@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -190,5 +189,25 @@ func sweepMarked(ctx context.Context, paths Paths, grace time.Duration) error {
 		return err
 	}
 	readyErr := waitSocket(startup, paths.Socket, p)
-	return errors.Join(readyErr, stopChild(ctx, p, grace))
+	stopSweeper(ctx, p, grace)
+	return readyErr
+}
+
+// stopSweeper stops the Node sweepMarked started and reaps it before returning, also when the
+// caller's ctx has ended: once cleanup returns, RecoverRuntime releases the root's lock, and a
+// Node left behind would run on an unlocked root without a supervisor. The caller's end only cuts
+// SIGTERM's grace short; SIGKILL cannot be ignored, so the wait after it is bounded by the kernel
+// delivering the signal.
+func stopSweeper(ctx context.Context, p *child, grace time.Duration) {
+	_ = p.cmd.Process.Signal(syscall.SIGTERM)
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-p.done:
+		return
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+	_ = p.cmd.Process.Kill()
+	<-p.done
 }
