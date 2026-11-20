@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/nodeservices"
 	"github.com/wanglongan587/cloud/v2-server/internal/projectrepos"
+	"github.com/wanglongan587/cloud/v2-server/internal/store"
 )
 
 // backgroundJobDelay is how long the Agent's background job waits before it writes the late
@@ -32,12 +34,51 @@ const backgroundJobDelay = 5 * time.Second
 // stopped, so nothing writes the checkout after End returns: not the reclaim of a deleted
 // conversation, nor a later node in the same run directory, can race it.
 func TestRealEndKillsTheAgentsBackgroundJob(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
+	defer cancel()
+	f, driverRoot, project := backgroundJobRuntime(t, ctx, backgroundJobFixture{})
+
+	ref, err := f.service.Start(ctx, f.scope, execution.StartRequest{Caller: execution.Caller{Kind: execution.CallerChat, ID: "background-conversation", AttemptID: "first"}, Target: execution.Target{ProjectID: project.ID}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("Start the requested background job with the shell tool.")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _ := observeTurn(t, f, ref, 0)
+	requireRealFixtureResult(t, result)
+	// The turn is over and the session kept: the job must still be running, or End proves nothing.
+	pidFile := findCheckoutFile(t, driverRoot, "ora-v2-job.pid")
+	pid := readJobPID(t, pidFile)
+	if !jobAlive(pid) {
+		t.Fatalf("background job %d was not running when the session ended", pid)
+	}
+	if err := f.service.End(ctx, f.scope, ref.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if jobAlive(pid) {
+		t.Fatalf("background job %d outlived End: Node reported the session stopped while its job ran", pid)
+	}
+	// Watch past the job's own deadline, so a job that escaped the kill shows up as its write.
+	late := filepath.Join(filepath.Dir(pidFile), "ora-v2-late.txt")
+	deadline := time.Now().Add(backgroundJobDelay + 2*time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(late); err == nil {
+			t.Fatalf("background job wrote %s after End", late)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// backgroundJobRuntime starts the execution service on the real Node with model standing in for
+// the Agent's model, and seeds the Demo project; everything it starts is stopped at cleanup.
+func backgroundJobRuntime(t *testing.T, ctx context.Context, model nodeservices.Provider) (*runtimeFixture, string, store.Project) {
+	t.Helper()
 	assets := os.Getenv("V2_NODE_ASSETS_DIR")
 	if assets == "" {
 		t.Skip("set V2_NODE_ASSETS_DIR for real Node/Agent background job evidence")
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
-	defer cancel()
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +92,7 @@ func TestRealEndKillsTheAgentsBackgroundJob(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	f := runtimeDatabase(t, backgroundJobFixture{})
+	f := runtimeDatabase(t, model)
 	if err := f.service.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -102,45 +143,24 @@ func TestRealEndKillsTheAgentsBackgroundJob(t *testing.T) {
 		}
 	})
 
-	ref, err := f.service.Start(ctx, f.scope, execution.StartRequest{Caller: execution.Caller{Kind: execution.CallerChat, ID: "background-conversation", AttemptID: "first"}, Target: execution.Target{ProjectID: project.ID}, ExecutorID: "opencode:fixture", Prompt: execution.TextPrompt("Start the requested background job with the shell tool.")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, _ := observeTurn(t, f, ref, 0)
-	requireRealFixtureResult(t, result)
-	// The turn is over and the session kept: the job must still be running, or End proves nothing.
-	pidFile := findCheckoutFile(t, driverRoot, "ora-v2-job.pid")
-	pid := readJobPID(t, pidFile)
-	if !jobAlive(pid) {
-		t.Fatalf("background job %d was not running when the session ended", pid)
-	}
-	if err := f.service.End(ctx, f.scope, ref.SessionID); err != nil {
-		t.Fatal(err)
-	}
-	if jobAlive(pid) {
-		t.Fatalf("background job %d outlived End: Node reported the session stopped while its job ran", pid)
-	}
-	// Watch past the job's own deadline, so a job that escaped the kill shows up as its write.
-	late := filepath.Join(filepath.Dir(pidFile), "ora-v2-late.txt")
-	deadline := time.Now().Add(backgroundJobDelay + 2*time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(late); err == nil {
-			t.Fatalf("background job wrote %s after End", late)
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
+	return f, driverRoot, project
 }
 
 // backgroundJobFixture asks the real Agent's shell tool to leave a job running in the
 // background that records its PID and writes a late file after backgroundJobDelay; once the
-// tool returns it answers like FixtureProvider.
-type backgroundJobFixture struct{}
+// tool returns it answers like FixtureProvider. Only a conversation whose user message asks for
+// a background job gets the tool call; any other is answered like FixtureProvider at once.
+type backgroundJobFixture struct {
+	// delay, when set, replaces backgroundJobDelay.
+	delay time.Duration
+	// hold, when set, keeps the answer after the tool result pending until hold closes or the
+	// request ends, so the turn is still running while the job does.
+	hold <-chan struct{}
+	// answered, when set, is called before answering a conversation that asks for no job.
+	answered func()
+}
 
-func (backgroundJobFixture) Complete(w http.ResponseWriter, r *http.Request, model nodeservices.Model) {
+func (fixture backgroundJobFixture) Complete(w http.ResponseWriter, r *http.Request, model nodeservices.Model) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "unreadable request", http.StatusBadRequest)
@@ -148,7 +168,8 @@ func (backgroundJobFixture) Complete(w http.ResponseWriter, r *http.Request, mod
 	}
 	var req struct {
 		Messages []struct {
-			Role string `json:"role"`
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 		Tools []struct {
 			Function struct {
@@ -166,14 +187,33 @@ func (backgroundJobFixture) Complete(w http.ResponseWriter, r *http.Request, mod
 			tool = advertised.Function.Name
 		}
 	}
-	if tool == "" || len(req.Messages) == 0 || req.Messages[len(req.Messages)-1].Role == "tool" {
+	asked := false
+	for _, message := range req.Messages {
+		asked = asked || message.Role == "user" && bytes.Contains(message.Content, []byte("background job"))
+	}
+	toolReturned := len(req.Messages) != 0 && req.Messages[len(req.Messages)-1].Role == "tool"
+	if asked && toolReturned && fixture.hold != nil {
+		select {
+		case <-fixture.hold:
+		case <-r.Context().Done():
+			return
+		}
+	}
+	if !asked && fixture.answered != nil {
+		fixture.answered()
+	}
+	if tool == "" || !asked || toolReturned {
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		nodeservices.FixtureProvider{}.Complete(w, r, model)
 		return
 	}
+	delay := fixture.delay
+	if delay == 0 {
+		delay = backgroundJobDelay
+	}
 	// sh -c makes $$ the job's own PID. Its output goes nowhere, so the tool returns at once
 	// and leaves the job behind, as an Agent starting a development server would.
-	command := "sh -c 'echo $$ > ora-v2-job.pid; sleep " + strconv.Itoa(int(backgroundJobDelay/time.Second)) + "; echo late > ora-v2-late.txt' >/dev/null 2>&1 &"
+	command := "sh -c 'echo $$ > ora-v2-job.pid; sleep " + strconv.Itoa(int(delay/time.Second)) + "; echo late > ora-v2-late.txt' >/dev/null 2>&1 &"
 	args, _ := json.Marshal(map[string]string{"command": command, "description": "Start a background job that writes a file later"})
 	message := map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{map[string]any{"index": 0, "id": "call_v2_background", "type": "function", "function": map[string]string{"name": tool, "arguments": string(args)}}}}
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -188,8 +228,22 @@ func (backgroundJobFixture) Complete(w http.ResponseWriter, r *http.Request, mod
 // findCheckoutFile returns the one file named name under root, outside Git directories.
 func findCheckoutFile(t *testing.T, root, name string) string {
 	t.Helper()
+	found := checkoutFiles(t, root, name)
+	if len(found) != 1 {
+		t.Fatalf("found %d files named %s, want 1: %v", len(found), name, found)
+	}
+	return found[0]
+}
+
+// checkoutFiles lists the files named name under root, outside Git directories. Entries that
+// vanish during the walk are skipped: Node may be writing the tree.
+func checkoutFiles(t *testing.T, root, name string) []string {
+	t.Helper()
 	var found []string
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -204,10 +258,7 @@ func findCheckoutFile(t *testing.T, root, name string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(found) != 1 {
-		t.Fatalf("found %d files named %s, want 1: %v", len(found), name, found)
-	}
-	return found[0]
+	return found
 }
 
 // readJobPID waits briefly for the job to record its PID: the tool may return before the
