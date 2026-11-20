@@ -328,3 +328,57 @@ func TestInspectReclaimFailsClosedOnAnUnreadableHEAD(t *testing.T) {
 		})
 	}
 }
+
+// A ref Git cannot read (for-each-ref only warns and skips it) and a HEAD naming an existing alias
+// that dangles are not taken for absent: the checkout is unverifiable.
+func TestInspectReclaimDoesNotTrustRefsGitSkips(t *testing.T) {
+	for name, setup := range map[string]func(t *testing.T, root string){
+		"truncated loose ref": func(t *testing.T, root string) {
+			deliveryGit(t, root, "branch", "side")
+			deliveryWrite(t, root, ".git/refs/heads/side", "abcdef012345\n")
+		},
+		"HEAD naming a dangling alias": func(t *testing.T, root string) {
+			deliveryGit(t, root, "symbolic-ref", "refs/heads/alias", "refs/heads/missing")
+			deliveryGit(t, root, "symbolic-ref", "HEAD", "refs/heads/alias")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
+			setup(t, req.Workspace.Root)
+			unlock, err := f.LockWorkspace(t.Context(), req.Workspace.Root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlock()
+			if _, err := f.InspectReclaim(t.Context(), req.Workspace, req.MirrorPath, ""); !errors.Is(err, workspacefs.ErrUnverifiable) {
+				t.Fatalf("err = %v, want ErrUnverifiable", err)
+			}
+		})
+	}
+}
+
+// An I/O error reading HEAD's tree is not a verdict on the checkout: it is returned as is, to be
+// retried, and the same inspection succeeds once the fault is gone.
+func TestInspectReclaimRetriesAPassingHEADReadError(t *testing.T) {
+	f, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
+	failed := false
+	restore := workspacefs.InjectGitFault(func(args []string) error {
+		if !failed && len(args) > 0 && args[0] == "ls-tree" && args[len(args)-1] == "HEAD" {
+			failed = true
+			return errors.New("fatal: unable to read tree: Input/output error")
+		}
+		return nil
+	})
+	defer restore()
+	unlock, err := f.LockWorkspace(t.Context(), req.Workspace.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if _, err := f.InspectReclaim(t.Context(), req.Workspace, req.MirrorPath, ""); err == nil || errors.Is(err, workspacefs.ErrUnverifiable) {
+		t.Fatalf("err = %v, want a retryable error", err)
+	}
+	if _, err := f.InspectReclaim(t.Context(), req.Workspace, req.MirrorPath, ""); err != nil {
+		t.Fatalf("after the fault: %v", err)
+	}
+}

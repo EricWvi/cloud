@@ -1007,3 +1007,67 @@ func TestReclaimFailsClosedOnAnUnreadableHEAD(t *testing.T) {
 		}
 	})
 }
+
+// A branch whose ref file is damaged, so Git skips it with only a warning, and a HEAD naming an
+// alias that dangles keep the checkout under the default reclaim; the branch's commit and file
+// stay readable.
+func TestReclaimKeepsRefsGitCannotRead(t *testing.T) {
+	t.Run("truncated branch ref", func(t *testing.T) {
+		f := newFixture(t)
+		c := f.chat(t, st.TurnDelivered)
+		git(t, c.Path, "stash", "push", "-q", "-u")
+		git(t, c.Path, "checkout", "-q", "-b", "side")
+		write(t, c.Path, "side.txt", "only on side\n")
+		git(t, c.Path, "add", "side.txt")
+		git(t, c.Path, "commit", "-qm", "side")
+		commit := git(t, c.Path, "rev-parse", "HEAD")
+		blob := git(t, c.Path, "rev-parse", "HEAD:side.txt")
+		git(t, c.Path, "checkout", "-q", "main")
+		git(t, c.Path, "stash", "pop", "-q")
+		write(t, c.Path, ".git/refs/heads/side", commit[:12]+"\n")
+		f.deleteChat(t, c, store.ReclaimRecoverable)
+		if got := f.run(t, c); got != (wr.Outcome{Workspace: wr.OutcomeKept, Reason: wr.ReasonUnverifiable}) {
+			t.Fatalf("outcome %+v", got)
+		}
+		git(t, c.Path, "cat-file", "-e", commit)
+		git(t, c.Path, "cat-file", "-e", blob)
+	})
+	t.Run("HEAD naming a dangling alias", func(t *testing.T) {
+		f := newFixture(t)
+		c := f.chat(t, st.TurnDelivered)
+		git(t, c.Path, "symbolic-ref", "refs/heads/alias", "refs/heads/missing")
+		git(t, c.Path, "symbolic-ref", "HEAD", "refs/heads/alias")
+		f.deleteChat(t, c, store.ReclaimRecoverable)
+		if got := f.run(t, c); got != (wr.Outcome{Workspace: wr.OutcomeKept, Reason: wr.ReasonUnverifiable}) {
+			t.Fatalf("outcome %+v", got)
+		}
+	})
+}
+
+// A passing I/O error reading HEAD's tree leaves the reclaim pending as check_failed; with the
+// fault gone, the next start reclaims it.
+func TestReclaimRetriesAPassingHEADReadError(t *testing.T) {
+	f := newFixture(t)
+	c := f.chat(t, st.TurnDelivered)
+	f.deleteChat(t, c, store.ReclaimRecoverable)
+	restore := workspacefs.InjectGitFault(func(args []string) error {
+		if len(args) > 0 && args[0] == "ls-tree" && args[len(args)-1] == "HEAD" {
+			return errors.New("fatal: unable to read tree: Input/output error")
+		}
+		return nil
+	})
+	got := f.run(t, c)
+	restore()
+	if got != (wr.Outcome{Workspace: wr.OutcomePending, Reason: wr.ReasonCheckFailed}) || !exists(t, c.Path) {
+		t.Fatalf("with the fault = %+v", got)
+	}
+	if r := f.reclaim(t, c); r.Status != store.ReclaimPending || r.Attempts != 1 {
+		t.Fatalf("after the fault: %+v", r)
+	}
+	if err := wr.New(f.s, f.fs, f.remover).Resume(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.reclaim(t, c); r.Status != store.ReclaimReclaimed || exists(t, c.Path) {
+		t.Fatalf("after the restart: %+v", r)
+	}
+}

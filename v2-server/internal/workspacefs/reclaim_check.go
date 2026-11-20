@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"slices"
@@ -183,6 +184,17 @@ func (s *DeliveryFS) gitState(ctx context.Context, st *staged, target string) (G
 	refs, err := agent.run(ctx, nil, MaxDiffBytes, "for-each-ref", "--format=%(refname)%00%(objecttype)%00%(*objecttype)")
 	if err != nil {
 		return g, corrupt(err)
+	}
+	// for-each-ref skips a ref it cannot read with a warning and still succeeds, so the refs
+	// recorded on disk are checked against what it listed.
+	listed := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(refs)), "\n") {
+		if name, _, ok := strings.Cut(line, "\x00"); ok {
+			listed[name] = true
+		}
+	}
+	if err := checkRecordedRefs(layout, listed); err != nil {
+		return g, err
 	}
 	stop := []string{"--not", st.base}
 	if _, err := agent.value(ctx, "rev-parse", "--verify", "-q", "HEAD^{commit}"); err == nil {
@@ -525,7 +537,7 @@ func (s *DeliveryFS) headAndIndex(ctx context.Context, agent deliveryGit, st *st
 	if present {
 		head, err := listing(agent, "ls-tree", "-r", "-z", "--full-tree", "HEAD")
 		if err != nil {
-			return false, 0, false, fmt.Errorf("%w: read HEAD's tree: %w", ErrUnverifiable, err)
+			return false, 0, false, corrupt(err)
 		}
 		for _, line := range strings.Split(string(head), "\x00") {
 			meta, path, ok := strings.Cut(line, "\t")
@@ -586,15 +598,16 @@ func (s *DeliveryFS) headAndIndex(ctx context.Context, agent deliveryGit, st *st
 	return headDiffers, headCommits, indexDiffers, nil
 }
 
-// corrupt marks a Git failure that comes from the repository's content (an object it names is
-// missing or unreadable) as ErrUnverifiable, which retrying cannot change; other failures stay as
-// they are and are retried.
+// corrupt marks a Git failure that Git attributes to the repository's content (an object it names
+// is missing, malformed or not what it should be) as ErrUnverifiable, which retrying cannot
+// change. Anything else (I/O, permissions, a failed start, a timeout, a cancellation) stays as it
+// is and is retried.
 func corrupt(err error) error {
-	if err == nil {
-		return nil
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
 	msg := err.Error()
-	for _, sign := range []string{"missing object", "bad object", "not a valid object", "invalid object", "unable to read", "Could not parse object", "corrupt"} {
+	for _, sign := range []string{"missing object", "bad object", "not a tree object", "not a valid object", "invalid object", "corrupt"} {
 		if strings.Contains(msg, sign) {
 			return fmt.Errorf("%w: %w", ErrUnverifiable, err)
 		}
@@ -610,10 +623,15 @@ func (s *DeliveryFS) headPresent(ctx context.Context, agent deliveryGit, st *sta
 	if _, err := agent.value(ctx, "rev-parse", "-q", "--verify", "HEAD^{commit}"); err == nil {
 		return true, nil
 	}
-	ref, err := agent.value(ctx, "symbolic-ref", "-q", "HEAD")
+	// Only HEAD's direct target matters: a HEAD naming an existing alias that dangles is not
+	// unborn, so the symbolic ref is not followed further.
+	ref, err := agent.value(ctx, "symbolic-ref", "--no-recurse", "-q", "HEAD")
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return false, fmt.Errorf("%w: detached HEAD does not resolve to a commit", ErrUnverifiable)
+	}
 	if err != nil {
-		// Detached (exit 1) with an OID that does not resolve, or a HEAD Git cannot read.
-		return false, fmt.Errorf("%w: HEAD does not resolve to a commit: %w", ErrUnverifiable, err)
+		return false, err // Git could not read HEAD this time: retried
 	}
 	recorded, err := refRecorded(st.root, ref)
 	if err != nil {
@@ -623,6 +641,109 @@ func (s *DeliveryFS) headPresent(ctx context.Context, agent deliveryGit, st *sta
 		return false, fmt.Errorf("%w: HEAD names %s, which does not resolve to a commit", ErrUnverifiable, ref)
 	}
 	return false, nil // unborn: nothing committed yet
+}
+
+// checkRecordedRefs reads the refs the repository records as files (loose refs under refs/ of
+// its common and its own Git directory, and packed-refs) without following links or blocking, and
+// requires each to be a well-formed object ID or symbolic ref, and each object ID ref to be one
+// for-each-ref listed: a ref Git could not read is not taken for one that is absent. A reftable
+// cannot be read this way and counts as unverifiable.
+func checkRecordedRefs(layout gitexclude.Layout, listed map[string]bool) error {
+	dirs := []string{layout.CommonDir()}
+	if layout.GitDir() != layout.CommonDir() {
+		dirs = append(dirs, layout.GitDir())
+	}
+	for _, dir := range dirs {
+		r, err := os.OpenRoot(dir)
+		if err != nil {
+			return err
+		}
+		err = func() error {
+			defer r.Close()
+			if _, err := r.Lstat("reftable"); err == nil {
+				return fmt.Errorf("%w: the repository uses a reftable", ErrUnverifiable)
+			}
+			check := func(name, value string) error {
+				value = strings.TrimSpace(value)
+				if target, ok := strings.CutPrefix(value, "ref: "); ok {
+					if !strings.HasPrefix(target, "refs/") {
+						return fmt.Errorf("%w: ref %s names %q", ErrUnverifiable, name, target)
+					}
+					return nil // a symbolic ref holds no object of its own
+				}
+				if !validCommit(value) {
+					return fmt.Errorf("%w: ref %s is malformed", ErrUnverifiable, name)
+				}
+				if !listed[name] {
+					return fmt.Errorf("%w: ref %s cannot be read", ErrUnverifiable, name)
+				}
+				return nil
+			}
+			err := fs.WalkDir(r.FS(), "refs", func(p string, e fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if e.IsDir() {
+					return nil
+				}
+				content, err := readSmall(r, p)
+				if err != nil {
+					return err
+				}
+				return check(p, content)
+			})
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+			packed, err := readSmall(r, "packed-refs")
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			for _, line := range strings.Split(packed, "\n") {
+				if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "^") {
+					continue
+				}
+				oid, name, ok := strings.Cut(line, " ")
+				if !ok {
+					return fmt.Errorf("%w: packed-refs is malformed", ErrUnverifiable)
+				}
+				// A packed ref a loose one overrides is not what Git uses.
+				if _, err := r.Lstat(name); err == nil {
+					continue
+				}
+				if err := check(name, oid); err != nil {
+					return err
+				}
+			}
+			return nil
+		}()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// readSmall reads a regular file of Git metadata within maxTreeListing, without following a link
+// or blocking on a special file; anything else is unverifiable.
+func readSmall(r *os.Root, name string) (string, error) {
+	info, err := r.Lstat(name)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxTreeListing {
+		return "", fmt.Errorf("%w: %s is not a regular file within limits", ErrUnverifiable, name)
+	}
+	f, err := r.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, maxTreeListing))
+	return string(raw), err
 }
 
 // refRecorded reports whether the repository records ref at all, as a loose ref or in

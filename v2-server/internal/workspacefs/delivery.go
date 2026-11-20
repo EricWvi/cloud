@@ -153,6 +153,11 @@ func (g deliveryGit) command(ctx context.Context, args ...string) *exec.Cmd {
 }
 
 func (g deliveryGit) run(ctx context.Context, stdin io.Reader, limit int, args ...string) ([]byte, error) {
+	if fault := gitFault.Load(); fault != nil {
+		if err := (*fault)(args); err != nil {
+			return nil, fmt.Errorf("git %s: %w", args[0], err)
+		}
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := g.command(ctx, args...)
