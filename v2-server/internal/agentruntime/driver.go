@@ -79,7 +79,9 @@ type Driver struct {
 	// recorded are workflow checkouts an earlier Node incarnation prepared, by workspace (see
 	// Reattach): Node resolves them from their clone execution in its own ledger, so a later
 	// session of the workspace starts on the same directory instead of a fresh clone.
-	recorded       map[string]Checkout
+	recorded map[string]Checkout
+	// projectLocks stand in for a project's skillsMu while it has no runtime (see projectLock).
+	projectLocks   map[string]*sync.Mutex
 	serial         atomic.Uint64
 	controlTimeout time.Duration
 	mcpRefreshWait time.Duration

@@ -228,6 +228,119 @@ export interface ChatProjectOrder {
   projectIds: string[];
 }
 
+export type ChatDeletionPreviewWorkspace = typeof ChatDeletionPreviewWorkspace[keyof typeof ChatDeletionPreviewWorkspace];
+
+
+export const ChatDeletionPreviewWorkspace = {
+  none: 'none',
+  recoverable: 'recoverable',
+  undelivered: 'undelivered',
+} as const;
+
+export type ChatDeletionPreviewReason = typeof ChatDeletionPreviewReason[keyof typeof ChatDeletionPreviewReason];
+
+
+export const ChatDeletionPreviewReason = {
+  no_workspace: 'no_workspace',
+  workspace_missing: 'workspace_missing',
+  legacy: 'legacy',
+  delivering: 'delivering',
+  last_turn_undelivered: 'last_turn_undelivered',
+  git_state: 'git_state',
+  changed_after_delivery: 'changed_after_delivery',
+  unverifiable: 'unverifiable',
+} as const;
+
+export type ChatUndeliveredChangeStatus = typeof ChatUndeliveredChangeStatus[keyof typeof ChatUndeliveredChangeStatus];
+
+
+export const ChatUndeliveredChangeStatus = {
+  added: 'added',
+  modified: 'modified',
+  deleted: 'deleted',
+} as const;
+
+export interface ChatUndeliveredChange {
+  path: string;
+  status: ChatUndeliveredChangeStatus;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+}
+
+export type ChatGitFindingsRefsItem = {
+  name: string;
+  /** Commits it reaches that neither the base nor HEAD reaches. */
+  commits: number;
+  /** It does not peel to a commit. */
+  notCommit?: boolean;
+};
+
+/**
+ * With reason git_state: what only the checkout's repository holds, which no delivery carries.
+ */
+export interface ChatGitFindings {
+  /** Entries of refs/stash. */
+  stashes: number;
+  refs: ChatGitFindingsRefsItem[];
+  /** Nested repositories: a .git of any kind below the top level, a changed gitlink, an initialized submodule (.git/modules/<name>). */
+  repositories: string[];
+  /** HEAD is beyond the base and its tree differs from the delivery's (and the base's) on a path it tracks. */
+  headDiffers: boolean;
+  /** With headDiffers: HEAD's commits beyond the base. */
+  headCommits?: number;
+  /** The index has a conflict, or an entry whose blob or mode is neither the delivery's, the base's nor (unstaged) HEAD's. */
+  indexDiffers: boolean;
+}
+
+export interface ChatDeletionPreview {
+  workspace: ChatDeletionPreviewWorkspace;
+  reason?: ChatDeletionPreviewReason;
+  ignored: boolean;
+  undeliveredChanges: ChatUndeliveredChange[];
+  undeliveredTotal: number;
+  /** The newest delivered delivery, whose patch the workspace routes download. */
+  latestDelivery?: string;
+  revision: string;
+  git?: ChatGitFindings;
+  /** Whether a discard can be confirmed: false when there is nothing to discard, a turn still delivers, or a nested repository is too large to bind into the revision (then a discard answers 409 discard_unverifiable). */
+  discardable: boolean;
+}
+
+export type ChatDeletionResultWorkspace = typeof ChatDeletionResultWorkspace[keyof typeof ChatDeletionResultWorkspace];
+
+
+export const ChatDeletionResultWorkspace = {
+  none: 'none',
+  reclaimed: 'reclaimed',
+  kept: 'kept',
+  pending: 'pending',
+} as const;
+
+export interface ChatDeletionResult {
+  workspace: ChatDeletionResultWorkspace;
+  /** Why kept, or why pending: in_progress is still being removed in the background; delivering, removal_failed and check_failed are retried at the next start; reclaim_unavailable at the next start with an Agent runtime. */
+  reason?: string;
+  releasedBytes?: number;
+  releasedFiles?: number;
+}
+
+export type DeleteChatConversationParams = {
+workspace?: DeleteChatConversationWorkspace;
+/**
+ * The deletion preview's revision; required with workspace=discard.
+ */
+revision?: string;
+};
+
+export type DeleteChatConversationWorkspace = typeof DeleteChatConversationWorkspace[keyof typeof DeleteChatConversationWorkspace];
+
+
+export const DeleteChatConversationWorkspace = {
+  reclaim: 'reclaim',
+  discard: 'discard',
+} as const;
+
 export type StreamChatConversationEventsParams = {
 /**
  * Resume after this sequence; Last-Event-ID takes precedence.
@@ -581,17 +694,20 @@ export const useRenameChatConversation = <TError = ErrorType<ChatError>,
     }
 
 /**
- * @summary End the live session, then delete the conversation
+ * workspace says what happens to the conversation's checkout: reclaim (the default) removes it only when its work is recoverable from the session's deliveries and keeps it otherwise; discard removes it regardless, dropping undelivered work, and must carry the revision of the deletion preview the person saw. A discard whose preview is stale, or made while a turn runs or delivers, answers 409 deletion_preview_stale and changes nothing. The reclaim is recorded with the deletion and executed at once; the body says what came of it (pending ones finish at the next start). A server without an Agent runtime cannot judge a checkout: for a conversation that has one it answers a discard with 503 workspace_reclaim_unavailable before anything changes, and a default deletion leaves the reclaim pending (reclaim_unavailable). A discard the preview marked not discardable answers 409 discard_unverifiable.
+ * @summary End the live session, delete the conversation and reclaim its checkout
  */
 export const deleteChatConversation = (
     tid: string,
     cid: string,
+    params?: DeleteChatConversationParams,
  options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
 ) => {
 
 
-      return customInstance<void>(
-      {url: `/api/v2/tenants/${tid}/chat/conversations/${cid}`, method: 'DELETE', signal
+      return customInstance<ChatDeletionResult>(
+      {url: `/api/v2/tenants/${tid}/chat/conversations/${cid}`, method: 'DELETE',
+        params, signal
     },
       options);
     }
@@ -616,9 +732,9 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof deleteChatConversation>>, DeleteChatConversationMutationVariables> = (props) => {
-          const {tid,cid} = props ?? {};
+          const {tid,cid,params} = props ?? {};
 
-          return  deleteChatConversation(tid,cid,requestOptions)
+          return  deleteChatConversation(tid,cid,params,requestOptions)
         }
 
 
@@ -631,10 +747,10 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type DeleteChatConversationMutationResult = NonNullable<Awaited<ReturnType<typeof deleteChatConversation>>>
 
     export type DeleteChatConversationMutationError = ErrorType<ChatError>
-    export type DeleteChatConversationMutationVariables = {tid: string;cid: string}
+    export type DeleteChatConversationMutationVariables = {tid: string;cid: string;params?: DeleteChatConversationParams}
 
     /**
- * @summary End the live session, then delete the conversation
+ * @summary End the live session, delete the conversation and reclaim its checkout
  */
 export const useDeleteChatConversation = <TError = ErrorType<ChatError>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteChatConversation>>, TError,DeleteChatConversationMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
@@ -646,6 +762,107 @@ export const useDeleteChatConversation = <TError = ErrorType<ChatError>,
       > => {
       return useMutation(getDeleteChatConversationMutationOptions(options), queryClient);
     }
+
+/**
+ * workspace none: no checkout recorded (no_workspace) or it no longer exists (workspace_missing). recoverable: the last turn's delivery holds the checkout's work, so deleting removes it; afterwards only an operator can restore that work from the delivery, so latestDelivery offers its patch first; ignored tells whether files the ignore rules leave out of deliveries would go with it. undelivered: deleting keeps the checkout unless workspace=discard; reason says why and undeliveredChanges lists what is not delivered (against the newest delivered delivery, else the base), up to a limit with undeliveredTotal counting all. revision identifies this state for a discard. revision binds the checkout's snapshot content, not only the listed paths. 503 workspace_reclaim_unavailable: this server has no Agent runtime to judge the conversation's checkout.
+ * @summary What deleting the conversation does to its checkout
+ */
+export const previewChatConversationDeletion = (
+    tid: string,
+    cid: string,
+ options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
+) => {
+
+
+      return customInstance<ChatDeletionPreview>(
+      {url: `/api/v2/tenants/${tid}/chat/conversations/${cid}/deletion`, method: 'GET', signal
+    },
+      options);
+    }
+
+
+
+
+export const getPreviewChatConversationDeletionQueryKey = (tid: string,
+    cid: string,) => {
+    return [
+    `/api/v2/tenants/${tid}/chat/conversations/${cid}/deletion`
+    ] as const;
+    }
+
+
+export const getPreviewChatConversationDeletionQueryOptions = <TData = Awaited<ReturnType<typeof previewChatConversationDeletion>>, TError = ErrorType<ChatError>>(tid: string,
+    cid: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof previewChatConversationDeletion>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPreviewChatConversationDeletionQueryKey(tid,cid);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof previewChatConversationDeletion>>> = ({ signal }) => previewChatConversationDeletion(tid,cid, requestOptions, signal);
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: tid !== null && tid !== undefined && cid !== null && cid !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof previewChatConversationDeletion>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PreviewChatConversationDeletionQueryResult = NonNullable<Awaited<ReturnType<typeof previewChatConversationDeletion>>>
+export type PreviewChatConversationDeletionQueryError = ErrorType<ChatError>
+
+
+export function usePreviewChatConversationDeletion<TData = Awaited<ReturnType<typeof previewChatConversationDeletion>>, TError = ErrorType<ChatError>>(
+ tid: string,
+    cid: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof previewChatConversationDeletion>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof previewChatConversationDeletion>>,
+          TError,
+          Awaited<ReturnType<typeof previewChatConversationDeletion>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePreviewChatConversationDeletion<TData = Awaited<ReturnType<typeof previewChatConversationDeletion>>, TError = ErrorType<ChatError>>(
+ tid: string,
+    cid: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof previewChatConversationDeletion>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof previewChatConversationDeletion>>,
+          TError,
+          Awaited<ReturnType<typeof previewChatConversationDeletion>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePreviewChatConversationDeletion<TData = Awaited<ReturnType<typeof previewChatConversationDeletion>>, TError = ErrorType<ChatError>>(
+ tid: string,
+    cid: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof previewChatConversationDeletion>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary What deleting the conversation does to its checkout
+ */
+
+export function usePreviewChatConversationDeletion<TData = Awaited<ReturnType<typeof previewChatConversationDeletion>>, TError = ErrorType<ChatError>>(
+ tid: string,
+    cid: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof previewChatConversationDeletion>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPreviewChatConversationDeletionQueryOptions(tid,cid,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
 
 /**
  * Appends to the conversation's session. 409 turn_running: the previous turn is still running, so the page queues the prompt. 409 conversation_ended: the session has ended (stopped or the server restarted) and the conversation is read-only; start a new chat.

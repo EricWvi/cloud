@@ -1,6 +1,6 @@
 import type { InternalAxiosRequestConfig } from 'axios'
 import { demoUser, fakeBackend } from '@/test/backend'
-import type { ChatConversation, ChatEvent, ChatExecutor, ChatHistoryRecord } from './api/generated'
+import type { ChatConversation, ChatDeletionPreview, ChatEvent, ChatExecutor, ChatHistoryRecord } from './api/generated'
 
 export const tenantId = '00000000-0000-4000-8000-0000000000aa'
 
@@ -100,6 +100,12 @@ export interface ChatBackend {
   tokenConfigured?: boolean
   /** When the repository token was last set or cleared. */
   tokenSetAt?: string
+  /** What the deletion preview answers (a status fails it); no checkout when unset. */
+  deletion?: Partial<ChatDeletionPreview> | { status: number; code?: string }
+  /** Makes the next discard answer 409 deletion_preview_stale and delete nothing. */
+  staleDiscard?: boolean
+  /** The query each delete carried, by conversation. */
+  deletedWith: Record<string, { workspace?: string; revision?: string }>
   /** Requests seen, as "METHOD /path". */
   seen: string[]
   bodies: unknown[]
@@ -117,6 +123,7 @@ export function chatBackend(options: { unavailable?: boolean } = {}): ChatBacken
     conversations: [conversation('c-main', '梳理 v2 接口缺口'), conversation('c-style', '对话页样式')],
     projectOrder: [],
     created: [],
+    deletedWith: {},
     seen: [],
     bodies: [],
   }
@@ -210,10 +217,25 @@ export function chatBackend(options: { unavailable?: boolean } = {}): ChatBacken
       Object.assign(session, { endedAt: at, endReason: 'stopped' })
       return { status: 200, data: { result: { status: 'cancelled', answer: '', answerComplete: false, stopReason: 'cancelled', failureCode: '' } } }
     }
+    if (action === 'deletion') {
+      const preview = state.deletion
+      if (preview && 'status' in preview) {
+        const code = preview.status === 503 && 'code' in preview ? (preview as { code: string }).code : 'internal'
+        return { status: preview.status, data: { code, params: {}, requestId: 'r' } }
+      }
+      return { status: 200, data: { workspace: 'none', reason: 'no_workspace', ignored: false, undeliveredChanges: [], undeliveredTotal: 0, revision: 'rev-1', discardable: preview?.workspace === 'undelivered' && preview.reason !== 'delivering', ...preview } }
+    }
+    if (action.startsWith('workspace/deliveries/') && action.endsWith('/patch')) return { status: 200, data: new Blob(['diff --git']) }
     if (method === 'PATCH') return { status: 200, data: Object.assign(c, { title: body.title }) }
     if (method === 'DELETE') {
+      const params = (config.params ?? {}) as { workspace?: string; revision?: string }
+      if (params.workspace === 'discard' && state.staleDiscard) {
+        state.staleDiscard = false
+        return { status: 409, data: { code: 'deletion_preview_stale', params: {}, requestId: 'r' } }
+      }
+      state.deletedWith[c.id] = params
       state.conversations = state.conversations.filter((x) => x !== c)
-      return { status: 204 }
+      return { status: 200, data: { workspace: 'none' } }
     }
     return undefined
   }

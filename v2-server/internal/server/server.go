@@ -129,6 +129,9 @@ type Options struct {
 	// Deliveries reads retained turn deliveries for the change view and patch download; nil
 	// answers 503 workspace_unavailable wherever a delivery would be read.
 	Deliveries DeliveryReader
+	// WorkspaceReclaims previews and executes the reclaim of a deleted conversation's checkout;
+	// nil (no Agent runtime, so no checkouts) leaves a recorded reclaim to the next start.
+	WorkspaceReclaims chat.Reclaims
 	// MaxPatchBytes caps a downloadable delivery patch; zero or less uses DefaultMaxPatchBytes.
 	MaxPatchBytes int
 	// Context is the server's lifetime: work the handler runs beyond any one request, such as a
@@ -299,7 +302,7 @@ func newHandler(s Store, o Options) *handler {
 	}
 	h := &handler{store: s, opts: o, verdicts: newDecompositionVerdicts(lifetime), patchSlots: make(chan struct{}, maxConcurrentPatches), attempts: newLoginAttempts()}
 	if cs, ok := s.(chat.Store); ok {
-		h.chats = chat.New(cs, o.Execution, o.Catalog, chat.Options{})
+		h.chats = chat.New(cs, o.Execution, o.Catalog, chat.Options{Reclaims: o.WorkspaceReclaims})
 	}
 	return h
 }

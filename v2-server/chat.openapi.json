@@ -341,7 +341,120 @@
         "tags": [
           "chat"
         ],
-        "summary": "End the live session, then delete the conversation",
+        "summary": "End the live session, delete the conversation and reclaim its checkout",
+        "parameters": [
+          {
+            "name": "tid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "reclaim",
+                "discard"
+              ],
+              "default": "reclaim"
+            }
+          },
+          {
+            "name": "revision",
+            "in": "query",
+            "required": false,
+            "description": "The deletion preview's revision; required with workspace=discard.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatDeletionResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatError"
+                }
+              }
+            }
+          }
+        },
+        "description": "workspace says what happens to the conversation's checkout: reclaim (the default) removes it only when its work is recoverable from the session's deliveries and keeps it otherwise; discard removes it regardless, dropping undelivered work, and must carry the revision of the deletion preview the person saw. A discard whose preview is stale, or made while a turn runs or delivers, answers 409 deletion_preview_stale and changes nothing. The reclaim is recorded with the deletion and executed at once; the body says what came of it (pending ones finish at the next start). A server without an Agent runtime cannot judge a checkout: for a conversation that has one it answers a discard with 503 workspace_reclaim_unavailable before anything changes, and a default deletion leaves the reclaim pending (reclaim_unavailable). A discard the preview marked not discardable answers 409 discard_unverifiable."
+      }
+    },
+    "/api/v2/tenants/{tid}/chat/conversations/{cid}/deletion": {
+      "get": {
+        "operationId": "previewChatConversationDeletion",
+        "tags": [
+          "chat"
+        ],
+        "summary": "What deleting the conversation does to its checkout",
+        "description": "workspace none: no checkout recorded (no_workspace) or it no longer exists (workspace_missing). recoverable: the last turn's delivery holds the checkout's work, so deleting removes it; afterwards only an operator can restore that work from the delivery, so latestDelivery offers its patch first; ignored tells whether files the ignore rules leave out of deliveries would go with it. undelivered: deleting keeps the checkout unless workspace=discard; reason says why and undeliveredChanges lists what is not delivered (against the newest delivered delivery, else the base), up to a limit with undeliveredTotal counting all. revision identifies this state for a discard. revision binds the checkout's snapshot content, not only the listed paths. 503 workspace_reclaim_unavailable: this server has no Agent runtime to judge the conversation's checkout.",
         "parameters": [
           {
             "name": "tid",
@@ -361,15 +474,12 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Response"
-          },
-          "400": {
+          "200": {
             "description": "Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ChatError"
+                  "$ref": "#/components/schemas/ChatDeletionPreview"
                 }
               }
             }
@@ -1296,6 +1406,191 @@
         "required": [
           "projectIds"
         ]
+      },
+      "ChatDeletionPreview": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace",
+          "ignored",
+          "undeliveredChanges",
+          "undeliveredTotal",
+          "revision",
+          "discardable"
+        ],
+        "properties": {
+          "workspace": {
+            "type": "string",
+            "enum": [
+              "none",
+              "recoverable",
+              "undelivered"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "no_workspace",
+              "workspace_missing",
+              "legacy",
+              "delivering",
+              "last_turn_undelivered",
+              "git_state",
+              "changed_after_delivery",
+              "unverifiable"
+            ]
+          },
+          "ignored": {
+            "type": "boolean"
+          },
+          "undeliveredChanges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatUndeliveredChange"
+            }
+          },
+          "undeliveredTotal": {
+            "type": "integer"
+          },
+          "latestDelivery": {
+            "type": "string",
+            "description": "The newest delivered delivery, whose patch the workspace routes download."
+          },
+          "revision": {
+            "type": "string"
+          },
+          "git": {
+            "$ref": "#/components/schemas/ChatGitFindings"
+          },
+          "discardable": {
+            "type": "boolean",
+            "description": "Whether a discard can be confirmed: false when there is nothing to discard, a turn still delivers, or a nested repository is too large to bind into the revision (then a discard answers 409 discard_unverifiable)."
+          }
+        }
+      },
+      "ChatUndeliveredChange": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "status",
+          "additions",
+          "deletions",
+          "binary"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "added",
+              "modified",
+              "deleted"
+            ]
+          },
+          "additions": {
+            "type": "integer"
+          },
+          "deletions": {
+            "type": "integer"
+          },
+          "binary": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ChatDeletionResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace"
+        ],
+        "properties": {
+          "workspace": {
+            "type": "string",
+            "enum": [
+              "none",
+              "reclaimed",
+              "kept",
+              "pending"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why kept, or why pending: in_progress is still being removed in the background; delivering, removal_failed and check_failed are retried at the next start; reclaim_unavailable at the next start with an Agent runtime."
+          },
+          "releasedBytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "releasedFiles": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ChatGitFindings": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "stashes",
+          "refs",
+          "repositories",
+          "headDiffers",
+          "indexDiffers"
+        ],
+        "description": "With reason git_state: what only the checkout's repository holds, which no delivery carries.",
+        "properties": {
+          "stashes": {
+            "type": "integer",
+            "description": "Entries of refs/stash."
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name",
+                "commits"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "commits": {
+                  "type": "integer",
+                  "description": "Commits it reaches that neither the base nor HEAD reaches."
+                },
+                "notCommit": {
+                  "type": "boolean",
+                  "description": "It does not peel to a commit."
+                }
+              }
+            }
+          },
+          "repositories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Nested repositories: a .git of any kind below the top level, a changed gitlink, an initialized submodule (.git/modules/<name>)."
+          },
+          "headDiffers": {
+            "type": "boolean",
+            "description": "HEAD is beyond the base and its tree differs from the delivery's (and the base's) on a path it tracks."
+          },
+          "headCommits": {
+            "type": "integer",
+            "description": "With headDiffers: HEAD's commits beyond the base."
+          },
+          "indexDiffers": {
+            "type": "boolean",
+            "description": "The index has a conflict, or an entry whose blob or mode is neither the delivery's, the base's nor (unstaged) HEAD's."
+          }
+        }
       }
     }
   }

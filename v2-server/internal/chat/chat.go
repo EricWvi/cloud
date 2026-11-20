@@ -13,12 +13,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
+	"github.com/wanglongan587/cloud/v2-server/internal/workspacereclaim"
 )
 
 // ErrNoActiveTurn reports a stop with no live session to act on.
@@ -31,16 +33,50 @@ type Store interface {
 	ChatConversations(ctx context.Context, tenant, user string) ([]store.ChatConversation, error)
 	RenameChatConversation(ctx context.Context, tenant, user, id, title string) error
 	DeleteChatConversation(ctx context.Context, tenant, user, id string) error
+	DeleteChatConversationReclaiming(ctx context.Context, tenant, user, id string, mode store.ReclaimMode) (string, error)
+	ChatCheckout(ctx context.Context, tenant, user, id string) (store.ChatCheckout, error)
 	RecordChatTurn(ctx context.Context, conversationID, sessionID, attemptID, turnID string, at time.Time) error
 	EndChatSession(ctx context.Context, sessionID, reason string, at time.Time) error
 	MarkChatSessionEnding(ctx context.Context, sessionID, reason string) error
 	ClearChatSessionEnding(ctx context.Context, sessionID string) error
 }
 
+// Reclaims judges and reclaims deleted conversations' checkouts; *workspacereclaim.Reclaimer
+// implements it.
+type Reclaims interface {
+	Preview(ctx context.Context, tenant, user, conversationID string) (workspacereclaim.Verdict, error)
+	// Start executes a recorded reclaim in the background, under the server's life.
+	Start(workspaceID string) <-chan workspacereclaim.Result
+}
+
+// ErrDeletionPreviewStale reports a discard whose preview no longer matches the conversation: the
+// person would drop something they were not shown. Nothing is deleted.
+var ErrDeletionPreviewStale = errors.New("deletion preview stale")
+
+// ErrDiscardUnverifiable reports a discard the preview cannot vouch for: part of what it would drop
+// (a nested repository too large to digest) is not bound by the revision. Nothing is deleted.
+var ErrDiscardUnverifiable = errors.New("discard cannot be verified")
+
+// ErrReclaimUnavailable reports a conversation whose checkout this server cannot judge: it runs
+// without an Agent runtime, so it can neither preview the checkout nor verify a discard. A
+// deletion that keeps the default mode still goes ahead and leaves the reclaim to a start that
+// can judge it.
+var ErrReclaimUnavailable = errors.New("workspace reclaim unavailable")
+
+// reclaimWait is how long a deletion waits for the reclaim it started before answering; a
+// checkout that takes longer goes on being removed in the background (pending, in_progress).
+const reclaimWait = 5 * time.Second
+
 // Options tune a Service.
 type Options struct {
 	// Now is the clock; nil uses time.Now.
 	Now func() time.Time
+	// ReclaimWait is how long a deletion waits for its reclaim; zero uses 5 seconds.
+	ReclaimWait time.Duration
+	// Reclaims judges and reclaims a deleted conversation's checkout. Nil (no Agent runtime)
+	// refuses previews and discards of a conversation with a checkout, and leaves a recorded
+	// reclaim to a later start that has a runtime.
+	Reclaims Reclaims
 }
 
 // Service coordinates conversations with the execution port.
@@ -49,6 +85,9 @@ type Service struct {
 	runtime execution.Service
 	catalog execution.Catalog
 	now     func() time.Time
+	reclaim Reclaims
+	// reclaimWait is how long Delete waits for the reclaim it started.
+	reclaimWait time.Duration
 	// locks serialize work on one conversation, so two first prompts cannot both start a session.
 	// v2-server is a single process, which is what makes an in-memory lock sufficient.
 	locks keyedLocks
@@ -60,7 +99,10 @@ func New(s Store, runtime execution.Service, catalog execution.Catalog, o Option
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	return &Service{store: s, runtime: runtime, catalog: catalog, now: o.Now}
+	if o.ReclaimWait <= 0 {
+		o.ReclaimWait = reclaimWait
+	}
+	return &Service{store: s, runtime: runtime, catalog: catalog, now: o.Now, reclaim: o.Reclaims, reclaimWait: o.ReclaimWait}
 }
 
 func (s *Service) lock(id string) func() { return s.locks.lock(id) }
@@ -274,18 +316,85 @@ func (s *Service) Rename(ctx context.Context, scope execution.Scope, conversatio
 
 // Delete ends the live session, then removes the conversation. If the port cannot confirm the
 // session ended, the conversation stays: deleting it would hide an Agent that is still running.
-func (s *Service) Delete(ctx context.Context, scope execution.Scope, conversationID string) error {
+// The same transaction records a reclaim of the conversation's checkout under mode, which is
+// then executed at once: reclaim removes the checkout only when its deliveries hold its work,
+// discard removes it regardless and must present the revision of the preview the person saw. A
+// discard whose preview is stale, or made while a turn still runs or delivers, changes nothing
+// and returns ErrDeletionPreviewStale. The outcome says what happened to the checkout.
+func (s *Service) Delete(ctx context.Context, scope execution.Scope, conversationID string, mode store.ReclaimMode, revision string) (workspacereclaim.Outcome, error) {
+	none := workspacereclaim.Outcome{Workspace: workspacereclaim.WorkspaceNone}
+	if mode != store.ReclaimRecoverable && mode != store.ReclaimDiscard || mode == store.ReclaimDiscard && revision == "" {
+		return none, execution.ErrInvalidRequest
+	}
 	defer s.lock(conversationID)()
 	c, e := s.store.ChatConversation(ctx, scope.TenantID, scope.UserID, conversationID)
 	if e != nil {
-		return e
+		return none, e
+	}
+	if mode == store.ReclaimDiscard && s.reclaim == nil {
+		// Nothing can verify what the person was shown; refuse before anything changes.
+		checkout, e := s.store.ChatCheckout(ctx, scope.TenantID, scope.UserID, conversationID)
+		if e != nil {
+			return none, e
+		}
+		if checkout.Registered {
+			return none, ErrReclaimUnavailable
+		}
+	}
+	if mode == store.ReclaimDiscard && s.reclaim != nil {
+		// Judged again before the session ends, so a stale discard leaves everything as it was.
+		v, e := s.reclaim.Preview(ctx, scope.TenantID, scope.UserID, conversationID)
+		if e != nil {
+			return none, e
+		}
+		if v.Revision != revision || v.Reason == workspacereclaim.ReasonDelivering {
+			return none, ErrDeletionPreviewStale
+		}
+		if v.Workspace == workspacereclaim.WorkspaceUndelivered && !v.Discardable {
+			return none, ErrDiscardUnverifiable
+		}
 	}
 	if live, ok := c.Live(); ok {
 		if e := s.ending(ctx, live.ID, store.EndDeleted, func() error { return s.runtime.End(ctx, scope, live.ID) }); e != nil {
-			return fmt.Errorf("end session: %w", e)
+			return none, fmt.Errorf("end session: %w", e)
 		}
 	}
-	return s.store.DeleteChatConversation(ctx, scope.TenantID, scope.UserID, conversationID)
+	workspace, e := s.store.DeleteChatConversationReclaiming(ctx, scope.TenantID, scope.UserID, conversationID, mode)
+	if e != nil || workspace == "" {
+		return none, e
+	}
+	if s.reclaim == nil {
+		// Recorded in the default mode only (a discard was refused above): a start with an Agent
+		// runtime judges it like any other.
+		return workspacereclaim.Outcome{Workspace: workspacereclaim.OutcomePending, Reason: workspacereclaim.ReasonReclaimUnavailable}, nil
+	}
+	// The deletion has committed: whatever happens to the checkout from here on is reported as
+	// its outcome, never as a failed deletion.
+	select {
+	case res := <-s.reclaim.Start(workspace):
+		if res.Err != nil {
+			slog.Warn("workspace reclaim stays open after deletion", "workspace", workspace, "error", res.Err)
+			return workspacereclaim.Outcome{Workspace: workspacereclaim.OutcomePending, Reason: workspacereclaim.ReasonRemovalFailed}, nil
+		}
+		return res.Outcome, nil
+	case <-time.After(s.reclaimWait):
+		return workspacereclaim.Outcome{Workspace: workspacereclaim.OutcomePending, Reason: workspacereclaim.ReasonInProgress}, nil
+	}
+}
+
+// DeletionPreview tells the person what deleting the conversation does to its checkout.
+func (s *Service) DeletionPreview(ctx context.Context, scope execution.Scope, conversationID string) (workspacereclaim.Verdict, error) {
+	if s.reclaim == nil {
+		checkout, e := s.store.ChatCheckout(ctx, scope.TenantID, scope.UserID, conversationID)
+		if e != nil {
+			return workspacereclaim.Verdict{}, e
+		}
+		if checkout.Registered {
+			return workspacereclaim.Verdict{}, ErrReclaimUnavailable
+		}
+		return workspacereclaim.Verdict{Workspace: workspacereclaim.WorkspaceNone, Reason: workspacereclaim.ReasonNoWorkspace}, nil
+	}
+	return s.reclaim.Preview(ctx, scope.TenantID, scope.UserID, conversationID)
 }
 
 // TurnPrompt returns the text a turn of the session was asked. A turn stopped before its Agent

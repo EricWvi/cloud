@@ -1,7 +1,8 @@
+import { codeOf } from '@/lib/api-client'
 import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
 import type { SidebarLayout } from '@/components/sidebar-resize-handle'
-import type { ChatConversation, ChatEvent, ChatExecutor } from './api/generated'
+import type { ChatConversation, ChatDeletionPreview, ChatEvent, ChatExecutor } from './api/generated'
 import type { CreateProject } from '@/lib/projects-api/generated'
 import { applyEvent, isResponding } from '@/components/agent-thread/model/conversation'
 import { applySessionEvent, conversationOf, emptySessionView, type SessionView } from '@/components/agent-thread/model/history'
@@ -147,7 +148,20 @@ interface State {
   /** Creates the conversation the new chat describes with its first prompt, and selects it. */
   sendNewChat: (draft: Draft) => Promise<void>
   renameSession: (id: string, title: string) => void
-  deleteSession: (id: string) => Promise<void>
+  /**
+   * Deletes the conversation. With `discardRevision`, the revision of the preview the person saw,
+   * its working directory goes too even when its changes were never delivered; otherwise the
+   * server keeps such a directory. Resolves to 'stale' when that preview no longer holds: nothing
+   * was deleted and the person must look again.
+   */
+  deleteSession: (id: string, discardRevision?: string) => Promise<'stale' | undefined>
+  /**
+   * Tells what deleting the conversation does to its working directory. A conversation that never
+   * reached the backend has none. Rejects when the backend cannot tell.
+   */
+  deletionPreview: (id: string) => Promise<ChatDeletionPreview>
+  /** Downloads one of the conversation's deliveries as a patch. */
+  deliveryPatch: (id: string, deliveryId: string) => Promise<Blob>
   /**
    * Creates a project from a repository the backend clones, then starts the new chat in it.
    * Resolves to why it failed, if it did.
@@ -538,14 +552,26 @@ export const useChatStore = create<State>()(
             })
           }
         },
-        deleteSession: async (id) => {
+        deletionPreview: async (id) => {
+          const session = get().sessions.find((x) => x.id === id)
+          const { tenantId: tid } = get()
+          if (!session?.remote || !tid) return { workspace: 'none', reason: 'no_workspace', ignored: false, undeliveredChanges: [], undeliveredTotal: 0, revision: '', discardable: false }
+          return remote.deletionPreview(tid, id)
+        },
+        deliveryPatch: async (id, deliveryId) => {
+          const { tenantId: tid } = get()
+          if (!tid) throw new Error('not signed in')
+          return remote.deliveryPatch(tid, id, deliveryId)
+        },
+        deleteSession: async (id, discardRevision) => {
           const session = get().sessions.find((x) => x.id === id)
           const { tenantId: tid, userId } = get()
           if (session?.remote && tid && userId) {
             try {
-              await remote.remove(tid, id)
+              await remote.remove(tid, id, discardRevision)
             } catch (error) {
               if (!isCurrent(tid, userId)) return
+              if (codeOf(error) === 'deletion_preview_stale') return 'stale'
               notify(id, failureOf(error))
               return
             }

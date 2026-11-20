@@ -55,13 +55,17 @@ type deliveries struct{ s *steps }
 
 func (d deliveries) RecoverTurnDeliveries(context.Context) error { return d.s.run("deliveries") }
 
+type reclaims struct{ s *steps }
+
+func (r reclaims) Resume(context.Context) error { return r.s.run("workspace-reclaims") }
+
 type decompositions struct{ s *steps }
 
 func (d decompositions) Recover(context.Context) error { return d.s.run("decompositions") }
 func (d decompositions) Adopt(context.Context) error   { return d.s.run("decompositions-adopt") }
 
 func TestRecoverDeliversBeforeWorkflowResumeAndAdmission(t *testing.T) {
-	all := []string{"task-workflows", "decompositions", "workflow-runs", "task-runs", "deliveries", "workflow-resume", "decompositions-adopt"}
+	all := []string{"task-workflows", "decompositions", "workflow-runs", "task-runs", "deliveries", "workspace-reclaims", "workflow-resume", "decompositions-adopt"}
 	for i, failing := range append([]string{""}, all...) {
 		name := failing
 		if name == "" {
@@ -75,6 +79,9 @@ func TestRecoverDeliversBeforeWorkflowResumeAndAdmission(t *testing.T) {
 				WorkflowRuns:   workflows{s},
 				Deliveries:     deliveries{s},
 				TaskRuns:       interrupter{s, "task-runs"},
+				// Deleted conversations' checkouts are judged after interrupted deliveries settle and
+				// before workflows resume or requests are served.
+				WorkspaceReclaims: reclaims{s},
 			})
 			if (failing != "") != errors.Is(err, errBroken) {
 				t.Fatalf("error = %v, want the broken step's error only when a step fails", err)

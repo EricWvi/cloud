@@ -135,6 +135,7 @@ type chatClient struct {
 	base   string
 	http   *http.Client
 	tenant string
+	store  *store.Store
 }
 
 // newChatClient serves v2-server with rt injected as both the execution service and the catalog,
@@ -150,7 +151,7 @@ func newChatClient(t *testing.T, rt *executiontest.Stub) *chatClient {
 	srv := httptest.NewServer(server.New(s, opts))
 	t.Cleanup(srv.Close)
 	jar, _ := cookiejar.New(nil)
-	cl := &chatClient{t: t, base: srv.URL, http: &http.Client{Jar: jar}}
+	cl := &chatClient{t: t, base: srv.URL, http: &http.Client{Jar: jar}, store: s}
 	cl.raw("POST", "/auth/login", map[string]string{"provider": "email", "email": storetest.Email("chat")}, nil)
 	_, me := cl.raw("GET", "/api/v1/me/tenants", nil, nil)
 	cl.tenant = me["items"].([]any)[0].(map[string]any)["id"].(string)
@@ -287,8 +288,22 @@ func TestChatConversationLifecycle(t *testing.T) {
 	if items := list["items"].([]any); status != 200 || len(items) != 2 || items[0].(map[string]any)["session"].(map[string]any)["endReason"] != "stopped" {
 		t.Fatalf("list = %d %v", status, list)
 	}
-	if status, _ := c.do("DELETE", "/conversations/"+id, nil); status != 204 {
-		t.Fatalf("delete = %d", status)
+	// The stub records no checkout, so deleting has nothing to keep or reclaim.
+	status, preview := c.do("GET", "/conversations/"+id+"/deletion", nil)
+	if status != 200 || preview["workspace"] != "none" || preview["reason"] != "no_workspace" || preview["ignored"] != false {
+		t.Fatalf("deletion preview = %d %v", status, preview)
+	}
+	if status, body := c.do("GET", "/conversations/00000000-0000-0000-0000-000000000009/deletion", nil); status != 404 {
+		t.Fatalf("preview of an unknown conversation = %d %v", status, body)
+	}
+	if status, body := c.do("DELETE", "/conversations/"+id+"?workspace=keep", nil); status != 400 || body["code"] != "invalid_request" {
+		t.Fatalf("delete with an unknown workspace choice = %d %v", status, body)
+	}
+	if status, body := c.do("DELETE", "/conversations/"+id+"?workspace=discard", nil); status != 400 || body["code"] != "invalid_request" {
+		t.Fatalf("discard without the preview's revision = %d %v", status, body)
+	}
+	if status, body := c.do("DELETE", "/conversations/"+id+"?workspace=discard&revision=x", nil); status != 200 || body["workspace"] != "none" {
+		t.Fatalf("delete = %d %v", status, body)
 	}
 	if status, _ := c.do("PATCH", "/conversations/"+id, map[string]any{"title": "x"}); status != 404 {
 		t.Fatalf("rename deleted = %d", status)
@@ -428,5 +443,27 @@ func TestChatProjectOrder(t *testing.T) {
 	c.do("PUT", "/project-order", map[string]any{"projectIds": []string{"b", "a"}})
 	if _, body := c.do("GET", "/project-order", nil); body["projectIds"].([]any)[0] != "b" {
 		t.Fatalf("saved order = %v", body)
+	}
+}
+
+// A server without an Agent runtime cannot judge a checkout an earlier one recorded: the preview
+// and a discard answer 503 workspace_reclaim_unavailable, and a default deletion still succeeds.
+func TestChatDeletionWithoutReclaimerAnswersUnavailable(t *testing.T) {
+	c := newChatClient(t, withRuntime(nil))
+	_, me := c.raw("GET", "/api/v1/me", nil, nil)
+	scope := execution.Scope{TenantID: c.tenant, UserID: me["id"].(string)}
+	conv := storetest.ChatWithCheckout(t, c.store, scope, "/checkouts/earlier-runtime", storetest.TurnDelivered)
+	conv.End(t, c.store)
+	if e := c.store.EndChatSession(t.Context(), conv.SessionID, store.EndStopped, time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	if status, body := c.do("GET", "/conversations/"+conv.ConversationID+"/deletion", nil); status != 503 || body["code"] != "workspace_reclaim_unavailable" {
+		t.Fatalf("preview = %d %v", status, body)
+	}
+	if status, body := c.do("DELETE", "/conversations/"+conv.ConversationID+"?workspace=discard&revision=r", nil); status != 503 || body["code"] != "workspace_reclaim_unavailable" {
+		t.Fatalf("discard = %d %v", status, body)
+	}
+	if status, body := c.do("DELETE", "/conversations/"+conv.ConversationID, nil); status != 200 || body["workspace"] != "pending" || body["reason"] != "reclaim_unavailable" {
+		t.Fatalf("default delete = %d %v", status, body)
 	}
 }

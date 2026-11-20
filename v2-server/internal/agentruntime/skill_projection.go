@@ -91,6 +91,11 @@ func (p *projectRuntime) projectSkills(checkouts []string, old, next []skillLink
 	owned := map[*os.Root][]string{}
 	for _, checkout := range checkouts {
 		root, e := os.OpenRoot(checkout)
+		if errors.Is(e, fs.ErrNotExist) {
+			// A deleted conversation's checkout was reclaimed after it was listed: nothing to
+			// project there, and the other checkouts must still get their links.
+			continue
+		}
 		if e != nil {
 			return e
 		}

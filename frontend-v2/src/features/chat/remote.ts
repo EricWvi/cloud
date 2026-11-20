@@ -12,6 +12,7 @@ import {
 import { isAxiosError } from 'axios'
 import {
   type ChatConversation,
+  type ChatDeletionPreview,
   type ChatEvent,
   type ChatExecutor,
   createChatConversation,
@@ -19,11 +20,13 @@ import {
   getChatProjectOrder,
   listChatConversations,
   listChatExecutors,
+  previewChatConversationDeletion,
   renameChatConversation,
   sendChatMessage,
   setChatProjectOrder,
   stopChatConversation,
 } from './api/generated'
+import { getChatWorkspaceDeliveryPatch } from '@/lib/workspace-api/generated'
 
 /** A project the backend can run chats in; each conversation gets its own directory of it. */
 export interface RemoteProject {
@@ -177,7 +180,17 @@ export const remote = {
   conversations: async (tid: string) => (await listChatConversations(tid)).items,
   stop: (tid: string, cid: string) => stopChatConversation(tid, cid),
   rename: (tid: string, cid: string, title: string) => renameChatConversation(tid, cid, { title }),
-  remove: (tid: string, cid: string) => deleteChatConversation(tid, cid),
+  /**
+   * Deletes the conversation. With the revision of the preview the person saw it also discards the
+   * working directory's undelivered changes; without it the server removes the directory only when
+   * the deliveries hold its work. Resolves to what became of the directory.
+   */
+  remove: (tid: string, cid: string, discardRevision?: string) =>
+    deleteChatConversation(tid, cid, discardRevision ? { workspace: 'discard', revision: discardRevision } : undefined),
+  /** What deleting the conversation does to its working directory, for the confirmation. */
+  deletionPreview: (tid: string, cid: string): Promise<ChatDeletionPreview> => previewChatConversationDeletion(tid, cid),
+  /** Downloads one of the conversation's deliveries as a patch. */
+  deliveryPatch: async (tid: string, cid: string, deliveryId: string): Promise<Blob> => (await getChatWorkspaceDeliveryPatch(tid, cid, deliveryId)) ?? new Blob(),
   saveOrder: (tid: string, projectIds: string[]) => setChatProjectOrder(tid, { projectIds }),
   /** Clones the repository and records the project; resolves only once both have succeeded. */
   createProject: async (tid: string, input: CreateProject): Promise<RemoteProject> => {

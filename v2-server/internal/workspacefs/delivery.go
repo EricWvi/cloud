@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -152,6 +153,11 @@ func (g deliveryGit) command(ctx context.Context, args ...string) *exec.Cmd {
 }
 
 func (g deliveryGit) run(ctx context.Context, stdin io.Reader, limit int, args ...string) ([]byte, error) {
+	if fault := gitFault.Load(); fault != nil {
+		if err := (*fault)(args); err != nil {
+			return nil, fmt.Errorf("git %s: %w", args[0], err)
+		}
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := g.command(ctx, args...)
@@ -202,84 +208,130 @@ func (s *DeliveryFS) mirrorGit(mirror string) (deliveryGit, error) {
 	return deliveryGit{binary: s.git, dir: mirror, env: []string{"GIT_DIR=" + mirror}}, nil
 }
 
+// ErrUnverifiable reports a checkout whose snapshot cannot be built because of what it holds
+// (unreadable Git metadata, changes too large, skills Ora cannot tell apart), not because of a
+// failing disk or mirror: retrying gives the same answer.
+var ErrUnverifiable = errors.New("checkout snapshot cannot be verified")
+
+// isIOError reports an operating system error, which a later attempt may not meet again.
+func isIOError(err error) bool {
+	var path *fs.PathError
+	var link *os.LinkError
+	var sys *os.SyscallError
+	return errors.As(err, &path) || errors.As(err, &link) || errors.As(err, &sys)
+}
+
+// staged is a checkout's snapshot tree written into a scratch repository whose objects fall back
+// to the mirror's. close removes the scratch repository.
+type staged struct {
+	git, mirror    deliveryGit
+	scratch, root  string
+	base, baseTree string
+	tree           string
+	close          func()
+}
+
+// stage builds the checkout's snapshot tree by the delivery rules: a temporary index initialized
+// at the base, every file Git does not ignore, materialized skills removed. It writes objects only
+// into a scratch repository. The caller must hold the checkout lock.
+func (s *DeliveryFS) stage(ctx context.Context, ws Workspace, mirrorPath string, observedAt time.Time) (*staged, error) {
+	root, err := ws.root()
+	if err != nil {
+		return nil, err
+	}
+	mirror, err := s.mirrorGit(mirrorPath)
+	if err != nil {
+		return nil, err
+	}
+	format, err := mirror.value(ctx, "rev-parse", "--show-object-format")
+	if err != nil {
+		return nil, err
+	}
+	base := ws.BaseCommit
+	if !validCommit(base) || (format != "sha1" && format != "sha256") ||
+		(format == "sha1" && len(base) != 40) || (format == "sha256" && len(base) != 64) {
+		return nil, errors.New("invalid delivery base")
+	}
+	kind, err := mirror.value(ctx, "cat-file", "-t", base)
+	if err != nil {
+		return nil, err
+	}
+	if kind != "commit" {
+		return nil, errors.New("delivery base is not a commit")
+	}
+	baseTree, err := mirror.value(ctx, "rev-parse", "--verify", base+"^{tree}")
+	if err != nil {
+		return nil, err
+	}
+	scratch, err := os.MkdirTemp(s.scratch, "delivery-")
+	if err != nil {
+		return nil, err
+	}
+	st := &staged{mirror: mirror, scratch: scratch, root: root, base: base, baseTree: baseTree, close: func() { os.RemoveAll(scratch) }}
+	fail := func(err error) (*staged, error) { st.close(); return nil, err }
+	g := deliveryGit{binary: s.git, dir: scratch}
+	if _, err := g.value(ctx, "init", "--bare", "--template=", "--object-format="+format); err != nil {
+		return fail(err)
+	}
+	exclude, withoutGit, err := copyDeliveryExclude(root, scratch)
+	if err != nil {
+		// A .git pointing nowhere is broken metadata like any other, not a passing disk error.
+		if !errors.Is(err, ErrGone) && (!isIOError(err) || errors.Is(err, fs.ErrNotExist)) {
+			// Git metadata Ora may not read (an exclude outside the checkout, an oversized or
+			// irregular file): what the checkout holds cannot be told, now or on a retry.
+			err = fmt.Errorf("%w: %w", ErrUnverifiable, err)
+		}
+		return fail(err)
+	}
+	g.dir = root
+	g.env = []string{"GIT_DIR=" + scratch, "GIT_WORK_TREE=" + root, "GIT_INDEX_FILE=" + filepath.Join(scratch, "delivery.index"),
+		"GIT_OBJECT_DIRECTORY=" + filepath.Join(scratch, "objects"),
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES=" + strconv.Quote(filepath.Join(mirrorPath, "objects")),
+		"GIT_AUTHOR_NAME=Ora", "GIT_COMMITTER_NAME=Ora", "GIT_AUTHOR_EMAIL=ora@ora.invalid", "GIT_COMMITTER_EMAIL=ora@ora.invalid"}
+	if !observedAt.IsZero() {
+		at := observedAt.UTC().Format(time.RFC3339)
+		g.env = append(g.env, "GIT_AUTHOR_DATE="+at, "GIT_COMMITTER_DATE="+at)
+	}
+	if _, err := g.value(ctx, "read-tree", "--reset", base); err != nil {
+		return fail(err)
+	}
+	if err := checkDeliveryFileBytes(ctx, g, root, s.maxObjects); err != nil {
+		return fail(err)
+	}
+	if _, err := g.value(ctx, "add", "-A", "--", "."); err != nil {
+		return fail(err)
+	}
+	for _, rules := range exclude {
+		if err := removeMaterializedPaths(ctx, g, base, rules); err != nil {
+			return fail(err)
+		}
+	}
+	if withoutGit {
+		if err := requireNoMaterializedChanges(ctx, g, base); err != nil {
+			return fail(err)
+		}
+	}
+	if st.tree, err = g.value(ctx, "write-tree"); err != nil {
+		return fail(err)
+	}
+	st.git = g
+	return st, nil
+}
+
 // Deliver stages and publishes one snapshot. Its caller must hold the checkout lock.
 func (s *DeliveryFS) Deliver(ctx context.Context, req DeliveryRequest) (Snapshot, error) {
 	ref, err := deliveryRef(req.ProjectID, req.DeliveryID)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	root, err := req.Workspace.root()
+	st, err := s.stage(ctx, req.Workspace, req.MirrorPath, req.ObservedAt)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	mirror, err := s.mirrorGit(req.MirrorPath)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	format, err := mirror.value(ctx, "rev-parse", "--show-object-format")
-	if err != nil {
-		return Snapshot{}, err
-	}
-	base := req.Workspace.BaseCommit
-	if !validCommit(base) || (format != "sha1" && format != "sha256") ||
-		(format == "sha1" && len(base) != 40) || (format == "sha256" && len(base) != 64) {
-		return Snapshot{}, errors.New("invalid delivery base")
-	}
-	kind, err := mirror.value(ctx, "cat-file", "-t", base)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	if kind != "commit" {
-		return Snapshot{}, errors.New("delivery base is not a commit")
-	}
-	baseTree, err := mirror.value(ctx, "rev-parse", "--verify", base+"^{tree}")
-	if err != nil {
-		return Snapshot{}, err
-	}
-	scratch, err := os.MkdirTemp(s.scratch, "delivery-")
-	if err != nil {
-		return Snapshot{}, err
-	}
-	defer os.RemoveAll(scratch)
-	g := deliveryGit{binary: s.git, dir: scratch}
-	if _, err := g.value(ctx, "init", "--bare", "--template=", "--object-format="+format); err != nil {
-		return Snapshot{}, err
-	}
-	exclude, withoutGit, err := copyDeliveryExclude(root, scratch)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	g.dir = root
-	g.env = []string{"GIT_DIR=" + scratch, "GIT_WORK_TREE=" + root, "GIT_INDEX_FILE=" + filepath.Join(scratch, "delivery.index"),
-		"GIT_OBJECT_DIRECTORY=" + filepath.Join(scratch, "objects"),
-		"GIT_ALTERNATE_OBJECT_DIRECTORIES=" + strconv.Quote(filepath.Join(req.MirrorPath, "objects")),
-		"GIT_AUTHOR_NAME=Ora", "GIT_COMMITTER_NAME=Ora", "GIT_AUTHOR_EMAIL=ora@ora.invalid", "GIT_COMMITTER_EMAIL=ora@ora.invalid"}
-	if !req.ObservedAt.IsZero() {
-		at := req.ObservedAt.UTC().Format(time.RFC3339)
-		g.env = append(g.env, "GIT_AUTHOR_DATE="+at, "GIT_COMMITTER_DATE="+at)
-	}
-	if _, err := g.value(ctx, "read-tree", "--reset", base); err != nil {
-		return Snapshot{}, err
-	}
-	if err := checkDeliveryFileBytes(ctx, g, root, s.maxObjects); err != nil {
-		return Snapshot{}, err
-	}
-	if _, err := g.value(ctx, "add", "-A", "--", "."); err != nil {
-		return Snapshot{}, err
-	}
-	for _, rules := range exclude {
-		if err := removeMaterializedPaths(ctx, g, base, rules); err != nil {
-			return Snapshot{}, err
-		}
-	}
-	if withoutGit {
-		if err := requireNoMaterializedChanges(ctx, g, base); err != nil {
-			return Snapshot{}, err
-		}
-	}
-	tree, err := g.value(ctx, "write-tree")
-	if err != nil || tree == baseTree {
-		return Snapshot{}, err
+	defer st.close()
+	g, mirror, scratch, base, tree := st.git, st.mirror, st.scratch, st.base, st.tree
+	if tree == st.baseTree {
+		return Snapshot{}, nil
 	}
 	raw, err := g.run(ctx, strings.NewReader(req.Message+"\n"), 1024, "commit-tree", tree, "-p", base)
 	if err != nil {

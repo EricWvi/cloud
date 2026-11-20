@@ -15,6 +15,8 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/chat"
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
+	"github.com/wanglongan587/cloud/v2-server/internal/workspacefs"
+	"github.com/wanglongan587/cloud/v2-server/internal/workspacereclaim"
 )
 
 // The chat routes are outside api/openapi.json; chat.openapi.json describes them.
@@ -34,6 +36,7 @@ func (h *handler) chatRoutes(rt *router) {
 	rt.tenant("POST "+chatBase+"/conversations", h.chat(h.chatCreate))
 	rt.tenant("PATCH "+chatBase+"/conversations/{cid}", h.chat(h.chatRename))
 	rt.tenant("DELETE "+chatBase+"/conversations/{cid}", h.chat(h.chatDelete))
+	rt.tenant("GET "+chatBase+"/conversations/{cid}/deletion", h.chat(h.chatDeletion))
 	rt.tenant("POST "+chatBase+"/conversations/{cid}/messages", h.chat(h.chatSend))
 	rt.tenant("POST "+chatBase+"/conversations/{cid}/stop", h.chat(h.chatStop))
 	rt.tenant("GET "+chatBase+"/conversations/{cid}/events", h.chat(h.chatEvents))
@@ -183,12 +186,68 @@ func (h *handler) chatRename(w http.ResponseWriter, r *http.Request, c chatReque
 	writeJSON(w, http.StatusOK, conv)
 }
 
+// chatDelete deletes a conversation. The optional workspace query parameter is what happens to its
+// checkout: reclaim (the default) removes it only when the deliveries hold its work, discard
+// removes it regardless and needs the preview's revision. The body says what became of it.
 func (h *handler) chatDelete(w http.ResponseWriter, r *http.Request, c chatRequest) {
-	if e := c.svc.Delete(r.Context(), c.scope, r.PathValue("cid")); e != nil {
+	q := r.URL.Query()
+	mode := store.ReclaimRecoverable
+	if q.Has("workspace") {
+		mode = store.ReclaimMode(q.Get("workspace"))
+		if mode != store.ReclaimRecoverable && mode != store.ReclaimDiscard {
+			fault(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+	}
+	out, e := c.svc.Delete(r.Context(), c.scope, r.PathValue("cid"), mode, q.Get("revision"))
+	if e != nil {
 		chatFault(w, "chat delete", e)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	res := chatDeletionResult{Workspace: out.Workspace, Reason: out.Reason}
+	if out.Workspace == workspacereclaim.OutcomeReclaimed {
+		res.ReleasedBytes, res.ReleasedFiles = &out.Bytes, &out.Files
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+type chatDeletionResult struct {
+	Workspace     string `json:"workspace"`
+	Reason        string `json:"reason,omitempty"`
+	ReleasedBytes *int64 `json:"releasedBytes,omitempty"`
+	ReleasedFiles *int64 `json:"releasedFiles,omitempty"`
+}
+
+type chatDeletionPreview struct {
+	Workspace          string                   `json:"workspace"`
+	Reason             string                   `json:"reason,omitempty"`
+	Ignored            bool                     `json:"ignored"`
+	UndeliveredChanges []workspacefs.Change     `json:"undeliveredChanges"`
+	UndeliveredTotal   int                      `json:"undeliveredTotal"`
+	Git                *workspacefs.GitFindings `json:"git,omitempty"`
+	LatestDelivery     string                   `json:"latestDelivery,omitempty"`
+	Revision           string                   `json:"revision"`
+	Discardable        bool                     `json:"discardable"`
+}
+
+// chatDeletion tells the page, before it asks the person to confirm, what deleting the
+// conversation does to its checkout.
+func (h *handler) chatDeletion(w http.ResponseWriter, r *http.Request, c chatRequest) {
+	v, e := c.svc.DeletionPreview(r.Context(), c.scope, r.PathValue("cid"))
+	if e != nil {
+		chatFault(w, "chat deletion preview", e)
+		return
+	}
+	changes := v.Changes
+	if changes == nil {
+		changes = []workspacefs.Change{}
+	}
+	res := chatDeletionPreview{Workspace: v.Workspace, Reason: v.Reason, Ignored: v.Ignored,
+		UndeliveredChanges: changes, UndeliveredTotal: v.Total, LatestDelivery: v.LatestDelivery, Revision: v.Revision, Discardable: v.Discardable}
+	if v.Reason == workspacereclaim.ReasonGitState {
+		res.Git = &v.Git
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 type chatResult struct {
@@ -315,6 +374,15 @@ func chatFault(w http.ResponseWriter, op string, e error) {
 		fault(w, http.StatusNotFound, "not_found")
 	case errors.Is(e, store.ErrKeyReused), errors.Is(e, execution.ErrConflict):
 		fault(w, http.StatusConflict, "idempotency_conflict")
+	case errors.Is(e, chat.ErrReclaimUnavailable):
+		// No Agent runtime here to judge the checkout: neither preview nor discard can be offered.
+		fault(w, http.StatusServiceUnavailable, "workspace_reclaim_unavailable")
+	case errors.Is(e, chat.ErrDiscardUnverifiable):
+		// Part of what the discard would drop is not bound by the preview; the page does not offer it.
+		fault(w, http.StatusConflict, "discard_unverifiable")
+	case errors.Is(e, chat.ErrDeletionPreviewStale):
+		// The person would drop something the preview did not show: fetch it again.
+		fault(w, http.StatusConflict, "deletion_preview_stale")
 	case errors.Is(e, chat.ErrNoActiveTurn):
 		fault(w, http.StatusConflict, "no_active_turn")
 	case errors.Is(e, execution.ErrUnsupported):
