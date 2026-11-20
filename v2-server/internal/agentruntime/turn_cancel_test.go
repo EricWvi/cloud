@@ -742,3 +742,47 @@ func TestDriverIPCStopTurnRefusesWhilePreparing(t *testing.T) {
 		t.Fatal(got.err)
 	}
 }
+
+// desktop#793's merge settles a cancel of an accepted turn whose MCP wait timed out first as
+// already_ended (it used to say unknown). The turn's own failure, which Node writes before the
+// settlement, is its result; the late settlement changes nothing and the session takes the next turn.
+func TestDriverIPCStopOfATurnWhoseMCPWaitTimedOutKeepsItsFailure(t *testing.T) {
+	h := newIPCHarness(t, nil)
+	h.turnCancel.Store(true)
+	ctx := ipcContext(t)
+	session := h.session("session", "workspace")
+	first := startIPCRun(h, ctx, session, "first", discardIPCEvent)
+	f := receiveIPC(t, h.created)
+	start := nextIPCCommand(t, f, "start_agent_session")
+	f.finishTurn(t, start, "first", "done")
+	if got := receiveIPC(t, first); got.err != nil {
+		t.Fatal(got.err)
+	}
+	done := startIPCRun(h, ctx, session, "second", discardIPCEvent)
+	submit := nextIPCCommand(t, f, "submit_user_turn")
+	var submission struct {
+		CommandID string `json:"command_id"`
+	}
+	if err := json.Unmarshal(submit.Payload, &submission); err != nil {
+		t.Fatal(err)
+	}
+	stopTurn(t, h, session, "second")
+	cancel := nextCancel(t, f, start, "second")
+	f.seq[start.ExecutionID]++
+	sequence := f.seq[start.ExecutionID]
+	failure, _ := json.Marshal(map[string]string{"turn_id": "second", "command_id": submission.CommandID, "code": "mcp_refresh_wait_timeout"})
+	f.in <- node.Message{Type: "session_turn_failed", Version: 1, OperationID: start.OperationID, ExecutionID: start.ExecutionID, Sequence: &sequence, Payload: failure}
+	f.settleCancel(start, cancel, "already_ended")
+	got := receiveIPC(t, done)
+	if got.err != nil || got.result.Status != execution.StatusFailed || got.result.FailureCode != "mcp_refresh_wait_timeout" || got.result.AgentLost || got.result.SessionKept {
+		t.Fatalf("stopped turn whose MCP wait timed out = %+v", got)
+	}
+	third := startIPCRun(h, ctx, session, "third", discardIPCEvent)
+	f.finishTurn(t, nextIPCCommand(t, f, "submit_user_turn"), "third", "next")
+	if got := receiveIPC(t, third); got.err != nil || got.result.Status != execution.StatusCompleted {
+		t.Fatalf("turn after it = %+v", got)
+	}
+	if sent := sentIPC(f); slices.Contains(sent, "end_session") {
+		t.Fatalf("the session was ended: %v", sent)
+	}
+}
