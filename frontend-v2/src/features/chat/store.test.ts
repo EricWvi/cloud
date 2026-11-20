@@ -168,6 +168,24 @@ describe('chat store: backend conversations', () => {
     expect(backend.seen).toHaveLength(requests)
   })
 
+  it('stops only the turn when the session stays: no end marker, and the next prompt is sent', async () => {
+    backend.keepOnStop = true
+    state().select('c-main')
+    const stream = FakeEventSource.of('c-main')
+    stream.emit({ kind: 'history_snapshot', history: { records: [line.user(1, '写长一点')], incomplete: false } })
+    state().send('c-main', { ...emptyDraft, text: '排队的' })
+    state().stop('c-main')
+    expect(state().queued['c-main']).toEqual([])
+    stream.emit({ kind: 'turn_ended', result: { status: 'cancelled', answer: '', answerComplete: false, stopReason: 'cancelled', failureCode: '' } })
+    await vi.waitFor(() => expect(state().views['c-main']?.every((v) => v.endReason === '')).toBe(true))
+    expect(conversation('c-main').turns[0].status).toBe('cancelled')
+    expect(conversation('c-main').markers).toEqual([])
+    expect(isEnded(state().views['c-main'])).toBe(false)
+    state().send('c-main', { ...emptyDraft, text: '接着写' })
+    await vi.waitFor(() => expect(backend.bodies.at(-1)).toEqual({ prompt: '接着写' }))
+    expect(state().notices['c-main']).toBeUndefined()
+  })
+
   it('shows a conversation the server ended (a restart) as ended once a send is refused', async () => {
     state().select('c-main')
     backend.conversations[0].session = { ...backend.conversations[0].session!, endedAt: '2026-10-30T09:05:00Z', endReason: 'interrupted' }

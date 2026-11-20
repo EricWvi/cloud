@@ -27,7 +27,7 @@ Start/StartModel/Append 以当前租户授权（`TenantAccess`，store 在记录
 有序事件、完整结果和最终停止原因由 PostgreSQL 保留；Node 的历史快照/轮次终态先写库再 ACK。
 Subscribe 从持久 cursor 轮询，关闭观察者不停止 worker；会话结束后仍可按原序号读完再 EOF。
 
-Agent Cancel 使用固定 Node 的 EndSession，因此会结束整个物理会话；纯模型 Cancel 仅取消指定轮。
+Agent Cancel 先问 driver 能不能只停这一轮（`AgentDriver.StopTurn`）：能（Node 协商了 `turn_cancel`）时 worker 的 context 不取消，结果带 `SessionKept`，worker 不结束会话，之后照常 Append；End、Close 和关停仍取消 worker，等结论时也立刻结束会话。不能时 Cancel 像以前一样取消 worker，worker 和其他没完成的轮次一样结束会话，Cancel 再 End 确认。worker 退出前一直占着这个会话的轮次，所以停止的结论出来之前不会有新的一轮进来。纯模型 Cancel 仅取消指定轮。
 取消旧的已完成 Ref 只返回原结果。End 等 worker 与物理停止确认后再写 session_ended；
 停止或终态写入无法确认时保留目录、阻止该会话后续接收，返回 StopUnconfirmed 或 Unavailable。
 
@@ -41,7 +41,7 @@ Agent Cancel 使用固定 Node 的 EndSession，因此会结束整个物理会�
   读取预算、结算补写和启动中断边界见 [`executionwait`](../executionwait/README.md)。
 - 存储拒绝的无效结果（例如 completed 但答案不完整）永远写不进去，改记为失败：只把状态改为 failed、失败码设为 `execution_failed`，
   答案、停止原因、用量和 `AgentLost`、`NotStarted` 照原样保留，不让这一轮一直停在运行中。
-- 物理停止由服务自己限时 30s，worker 收尾、End 和 Cancel 对同一会话共用一次尝试：调用方可以提前放弃等待，尝试本身继续，
+- 物理停止由服务自己限时 30s（Cancel 只停这一轮时等 Node 结算的时间不算在内，最多 `execution.TurnStopSettleLimit`，等不到才开始这次停止），worker 收尾、End 和 Cancel 对同一会话共用一次尝试：调用方可以提前放弃等待，尝试本身继续，
   所以调用方的短 deadline 不会把只是回复慢的 Node 标坏，没有 deadline 的调用方也不会一直等。到时仍未确认就调用 driver 的 `Rebuild`，
   只把该项目的 Node 标为需要重建；同一项目的下一个会话或之后的 End 先由 supervisor 确认旧进程树停止，再起新 Node。
   一个项目只有一个 Node，停掉旧进程树会连带停掉同一项目里其他还在运行的会话，其他项目不受影响。

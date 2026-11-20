@@ -44,7 +44,10 @@ type Host struct {
 	log         *slog.Logger
 	now         func() time.Time
 	stopTimeout time.Duration
-	busyRetry   time.Duration
+	// turnStopSettle is what a stop through execution.Service.Cancel may add to stopTimeout while
+	// Node settles it (execution.TurnStopSettleLimit); tests lower it.
+	turnStopSettle time.Duration
+	busyRetry      time.Duration
 	// endRetry is the first wait before an unconfirmed End is retried (see retryEnd); tests lower it.
 	endRetry time.Duration
 	// resultRetry bounds polling for a turn's recorded result after a stream break; tests lower it.
@@ -152,6 +155,7 @@ func NewHost(c Config) (*Host, error) {
 	if h.stopTimeout == 0 {
 		h.stopTimeout = 30 * time.Second
 	}
+	h.turnStopSettle = execution.TurnStopSettleLimit
 	if h.busyRetry == 0 {
 		h.busyRetry = 10 * time.Second
 	}
@@ -535,7 +539,7 @@ func (h *Host) CancelRun(ctx context.Context, scope server.WorkflowRunScope, run
 	run.Status = status
 	st := h.state(runID)
 	if st != nil && (run.Status == store.WorkflowStatusPending || run.Status == store.WorkflowStatusRunning || run.Status == store.WorkflowRunAwaitingInput) {
-		stopCtx, cancel := context.WithTimeout(ctx, h.stopTimeout)
+		stopCtx, cancel := context.WithTimeout(ctx, h.stopBudget())
 		defer cancel()
 		st.mu.Lock()
 		st.cancelling = true // no further turn starts
@@ -602,7 +606,7 @@ func (h *Host) stopTurns(ctx context.Context, st *runState, selected func(*attem
 				h.workers.Add(1)
 				go func() {
 					defer h.workers.Done()
-					late, cancel := context.WithTimeout(context.WithoutCancel(ctx), h.stopTimeout)
+					late, cancel := context.WithTimeout(context.WithoutCancel(ctx), h.stopBudget())
 					defer cancel()
 					if _, err := h.exec.Cancel(late, st.scope, ref); err != nil {
 						h.log.Warn("stop a turn that started as its cancellation timed out", "session", ref.SessionID, "error", publicReason(err))
@@ -666,3 +670,8 @@ func lifecycleError(err error) error {
 	}
 	return err
 }
+
+// stopBudget bounds a stop that goes through execution.Service.Cancel: the host's own stop
+// timeout, plus the time Cancel may wait for Node to settle a stop that keeps the session, so a
+// Node that settles slowly is not reported as a stop that failed (workflow_run_stop_unconfirmed).
+func (h *Host) stopBudget() time.Duration { return h.stopTimeout + h.turnStopSettle }

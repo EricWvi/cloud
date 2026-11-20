@@ -134,7 +134,7 @@ func TestUnconfirmedEndOfAStoppedTurnKeepsTheSlot(t *testing.T) {
 	f.exec.awaitAppend(t)
 	confirm := f.refuseEndOf(t, func() string { return a })
 	f.exec.onCancel = func(ref execution.Ref) error {
-		f.exec.finish(ref.SessionID, completed("停"))
+		f.exec.finish(ref.SessionID, stopEnded())
 		return nil
 	}
 	if _, err := f.host.StopNodeTurn(ctx, f.scope, runID, "a"); err != nil {
@@ -143,7 +143,8 @@ func TestUnconfirmedEndOfAStoppedTurnKeepsTheSlot(t *testing.T) {
 	f.await(t, runID, parked("a"))
 	f.exec.noStart(t, "C started while A's session may still be live")
 	confirm()
-	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", server.WorkflowNodeCompletion{ConfirmInitialTurn: true}); err != nil {
+	// The stopped follow-up blocks a plain completion; forcing it takes the answer anyway.
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", server.WorkflowNodeCompletion{Force: true}); err != nil {
 		t.Fatal(err)
 	}
 	c := f.exec.awaitStart(t)
@@ -262,7 +263,7 @@ func TestARetryConfirmsTheEndOfAStoppedTurn(t *testing.T) {
 	f.exec.awaitAppend(t)
 	confirm := f.refuseEndOf(t, func() string { return a })
 	f.exec.onCancel = func(ref execution.Ref) error {
-		f.exec.finish(ref.SessionID, completed("停"))
+		f.exec.finish(ref.SessionID, stopEnded())
 		return nil
 	}
 	if _, err := f.host.StopNodeTurn(ctx, f.scope, runID, "a"); err != nil {
@@ -386,7 +387,7 @@ func TestACancellationStopsTheRetryOfAParkedNodesEnd(t *testing.T) {
 	f.refuseEndOf(t, func() string { return a })
 	ends := f.countEndsOf(func() string { return a })
 	f.exec.onCancel = func(ref execution.Ref) error {
-		f.exec.finish(ref.SessionID, completed("停"))
+		f.exec.finish(ref.SessionID, stopEnded())
 		return nil
 	}
 	if _, err := f.host.StopNodeTurn(ctx, f.scope, runID, "a"); err != nil {

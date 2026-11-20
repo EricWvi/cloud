@@ -4,8 +4,9 @@
 //
 // A conversation runs in exactly one execution session, in a directory the port makes for it, so
 // conversations never contend with each other, with schedules or with workflows. The session stays
-// live between turns until the person stops a turn (the fixed Node then ends the whole session),
-// deletes the conversation, or the server restarts. After that the conversation is read-only:
+// live between turns, also after the person stops a turn when the Node keeps the session through
+// the stop, until a stop the Node cannot keep it through, deleting the conversation, or a server
+// restart ends it. After that the conversation is read-only:
 // chat never starts a replacement session or replays history, and the page offers a new chat.
 package chat
 
@@ -272,8 +273,9 @@ func (s *Service) start(ctx context.Context, scope execution.Scope, c store.Chat
 	return ref, s.store.RecordChatTurn(ctx, c.ID, ref.SessionID, key, ref.TurnID, s.now())
 }
 
-// Stop cancels the session's latest turn. On the fixed Node that ends the whole session, so it is
-// recorded as stopped once the port confirms; an unconfirmed stop changes nothing.
+// Stop cancels the session's latest turn. When the session outlives the stop (the Node kept it
+// through turn_cancel) the conversation stays live and takes the next prompt; when the stop ended
+// it, it is recorded as stopped once the port confirms. An unconfirmed stop changes nothing.
 func (s *Service) Stop(ctx context.Context, scope execution.Scope, conversationID string) (execution.Result, error) {
 	defer s.lock(conversationID)()
 	c, e := s.store.ChatConversation(ctx, scope.TenantID, scope.UserID, conversationID)
@@ -300,7 +302,7 @@ func (s *Service) Stop(ctx context.Context, scope execution.Scope, conversationI
 		return result, e
 	}
 	if session.EndedAt == nil {
-		// The turn had already finished, so cancelling it ended nothing: the session stays live.
+		// Only the turn stopped, or it had already finished: the session stays live.
 		return result, s.store.ClearChatSessionEnding(ctx, live.ID)
 	}
 	return result, s.store.EndChatSession(ctx, live.ID, store.EndStopped, s.now())

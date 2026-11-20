@@ -30,7 +30,7 @@
 
 `result=null` 只表示尚无终态的活动轮次，不是成功；已结束的 Session/Turn 或 occurrence 终态缺失结果时不能这样返回。存在结果时完整保留 `status/answer/answerComplete/stopReason/failureCode/usage`，不截断回答，不从事件拼凑结果，不把缺失 usage 补成零。**HTTP 200 仅表示读取成功：执行成功必须同时满足 `result.status=completed` 和 `result.answerComplete=true`**。公共方返回的部分或不完整回答保持原值，不能仅凭 occurrence 的 `succeeded` 展示为成功。
 
-`endedAt` 是轮次结束，`sessionEndedAt` 是会话结束。Agent 的活动轮 Cancel 会结束会话；纯模型 Cancel 只停当前轮，不能仅凭 cancelled 推断会话结束。End 保留历史和目录，`workspaceId` 是目录身份而非目录路径或存在性保证。重启后读取仍使用原 Caller/Ref，不恢复追问、不重放执行。HTTP 不自动读取整段工具事件；完整最终回答与事件投影是不同能力。
+`endedAt` 是轮次结束，`sessionEndedAt` 是会话结束。Agent 的活动轮 Cancel 在 Node 不能保留会话时结束会话（能保留时只停这一轮，定时任务随后照样 End）；纯模型 Cancel 只停当前轮，不能仅凭 cancelled 推断会话结束。End 保留历史和目录，`workspaceId` 是目录身份而非目录路径或存在性保证。重启后读取仍使用原 Caller/Ref，不恢复追问、不重放执行。HTTP 不自动读取整段工具事件；完整最终回答与事件投影是不同能力。
 
 真实 PostgreSQL HTTP 测试校验候选契约、全部既有状态及释放标记、分页/游标隔离、当前权限撤销、服务不可用和错误脱敏。公共 Stub 测试另验证完整长答案、Caller/Ref 错配、部分结果、两种 Cancel 会话边界、结束后读取和 GET 零写入；Stub 不证明真实执行或公共持久化。
 

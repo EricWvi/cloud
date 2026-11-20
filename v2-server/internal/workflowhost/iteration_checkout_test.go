@@ -83,6 +83,7 @@ func (d *checkoutDriver) Run(ctx context.Context, _ execution.Scope, session exe
 func (*checkoutDriver) End(context.Context, string) error { return nil }
 func (*checkoutDriver) Rebuild(string)                    {}
 func (*checkoutDriver) Close(context.Context) error       { return nil }
+func (*checkoutDriver) StopTurn(execution.Ref) bool       { return false }
 
 func (d *checkoutDriver) Reattach(workspace, clone, path string) {
 	d.mu.Lock()

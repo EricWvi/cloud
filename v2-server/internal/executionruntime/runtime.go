@@ -37,6 +37,10 @@ type AgentDriver interface {
 	// sessions start on, so a restarted server continues a run in its own directory.
 	Reattach(workspaceID, cloneExecution, path string)
 	Close(context.Context) error
+	// StopTurn asks to stop only the running turn ref, keeping its session, as Cancel wants. It
+	// reports false when the session cannot be kept through a stop; Cancel then ends it. Run
+	// returns the turn's result, with Result.SessionKept when the session outlived the stop.
+	StopTurn(ref execution.Ref) bool
 }
 
 // ModelChoice separates the public immutable selection from the private provider binding.
@@ -588,6 +592,8 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		if result.NotStarted {
 			result.NotDelivered = true
 		}
+		// Read before delivery and persistence, which return the stored result without it.
+		kept := result.SessionKept && agentErr == nil
 		// A recovered session whose new Agent could not be started keeps waiting for another
 		// turn: nothing ran, and the conversation is still recorded. Only a missing checkout
 		// ends it.
@@ -628,8 +634,9 @@ func (s *Service) launch(scope execution.Scope, session execution.Session, turn 
 		}
 		// Failures stay with this session: nothing here stops admission for other sessions.
 		// A held session survives a turn the Agent itself ended without completing: the driver
-		// reports no error then, and the Agent is still there to take the next turn.
-		broken := session.Target != nil && !retry && (agentErr != nil || (result.Status != execution.StatusCompleted && !held))
+		// reports no error then, and the Agent is still there to take the next turn. So does any
+		// session whose turn the caller stopped when the driver kept it (Result.SessionKept).
+		broken := session.Target != nil && !retry && (agentErr != nil || (result.Status != execution.StatusCompleted && !held && !kept))
 		if nodeLost && err == nil {
 			// The session stays open for its next turn, but the lost Node's process tree is
 			// retired now, with the supervisor's proof, rather than when the project is next used.
@@ -826,8 +833,11 @@ func (s *Service) messages(ctx context.Context, scope execution.Scope, current e
 	}
 }
 
-// Cancel ends an Agent session because the pinned Node has only EndSession cancellation.
-// Model-only cancellation stops the requested turn and leaves its conversation open.
+// Cancel stops an active Agent turn through the driver's StopTurn, which cancels only the turn
+// when the session's Node keeps sessions after a stop; otherwise, or when the driver cannot, the
+// session ends. Its worker context stays live meanwhile, so End, Close and shutdown still end the
+// session at once. Model-only cancellation stops the requested turn and leaves its conversation
+// open.
 func (s *Service) Cancel(ctx context.Context, scope execution.Scope, ref execution.Ref) (execution.Result, error) {
 	turn, err := s.readTurn(ctx, scope, ref)
 	if err != nil {
@@ -842,7 +852,8 @@ func (s *Service) Cancel(ctx context.Context, scope execution.Scope, ref executi
 	}
 	if session.Target != nil {
 		// Serialize with Append: a late retry for an already finished turn must not
-		// stop a newer turn. Once cancellation wins, no new turn can enter this session.
+		// stop a newer turn. The worker keeps the session's group until it has gone, so no new
+		// turn enters the session before it is known whether the stop kept it.
 		var staged bool
 		if s.delivery != nil {
 			work, workErr := s.readDeliveryWork(ctx, ref)
@@ -854,7 +865,7 @@ func (s *Service) Cancel(ctx context.Context, scope execution.Scope, ref executi
 		s.mu.Lock()
 		w := s.workers[ref.TurnID]
 		s.mu.Unlock()
-		var stopping bool
+		var stopping, turnOnly bool
 		if w != nil {
 			// Wait for a racing stage without holding the service mutex. A worker
 			// that has already left must never cause a newer turn to be stopped.
@@ -863,13 +874,44 @@ func (s *Service) Cancel(ctx context.Context, scope execution.Scope, ref executi
 			if !staged {
 				s.mu.Lock()
 				stopping = s.workers[ref.TurnID] == w
-				if stopping {
-					s.ending[ref.SessionID] = true
-					w.cancel()
-				}
 				s.mu.Unlock()
+				// The driver takes its own locks, so it is asked outside mu; terminalMu still
+				// keeps the worker from staging its terminal meanwhile.
+				turnOnly = stopping && s.agent.StopTurn(ref)
+				if stopping && !turnOnly {
+					// Once cancellation wins, no new turn can enter this session.
+					s.mu.Lock()
+					if s.workers[ref.TurnID] == w {
+						s.ending[ref.SessionID] = true
+						w.cancel()
+					}
+					s.mu.Unlock()
+				}
 			}
 			w.terminalMu.Unlock()
+		}
+		if turnOnly {
+			select {
+			case <-ctx.Done():
+				return execution.Result{}, ctx.Err()
+			case <-w.done:
+			}
+			s.mu.Lock()
+			_, unsaved := s.unsaved[ref.SessionID]
+			ending := s.ending[ref.SessionID] || unsaved
+			s.mu.Unlock()
+			if !ending {
+				// The worker kept the session (or the turn ended on its own first): its stored
+				// result is the answer, and the session takes the next turn.
+				turn, err := s.readTurn(ctx, scope, ref)
+				if err != nil {
+					return execution.Result{}, err
+				}
+				if turn.Result == nil {
+					return execution.Result{}, execution.ErrStopUnconfirmed
+				}
+				return *turn.Result, nil
+			}
 		}
 		if !stopping {
 			if staged && w != nil {

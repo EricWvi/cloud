@@ -85,7 +85,11 @@ type Driver struct {
 	serial         atomic.Uint64
 	controlTimeout time.Duration
 	mcpRefreshWait time.Duration
-	startProject   func(*projectRuntime) error
+	// turnCancelWait and turnCancelLimit bound the wait for TurnCancelSettled (see
+	// defaultTurnCancelWait).
+	turnCancelWait  time.Duration
+	turnCancelLimit time.Duration
+	startProject    func(*projectRuntime) error
 	// wrapClient lets real-Node tests interpose on IPC before the receiver starts.
 	wrapClient func(nodeClient) nodeClient
 }
@@ -124,7 +128,7 @@ func New(opts Options) (*Driver, error) {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, execution.ErrUnavailable
 	}
-	return &Driver{opts: opts, boot: hex.EncodeToString(nonce[:]), projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, recorded: map[string]Checkout{}, controlTimeout: 2 * time.Minute, mcpRefreshWait: 5 * time.Minute}, nil
+	return &Driver{opts: opts, boot: hex.EncodeToString(nonce[:]), projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, recorded: map[string]Checkout{}, controlTimeout: 2 * time.Minute, mcpRefreshWait: 5 * time.Minute, turnCancelWait: defaultTurnCancelWait, turnCancelLimit: execution.TurnStopSettleLimit}, nil
 }
 
 // Reattach makes a workflow workspace's checkout, prepared by an earlier process, the one its
@@ -272,6 +276,44 @@ func (d *Driver) run(ctx context.Context, scope execution.Scope, session executi
 		a.requestEnd()
 	}
 	var refreshDeadline time.Time
+	// A stop the caller asked for (StopTurn) also interrupts a wait for an MCP refresh. The
+	// goroutine ends with Run.
+	refreshCtx, stopRefresh := context.WithCancel(ctx)
+	defer stopRefresh()
+	go func() {
+		select {
+		case <-call.stopRequested:
+			stopRefresh()
+		case <-refreshCtx.Done():
+		}
+	}()
+	// ended ends the session: for End, Close and shutdown (ctx), and for a stop the session cannot
+	// keep, as every stop did before turn_cancel. Whatever the turn's outcome, the session is gone
+	// from here on, so the outcome reports it lost, even a late stopped settlement (fallingBack).
+	ended := func() (execution.Result, error) {
+		a.mu.Lock()
+		call.fallingBack = true
+		a.mu.Unlock()
+		reason := ctx.Err()
+		if reason == nil {
+			reason = execution.ErrSessionEnded
+		}
+		result, err := d.cancelledRun(session.ID, reason)
+		select {
+		case outcome := <-call.done:
+			if outcome.err == nil {
+				outcome.result.SessionKept, outcome.result.AgentLost, outcome.err = false, true, execution.ErrSessionEnded
+			}
+			return outcome.result, outcome.err
+		default:
+			return result, err
+		}
+	}
+	stopRequested := call.stopRequested
+	// While Node settles a stop (cancel-turn ADR D4), window ends the wait unless an event of this
+	// session arrives first, which restarts it; limit bounds the whole wait.
+	var window *time.Timer
+	var windowEnded, limitEnded <-chan time.Time
 	for {
 		select {
 		case outcome := <-call.done:
@@ -285,9 +327,10 @@ func (d *Driver) run(ctx context.Context, scope execution.Scope, session executi
 			if refreshDeadline.IsZero() {
 				refreshDeadline = time.Now().Add(d.mcpRefreshWait)
 			}
-			err := a.reconcileTurn(ctx, refreshDeadline, call, turn, text)
-			// Service.Cancel owns the physical stop and its confirmation.
-			if err == nil || ctx.Err() != nil {
+			err := a.reconcileTurn(refreshCtx, refreshDeadline, call, turn, text)
+			// Service.Cancel owns the physical stop and its confirmation; a requested stop is
+			// handled below.
+			if err == nil || refreshCtx.Err() != nil {
 				continue
 			}
 			if errors.Is(err, errMCPRefreshWait) {
@@ -304,16 +347,70 @@ func (d *Driver) run(ctx context.Context, scope execution.Scope, session executi
 				a.fail("mcp_update_failed", err)
 			}
 			a.requestEnd()
-		case <-ctx.Done():
-			result, err := d.cancelledRun(session.ID, ctx.Err())
-			select {
-			case outcome := <-call.done:
+		case <-stopRequested:
+			stopRequested = nil
+			switch a.stopTurn(call) {
+			case turnStopSent:
+				// Only the turn stops; its settlement arrives on call.done.
+				window = time.NewTimer(d.turnCancelWait)
+				defer window.Stop()
+				limit := time.NewTimer(d.turnCancelLimit)
+				defer limit.Stop()
+				windowEnded, limitEnded = window.C, limit.C
+				continue
+			case turnStopFinished:
+				outcome := <-call.done
 				return outcome.result, outcome.err
-			default:
-				return result, err
 			}
+			return ended()
+		case <-call.progress:
+			if window != nil {
+				window.Reset(d.turnCancelWait)
+			}
+		case <-ctx.Done():
+			// End, Close or shutdown: the session ends now, also while a stop awaits settlement.
+			return ended()
+		case <-call.cancelFallback:
+			return ended()
+		case <-windowEnded:
+			return ended()
+		case <-limitEnded:
+			return ended()
 		}
 	}
+}
+
+// StopTurn asks to stop only the turn ref of a session that chose keep_session_on_cancel, the way
+// execution.Service.Cancel wants a stop. It reports false when that session cannot keep its Agent
+// through a stop (it did not choose to, its Agent has not been started, it is ending or broken);
+// the caller then ends the session instead. A turn that has not begun yet is stopped when it does;
+// one that already ended keeps its outcome.
+func (d *Driver) StopTurn(ref execution.Ref) bool {
+	d.mu.Lock()
+	a := d.sessions[ref.SessionID]
+	d.mu.Unlock()
+	if a == nil {
+		return false
+	}
+	select {
+	case <-a.ready:
+	default:
+		return false // still preparing: nothing was started that a stop could keep
+	}
+	if a.prepareErr != nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.started || !a.keep.onCancel || a.ended || a.ending || a.broken {
+		return false
+	}
+	if a.active != nil && a.active.id == ref.TurnID {
+		a.active.requestStop()
+		return true
+	}
+	a.stopNext = ref.TurnID
+	return true
 }
 
 // End waits for the physical session to stop; it does not release the caller's SQL directory lock.

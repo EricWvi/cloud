@@ -549,7 +549,7 @@ export const workflowRunTranslations = {
     "workflowRun.v2.interactive.awaitingBadge": "等待输入",
     "workflowRun.v2.interactive.openHint": "等待输入：打开会话继续对话，或完成这一步",
     "workflowRun.v2.interactive.partialNote":
-      "Agent 完成信号暂未支持，由发起人确认完成。停止本轮会结束这个节点的会话，停止后不能继续对话。",
+      "Agent 完成信号暂未支持，由发起人确认完成。停止本轮后，会话还在就可以接着对话；没能保留会话时只能完成这一步。",
     "workflowRun.v2.interactive.readOnly":
       "只有发起这次运行的人可以继续对话、停止或完成这一步，你可以查看。",
     "workflowRun.v2.interactive.composerLabel": "回复 Agent",
@@ -562,7 +562,7 @@ export const workflowRunTranslations = {
       "上一条消息未送达，会话也已结束，不能重发。可以用上一轮的回答完成这一步；要重新开始这一步，请先停止运行，再「从失败处继续」。",
     "workflowRun.v2.interactive.restoreDraft": "重新填入",
     "workflowRun.v2.interactive.sessionEnded":
-      "会话已结束（停止了本轮或 Agent 断开），不能继续对话。",
+      "会话已结束（停止时没能保留会话，或 Agent 断开），不能继续对话。",
     "workflowRun.v2.interactive.confirmComplete": "确认并完成",
     "workflowRun.v2.interactive.confirmHint":
       "这是工作流发起的首轮：Agent 的回答可能是在提问。确认回答就是这一步要的结果后再完成，否则继续对话。",
@@ -1197,7 +1197,7 @@ export const workflowRunTranslations = {
     "workflowRun.v2.interactive.awaitingBadge": "Awaiting input",
     "workflowRun.v2.interactive.openHint": "Awaiting input: open the session to reply or complete this step",
     "workflowRun.v2.interactive.partialNote":
-      "The agent completion signal is not supported yet, so the starter confirms completion. Stopping a turn ends this node's session, so the conversation cannot continue afterwards.",
+      "The agent completion signal is not supported yet, so the starter confirms completion. After stopping a turn you can keep talking while the session lasts; if it could not be kept, the step can only be completed.",
     "workflowRun.v2.interactive.readOnly":
       "Only the person who started this run can continue, stop or complete this step; you can read it.",
     "workflowRun.v2.interactive.composerLabel": "Reply to the agent",
@@ -1210,7 +1210,7 @@ export const workflowRunTranslations = {
       "Your last message was not delivered, and the session has also ended, so it cannot be sent again. You can complete this step with the previous answer; to start this step again, stop the run, then resume from the failure.",
     "workflowRun.v2.interactive.restoreDraft": "Put it back",
     "workflowRun.v2.interactive.sessionEnded":
-      "The session has ended (the turn was stopped or the agent disconnected), so the conversation cannot continue.",
+      "The session has ended (it could not be kept when the turn was stopped, or the agent disconnected), so the conversation cannot continue.",
     "workflowRun.v2.interactive.confirmComplete": "Confirm and complete",
     "workflowRun.v2.interactive.confirmHint":
       "This is the workflow's own first turn: the agent may have ended it with a question. Complete once the answer is what this step needs, or keep talking.",

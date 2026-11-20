@@ -78,6 +78,8 @@ type Host struct {
 	workers     sync.WaitGroup
 	resultRetry executionwait.Policy
 	deliveries  bool
+	// stopRead, when a test sets it, runs once Stop has read what the caller saw.
+	stopRead func()
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
@@ -406,9 +408,20 @@ func (h *Host) followUp(ctx context.Context, scope execution.Scope, task store.T
 	return run.ID, run.LastTurnID, nil
 }
 
-// Stop ends a live run: a running turn is cancelled, which on the fixed Node ends the session,
-// and an idle session is ended. Any member can stop a run; it spends nobody's identity.
+// Stop stops a live run. A running turn is cancelled; when its session outlives the stop (the
+// Node kept it), the run stays live and idle, awaiting a follow-up. A run whose session ended
+// with the stop, and an idle run, is ended. Any member can stop a run; it spends nobody's
+// identity.
+//
+// A Stop sent while a turn ran asks to stop that turn: if the turn has ended by the time this
+// Stop holds the task's lock (another member's stop kept the session, or the turn finished), it
+// does nothing rather than end the idle run, which only a Stop of the idle run does.
 func (h *Host) Stop(ctx context.Context, scope execution.Scope, taskID, runID string) (store.TaskRun, error) {
+	// Read before the lock, so it is what the caller saw; it is only used after the checks below.
+	seen, seenErr := h.store.TaskRun(ctx, scope.TenantID, taskID, runID)
+	if h.stopRead != nil {
+		h.stopRead()
+	}
 	defer h.lock(taskID)()
 	if _, e := h.store.Task(ctx, scope.TenantID, taskID); e != nil {
 		return store.TaskRun{}, e
@@ -420,10 +433,51 @@ func (h *Host) Stop(ctx context.Context, scope execution.Scope, taskID, runID st
 	if !run.Live() || run.SessionID == "" {
 		return run, ErrNoLiveRun
 	}
-	if e := h.end(ctx, run, store.TaskRunStopped); e != nil {
+	if seenErr == nil && seen.TurnActive() && !(run.TurnActive() && run.LastTurnID == seen.LastTurnID) {
+		return run, nil
+	}
+	if e := h.stopRun(ctx, run); e != nil {
 		return run, e
 	}
 	return h.store.TaskRun(ctx, scope.TenantID, taskID, runID)
+}
+
+// stopRun is Stop's end of a run: like end, except that a running turn whose session outlives its
+// cancellation only settles, leaving the run live. The stop reason is recorded first, as end
+// does, so a page that sees the session end with the stop reads why. The caller holds the lock.
+func (h *Host) stopRun(ctx context.Context, run store.TaskRun) error {
+	if !run.TurnActive() {
+		return h.end(ctx, run, store.TaskRunStopped)
+	}
+	owner := execution.Scope{TenantID: run.TenantID, UserID: run.StartedBy}
+	if e := h.store.MarkTaskRunEnding(ctx, run.ID, store.TaskRunStopped); e != nil {
+		return e
+	}
+	result, e := h.exec.Cancel(ctx, owner, execution.Ref{SessionID: run.SessionID, TurnID: run.LastTurnID})
+	if e != nil {
+		return errors.Join(e, h.store.ClearTaskRunEnding(context.WithoutCancel(ctx), run.ID))
+	}
+	if !result.AgentLost && h.sessionLive(ctx, owner, run.SessionID) {
+		if e := h.store.ClearTaskRunEnding(ctx, run.ID); e != nil {
+			return e
+		}
+		settleCtx, cancel := h.endSettleContext(ctx)
+		defer cancel()
+		return h.settle(settleCtx, run, run.LastTurnID, result, false)
+	}
+	// The stop ended the session, or it cannot be told that it did not: end the run too.
+	// Cancelling the stopped turn again only returns its result, which end settles.
+	return h.end(ctx, run, store.TaskRunStopped)
+}
+
+// sessionLive reports whether the execution service still holds the session open. The turn is
+// already stopped, so the read is bounded like a settlement and survives the caller leaving; a
+// failed read counts as ended, the safe side, since ending a live session only costs a follow-up.
+func (h *Host) sessionLive(ctx context.Context, owner execution.Scope, sessionID string) bool {
+	read, cancel := h.endSettleContext(ctx)
+	defer cancel()
+	session, e := h.exec.ReadSession(read, owner, sessionID)
+	return e == nil && session.EndedAt == nil
 }
 
 // RecoverScheduledStart reconnects a provisional run to its already accepted

@@ -112,6 +112,16 @@ describe('RunNodeSessionActions', () => {
     await waitFor(() => expect(calls.completeNode).toHaveBeenCalledWith('tenant-1', 'run-1', 'a', { force: true }))
   })
 
+  it('keeps talking after a stop the session outlived', async () => {
+    view({ session: { ...parked, completable: false, blockers: [{ kind: 'turn_stopped' }], stopCause: 'user_stopped', parkKind: 'awaiting_user' } })
+    expect(screen.queryByText(zh['workflowRun.v2.interactive.sessionEnded'])).toBeNull()
+    expect(screen.getByText(zh['workflowRun.v2.interactive.blockedHint'])).toBeTruthy()
+    const box = screen.getByRole('textbox', { name: zh['workflowRun.v2.interactive.composerLabel'] })
+    fireEvent.change(box, { target: { value: '接着改' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    await waitFor(() => expect(calls.sendNodeTurn).toHaveBeenCalledWith('tenant-1', 'run-1', 'a', '接着改'))
+  })
+
   it('takes no more messages once the session was stopped and says force takes the last normal answer', async () => {
     view({ session: { ...parked, sessionEnded: true, completable: false, blockers: [{ kind: 'turn_stopped' }], stopCause: 'user_stopped', answerSource: 'last_completed_turn' } })
     expect(screen.queryByRole('textbox')).toBeNull()

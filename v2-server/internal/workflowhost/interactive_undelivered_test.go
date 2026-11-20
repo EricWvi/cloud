@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +30,11 @@ type refusingDriver struct {
 	refusal *driverRefusal
 	// got lists the prompts an Agent received.
 	got []string
+	// holdStops holds the next follow-ups until StopTurn, which ends them the way the real driver
+	// ends a turn Node dropped before its Agent got it (not_started): cancelled, never delivered,
+	// the session kept. held is the follow-up waiting for its stop.
+	holdStops bool
+	held      chan struct{}
 }
 
 type driverRefusal struct {
@@ -46,10 +52,23 @@ func (d *refusingDriver) Run(ctx context.Context, _ execution.Scope, session exe
 	if !strings.Contains(turn.Caller.AttemptID, "/turn-") {
 		refusal = nil // the workflow's own first turn always reaches the Agent
 	}
-	if refusal == nil || !refusal.result.NotDelivered {
+	var held chan struct{}
+	if d.holdStops && strings.Contains(turn.Caller.AttemptID, "/turn-") {
+		held = make(chan struct{})
+		d.held = held
+	} else if refusal == nil || !refusal.result.NotDelivered {
 		d.got = append(d.got, text)
 	}
 	d.mu.Unlock()
+	if held != nil {
+		select {
+		case <-ctx.Done():
+			return execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled", AgentLost: true}, ctx.Err()
+		case <-held:
+		}
+		result := execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled", NotDelivered: true, SessionKept: true}
+		return result, emit(ctx, execution.Event{Kind: execution.EventTurnEnded, Result: &result})
+	}
 	if refusal != nil {
 		result := refusal.result
 		if refusal.err != nil {
@@ -68,6 +87,18 @@ func (*refusingDriver) End(context.Context, string) error { return nil }
 func (*refusingDriver) Rebuild(string)                    {}
 func (*refusingDriver) Reattach(string, string, string)   {}
 func (*refusingDriver) Close(context.Context) error       { return nil }
+
+// StopTurn stops a held follow-up before its Agent gets it; any other turn is not stoppable alone.
+func (d *refusingDriver) StopTurn(execution.Ref) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.held == nil {
+		return false
+	}
+	close(d.held)
+	d.held, d.holdStops = nil, false
+	return true
+}
 
 func (d *refusingDriver) refuse(r *driverRefusal) {
 	d.mu.Lock()
@@ -266,9 +297,10 @@ func TestARestartDoesNotCountAFollowUpTheDriverRefused(t *testing.T) {
 }
 
 // The starter stops a follow-up that then turns out never to have reached the Agent, with a
-// refusal that would have kept the session. The pinned Node stops a turn only by ending its
-// session, so the stop still ends it, and the message is still reported not delivered.
-func TestStoppingAFollowUpThatWasNotDeliveredEndsTheSession(t *testing.T) {
+// refusal that kept the session. The stop alone does not end the session (it outlives a stop the
+// Node keeps it through, as any stopped turn does): the message is reported not delivered and the
+// starter sends it again in the same session.
+func TestStoppingAFollowUpThatWasNotDeliveredKeepsTheSession(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	runID, a := f.startParked(t, interactiveChain, "初稿一")
@@ -283,15 +315,17 @@ func TestStoppingAFollowUpThatWasNotDeliveredEndsTheSession(t *testing.T) {
 		t.Fatalf("stop = %v, want it unconfirmed", err)
 	}
 	f.exec.finish(a, execution.Result{Status: execution.StatusFailed, FailureCode: "mcp_refresh_wait_timeout", NotDelivered: true})
-	_, nodes := f.await(t, runID, func(run store.WorkflowRun, n []store.WorkflowNodeRun) bool {
-		return undelivered(t)(run, n) && interactivePayload(t, node(n, "a"))["session_ended"] == true
-	})
-	if p := interactivePayload(t, node(nodes, "a")); p["turns"] != float64(1) || p["sent"] != float64(1) || p["answer"] != "初稿一" {
-		t.Fatalf("summary = %v, want the first turn's node with the session ended and the notice", p)
+	_, nodes := f.await(t, runID, undelivered(t))
+	if p := interactivePayload(t, node(nodes, "a")); p["turns"] != float64(1) || p["sent"] != float64(1) || p["answer"] != "初稿一" || p["session_ended"] != false || f.exec.isClosed(a) {
+		t.Fatalf("summary = %v closed = %v, want the first turn's node with its session open and the notice", p, f.exec.isClosed(a))
 	}
 	f.awaitClaimable(t, runID, "a")
-	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); !errors.Is(err, server.ErrWorkflowNodeSessionEnded) {
-		t.Fatalf("a message after the stop = %v, want %v", err, server.ErrWorkflowNodeSessionEnded)
+	f.exec.onCancel = nil
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "改一下"); err != nil {
+		t.Fatalf("resending the message after the stop = %v", err)
+	}
+	if id := f.exec.awaitAppend(t); id != a {
+		t.Fatalf("the resent message went to %s, want %s", id, a)
 	}
 }
 
@@ -329,4 +363,61 @@ func TestARestartStillCountsALegacyUnstartedFollowUp(t *testing.T) {
 	if accepted, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再试一次"); err != nil || accepted.Sent != 2 {
 		t.Fatalf("the next message = %+v %v, want message 2", accepted.Sent, err)
 	}
+}
+
+// A follow-up the starter stops before its prompt reaches the Agent (Node dropped it, so the
+// session stays) is a stopped turn: it counts, and no undelivered notice is shown. But it answered
+// nothing, so the answer the node could complete with before it stays, and completing with it is
+// still allowed without force, also after a restart rebuilt the node from its recorded turns.
+func TestAFollowUpStoppedBeforeDeliveryKeepsTheAnswerToComplete(t *testing.T) {
+	f, driver, restart := executionWorkflow(t)
+	ctx := t.Context()
+	runID, _ := f.startParkedOn(t)
+	f.awaitClaimable(t, runID, "a")
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "定稿"); err != nil {
+		t.Fatal(err)
+	}
+	completable := func(turns float64) func(store.WorkflowRun, []store.WorkflowNodeRun) bool {
+		return func(run store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+			return awaitingInput("a")(run, n) && interactivePayload(t, node(n, "a"))["turns"] == turns
+		}
+	}
+	_, nodes := f.await(t, runID, completable(2))
+	if p := interactivePayload(t, node(nodes, "a")); p["completable"] != true || p["answer"] != "答复：定稿" {
+		t.Fatalf("parked with a complete answer = %v", p)
+	}
+	f.awaitClaimable(t, runID, "a")
+	driver.mu.Lock()
+	driver.holdStops = true
+	driver.mu.Unlock()
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再改改"); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, func() bool { // the follow-up reached the driver, which holds it for the stop
+		driver.mu.Lock()
+		defer driver.mu.Unlock()
+		return driver.held != nil
+	})
+	if _, err := f.host.StopNodeTurn(ctx, f.scope, runID, "a"); err != nil {
+		t.Fatalf("stop = %v", err)
+	}
+	check := func(when string) {
+		t.Helper()
+		_, nodes := f.await(t, runID, completable(3))
+		p := interactivePayload(t, node(nodes, "a"))
+		if p["completable"] != true || p["answer"] != "答复：定稿" || p["session_ended"] != false || p["last_turn_error"] != nil || p["sent"] != float64(2) {
+			t.Fatalf("%s: summary = %v, want three turns, the previous answer completable and no notice", when, p)
+		}
+	}
+	check("after the stop")
+	f.awaitClaimable(t, runID, "a")
+	restart()
+	check("after a restart")
+	f.awaitClaimable(t, runID, "a")
+	if _, err := f.host.CompleteNode(ctx, f.scope, runID, "a", server.WorkflowNodeCompletion{}); err != nil {
+		t.Fatalf("completing with the previous answer = %v", err)
+	}
+	waitUntil(t, func() bool {
+		return slices.ContainsFunc(driver.prompts(), func(p string) bool { return strings.Contains(p, "审阅：答复：定稿") })
+	})
 }

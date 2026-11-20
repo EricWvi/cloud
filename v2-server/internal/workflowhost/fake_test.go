@@ -285,6 +285,17 @@ func completed(answer string) execution.Result {
 	return execution.Result{Status: execution.StatusCompleted, Answer: answer, AnswerComplete: true, StopReason: "end_turn"}
 }
 
+// stopEnded is a stopped turn whose session ended with it: the Node could not keep the session
+// through the stop, so execution.Service.Cancel reports the Agent lost.
+func stopEnded() execution.Result {
+	return execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled", AgentLost: true}
+}
+
+// stopKept is a stopped turn whose session outlived the stop (turn_cancel).
+func stopKept() execution.Result {
+	return execution.Result{Status: execution.StatusCancelled, StopReason: "cancelled"}
+}
+
 // fixture is one tenant with a project and a host over a real PostgreSQL store.
 type fixture struct {
 	s       *store.Store
@@ -377,6 +388,8 @@ func (f *fixture) newHost(t *testing.T) *Host {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The fake settles every stop at once; tests that need the allowance set it.
+	h.turnStopSettle = 0
 	t.Cleanup(h.Close)
 	return h
 }

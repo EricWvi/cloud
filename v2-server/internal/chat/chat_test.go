@@ -35,6 +35,8 @@ type port struct {
 	startLost bool
 	// onCancel runs inside Cancel, before it returns.
 	onCancel func()
+	// keepOnCancel makes Cancel stop only the turn, as over a Node that negotiated turn_cancel.
+	keepOnCancel bool
 }
 
 type fakeSession struct {
@@ -111,7 +113,7 @@ func (p *port) runtime() *executiontest.Stub {
 				// A terminal turn is a no-op: its result stands and the session stays live.
 				return *t.Result, nil
 			}
-			s.running, s.ended = "", true
+			s.running, s.ended = "", !p.keepOnCancel
 			r := execution.Result{Status: execution.StatusCancelled}
 			t.Result = &r
 			return r, nil
@@ -297,6 +299,23 @@ func TestStopEndsTheConversation(t *testing.T) {
 	}
 	if !c.Ended() || c.Session.EndReason != store.EndStopped {
 		t.Fatalf("session after stop = %+v", c.Session)
+	}
+}
+
+// A stop the session outlives (the Node kept it) leaves the conversation live: no end reason, and
+// the next prompt goes to the same session instead of being refused as conversation_ended.
+func TestStopThatKeepsTheSessionKeepsTheConversation(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.port.keepOnCancel = true
+	c, first := f.create(t, "k1")
+	r, e := f.svc.Stop(ctx, f.scope, c.ID)
+	if e != nil || r.Status != execution.StatusCancelled {
+		t.Fatalf("stop = %+v %v", r, e)
+	}
+	c, next, e := f.svc.Send(ctx, f.scope, c.ID, "k2", "接着来")
+	if e != nil || c.Ended() || c.Session.EndReason != "" || next.SessionID != first.SessionID || f.port.starts != 1 {
+		t.Fatalf("send after a kept stop = %+v %+v %v, starts %d", c.Session, next, e, f.port.starts)
 	}
 }
 

@@ -41,6 +41,10 @@ type fakeNodeIPC struct {
 	seq               map[string]uint64
 	hook              func(*fakeNodeIPC, node.Message) bool
 	missingCapability atomic.Pointer[string]
+	// turnCancel is the harness's: whether this Node negotiated turn_cancel.
+	turnCancel *atomic.Bool
+	// holdAck, when set, holds the ACK of the message types it names until the channel closes.
+	holdAck atomic.Pointer[map[string]chan struct{}]
 	// failSend, when set, fails the write of the commands it returns an error for.
 	failSend atomic.Pointer[func(node.Message) error]
 }
@@ -52,6 +56,8 @@ func (f *fakeNodeIPC) Supports(capability string) bool {
 	switch capability {
 	case "agent_session", "session_mcp", "session_mcp_lifecycle":
 		return true
+	case "turn_cancel":
+		return f.turnCancel.Load()
 	default:
 		return false
 	}
@@ -73,6 +79,15 @@ func (f *fakeNodeIPC) Receive(ctx context.Context) (node.Message, error) {
 	}
 }
 func (f *fakeNodeIPC) Ack(ctx context.Context, m node.Message) error {
+	if held := f.holdAck.Load(); held != nil {
+		if gate, ok := (*held)[m.Type]; ok {
+			select {
+			case <-gate:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
 	select {
 	case f.acked <- m:
 		return nil
@@ -134,6 +149,8 @@ type ipcHarness struct {
 	created chan *fakeNodeIPC
 	config  Project
 	scope   execution.Scope
+	// turnCancel makes every Node the harness starts negotiate turn_cancel.
+	turnCancel atomic.Bool
 }
 
 // ipcModel is the frozen model of the harness bindings.
@@ -156,7 +173,7 @@ func newIPCHarnessWith(t *testing.T, bindings map[string]nodeservices.Binding, h
 	root := t.TempDir()
 	config := Project{MirrorPath: filepath.Join(root, "mirror.git"), Commit: "0123456789012345678901234567890123456789", SnapshotRef: "refs/snapshots/demo"}
 	h := &ipcHarness{created: make(chan *fakeNodeIPC, 16), config: config, scope: execution.Scope{TenantID: "tenant", UserID: "user"}}
-	d := &Driver{opts: Options{Root: filepath.Join(root, "projects"), Bindings: bindings, ResolveProject: func(context.Context, execution.Scope, string) (Project, error) { return config, nil }}, boot: "fake", projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, recorded: map[string]Checkout{}, controlTimeout: time.Second, mcpRefreshWait: 5 * time.Minute}
+	d := &Driver{opts: Options{Root: filepath.Join(root, "projects"), Bindings: bindings, ResolveProject: func(context.Context, execution.Scope, string) (Project, error) { return config, nil }}, boot: "fake", projects: map[string]*projectRuntime{}, sessions: map[string]*agentSession{}, recorded: map[string]Checkout{}, controlTimeout: time.Second, mcpRefreshWait: 5 * time.Minute, turnCancelWait: defaultTurnCancelWait, turnCancelLimit: execution.TurnStopSettleLimit}
 	h.driver = d
 	d.startProject = func(p *projectRuntime) error {
 		if err := os.MkdirAll(filepath.Join(p.root, "w", "n"), 0700); err != nil {
@@ -181,7 +198,7 @@ func newIPCHarnessWith(t *testing.T, bindings map[string]nodeservices.Binding, h
 		if err != nil {
 			return err
 		}
-		f := &fakeNodeIPC{project: p, id: node.Identity{NodeID: "node", IncarnationID: d.nextID("incarnation")}, in: make(chan node.Message, 64), sent: make(chan node.Message, 64), acked: make(chan node.Message, 64), closed: make(chan struct{}), history: map[string][]json.RawMessage{}, seq: map[string]uint64{}, hook: hook}
+		f := &fakeNodeIPC{project: p, id: node.Identity{NodeID: "node", IncarnationID: d.nextID("incarnation")}, in: make(chan node.Message, 64), sent: make(chan node.Message, 64), acked: make(chan node.Message, 64), closed: make(chan struct{}), history: map[string][]json.RawMessage{}, seq: map[string]uint64{}, hook: hook, turnCancel: &h.turnCancel}
 		f.stopOK.Store(true)
 		p.client, p.stop, p.receiveStarted = f, f.stop, true
 		go p.receive()

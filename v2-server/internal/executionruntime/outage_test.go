@@ -74,6 +74,7 @@ func (a *outageAgent) Run(ctx context.Context, _ execution.Scope, _ execution.Se
 }
 func (*outageAgent) End(context.Context, string) error { return nil }
 func (*outageAgent) Rebuild(string)                    {}
+func (*outageAgent) StopTurn(execution.Ref) bool       { return false }
 func (*outageAgent) Reattach(string, string, string)   {}
 func (*outageAgent) Close(context.Context) error       { return nil }
 

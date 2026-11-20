@@ -378,9 +378,9 @@ func TestCompletionOutlivesItsRequest(t *testing.T) {
 	}
 }
 
-// Own mutant: a stop always ends the session, even when the turn ended just before the stop
-// reached it (the execution service then returns that turn's result and keeps the session).
-func TestStopEndsTheSessionEvenWhenTheTurnJustEnded(t *testing.T) {
+// A stop that reaches a turn just as it ended changes nothing: the execution service returns that
+// turn's result and keeps the session, so the node parks with its answer and talks on.
+func TestStopAfterTheTurnJustEndedKeepsTheSession(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	runID, a := f.startParked(t, interactiveChain, "初稿一")
@@ -398,8 +398,66 @@ func TestStopEndsTheSessionEvenWhenTheTurnJustEnded(t *testing.T) {
 	_, nodes := f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
 		return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["turns"] == float64(2)
 	})
-	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != true || p["answer"] != "刚好写完" || !f.exec.isClosed(a) {
+	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] == true || p["answer"] != "刚好写完" || f.exec.isClosed(a) {
 		t.Fatalf("summary = %v closed = %v", p, f.exec.isClosed(a))
+	}
+	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "再改改"); err != nil {
+		t.Fatalf("turn after the stop = %v", err)
+	}
+	if id := f.exec.awaitAppend(t); id != a {
+		t.Fatalf("the turn after the stop went to %s, want %s", id, a)
+	}
+}
+
+// A stop the session outlives (the Node kept it through turn_cancel) parks the node awaiting the
+// starter with the stopped turn recorded as their stop, and the starter talks on in the same
+// session. A stop that ended the session parks it for completion only.
+func TestStopOfAFollowUpKeepsTheSessionWhenTheNodeDoes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result execution.Result
+		ended  bool
+	}{
+		{name: "kept", result: stopKept()},
+		{name: "ended", result: stopEnded(), ended: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			ctx := context.Background()
+			runID, a := f.startParked(t, interactiveChain, "初稿一")
+			if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "继续"); err != nil {
+				t.Fatal(err)
+			}
+			f.exec.awaitAppend(t)
+			f.exec.onCancel = func(ref execution.Ref) error {
+				f.exec.finish(ref.SessionID, tc.result)
+				return nil
+			}
+			if _, err := f.host.StopNodeTurn(ctx, f.scope, runID, "a"); err != nil {
+				t.Fatal(err)
+			}
+			_, nodes := f.await(t, runID, func(_ store.WorkflowRun, n []store.WorkflowNodeRun) bool {
+				return node(n, "a").Status == store.WorkflowStatusPending && interactivePayload(t, node(n, "a"))["turns"] == float64(2)
+			})
+			p := interactivePayload(t, node(nodes, "a"))
+			completion, _ := p["completion"].(map[string]any)
+			if p["session_ended"] != tc.ended || f.exec.isClosed(a) != tc.ended || completion["stopCause"] != stopUserStopped {
+				t.Fatalf("summary = %v closed = %v", p, f.exec.isClosed(a))
+			}
+			_, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "接着写")
+			if tc.ended {
+				if !errors.Is(err, server.ErrWorkflowNodeSessionEnded) {
+					t.Fatalf("turn after a stop that ended the session = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("turn after a kept stop = %v", err)
+			}
+			if id := f.exec.awaitAppend(t); id != a {
+				t.Fatalf("the turn after the stop went to %s, want %s", id, a)
+			}
+		})
 	}
 }
 
@@ -702,9 +760,9 @@ func TestCancelledFollowUpDoesNotCloseTheRunBeforeItsSibling(t *testing.T) {
 	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
 }
 
-// A stop whose cancellation execution does not confirm still ends the session once the turn ends:
-// the node parks for completion and takes no further turn.
-func TestUnconfirmedStopOfAFollowUpStillEndsTheSession(t *testing.T) {
+// A stop whose cancellation execution does not confirm decides nothing by itself: the turn's own
+// end does. Here it completes and keeps the session, so the node parks completable and live.
+func TestUnconfirmedStopOfAFollowUpLeavesItToTheTurnsEnd(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	waiting, release := f.holdDispatchOf(t, "c")
@@ -732,11 +790,8 @@ func TestUnconfirmedStopOfAFollowUpStillEndsTheSession(t *testing.T) {
 	f.exec.onCancel = nil
 	f.exec.finish(a, completed("说完了"))
 	_, nodes := f.await(t, runID, parked("a"))
-	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] != true || p["completable"] != true || !f.exec.isClosed(a) {
-		t.Fatalf("summary = %v closed = %v, want parked for completion", p, f.exec.isClosed(a))
-	}
-	if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "还能说吗"); !errors.Is(err, server.ErrWorkflowNodeSessionEnded) {
-		t.Fatalf("turn after the stop = %v, want session ended", err)
+	if p := interactivePayload(t, node(nodes, "a")); p["session_ended"] == true || p["completable"] != true || f.exec.isClosed(a) {
+		t.Fatalf("summary = %v closed = %v, want parked completable with its session", p, f.exec.isClosed(a))
 	}
 	release()
 	f.exec.finish(f.exec.awaitStart(t), completed("好"))
@@ -968,7 +1023,7 @@ func TestStoppedTurnKeepsTheSlotUntilEndReturns(t *testing.T) {
 		return realEnd(ctx, scope, id)
 	}
 	f.exec.onCancel = func(ref execution.Ref) error {
-		f.exec.finish(ref.SessionID, completed("停"))
+		f.exec.finish(ref.SessionID, stopEnded())
 		return nil
 	}
 	if _, err := f.host.StopNodeTurn(ctx, f.scope, runID, "a"); err != nil {
@@ -1008,4 +1063,50 @@ func TestCancelDropsASiblingWaitingBehindAParkedSession(t *testing.T) {
 	}
 	f.exec.noStart(t, "the waiting sibling started after the cancellation")
 	f.await(t, runID, func(store.WorkflowRun, []store.WorkflowNodeRun) bool { return f.host.state(runID) == nil })
+}
+
+// A stop that Node settles more slowly than the host's stop timeout, but within what Cancel may
+// spend on a settlement (execution.TurnStopSettleLimit), is not reported as unconfirmed: neither
+// stopping a node's turn nor cancelling the run.
+func TestSlowlySettledStopIsNotUnconfirmed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(f *fixture, runID string) error
+	}{
+		{name: "node turn", stop: func(f *fixture, runID string) error {
+			_, err := f.host.StopNodeTurn(context.Background(), f.scope, runID, "a")
+			return err
+		}},
+		{name: "run", stop: func(f *fixture, runID string) error {
+			_, err := f.host.CancelRun(context.Background(), f.scope, runID)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			ctx := context.Background()
+			runID, a := f.startParked(t, interactiveChain, "初稿一")
+			if _, err := f.host.SendNodeTurn(ctx, f.scope, runID, "a", "继续"); err != nil {
+				t.Fatal(err)
+			}
+			f.exec.awaitAppend(t)
+			f.host.turnStopSettle = 2 * f.host.stopTimeout
+			settle := f.exec.CancelFunc
+			f.exec.CancelFunc = func(ctx context.Context, scope execution.Scope, ref execution.Ref) (execution.Result, error) {
+				// Node settles the stop half a stop timeout too late for the stop timeout alone.
+				select {
+				case <-ctx.Done():
+					return execution.Result{}, ctx.Err()
+				case <-time.After(f.host.stopTimeout * 3 / 2):
+				}
+				if ref.SessionID == a {
+					f.exec.finish(ref.SessionID, stopKept())
+				}
+				return settle(ctx, scope, ref)
+			}
+			if err := tc.stop(f, runID); err != nil {
+				t.Fatalf("slowly settled stop = %v", err)
+			}
+		})
+	}
 }

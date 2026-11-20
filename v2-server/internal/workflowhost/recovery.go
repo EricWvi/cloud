@@ -154,6 +154,10 @@ func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDis
 			if turn.Result == nil || undeliveredFollowUp(turn, prefix) {
 				continue
 			}
+			if strings.HasPrefix(turn.Caller.AttemptID, prefix) && stoppedBeforeDelivery(*turn.Result) {
+				n.turns++ // counted, as when it settled, but it answered nothing (see settleInteractiveTurn)
+				continue
+			}
 			result := *turn.Result
 			n.turns++
 			n.last = &result
@@ -178,7 +182,7 @@ func (h *Host) parkedNode(ctx context.Context, st *runState, d workflow.AgentDis
 // execution service recorded it, but it was no turn of the conversation, and the summary's
 // last_turn_error says it was lost.
 func undeliveredFollowUp(turn execution.Turn, prefix string) bool {
-	return strings.HasPrefix(turn.Caller.AttemptID, prefix) && !delivered(*turn.Result)
+	return strings.HasPrefix(turn.Caller.AttemptID, prefix) && !delivered(*turn.Result) && !stoppedBeforeDelivery(*turn.Result)
 }
 
 // failParked fails a parked node that cannot continue after the restart and ends its session.

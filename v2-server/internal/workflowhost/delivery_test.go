@@ -37,6 +37,7 @@ func (a workflowDeliveryAgent) Run(ctx context.Context, _ execution.Scope, sessi
 }
 func (workflowDeliveryAgent) End(context.Context, string) error { return nil }
 func (workflowDeliveryAgent) Rebuild(string)                    {}
+func (workflowDeliveryAgent) StopTurn(execution.Ref) bool       { return false }
 func (workflowDeliveryAgent) Reattach(string, string, string)   {}
 func (workflowDeliveryAgent) Close(context.Context) error       { return nil }
 

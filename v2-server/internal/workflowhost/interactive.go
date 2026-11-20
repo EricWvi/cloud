@@ -23,8 +23,9 @@ import (
 //
 // How a turn ended never fails the node (workflow-runs.md:125-126, 152-155): a refused, truncated,
 // unknown or unrequested cancelled turn keeps it parked with its held session open, so the starter
-// can keep talking, and completion waits for a turn that ended normally. Only a lost Agent or the
-// starter's stop ends the session; the node then parks for completion with the last normal
+// can keep talking, and completion waits for a turn that ended normally. So does a turn the
+// starter stopped when the Node keeps its session through the stop. Only a lost Agent, a stop that
+// lost it included, ends the session; the node then parks for completion with the last normal
 // answer, if there is one.
 //
 // Every transition of one node is claimed under runState.mu through interactiveNode.phase, so a
@@ -80,16 +81,16 @@ type interactiveNode struct {
 	// baselineUnwritten means the baseline is not in the payload yet: the first summary write,
 	// at dispatch, carries it, and later writes leave the stored one in place.
 	baselineUnwritten bool
-	// sessionEnded means the session accepts no further turn: the starter stopped a turn (the
-	// pinned Node stops a turn only by ending its session) or the Agent was lost.
+	// sessionEnded means the session accepts no further turn: the Agent was lost, or a stop the
+	// Node could not keep the session through ended it (execution.Service.Cancel).
 	sessionEnded bool
 	// sessionGone means Node no longer holds the session: its End returned (or the session was
 	// already gone). Until then the node keeps its slot of the run's checkout (see sessionsInUse).
 	sessionGone bool
 	// endRetrying marks a background retry of an unconfirmed End (see endInteractive).
 	endRetrying bool
-	// stopping marks a turn the starter asked to stop, so its end also ends the session even if
-	// the turn completed before the stop reached it.
+	// stopping marks a turn the starter asked to stop, so its end is recorded as their stop. The
+	// session outlives the stop unless the turn's result reports it lost (AgentLost).
 	stopping bool
 	// undelivered means the last message the starter sent was accepted (SendNodeTurn returned)
 	// and then never reached the Agent: the execution service refused it, or accepted it and the
@@ -113,6 +114,13 @@ type followUp struct {
 // summary never said the message was lost, and a rebuild must not change that silently).
 func delivered(r execution.Result) bool {
 	return !r.NotDelivered
+}
+
+// stoppedBeforeDelivery reports whether a settled turn is one the starter stopped before its
+// prompt reached the Agent (Node dropped it, or never held a refused submission). It is a stopped
+// turn of the conversation, not a lost message, but it answered nothing.
+func stoppedBeforeDelivery(r execution.Result) bool {
+	return r.NotDelivered && r.Status == execution.StatusCancelled
 }
 
 // endedNormally is the end_turn rule: only a complete EndTurn answer completes without force.
@@ -182,8 +190,9 @@ func (n *interactiveNode) summaryKeys() map[string]any {
 
 // settleInteractiveTurn records how a turn of n ended and parks the node again; a turn's outcome
 // never fails the node. The session ends only when the turn lost its Agent (its result could not
-// be read, or the execution service reports AgentLost) or the starter stopped it; any other turn
-// leaves the held session open, and completion waits for a turn that ended normally.
+// be read, or the execution service reports AgentLost, as it does for a stop that ended the
+// session); any other turn, a stop the session outlived included, leaves the held session open,
+// and completion waits for a turn that ended normally.
 //
 // The one exception is a first turn whose session was never set up: its Agent never started (the
 // project, checkout, plugin or Skills could not be prepared) or Node refused it at the checkout
@@ -243,14 +252,34 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 		h.fail(n.d, workflow.Failure{Kind: workflow.FailureInteractiveSession, Message: message})
 		return
 	}
+	if err == nil && seq > 0 && stoppedBeforeDelivery(result) {
+		// The starter stopped the message before the Agent got it. It counts as a turn, the stopped
+		// one the conversation shows, but it answered nothing: the node keeps the turn it last
+		// answered, so the answer it would complete with, and whether it can, stay as they were.
+		// The stop kept the session unless the result says it is lost.
+		n.turns++
+		ended := result.AgentLost
+		n.stopping = false
+		if ended {
+			n.sessionEnded = true
+		}
+		st.mu.Unlock()
+		if ended {
+			h.endInteractive(st, n)
+		}
+		h.park(st, n)
+		return
+	}
 	if err == nil && seq > 0 && !delivered(result) {
 		// The execution service accepted the starter's message and the Agent driver then refused
 		// it before the Agent got it (the session had ended, broken or lost its Node and no new
 		// Agent could take it, or Node refused the command). It is not a turn: the node stays as
 		// its last delivered turn left it, and the summary says the message was lost, as for one
-		// refused at Append. A session the refusal ended (AgentLost) takes no further message.
+		// refused at Append. A session the refusal ended (AgentLost) takes no further message; a
+		// stop of the message does not end it by itself, the session outlives a stop the Node keeps
+		// it through, as for any stopped turn.
 		n.undelivered = true
-		ended := result.AgentLost || n.stopping
+		ended := result.AgentLost
 		n.stopping = false
 		if ended {
 			n.sessionEnded = true
@@ -281,15 +310,15 @@ func (h *Host) settleInteractiveTurn(st *runState, a *attemptState, n *interacti
 	} else if !n.stopping {
 		n.lastStopCause = stopSessionLost
 	}
-	ended := err != nil || result.AgentLost || n.stopping
+	ended := err != nil || result.AgentLost
 	n.stopping = false
 	if ended {
 		n.sessionEnded = true
 	}
 	st.mu.Unlock()
 	if ended {
-		// A stop or a lost Agent has already ended the session; ending again is idempotent and
-		// covers a turn whose result could not be read. Like an automatic attempt, the slot frees
+		// A lost Agent (or a stop that lost it) has already ended the session; ending again is
+		// idempotent and covers a turn whose result could not be read. Like an automatic attempt, the slot frees
 		// only once End is confirmed; until then the node keeps it, and completing the node or
 		// the run's end ends the session again.
 		h.endInteractive(st, n)
@@ -562,9 +591,10 @@ func (h *Host) appendTurn(scope execution.Scope, req execution.AppendRequest) (e
 	}
 }
 
-// StopNodeTurn stops the turn an interactive node is executing. The pinned Node can only stop a
-// turn by ending its session (execution.Service.Cancel), so the node then parks for completion
-// without further turns; the run itself keeps running. A turn still starting is awaited first.
+// StopNodeTurn stops the turn an interactive node is executing (execution.Service.Cancel). The
+// node parks awaiting the starter, who can talk on when the session outlived the stop; when the
+// Node could not keep it, the session ended and the node parks for completion only. The run
+// itself keeps running. A turn still starting is awaited first.
 func (h *Host) StopNodeTurn(ctx context.Context, scope server.WorkflowRunScope, runID, nodeID string) (store.WorkflowRun, error) {
 	st, err := h.starter(ctx, scope, runID)
 	if err != nil {
@@ -573,7 +603,7 @@ func (h *Host) StopNodeTurn(ctx context.Context, scope server.WorkflowRunScope, 
 	if st == nil {
 		return store.WorkflowRun{}, server.ErrWorkflowNodeTurnNotRunning
 	}
-	stopCtx, cancel := context.WithTimeout(ctx, h.stopTimeout)
+	stopCtx, cancel := context.WithTimeout(ctx, h.stopBudget())
 	defer cancel()
 	ref, err := st.turnOf(stopCtx, nodeID)
 	if err != nil {
@@ -585,8 +615,8 @@ func (h *Host) StopNodeTurn(ctx context.Context, scope server.WorkflowRunScope, 
 	return h.store.WorkflowRun(ctx, scope.TenantID, runID)
 }
 
-// turnOf finds the turn nodeID is executing, marking the node stopping so the turn's end ends the
-// session, and waits out a start in flight.
+// turnOf finds the turn nodeID is executing, marking the node stopping so the turn's end is
+// recorded as the starter's stop, and waits out a start in flight.
 func (st *runState) turnOf(ctx context.Context, nodeID string) (execution.Ref, error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()

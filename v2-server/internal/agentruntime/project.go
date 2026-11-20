@@ -287,7 +287,7 @@ func (p *projectRuntime) start() error {
 		}
 		assets[name] = node.Asset{Path: path, SHA256: hex.EncodeToString(hash.Sum(nil))}
 	}
-	ipc := node.Options{ControllerID: "v2-execution", ExpectedNodeID: "v2-" + digest(p.id), HeartbeatInterval: time.Second, FrameTimeout: 15 * time.Second, RequiredCapabilities: []string{"plugin_install", "agent_session", "shared_checkout_sessions"}, ThreadPreviews: true}
+	ipc := node.Options{ControllerID: "v2-execution", ExpectedNodeID: "v2-" + digest(p.id), HeartbeatInterval: time.Second, FrameTimeout: 15 * time.Second, RequiredCapabilities: []string{"plugin_install", "agent_session", "shared_checkout_sessions"}, ThreadPreviews: true, TurnCancel: true}
 	p.runtime, err = node.StartRuntime(p.ctx, node.RuntimeOptions{Root: filepath.Join(p.root, "w"), Node: assets["ora-node"], Reaper: assets["ora-reaper"], IPC: ipc,
 		StartupTimeout: 20 * time.Second, StopGrace: 3 * time.Second, Configure: func(paths node.Paths) ([]byte, error) {
 			return p.services.NodeConfiguration(paths, ipc, filepath.Join(opts.AssetsDirectory, "bin", "deno"))

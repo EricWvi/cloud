@@ -685,18 +685,29 @@ export const useChatStore = create<State>()(
           const { tenantId: tid, userId } = get()
           // A first prompt still being admitted has nothing to stop yet.
           if (!isRemote(id) || !tid || !userId) return
-          // The fixed Node ends the whole session, and its stream can report that before the
-          // stop request returns; the reason is set first so the marker reads right either way.
-          // Prompts queued behind the stopped turn can never be sent.
+          // A stop may end the whole session (when the Node cannot keep it), and its stream can
+          // report that before the stop request returns; the reason is set first so the marker
+          // reads right either way. When only the turn stopped the session stays and the reason
+          // is withdrawn, so the conversation takes the next prompt. Prompts queued behind the
+          // stopped turn are dropped with it either way: stopping means not going on by itself.
           const reason = (endReason: SessionView['endReason']) =>
             refresh(id, (s) => ({ views: { ...s.views, [id]: (s.views[id] ?? []).map((v) => (v.ended ? v : { ...v, endReason })) } }))
           set((s) => ({ queued: { ...s.queued, [id]: [] } }))
           reason('stopped')
-          remote.stop(tid, id).catch((error: unknown) => {
-            if (!isCurrent(tid, userId)) return
-            reason('')
-            notify(id, failureOf(error))
-          })
+          remote.stop(tid, id).then(
+            () => {
+              if (!isCurrent(tid, userId)) return
+              // A session the stop ended is already marked ended (or will be, by its stream); the
+              // conversation read back says whether it did and why.
+              reason('')
+              void reconcile(id)
+            },
+            (error: unknown) => {
+              if (!isCurrent(tid, userId)) return
+              reason('')
+              notify(id, failureOf(error))
+            },
+          )
         },
         setDraft: (id, draft) => set((s) => ({ drafts: { ...s.drafts, [id]: draft } })),
         unqueue: (id, index) =>
