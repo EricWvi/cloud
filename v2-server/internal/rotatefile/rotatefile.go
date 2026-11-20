@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"sync"
+
+	"golang.org/x/sys/unix"
 )
 
 // Writer is an append-only file writer that rotates the current file once its
@@ -11,8 +13,9 @@ import (
 // `path.<keep-1>`. Rotation only closes, renames and reopens, so no write is
 // ever dropped and a caller's write-then-Sync ordering stays intact; a failure
 // surfaces from Write or Sync instead of silently losing events. Writers are
-// safe for concurrent use, which lets one Writer serve both of a child process's
-// stdout and stderr (os/exec copies each stream from its own pipe goroutine).
+// safe for concurrent use (Write, Sync and Close serialize on one mutex), and
+// every open refuses to follow a symlink (O_NOFOLLOW), so a caller cannot be
+// redirected onto an unrelated file.
 type Writer struct {
 	mu     sync.Mutex
 	path   string
@@ -29,7 +32,7 @@ func New(path string, limit int64, keep int) (*Writer, error) {
 	if keep < 2 {
 		return nil, fmt.Errorf("rotatefile: keep must be at least 2")
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY|unix.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -83,8 +86,11 @@ func (w *Writer) Close() error {
 	return w.file.Close()
 }
 
-// rotateLocked shifts `path.(i-1)` up to `path.i` for i from keep-1 down to 1
-// (dropping the oldest), then reopens `path` empty. The caller holds mu.
+// rotateLocked shifts `path.(i-1)` up to `path.i` for i from keep-1 down to 1,
+// then reopens `path` empty. rename atomically replaces the destination, so the
+// oldest file falls off only when the shift into its slot has already succeeded
+// (a mid-rotation failure therefore never deletes an archive it was about to
+// preserve). The caller holds mu.
 func (w *Writer) rotateLocked() error {
 	if w.file != nil {
 		if err := w.file.Close(); err != nil {
@@ -93,7 +99,6 @@ func (w *Writer) rotateLocked() error {
 		w.file = nil
 	}
 	for i := w.keep - 1; i >= 1; i-- {
-		_ = os.Remove(w.path + fmt.Sprintf(".%d", i))
 		from := w.path
 		if i > 1 {
 			from = w.path + fmt.Sprintf(".%d", i-1)
@@ -103,7 +108,7 @@ func (w *Writer) rotateLocked() error {
 			return fmt.Errorf("rotatefile: rotate %s: %w", w.path+fmt.Sprintf(".%d", i), err)
 		}
 	}
-	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY|unix.O_NOFOLLOW, 0600)
 	if err != nil {
 		return err
 	}

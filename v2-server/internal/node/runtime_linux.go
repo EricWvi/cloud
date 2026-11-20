@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -247,25 +248,61 @@ func claimRoot(root string) (Paths, *os.File, error) {
 }
 
 func startChild(binary string, paths Paths, args ...string) (*child, error) {
-	// Bound the child's combined stdout+stderr: 10 MiB per file, 3 files kept
-	// (the #1191 budget). The writer is safe for the two copy goroutines that
-	// os/exec runs for stdout and stderr.
+	// Bound the child's combined stdout+stderr: 10 MiB per file, 3 files kept (the #1191 budget).
 	logWriter, err := rotatefile.New(binary+".log", 10<<20, 3)
 	if err != nil {
+		return nil, err
+	}
+	// Hand the child a real *os.File pipe instead of the writer: os/exec then does not start a
+	// copy goroutine, so cmd.Wait waits for the child alone and never for a descendant that still
+	// holds the write end (Node's reaper inherits stderr and outlives a killed Node).
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		_ = logWriter.Close()
 		return nil, err
 	}
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = paths.Root
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + paths.UserHome}
-	cmd.Stdout = logWriter
-	cmd.Stderr = logWriter
+	cmd.Stdout = pw
+	cmd.Stderr = pw
 	if err := cmd.Start(); err != nil {
+		_ = pw.Close()
+		_ = pr.Close()
 		_ = logWriter.Close()
 		return nil, err
 	}
+	// Close the parent's write end so the pipe drains when every inheritor closes it; the child's
+	// own copy lives until it and its descendants exit.
+	_ = pw.Close()
+	// Drain on our own goroutine: a rotation failure must not stop the read, which would close
+	// the pipe's read end and SIGPIPE the child (and its reaper) on the next stderr write.
+	go drainChildLog(pr, logWriter)
 	p := &child{cmd: cmd, done: make(chan struct{})}
-	go func() { p.err = cmd.Wait(); _ = logWriter.Close(); close(p.done) }()
+	go func() { p.err = cmd.Wait(); close(p.done) }()
 	return p, nil
+}
+
+// drainChildLog copies the child's combined output into the rotating log until EOF. The first
+// write failure is logged once and the rest discarded, but reading never stops early: abandoning
+// the read end would break the child's stderr, which the direct-file behavior never did.
+func drainChildLog(r *os.File, w *rotatefile.Writer) {
+	defer r.Close()
+	defer w.Close()
+	buf := make([]byte, 32*1024)
+	discarding := false
+	for {
+		n, err := r.Read(buf)
+		if n > 0 && !discarding {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				discarding = true
+				slog.Warn("node log write failed; discarding further output", "error", werr)
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 func writeConfig(path string, data []byte) error {
