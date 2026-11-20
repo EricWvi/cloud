@@ -22,6 +22,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/node"
 	"github.com/wanglongan587/cloud/v2-server/internal/nodehistory"
 	"github.com/wanglongan587/cloud/v2-server/internal/nodeservices"
+	"github.com/wanglongan587/cloud/v2-server/internal/rotatefile"
 )
 
 // The fake replaces only the IPC peer and supervisor proof. The dispatcher, control waits,
@@ -176,7 +177,7 @@ func newIPCHarnessWith(t *testing.T, bindings map[string]nodeservices.Binding, h
 		if err != nil {
 			return err
 		}
-		p.journal, err = os.OpenFile(filepath.Join(p.root, "node-events.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		p.journal, err = rotatefile.New(filepath.Join(p.root, "node-events.jsonl"), 64<<20, 3)
 		if err != nil {
 			return err
 		}
