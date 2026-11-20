@@ -612,18 +612,27 @@ func corrupt(err error) error {
 	}
 	msg := err.Error()
 	// An I/O or permission diagnostic wins over the generic object complaint Git adds after it.
-	for _, sign := range []string{"Permission denied", "Input/output error", "unable to open loose object", "EACCES", "EIO",
-		"No space left", "Too many open files", "Stale file handle", "Resource temporarily unavailable"} {
-		if strings.Contains(msg, sign) {
-			return err
-		}
+	if ioTrouble(msg) {
+		return err
 	}
-	for _, sign := range []string{"missing object", "bad object", "not a tree object", "not a valid object", "invalid object", "corrupt"} {
+	for _, sign := range []string{"missing object", "bad object", "not a tree object", "not a valid object", "invalid object", "corrupt",
+		"unterminated line in", "unexpected line in"} {
 		if strings.Contains(msg, sign) {
 			return fmt.Errorf("%w: %w", ErrUnverifiable, err)
 		}
 	}
 	return err
+}
+
+// ioTrouble reports an I/O or permission diagnostic in Git's output: such a failure may pass.
+func ioTrouble(msg string) bool {
+	for _, sign := range []string{"Permission denied", "Input/output error", "unable to open loose object", "EACCES", "EIO",
+		"No space left", "Too many open files", "Stale file handle", "Resource temporarily unavailable"} {
+		if strings.Contains(msg, sign) {
+			return true
+		}
+	}
+	return false
 }
 
 // headPresent tells whether HEAD names a commit to compare, failing closed: only a symbolic HEAD
@@ -675,23 +684,22 @@ func (s *DeliveryFS) headPresent(ctx context.Context, agent deliveryGit, st *sta
 	if !validCommit(oid) {
 		return false, fmt.Errorf("%w: HEAD does not name an object", ErrUnverifiable)
 	}
-	// Why HEAD did not resolve decides: an object that is not there (or not a commit) is a lasting
-	// state of the checkout; anything else, such as an I/O error, may pass and is retried with the
-	// original error.
+	// Why HEAD did not resolve decides. cat-file -t says why with a diagnostic; every diagnostic
+	// seen so far counts: any I/O or permission trouble means the failure may pass (retried with the
+	// original error). Only an object reported absent, or one that is not a commit, with no such
+	// trouble anywhere, is a lasting state of the checkout. Silence proves nothing and is retried.
 	kind, err := agent.value(ctx, "cat-file", "-t", oid)
-	if err == nil {
-		if kind != "commit" {
-			return false, fmt.Errorf("%w: HEAD names a %s, not a commit", ErrUnverifiable, kind)
-		}
+	trouble := ioTrouble(resolveErr.Error()) || (err != nil && ioTrouble(err.Error()))
+	switch {
+	case trouble:
+		return false, resolveErr
+	case err == nil && kind != "commit":
+		return false, fmt.Errorf("%w: HEAD names a %s, not a commit", ErrUnverifiable, kind)
+	case err != nil && strings.Contains(err.Error(), "could not get object info"):
+		return false, fmt.Errorf("%w: HEAD's commit %s is missing", ErrUnverifiable, oid)
+	default:
 		return false, resolveErr
 	}
-	if _, existErr := agent.value(ctx, "cat-file", "-e", oid); errors.As(existErr, &exit) && exit.ExitCode() == 1 &&
-		strings.HasSuffix(strings.TrimSpace(existErr.Error()), "exit status 1:") {
-		return false, fmt.Errorf("%w: HEAD's commit %s is missing", ErrUnverifiable, oid)
-	} else if existErr != nil {
-		return false, corrupt(existErr)
-	}
-	return false, resolveErr
 }
 
 // refValue reads what the repository records for ref (a loose file, else its packed-refs line),
@@ -809,20 +817,36 @@ func checkRecordedRefs(layout gitexclude.Layout, listed map[string]bool) error {
 			if err != nil {
 				return err
 			}
-			for _, line := range strings.Split(packed, "\n") {
-				if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "^") {
-					continue
-				}
-				oid, name, ok := strings.Cut(line, " ")
-				if !ok {
-					return fmt.Errorf("%w: packed-refs is malformed", ErrUnverifiable)
-				}
-				// A packed ref a loose one overrides is not what Git uses.
-				if _, err := r.Lstat(name); err == nil {
-					continue
-				}
-				if err := check(name, oid); err != nil {
-					return err
+			// The whole structure, as Git would read it: lines end with a newline, an optional
+			// header comment comes first, then "<oid> <ref>" lines, each optionally followed by one
+			// "^<oid>" peeled line.
+			if packed != "" && !strings.HasSuffix(packed, "\n") {
+				return fmt.Errorf("%w: packed-refs ends in an unterminated line", ErrUnverifiable)
+			}
+			afterRef := false
+			for i, line := range strings.Split(strings.TrimSuffix(packed, "\n"), "\n") {
+				switch {
+				case packed == "":
+				case i == 0 && strings.HasPrefix(line, "# pack-refs with:"):
+					afterRef = false
+				case strings.HasPrefix(line, "^"):
+					if !afterRef || !validCommit(line[1:]) {
+						return fmt.Errorf("%w: packed-refs has a malformed peeled line", ErrUnverifiable)
+					}
+					afterRef = false
+				default:
+					oid, name, ok := strings.Cut(line, " ")
+					if !ok || !validCommit(oid) || !strings.HasPrefix(name, "refs/") || strings.ContainsAny(name, " \t") {
+						return fmt.Errorf("%w: packed-refs is malformed", ErrUnverifiable)
+					}
+					afterRef = true
+					// A packed ref a loose one overrides is not what Git uses.
+					if _, err := r.Lstat(name); err == nil {
+						continue
+					}
+					if err := check(name, oid); err != nil {
+						return err
+					}
 				}
 			}
 			return nil

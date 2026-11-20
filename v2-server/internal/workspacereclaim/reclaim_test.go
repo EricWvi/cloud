@@ -3,6 +3,7 @@ package workspacereclaim_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1194,6 +1195,64 @@ func TestReclaimKeepsAHEADWhoseBranchIsBroken(t *testing.T) {
 				if !exists(t, filepath.Join(c.Path, ".git", "objects", object[:2], object[2:])) {
 					t.Fatalf("object %s went", object)
 				}
+			}
+		})
+	}
+}
+
+// HEAD's commit directory is briefly unreadable: Git says "Permission denied", which is not a
+// verdict on the checkout. The reclaim stays pending as check_failed and is done once the
+// permission is back.
+func TestReclaimRetriesWhenHEADsObjectIsUnreadable(t *testing.T) {
+	f := newFixture(t)
+	c := f.chat(t, st.TurnDelivered)
+	base := git(t, c.Path, "rev-parse", "HEAD")
+	git(t, c.Path, "checkout", "-q", "--detach")
+	// An empty commit on a detached HEAD, its object in another directory than the branch's.
+	head := base
+	for i := 0; head[:2] == base[:2]; i++ {
+		git(t, c.Path, "commit", "-q", "--allow-empty", "-m", fmt.Sprintf("agent %d", i))
+		head = git(t, c.Path, "rev-parse", "HEAD")
+	}
+	dir := filepath.Join(c.Path, ".git", "objects", head[:2])
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	f.deleteChat(t, c, store.ReclaimRecoverable)
+	if got := f.run(t, c); got != (wr.Outcome{Workspace: wr.OutcomePending, Reason: wr.ReasonCheckFailed}) || !exists(t, c.Path) {
+		t.Fatalf("with the directory unreadable = %+v", got)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := wr.New(f.s, f.fs, f.remover).Resume(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.reclaim(t, c); r.Status != store.ReclaimReclaimed {
+		t.Fatalf("after the permission is back: %+v", r)
+	}
+}
+
+// A packed-refs file Git refuses (its last line unterminated, or a truncated peeled line) is a
+// damaged repository, not a passing failure: the default reclaim keeps the checkout.
+func TestReclaimKeepsADamagedPackedRefs(t *testing.T) {
+	for name, damage := range map[string]func(packed string) string{
+		"unterminated last line": func(p string) string { return strings.TrimSuffix(p, "\n") },
+		"truncated peeled line":  func(p string) string { return p + "^abcd\n" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			c := f.chat(t, st.TurnDelivered)
+			git(t, c.Path, "pack-refs", "--all")
+			packed, err := os.ReadFile(filepath.Join(c.Path, ".git", "packed-refs"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			write(t, c.Path, ".git/packed-refs", damage(string(packed)))
+			f.deleteChat(t, c, store.ReclaimRecoverable)
+			if got := f.run(t, c); got != (wr.Outcome{Workspace: wr.OutcomeKept, Reason: wr.ReasonUnverifiable}) || !exists(t, c.Path) {
+				t.Fatalf("outcome %+v", got)
 			}
 		})
 	}
