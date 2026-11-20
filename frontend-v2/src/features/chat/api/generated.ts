@@ -285,6 +285,12 @@ export interface ChatGitFindings {
   refs: ChatGitFindingsRefsItem[];
   /** Nested repositories: a .git of any kind below the top level, a changed gitlink, an initialized submodule (.git/modules/<name>). */
   repositories: string[];
+  /** HEAD is beyond the base and its tree differs from the delivery's (and the base's) on a path it tracks. */
+  headDiffers: boolean;
+  /** With headDiffers: HEAD's commits beyond the base. */
+  headCommits?: number;
+  /** The index has a conflict, or an entry whose blob or mode is neither the delivery's, the base's nor (unstaged) HEAD's. */
+  indexDiffers: boolean;
 }
 
 export interface ChatDeletionPreview {

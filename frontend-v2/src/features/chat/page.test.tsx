@@ -395,7 +395,7 @@ describe('chat page', () => {
   it('names what only the repository holds when it blocks reclaiming', async () => {
     backend.deletion = {
       workspace: 'undelivered', reason: 'git_state', revision: 'rev-git',
-      git: { stashes: 2, refs: [{ name: 'refs/heads/side', commits: 3 }], repositories: ['vendor/lib'] },
+      git: { stashes: 2, refs: [{ name: 'refs/heads/side', commits: 3 }], repositories: ['vendor/lib'], headDiffers: true, headCommits: 1, indexDiffers: true },
     }
     await renderReady()
     const dialog = await openDelete('梳理 v2 接口缺口')
@@ -403,11 +403,13 @@ describe('chat page', () => {
     expect(held.getByText('stash：2 条')).toBeInTheDocument()
     expect(held.getByText('refs/heads/side：3 个提交')).toBeInTheDocument()
     expect(held.getByText('嵌套仓库：vendor/lib')).toBeInTheDocument()
+    expect(held.getByText('HEAD：1 个未交付的提交')).toBeInTheDocument()
+    expect(held.getByText('暂存区里有未交付的内容')).toBeInTheDocument()
     expect(dialog.queryByRole('list', { name: '未交付的改动' })).not.toBeInTheDocument()
   })
 
   it('does not offer discarding a nested repository too large to confirm', async () => {
-    backend.deletion = { workspace: 'undelivered', reason: 'git_state', discardable: false, git: { stashes: 0, refs: [], repositories: ['vendor/big'] } }
+    backend.deletion = { workspace: 'undelivered', reason: 'git_state', discardable: false, git: { stashes: 0, refs: [], repositories: ['vendor/big'], headDiffers: false, indexDiffers: false } }
     await renderReady()
     const dialog = await openDelete('梳理 v2 接口缺口')
     expect(await dialog.findByText(/嵌套仓库太大，无法确认丢弃的是哪些内容/)).toBeInTheDocument()

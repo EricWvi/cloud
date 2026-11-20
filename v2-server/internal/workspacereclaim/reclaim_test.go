@@ -924,3 +924,50 @@ func TestDiscardIsStaleWhenASharedRepositoryNamedByCommondirChanges(t *testing.T
 		git(t, store, "worktree", "remove", "--force", tmp)
 	})
 }
+
+// Content only HEAD or the index holds is in no delivery: the default reclaim keeps the checkout.
+// An Agent commit that matches the delivered working tree holds nothing more and does not.
+func TestReclaimKeepsWorkOnlyHEADOrTheIndexHolds(t *testing.T) {
+	for name, tc := range map[string]struct {
+		setup func(t *testing.T, path string) (object string)
+		want  wr.Outcome
+	}{
+		"staged only": {func(t *testing.T, path string) string {
+			write(t, path, "README.md", "staged, never delivered\n")
+			git(t, path, "add", "README.md")
+			blob := git(t, path, "rev-parse", ":README.md")
+			write(t, path, "README.md", "base\n") // the working tree is the delivered one again
+			return blob
+		}, wr.Outcome{Workspace: wr.OutcomeKept, Reason: wr.ReasonGitState}},
+		"committed only": {func(t *testing.T, path string) string {
+			write(t, path, "README.md", "committed, never delivered\n")
+			git(t, path, "commit", "-qam", "agent")
+			commit := git(t, path, "rev-parse", "HEAD")
+			git(t, path, "restore", "--source=HEAD~1", "--staged", "--worktree", "README.md")
+			return commit
+		}, wr.Outcome{Workspace: wr.OutcomeKept, Reason: wr.ReasonGitState}},
+		"agent commit matching the delivery": {func(t *testing.T, path string) string {
+			git(t, path, "add", "-A")
+			git(t, path, "commit", "-qm", "agent commits what it delivered")
+			return ""
+		}, wr.Outcome{Workspace: wr.OutcomeReclaimed}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			c := f.chat(t, st.TurnDelivered)
+			object := tc.setup(t, c.Path)
+			f.deleteChat(t, c, store.ReclaimRecoverable)
+			got := f.run(t, c)
+			got.Bytes, got.Files = 0, 0
+			if got != tc.want {
+				t.Fatalf("outcome %+v, want %+v", got, tc.want)
+			}
+			if object != "" {
+				if !exists(t, filepath.Join(c.Path, ".git", "index")) {
+					t.Fatal("the index went")
+				}
+				git(t, c.Path, "cat-file", "-e", object) // still in the repository
+			}
+		})
+	}
+}

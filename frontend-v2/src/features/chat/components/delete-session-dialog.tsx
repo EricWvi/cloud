@@ -65,6 +65,8 @@ function WorkspaceNote({ preview, discard, setDiscard }: { preview: ChatDeletion
             {preview.git.repositories.map((p) => (
               <li key={p}>嵌套仓库：{p}</li>
             ))}
+            {preview.git.headDiffers && <li>HEAD：{preview.git.headCommits ?? 0} 个未交付的提交</li>}
+            {preview.git.indexDiffers && <li>暂存区里有未交付的内容</li>}
           </ul>
         </div>
       )}

@@ -1537,7 +1537,9 @@
         "required": [
           "stashes",
           "refs",
-          "repositories"
+          "repositories",
+          "headDiffers",
+          "indexDiffers"
         ],
         "description": "With reason git_state: what only the checkout's repository holds, which no delivery carries.",
         "properties": {
@@ -1575,6 +1577,18 @@
               "type": "string"
             },
             "description": "Nested repositories: a .git of any kind below the top level, a changed gitlink, an initialized submodule (.git/modules/<name>)."
+          },
+          "headDiffers": {
+            "type": "boolean",
+            "description": "HEAD is beyond the base and its tree differs from the delivery's (and the base's) on a path it tracks."
+          },
+          "headCommits": {
+            "type": "integer",
+            "description": "With headDiffers: HEAD's commits beyond the base."
+          },
+          "indexDiffers": {
+            "type": "boolean",
+            "description": "The index has a conflict, or an entry whose blob or mode is neither the delivery's, the base's nor (unstaged) HEAD's."
           }
         }
       }
