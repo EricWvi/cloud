@@ -77,8 +77,13 @@ func (c *desktopCodes) take(code string, now time.Time) (desktopCode, bool) {
 
 // loopbackRedirect accepts only http://127.0.0.1:<port>/<path> and http://[::1]:<port>/<path>
 // (RFC 8252 §7.3). localhost is refused because it resolves through DNS and the hosts file; a
-// query is refused so the code and state this server appends are the only parameters.
+// query is refused so the code and state this server appends are the only parameters. Any '#' is
+// refused before parsing: an empty fragment parses to "" yet would still push the appended code
+// and state into a fragment the listener never receives.
 func loopbackRedirect(raw string) bool {
+	if strings.Contains(raw, "#") {
+		return false
+	}
 	u, e := url.Parse(raw)
 	if e != nil || u.Scheme != "http" || u.User != nil || u.RawQuery != "" || u.ForceQuery ||
 		u.Fragment != "" || !strings.HasPrefix(u.Path, "/") || u.Opaque != "" {

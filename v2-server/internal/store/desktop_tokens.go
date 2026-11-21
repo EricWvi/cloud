@@ -20,8 +20,9 @@ const DesktopTokenPrefix = "ora_dt_"
 const DesktopTokenIdle = 30 * 24 * time.Hour
 
 // desktopTokenTouch is how stale last_used_at may get before a request refreshes it, so a busy
-// desktop writes once an hour rather than on every request. A token therefore expires between
-// DesktopTokenIdle and DesktopTokenIdle plus this after its last use.
+// desktop writes once an hour rather than on every request. Uses within an hour of a refresh are
+// not recorded, so a token expires between DesktopTokenIdle minus this and DesktopTokenIdle after
+// its last use.
 const desktopTokenTouch = time.Hour
 
 // StartDesktopToken issues a desktop token for an active account. The account is re-checked in the

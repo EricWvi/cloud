@@ -247,6 +247,7 @@ func TestDesktopApprovalAcceptsOnlyLoopbackAndS256(t *testing.T) {
 		"http://127.0.0.1:53682",              // no path
 		"http://127.0.0.1:53682/cb?next=x",    // would mix with code and state
 		"http://127.0.0.1:53682/cb#frag",      // fragment
+		"http://127.0.0.1:53682/cb#",          // empty fragment still moves code and state
 		"http://user@127.0.0.1:53682/cb",      // userinfo
 		"http://10.0.0.1:53682/callback",      // another machine
 		"ora://callback",                      // custom scheme

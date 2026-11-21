@@ -170,7 +170,7 @@ Ora desktop 经系统浏览器和本机回环地址登录（A6 D6，RFC 8252）�
 | `POST /auth/desktop/token` | 公开，凭授权码：`{code, codeVerifier, redirectUri}`。授权码只在进程内存，2 分钟有效，第一次兑换不论成败都会用掉；verifier 的 S256 与批准时的 challenge 一致、`redirectUri` 与批准时完全相同，才签令牌。授权码不存在、过期、用过，verifier 或回调不符，或账号在批准后被停用，一律 `400 invalid_grant`。成功 `{token, user: {id, displayName}}`，`Cache-Control: no-store` |
 | `POST /auth/desktop/logout` | 吊销本请求 `Bearer` 头里的这一个令牌，`204`；令牌已不存在也是 `204`。没有合法的 `Bearer` 头 `401`。网页会话和其他设备的令牌不受影响 |
 
-令牌是 `ora_dt_` 加 43 个 base64url 字符，库里和网页会话在同一张 `sessions` 表、只存 SHA-256，`kind` 区分两种：网页会话只认 Cookie、登录后固定 7 天到期；desktop 令牌只认 `Authorization` 头，连续 30 天没用才过期（最近使用时间最多一小时刷新一次，所以实际在最后一次使用后 30 天到 30 天零 1 小时之间过期），没有绝对上限、不轮换。网页登出不影响 desktop 令牌，desktop 登出也不影响网页会话。授权码只在内存，最多 10000 条，满了挤掉最早的；重启后进行中的授权要重新点「允许」。
+令牌是 `ora_dt_` 加 43 个 base64url 字符，库里和网页会话在同一张 `sessions` 表、只存 SHA-256，`kind` 区分两种：网页会话只认 Cookie、登录后固定 7 天到期；desktop 令牌只认 `Authorization` 头，连续 30 天没用才过期（最近使用时间最多一小时刷新一次，刷新后一小时内的使用不记，所以实际在最后一次使用后 30 天减 1 小时到 30 天之间过期），没有绝对上限、不轮换。网页登出不影响 desktop 令牌，desktop 登出也不影响网页会话。授权码只在内存，最多 10000 条，满了挤掉最早的；重启后进行中的授权要重新点「允许」。
 
 ### 用户技能
 
