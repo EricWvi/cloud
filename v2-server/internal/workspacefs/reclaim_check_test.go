@@ -406,3 +406,232 @@ func TestInspectReclaimDoesNotJudgeAHEADThatTimesOut(t *testing.T) {
 		t.Fatalf("err = %v, want a retryable error", err)
 	}
 }
+
+// Nested Git directories containing symlinks or objects/info/alternates make the identity digest
+// incomplete so a discard is refused, while symlinks in a nested repository's own working tree
+// stay complete.
+func TestInspectReclaimMarksSymlinksAndAlternatesInNestedGitIncomplete(t *testing.T) {
+	initLib := func(t *testing.T) string {
+		t.Helper()
+		lib := t.TempDir()
+		deliveryWrite(t, lib, "lib.go", "package lib\n")
+		deliveryGit(t, lib, "init", "-q", ".")
+		deliveryGit(t, lib, "add", ".")
+		deliveryGit(t, lib, "commit", "-qm", "lib")
+		return lib
+	}
+	copyDir := func(t *testing.T, src, dst string) {
+		t.Helper()
+		if err := os.CopyFS(dst, os.DirFS(src)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, tc := range map[string]struct {
+		setup        func(t *testing.T, root string)
+		wantComplete bool
+		wantRepo     string
+	}{
+		"symlinked refs and objects inside nested .git": {
+			setup: func(t *testing.T, root string) {
+				deliveryWrite(t, root, ".gitignore", "*.log\nstore.git/\nwt/\n")
+				lib := initLib(t)
+				shared := filepath.Join(root, "store.git")
+				deliveryGit(t, root, "clone", "-q", "--bare", lib, shared)
+				wt := filepath.Join(root, "wt")
+				if err := os.MkdirAll(filepath.Join(wt, ".git"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				head, err := os.ReadFile(filepath.Join(shared, "HEAD"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				deliveryWrite(t, wt, ".git/HEAD", string(head))
+				deliveryWrite(t, wt, ".git/config", "[core]\n\tbare = false\n\tlogallrefupdates = true\n")
+				for _, e := range []string{"refs", "packed-refs", "objects", "logs"} {
+					if err := os.Symlink(filepath.Join("..", "..", "store.git", e), filepath.Join(wt, ".git", e)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			wantRepo: "wt",
+		},
+		"symlinked index inside nested .git": {
+			setup: func(t *testing.T, root string) {
+				deliveryWrite(t, root, ".gitignore", "*.log\nextra/\nwt/\n")
+				wt := filepath.Join(root, "wt")
+				deliveryWrite(t, wt, "lib.go", "package lib\n")
+				deliveryGit(t, wt, "init", "-q", ".")
+				deliveryGit(t, wt, "add", "lib.go")
+				deliveryGit(t, wt, "commit", "-qm", "lib")
+				deliveryWrite(t, wt, "lib.go", "package lib // staged\n")
+				deliveryGit(t, wt, "add", "lib.go")
+				extraIndex := filepath.Join(root, "extra", "index")
+				if err := os.MkdirAll(filepath.Dir(extraIndex), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(filepath.Join(wt, ".git", "index"), extraIndex); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join("..", "..", "extra", "index"), filepath.Join(wt, ".git", "index")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantRepo: "wt",
+		},
+		"symlink inside gitfile target": {
+			setup: func(t *testing.T, root string) {
+				deliveryWrite(t, root, ".gitignore", "*.log\nstore.git/\nmeta/\nwt/\n")
+				lib := initLib(t)
+				shared := filepath.Join(root, "store.git")
+				deliveryGit(t, root, "clone", "-q", "--bare", lib, shared)
+				meta := filepath.Join(root, "meta", "wt")
+				if err := os.MkdirAll(meta, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				head, err := os.ReadFile(filepath.Join(shared, "HEAD"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				deliveryWrite(t, meta, "HEAD", string(head))
+				deliveryWrite(t, meta, "config", "[core]\n\tbare = false\n")
+				if err := os.Symlink(filepath.Join("..", "..", "store.git", "objects"), filepath.Join(meta, "objects")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join("..", "..", "store.git", "refs"), filepath.Join(meta, "refs")); err != nil {
+					t.Fatal(err)
+				}
+				deliveryWrite(t, root, "wt/.git", "gitdir: ../meta/wt\n")
+			},
+			wantRepo: "wt",
+		},
+		"symlink inside commondir target": {
+			setup: func(t *testing.T, root string) {
+				deliveryWrite(t, root, ".gitignore", "*.log\nstore.git/\nother-refs/\nwt/\n")
+				lib := initLib(t)
+				shared := filepath.Join(root, "store.git")
+				deliveryGit(t, root, "clone", "-q", "--bare", lib, shared)
+				wt := filepath.Join(root, "wt")
+				deliveryGit(t, shared, "worktree", "add", "-q", "--detach", wt)
+				if err := os.Remove(filepath.Join(wt, ".git")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(filepath.Join(shared, "worktrees", "wt"), filepath.Join(wt, ".git")); err != nil {
+					t.Fatal(err)
+				}
+				deliveryWrite(t, wt, ".git/commondir", "../../store.git\n")
+				otherRefs := filepath.Join(root, "other-refs")
+				copyDir(t, filepath.Join(shared, "refs"), otherRefs)
+				if err := os.RemoveAll(filepath.Join(shared, "refs")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join("..", "other-refs"), filepath.Join(shared, "refs")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantRepo: "wt",
+		},
+		"symlink inside .git/modules entry": {
+			setup: func(t *testing.T, root string) {
+				deliveryWrite(t, root, ".gitignore", "*.log\nstore.git/\n")
+				lib := initLib(t)
+				shared := filepath.Join(root, "store.git")
+				deliveryGit(t, root, "clone", "-q", "--bare", lib, shared)
+				deliveryGit(t, root, "-c", "protocol.file.allow=always", "submodule", "add", "-q", lib, "mod")
+				deliveryGit(t, root, "commit", "-qm", "submodule")
+				modObjects := filepath.Join(root, ".git", "modules", "mod", "objects")
+				if err := os.RemoveAll(modObjects); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join("..", "..", "..", "store.git", "objects"), modObjects); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantRepo: ".git/modules/mod",
+		},
+		"symlinked .git/modules entry": {
+			setup: func(t *testing.T, root string) {
+				deliveryWrite(t, root, ".gitignore", "*.log\n")
+				lib := initLib(t)
+				deliveryGit(t, root, "-c", "protocol.file.allow=always", "submodule", "add", "-q", lib, "mod")
+				deliveryGit(t, root, "commit", "-qm", "submodule")
+				if err := os.RemoveAll(filepath.Join(root, "mod")); err != nil {
+					t.Fatal(err)
+				}
+				realDir := filepath.Join(root, ".git", "modules", "real", "mod")
+				if err := os.MkdirAll(filepath.Dir(realDir), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(filepath.Join(root, ".git", "modules", "mod"), realDir); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join("real", "mod"), filepath.Join(root, ".git", "modules", "mod")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantRepo: ".git/modules/mod",
+		},
+		"commondir inside .git/modules entry": {
+			setup: func(t *testing.T, root string) {
+				deliveryWrite(t, root, ".gitignore", "*.log\nstore.git/\n")
+				lib := initLib(t)
+				shared := filepath.Join(root, "store.git")
+				deliveryGit(t, root, "clone", "-q", "--bare", lib, shared)
+				deliveryGit(t, root, "-c", "protocol.file.allow=always", "submodule", "add", "-q", lib, "mod")
+				deliveryGit(t, root, "commit", "-qm", "submodule")
+				if err := os.RemoveAll(filepath.Join(root, "mod")); err != nil {
+					t.Fatal(err)
+				}
+				deliveryWrite(t, root, ".git/modules/mod/commondir", "../../store.git\n")
+			},
+			wantRepo: ".git/modules/mod",
+		},
+		"alternates inside nested .git": {
+			setup: func(t *testing.T, root string) {
+				deliveryWrite(t, root, ".gitignore", "*.log\nstore.git/\nwt/\n")
+				lib := initLib(t)
+				shared := filepath.Join(root, "store.git")
+				deliveryGit(t, root, "clone", "-q", "--bare", lib, shared)
+				wt := filepath.Join(root, "wt")
+				deliveryWrite(t, wt, "lib.go", "package lib\n")
+				deliveryGit(t, wt, "init", "-q", ".")
+				deliveryGit(t, wt, "add", ".")
+				deliveryGit(t, wt, "commit", "-qm", "lib")
+				deliveryWrite(t, wt, ".git/objects/info/alternates", "../../../store.git/objects\n")
+			},
+			wantRepo: "wt",
+		},
+		"working tree symlink stays complete": {
+			setup: func(t *testing.T, root string) {
+				sub := filepath.Join(root, "vendor", "lib")
+				deliveryWrite(t, sub, "lib.go", "package lib\n")
+				deliveryGit(t, sub, "init", "-q", ".")
+				deliveryGit(t, sub, "add", ".")
+				deliveryGit(t, sub, "commit", "-qm", "lib")
+				if err := os.Symlink("lib.go", filepath.Join(sub, "link.go")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantComplete: true,
+			wantRepo:     "vendor/lib",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, req := deliveryFixture(t, workspacefs.DefaultDeliveryObjectBytes)
+			tc.setup(t, req.Workspace.Root)
+			got := inspect(t, f, req, "")
+			if got.GitIdentityComplete != tc.wantComplete {
+				t.Fatalf("GitIdentityComplete = %v, want %v (git=%+v)", got.GitIdentityComplete, tc.wantComplete, got.Git)
+			}
+			found := false
+			for _, repo := range got.Git.Repositories {
+				if repo == tc.wantRepo {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("Git.Repositories = %v, want %q", got.Git.Repositories, tc.wantRepo)
+			}
+		})
+	}
+}
