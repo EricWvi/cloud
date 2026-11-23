@@ -54,6 +54,20 @@ func (e *ValidationError) Error() string {
 	return fmt.Sprintf("workflow %s (%s): %s", e.Code, where, e.Reason)
 }
 
+// FaultParams names the refused node, field and reason for the public
+// workflow_run_graph_parse fault, so an author can find what to fix. The reason is a bounded
+// diagnostic about the submitted document; it carries no host or database detail.
+func (e *ValidationError) FaultParams() map[string]any {
+	params := map[string]any{"reason": e.Reason}
+	if e.NodeID != "" {
+		params["nodeId"] = e.NodeID
+	}
+	if e.Field != "" {
+		params["field"] = e.Field
+	}
+	return params
+}
+
 func invalid(code, nodeID, field, reason string) error {
 	return &ValidationError{Code: code, NodeID: nodeID, Field: field, Reason: reason}
 }

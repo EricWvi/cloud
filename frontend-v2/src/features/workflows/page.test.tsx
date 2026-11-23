@@ -122,8 +122,42 @@ describe("workflow page", () => {
     await user.click(within(dialog).getByRole("button", { name: "发布" }));
 
     expect(
-      await screen.findByText("服务端暂时不能检查和发布工作流，草稿已保存。"),
+      await within(dialog).findByText("发布失败：服务端暂时不能检查和发布工作流，草稿已保存。"),
     ).toBeInTheDocument();
+    expect(screen.getByText("暂未发布")).toBeInTheDocument();
+  });
+
+  it("keeps the publish dialog open on a graph refusal and names the refused node", async () => {
+    const user = userEvent.setup();
+    await renderPage();
+    await createWorkflow(user, "旧引用");
+    await screen.findByDisplayValue("旧引用");
+    const workflowId = server.backend.list().workflows.find((w) => w.name === "旧引用")!.id;
+    const graph = JSON.parse(server.backend.get({ workflowId }).draft.graph) as {
+      nodes: { id: string; data: { title: string } }[];
+    };
+    const [first] = graph.nodes;
+    server.refuse = {
+      match: /POST .*\/publish$/,
+      status: 400,
+      data: {
+        code: "workflow_run_graph_parse",
+        params: { nodeId: first!.id, field: "selector", reason: "Loop loop-1 publishes only its named outputs (result)" },
+        requestId: "r",
+      },
+    };
+
+    await user.click(await screen.findByRole("button", { name: "发布" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "发布工作流" });
+    await user.click(within(dialog).getByRole("button", { name: "发布" }));
+
+    expect(
+      await within(dialog).findByText(
+        `发布被拒绝：节点「${first!.data.title}」的变量引用没有通过发布校验，草稿已保存。`,
+      ),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText("Loop loop-1 publishes only its named outputs (result)")).toBeInTheDocument();
+    expect(screen.getByRole("alertdialog", { name: "发布工作流" })).toBeInTheDocument();
     expect(screen.getByText("暂未发布")).toBeInTheDocument();
   });
 

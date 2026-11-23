@@ -94,6 +94,10 @@ import { useAgents } from "@/lib/workflows/data/catalog-hooks";
 import { availableSkills, useSkills } from "@/lib/workflows/data/catalog-hooks";
 import { useWorkflowAgentModels } from "@/lib/workflows/data/catalog-hooks";
 import { localizeContractError } from "@/lib/workflows/host/contract-error";
+import {
+  describePublishFailure,
+  type WorkflowPublishFailure,
+} from "./workflow-publish-error";
 import { WorkflowCanvas } from "./workflow-canvas";
 import {
   authoredWorkflowNodesEqual,
@@ -564,6 +568,9 @@ function WorkflowEditorContent({
   const [globalVariablesDialogOpen, setGlobalVariablesDialogOpen] =
     useState(false);
   const [publishVersionName, setPublishVersionName] = useState("");
+  // A refused publish stays in its dialog, so the author sees it was the publish, not a save.
+  const [publishFailure, setPublishFailure] =
+    useState<WorkflowPublishFailure | null>(null);
   const inspectorPanelRef = useRef<ResizablePanelHandle | null>(null);
   const inspectorAnimationRef = useRef<number | null>(null);
   /** Bumps on every persistable edit so in-flight writes can detect they are stale. */
@@ -1459,6 +1466,7 @@ function WorkflowEditorContent({
     if (previewedVersionRef.current !== null) {
       setPreviewedVersion(null);
       setPublishVersionName("");
+      setPublishFailure(null);
       setPublishDialogOpen(true);
       return;
     }
@@ -1467,29 +1475,38 @@ function WorkflowEditorContent({
       return;
     }
     setPublishVersionName("");
+    setPublishFailure(null);
     setPublishDialogOpen(true);
   }
 
   /** Publishes the current draft as an immutable snapshot with an optional version name. */
   async function confirmPublish(): Promise<void> {
-    if (workflow === null) {
+    if (workflow === null || publishWorkflowMutation.isPending) {
       return;
     }
-    setPublishDialogOpen(false);
+    setPublishFailure(null);
     setManagerError(null);
     const version = publishVersionName.trim();
+    const nodes = workflow.nodes;
     try {
       const result = await publishWorkflowMutation.mutateAsync({
         workflowId: workflow.id,
         version: version === "" ? null : version,
       });
+      setPublishDialogOpen(false);
       toast.success(
         t("settings.workflow.publishSuccess", {
           version: result.snapshot.version,
         }),
       );
     } catch (cause) {
-      setManagerError(localizeContractError(cause, t));
+      setPublishFailure(
+        describePublishFailure(
+          cause,
+          (nodeId) => nodes.find((node) => node.id === nodeId)?.data.title,
+          t,
+        ),
+      );
     }
   }
 
@@ -3130,7 +3147,10 @@ function WorkflowEditorContent({
           {publishDialogOpen && workflow && <PinnedSchedulesWarning workflowId={workflow.id} />}
           <Input
             value={publishVersionName}
-            onChange={(event) => setPublishVersionName(event.target.value)}
+            onChange={(event) => {
+              setPublishVersionName(event.target.value);
+              setPublishFailure(null);
+            }}
             aria-label={t("settings.workflow.versionHistory")}
             placeholder={t("settings.workflow.publishVersionPlaceholder")}
             autoFocus
@@ -3141,9 +3161,23 @@ function WorkflowEditorContent({
               }
             }}
           />
+          {publishFailure !== null && (
+            <div role="alert" className="text-destructive space-y-1 text-sm">
+              <p>{publishFailure.message}</p>
+              {publishFailure.detail !== null && (
+                <p className="text-muted-foreground text-xs break-words">
+                  {t("settings.workflow.publishRejectedDetail")}
+                  <code>{publishFailure.detail}</code>
+                </p>
+              )}
+            </div>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void confirmPublish()}>
+            <AlertDialogAction
+              disabled={publishWorkflowMutation.isPending}
+              onClick={() => void confirmPublish()}
+            >
               <IconVersions />
               {t("settings.workflow.publish")}
             </AlertDialogAction>

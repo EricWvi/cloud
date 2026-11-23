@@ -28,6 +28,7 @@ Loop 外只能读命名输出（没有 `{loop}.output`），循环体内只能�
 
 装配层将 `Analysis` 映射成 HTTP 传输类型，`ValidateWorkflow` 可直接作为回调传入。
 失败返回 `*ValidationError`，包含领域分类 `Code`、可选的 `NodeID`、`Field` 和 `Reason`。
+`FaultParams` 把后三项交给 HTTP 层作为 `workflow_run_graph_parse` 的 `params`，HTTP 层不必导入本包。
 HTTP 错误码由适配层映射；诊断措辞不承诺逐字匹配 desktop。
 
 ## 行为依据与测试

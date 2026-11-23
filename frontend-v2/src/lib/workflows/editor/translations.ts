@@ -410,6 +410,29 @@ export const workflowEditorTranslations = {
     "settings.workflow.publishVersionPlaceholder":
       "版本名（可选，留空自动生成）",
     "settings.workflow.publishError": "发布工作流失败。",
+    "settings.workflow.publishFailed": "发布失败：{{message}}",
+    "settings.workflow.publishRejectedGraph":
+      "发布被拒绝：工作流图没有通过发布校验，草稿已保存。",
+    "settings.workflow.publishRejectedNode":
+      "发布被拒绝：节点「{{node}}」没有通过发布校验，草稿已保存。",
+    "settings.workflow.publishRejectedNodeField":
+      "发布被拒绝：节点「{{node}}」的{{field}}没有通过发布校验，草稿已保存。",
+    "settings.workflow.publishRejectedNodePath":
+      "发布被拒绝：节点「{{node}}」没有通过发布校验（{{field}}），草稿已保存。",
+    "settings.workflow.publishRejectedDetail": "服务端说明：",
+    "settings.workflow.publishField.selector": "变量引用",
+    "settings.workflow.publishField.template": "提示词变量",
+    "settings.workflow.publishField.aggregator": "聚合变量",
+    "settings.workflow.publishField.iterator": "迭代源",
+    "settings.workflow.publishField.collect": "收集变量",
+    "settings.workflow.publishField.edges": "连线",
+    "settings.workflow.publishField.container": "所属容器",
+    "settings.workflow.publishField.iteration": "迭代配置",
+    "settings.workflow.publishField.loop": "循环配置",
+    "settings.workflow.publishField.agent": "Agent 配置",
+    "settings.workflow.publishField.outputs": "输出结果",
+    "settings.workflow.publishField.inputs": "开始变量",
+    "settings.workflow.publishField.cases": "分支条件",
     "settings.workflow.publishSuccess": "已发布版本 {{version}}",
     "settings.workflow.deleteSuccess": "已删除“{{name}}”",
     "settings.workflow.versionLoadError": "无法加载该版本。",
@@ -1066,6 +1089,29 @@ export const workflowEditorTranslations = {
     "settings.workflow.publishVersionPlaceholder":
       "Version name (optional; auto-generated when empty)",
     "settings.workflow.publishError": "Failed to publish the workflow.",
+    "settings.workflow.publishFailed": "Publishing failed: {{message}}",
+    "settings.workflow.publishRejectedGraph":
+      "Publishing was rejected: the workflow graph failed publish validation. The draft is saved.",
+    "settings.workflow.publishRejectedNode":
+      "Publishing was rejected: node “{{node}}” failed publish validation. The draft is saved.",
+    "settings.workflow.publishRejectedNodeField":
+      "Publishing was rejected: the {{field}} of node “{{node}}” failed publish validation. The draft is saved.",
+    "settings.workflow.publishRejectedNodePath":
+      "Publishing was rejected: node “{{node}}” failed publish validation ({{field}}). The draft is saved.",
+    "settings.workflow.publishRejectedDetail": "Server says: ",
+    "settings.workflow.publishField.selector": "variable reference",
+    "settings.workflow.publishField.template": "prompt variable",
+    "settings.workflow.publishField.aggregator": "aggregated variables",
+    "settings.workflow.publishField.iterator": "iteration source",
+    "settings.workflow.publishField.collect": "collected variable",
+    "settings.workflow.publishField.edges": "edges",
+    "settings.workflow.publishField.container": "container",
+    "settings.workflow.publishField.iteration": "iteration settings",
+    "settings.workflow.publishField.loop": "loop settings",
+    "settings.workflow.publishField.agent": "Agent settings",
+    "settings.workflow.publishField.outputs": "results",
+    "settings.workflow.publishField.inputs": "start variables",
+    "settings.workflow.publishField.cases": "branch conditions",
     "settings.workflow.publishSuccess": "Published version {{version}}",
     "settings.workflow.deleteSuccess": "Deleted “{{name}}”",
     "settings.workflow.versionLoadError": "Failed to load that version.",

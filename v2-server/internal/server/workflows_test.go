@@ -23,6 +23,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
 	"github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
+	wf "github.com/wanglongan587/cloud/v2-server/internal/workflow"
 )
 
 // workflowCall drives the definition routes while validating every response against the candidate
@@ -327,8 +328,26 @@ func TestWorkflowAnalysisAndPublishValidation(t *testing.T) {
 	_, created := call("POST", base, map[string]any{"name": "不可执行", "graph": "unrunnable"})
 	id := created["workflow"].(map[string]any)["id"].(string)
 	status, failure := call("POST", base+"/"+id+"/publish", map[string]any{"version": "v1"})
-	if status != 400 || failure["code"] != "workflow_run_graph_parse" {
+	if status != 400 || failure["code"] != "workflow_run_graph_parse" || !reflect.DeepEqual(failure["params"], map[string]any{}) {
 		t.Fatalf("publish invalid graph = %d %v", status, failure)
+	}
+}
+
+// A domain refusal names the node and field so the editor can say what to fix.
+func TestWorkflowPublishRefusalNamesTheNode(t *testing.T) {
+	call := workflowServer(t, func(o *server.Options) {
+		o.ValidateWorkflow = func(string) error {
+			return &wf.ValidationError{Code: "invalid_loop_reference", NodeID: "out", Field: "selector", Reason: "Loop loop publishes only its named outputs (result); loop.output is not one"}
+		}
+	})
+	tid := workflowTenant(t, call)
+	base := "/api/v2/tenants/" + tid + "/workflows"
+	_, created := call("POST", base, map[string]any{"name": "旧引用", "graph": "{}"})
+	id := created["workflow"].(map[string]any)["id"].(string)
+	status, failure := call("POST", base+"/"+id+"/publish", map[string]any{"version": "v1"})
+	want := map[string]any{"nodeId": "out", "field": "selector", "reason": "Loop loop publishes only its named outputs (result); loop.output is not one"}
+	if status != 400 || failure["code"] != "workflow_run_graph_parse" || !reflect.DeepEqual(failure["params"], want) {
+		t.Fatalf("publish refusal = %d %v, want params %v", status, failure, want)
 	}
 }
 
