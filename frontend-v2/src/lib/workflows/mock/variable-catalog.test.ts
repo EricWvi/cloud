@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Edge, Node } from "@xyflow/react";
 import { deriveWorkflowVariableCatalog } from "./variable-catalog";
+import { createMockWorkflowLoopGroup } from "./node-factory";
 import type { WorkflowNodeData } from "./node-data";
 
 function node(
@@ -283,5 +284,100 @@ describe("deriveWorkflowVariableCatalog aggregator typing", () => {
       entries.find((entry) => entry.selector.join(".") === "agg2.output")
         ?.valueType,
     ).toBe("string");
+  });
+});
+
+describe("deriveWorkflowVariableCatalog loop scope rules", () => {
+  // The editor's own Loop group: a round Start and an Agent fed back as `value`,
+  // exported as the named output `result`.
+  const group = createMockWorkflowLoopGroup({
+    sequence: 1,
+    position: { x: 0, y: 0 },
+    locale: "zh-CN",
+  });
+  const [loop, roundStart, loopAgent] = group.nodes as [
+    Node<WorkflowNodeData, "workflow">,
+    Node<WorkflowNodeData, "workflow">,
+    Node<WorkflowNodeData, "workflow">,
+  ];
+  const loopStart = node("start", {
+    kind: "start",
+    title: "Start",
+    description: "",
+    inputVariables: [{ name: "topic", valueType: "string" }],
+  });
+  const after = node("after", { kind: "output", title: "After", description: "" });
+  const nodes = [loopStart, loop, roundStart, loopAgent, after];
+  const edges: Edge[] = [
+    { id: "s-l", source: "start", target: loop.id },
+    ...group.edges,
+    { id: "l-a", source: loop.id, target: "after" },
+  ];
+  const selectors = (consumer: string): string[] =>
+    deriveWorkflowVariableCatalog(nodes, edges, consumer, []).map((entry) =>
+      entry.selector.join("."),
+    );
+
+  it("offers outer consumers the named outputs, never loop.output", () => {
+    const visible = selectors("after");
+    expect(visible).toContain(`${loop.id}.result`);
+    expect(visible).not.toContain(`${loop.id}.output`);
+    // Neither loop variables nor body products leak out of the Loop.
+    expect(visible).not.toContain(`${loop.id}.value`);
+    expect(visible).not.toContain(`${loopAgent.id}.output`);
+    expect(visible).not.toContain(`${roundStart.id}.input`);
+    expect(visible).toEqual(
+      expect.arrayContaining(["start.input", "start.topic"]),
+    );
+  });
+
+  it("types named outputs as any, as the backend declares them", () => {
+    const result = deriveWorkflowVariableCatalog(nodes, edges, "after", []).find(
+      (entry) => entry.selector.join(".") === `${loop.id}.result`,
+    );
+    expect(result?.valueType).toBe("any");
+  });
+
+  it("offers body members the loop variables and the Loop's upstream", () => {
+    const visible = selectors(loopAgent.id);
+    expect(visible).toEqual(
+      expect.arrayContaining([`${loop.id}.value`, "start.input", "start.topic"]),
+    );
+    // The round Start assigns nothing; the Loop's exposed outputs are not yet produced.
+    expect(visible).not.toContain(`${roundStart.id}.input`);
+    expect(visible).not.toContain(`${loop.id}.result`);
+    expect(visible).not.toContain(`${loop.id}.output`);
+    const value = deriveWorkflowVariableCatalog(nodes, edges, loopAgent.id, []).find(
+      (entry) => entry.selector.join(".") === `${loop.id}.value`,
+    );
+    expect(value?.valueType).toBe("string");
+  });
+
+  it("shares in-body products between body members only", () => {
+    const reviewer = node(
+      "reviewer",
+      {
+        kind: "agent",
+        title: "Review",
+        description: "",
+        containerId: loop.id,
+      },
+      loop.id,
+    );
+    const visible = deriveWorkflowVariableCatalog(
+      [...nodes, reviewer],
+      [...edges, { id: "a-r", source: loopAgent.id, target: "reviewer" }],
+      "reviewer",
+      [],
+    ).map((entry) => entry.selector.join("."));
+    expect(visible).toContain(`${loopAgent.id}.output`);
+    expect(visible).toContain(`${loop.id}.value`);
+  });
+
+  it("lists no round Start variables when the Loop panel derives body candidates", () => {
+    const body = deriveWorkflowVariableCatalog([roundStart, loopAgent], [], undefined, []);
+    expect(body.map((entry) => entry.selector.join("."))).toEqual([
+      `${loopAgent.id}.output`,
+    ]);
   });
 });
