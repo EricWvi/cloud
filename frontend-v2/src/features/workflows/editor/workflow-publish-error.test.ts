@@ -40,6 +40,22 @@ describe("describePublishFailure", () => {
     expect(message("iterationConfig.collectSelector")).toBe(
       "发布被拒绝：节点「汇总输出」的收集变量没有通过发布校验，草稿已保存。",
     );
+    // Templates are named by where they were written, not as a generic "template".
+    expect(message("agentConfig.prompt")).toBe(
+      "发布被拒绝：节点「汇总输出」的提示词变量没有通过发布校验，草稿已保存。",
+    );
+    expect(message("cases")).toBe(
+      "发布被拒绝：节点「汇总输出」的分支条件没有通过发布校验，草稿已保存。",
+    );
+    expect(message("loopConfig.until")).toBe(
+      "发布被拒绝：节点「汇总输出」的结束条件没有通过发布校验，草稿已保存。",
+    );
+    expect(message("loopConfig.variables[0].initial")).toBe(
+      "发布被拒绝：节点「汇总输出」的循环变量初始值没有通过发布校验，草稿已保存。",
+    );
+    expect(message("loopConfig.outputs[0].variableSelector")).toBe(
+      "发布被拒绝：节点「汇总输出」的循环输出没有通过发布校验，草稿已保存。",
+    );
   });
 
   it("falls back to the node id and the raw field the editor has no words for", () => {

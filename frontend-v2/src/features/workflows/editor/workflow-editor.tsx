@@ -571,6 +571,9 @@ function WorkflowEditorContent({
   // A refused publish stays in its dialog, so the author sees it was the publish, not a save.
   const [publishFailure, setPublishFailure] =
     useState<WorkflowPublishFailure | null>(null);
+  // Set synchronously so a second Enter or click in the same tick cannot publish twice; the
+  // mutation's own `isPending` only updates on the next render.
+  const publishingRef = useRef(false);
   const inspectorPanelRef = useRef<ResizablePanelHandle | null>(null);
   const inspectorAnimationRef = useRef<number | null>(null);
   /** Bumps on every persistable edit so in-flight writes can detect they are stale. */
@@ -1481,9 +1484,10 @@ function WorkflowEditorContent({
 
   /** Publishes the current draft as an immutable snapshot with an optional version name. */
   async function confirmPublish(): Promise<void> {
-    if (workflow === null || publishWorkflowMutation.isPending) {
+    if (workflow === null || publishingRef.current) {
       return;
     }
+    publishingRef.current = true;
     setPublishFailure(null);
     setManagerError(null);
     const version = publishVersionName.trim();
@@ -1507,6 +1511,8 @@ function WorkflowEditorContent({
           t,
         ),
       );
+    } finally {
+      publishingRef.current = false;
     }
   }
 
@@ -3134,7 +3140,16 @@ function WorkflowEditorContent({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      <AlertDialog open={publishDialogOpen} onOpenChange={setPublishDialogOpen}>
+      <AlertDialog
+        open={publishDialogOpen}
+        onOpenChange={(open) => {
+          // The dialog is where a refusal is reported; closing it mid-publish would hide one.
+          if (!open && publishWorkflowMutation.isPending) {
+            return;
+          }
+          setPublishDialogOpen(open);
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
@@ -3173,7 +3188,9 @@ function WorkflowEditorContent({
             </div>
           )}
           <AlertDialogFooter>
-            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogCancel disabled={publishWorkflowMutation.isPending}>
+              {t("common.cancel")}
+            </AlertDialogCancel>
             <AlertDialogAction
               disabled={publishWorkflowMutation.isPending}
               onClick={() => void confirmPublish()}
