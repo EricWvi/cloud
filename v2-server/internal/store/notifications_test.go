@@ -49,12 +49,12 @@ func TestNotifyAssignment(t *testing.T) {
 
 	t.Run("reassigning tells the new assignee once", func(t *testing.T) {
 		task := createTask(t, f, owner, store.TaskInput{Title: "改派"})
-		task, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, owner, &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: bob}, task.Version)
+		task, e := f.store.SetTaskAssignee(ctx, storetest.Access(t, f.store, f.tenant, owner), task.ID, &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: bob}, task.Version)
 		if e != nil {
 			t.Fatal(e)
 		}
 		// Re-sending the same assignee is not a new assignment.
-		if task, e = f.store.SetTaskAssignee(ctx, f.tenant, task.ID, owner, &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: bob}, task.Version); e != nil {
+		if task, e = f.store.SetTaskAssignee(ctx, storetest.Access(t, f.store, f.tenant, owner), task.ID, &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: bob}, task.Version); e != nil {
 			t.Fatal(e)
 		}
 		if n := countFor(must(inbox(t, f, bob)), task.ID, store.NotifyAssigned); n != 1 {
@@ -62,10 +62,10 @@ func TestNotifyAssignment(t *testing.T) {
 		}
 		// Clearing and an Agent assignee tell nobody.
 		agentID := f.agent(t, "Agent", "active")
-		if task, e = f.store.SetTaskAssignee(ctx, f.tenant, task.ID, owner, &store.TaskAssigneeRef{Type: store.AssigneeAgent, ID: agentID}, task.Version); e != nil {
+		if task, e = f.store.SetTaskAssignee(ctx, storetest.Access(t, f.store, f.tenant, owner), task.ID, &store.TaskAssigneeRef{Type: store.AssigneeAgent, ID: agentID}, task.Version); e != nil {
 			t.Fatal(e)
 		}
-		if _, e = f.store.SetTaskAssignee(ctx, f.tenant, task.ID, owner, nil, task.Version); e != nil {
+		if _, e = f.store.SetTaskAssignee(ctx, storetest.Access(t, f.store, f.tenant, owner), task.ID, nil, task.Version); e != nil {
 			t.Fatal(e)
 		}
 		if n := countFor(must(inbox(t, f, bob)), task.ID, store.NotifyAssigned); n != 1 {
@@ -76,12 +76,12 @@ func TestNotifyAssignment(t *testing.T) {
 	t.Run("upper-case UUIDs are the same person", func(t *testing.T) {
 		upper := strings.ToUpper(bob)
 		task := createTask(t, f, owner, store.TaskInput{Title: "大写改派"})
-		task, e := f.store.SetTaskAssignee(ctx, f.tenant, task.ID, owner, &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: bob}, task.Version)
+		task, e := f.store.SetTaskAssignee(ctx, storetest.Access(t, f.store, f.tenant, owner), task.ID, &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: bob}, task.Version)
 		if e != nil {
 			t.Fatal(e)
 		}
 		// The same person spelled in upper case is not a new assignment.
-		if _, e = f.store.SetTaskAssignee(ctx, f.tenant, task.ID, owner, &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: upper}, task.Version); e != nil {
+		if _, e = f.store.SetTaskAssignee(ctx, storetest.Access(t, f.store, f.tenant, owner), task.ID, &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: upper}, task.Version); e != nil {
 			t.Fatal(e)
 		}
 		if n := countFor(must(inbox(t, f, bob)), task.ID, store.NotifyAssigned); n != 1 {

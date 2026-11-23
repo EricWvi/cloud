@@ -11,6 +11,7 @@ import (
 	"github.com/wanglongan587/cloud/v2-server/internal/execution"
 	"github.com/wanglongan587/cloud/v2-server/internal/server"
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
+	"github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
 	"github.com/wanglongan587/cloud/v2-server/internal/taskrun"
 )
 
@@ -154,7 +155,7 @@ func testPersonalTask(t *testing.T, lost bool) {
 	if e != nil || review.Reason != "task_no_longer_actionable" || review.ExecutionRef != "" {
 		t.Fatalf("review: %+v %v", review, e)
 	}
-	_, e = f.db.SetTaskAssignee(ctx, scope.TenantID, src.ID, "", nil, current.Version)
+	_, e = f.db.SetTaskAssignee(ctx, storetest.Access(t, f.db, scope.TenantID, scope.UserID), src.ID, nil, current.Version)
 	if e != nil {
 		t.Fatal(e)
 	}

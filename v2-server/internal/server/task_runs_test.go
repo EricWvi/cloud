@@ -146,6 +146,20 @@ func TestTaskRunHTTP(t *testing.T) {
 		t.Fatalf("events = %d %s", res.StatusCode, raw)
 	}
 
+	// A member who neither started the run nor created the task cannot stop it.
+	bystander, e := f.store.SessionUser(f.ctx, storetest.SignIn(t, f.store, "bystander", "旁观者", store.RoleOwner))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e := f.db.Exec(f.ctx, `UPDATE memberships SET role = 'member' WHERE tenant_id = $1 AND user_id = $2`, tid, bystander.ID); e != nil {
+		t.Fatal(e)
+	}
+	other := f.taskClient()
+	other.loginAs("bystander")
+	if status, body := other.do("POST", one+"/runs/"+run["id"].(string)+"/stop", nil); status != 403 || body["code"] != "forbidden" {
+		t.Fatalf("bystander stop = %d %v", status, body)
+	}
+
 	status, stopped := c.do("POST", one+"/runs/"+run["id"].(string)+"/stop", nil)
 	if status != 200 || stopped["state"] != store.TaskRunEnded || stopped["endReason"] != store.TaskRunStopped {
 		t.Fatalf("stop = %d %v", status, stopped)

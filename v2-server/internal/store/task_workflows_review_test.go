@@ -153,8 +153,11 @@ func TestTaskWorkflowVersionFenceAndClosedDuringPrepare(t *testing.T) {
 		t.Fatal(err)
 	}
 	current, _ := f.store.Task(f.ctx, f.tenant, task.ID)
-	if _, err := f.store.SetTaskStatus(f.ctx, storetest.Access(t, f.store, f.tenant, user), task.ID, "cancelled", current.Version); !errors.Is(err, store.ErrRunActive) {
+	if _, err := f.store.SetTaskStatus(f.ctx, storetest.Access(t, f.store, f.tenant, user), task.ID, "cancelled", current.Version); !errors.Is(err, store.ErrWorkflowActive) {
 		t.Fatalf("manual close while handling=%v", err)
+	}
+	if _, err := f.store.SetTaskStatus(f.ctx, storetest.Access(t, f.store, f.tenant, user), task.ID, "review", current.Version); !errors.Is(err, store.ErrWorkflowActive) {
+		t.Fatalf("submit for review while handling=%v", err)
 	}
 	for _, to := range []string{"pending", "running"} {
 		current, err = f.store.TransitionTaskStatus(f.ctx, f.tenant, task.ID, current.Status, to)
@@ -246,7 +249,7 @@ func TestTaskWorkflowIdleAgentAndCallerKeys(t *testing.T) {
 	}
 	other := f.login(t, "other", "member")
 	current, _ := f.store.Task(f.ctx, f.tenant, task.ID)
-	if _, err := f.store.SetTaskAssignee(f.ctx, f.tenant, task.ID, "", &store.TaskAssigneeRef{Type: "human", ID: other}, current.Version); err != nil {
+	if _, err := f.store.SetTaskAssignee(f.ctx, storetest.Access(t, f.store, f.tenant, user), task.ID, &store.TaskAssigneeRef{Type: "human", ID: other}, current.Version); err != nil {
 		t.Fatal(err)
 	}
 	in.UserID = other
@@ -521,7 +524,7 @@ func TestTaskWorkflowAssigneePolicy(t *testing.T) {
 	if _, err := f.store.AddSquadMember(f.ctx, storetest.Access(t, f.store, f.tenant, user), squad.ID, store.SquadMemberInput{Type: store.MemberHuman, UserID: member, Version: squad.Version}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.store.SetTaskAssignee(f.ctx, f.tenant, task.ID, "", &store.TaskAssigneeRef{Type: store.AssigneeSquad, ID: squad.ID}, task.Version); err != nil {
+	if _, err := f.store.SetTaskAssignee(f.ctx, storetest.Access(t, f.store, f.tenant, user), task.ID, &store.TaskAssigneeRef{Type: store.AssigneeSquad, ID: squad.ID}, task.Version); err != nil {
 		t.Fatal(err)
 	}
 	in := store.NewTaskWorkflow{TenantID: f.tenant, TaskID: task.ID, UserID: outsider, Key: "squad", WorkflowID: wid}

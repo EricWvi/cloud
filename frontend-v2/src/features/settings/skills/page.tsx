@@ -683,6 +683,11 @@ function SkillDeploymentStates({ states }: { states?: SkillProgress[] }) {
             <span className="font-medium">{item.name}</span>
             <span> · {projectStateLabel[item.state] ?? item.state}</span>
             {item.installedVersion && <span> · v{item.installedVersion}</span>}
+            {item.state === 'waiting' && (
+              <p className="mt-1 text-muted-foreground">
+                技能只在项目运行时已启动且空闲时下发。项目里的对话（即使已经回答完）以及正在运行的任务或工作流都会占用运行时；删除不再需要的对话、等任务和工作流结束后会自动下发。
+              </p>
+            )}
             {item.failure && (
               <p role="alert" className="mt-1 text-destructive">
                 {item.failure}

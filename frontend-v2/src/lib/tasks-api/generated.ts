@@ -1258,7 +1258,7 @@ export const useStartTaskRun = <TError = ErrorType<TaskError>,
     }
 
 /**
- * A running turn is cancelled. When its session outlives the stop (a Node that negotiated turn_cancel keeps it), the run stays live and idle, awaiting a follow-up; when the stop ended the session, the run ends with endReason stopped. An idle run is ended with endReason stopped.
+ * A running turn is cancelled. When its session outlives the stop (a Node that negotiated turn_cancel keeps it), the run stays live and idle, awaiting a follow-up; when the stop ended the session, the run ends with endReason stopped. An idle run is ended with endReason stopped. Only whoever started the run, the task's creator and the workspace owner may stop it; anyone else gets 403 forbidden.
  * @summary Stop a live run: cancel its running turn, or end it when idle
  */
 export const stopTaskRun = (

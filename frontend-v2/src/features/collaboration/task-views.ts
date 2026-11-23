@@ -9,8 +9,8 @@ export type SquadTasks = ReadonlyMap<string, MySquadTask>
 export type TaskView = 'mine' | 'todo' | 'all'
 
 export const TASK_VIEWS: { id: TaskView; label: string; hint: string }[] = [
-  { id: 'mine', label: '我的任务', hint: '指派给我和我所在小队的任务' },
-  { id: 'todo', label: '待我处理', hint: '指派给我且未结束的、小队新派来的、我建的等着验收的，以及有人 @ 我还没回复的' },
+  { id: 'mine', label: '我的任务', hint: '指派给我和我所在小队的任务，包括跑完交给创建人验收的' },
+  { id: 'todo', label: '待我处理', hint: '指派给我还在处理的、小队新派来的、我建的等着验收的，以及有人 @ 我还没回复的' },
   { id: 'all', label: '全部任务', hint: '工作区里所有任务，全团队可见' },
 ]
 
@@ -22,10 +22,14 @@ export const isAgentRunning = (task: Task): boolean => task.activeRun?.state ===
 
 const finished = (task: Task) => task.status === 'done' || task.status === 'cancelled'
 
+/** Work still in someone's hands: 待验收 waits on whoever can confirm it, not on whoever did it. */
+const inProgress = (task: Task) => task.status === 'pending' || task.status === 'running'
+
 /**
  * The tasks of a view, for the person `me`; a squad narrows any view to the tasks it owns.
  * `mentioned` holds the tasks where someone @-mentioned `me` and is still waiting on a reply;
- * `squadTasks` holds the tasks of `me`'s squads.
+ * `squadTasks` holds the tasks of `me`'s squads. 「待我处理」 lists a task in 待验收 only for its
+ * creator, who can confirm it; its assignee and squad cannot, so it leaves their list.
  */
 export function filterTasks(tasks: Task[], view: TaskView, me: string, mentioned: ReadonlySet<string> = new Set(), squadTasks: SquadTasks = new Map(), squadId?: string | null): Task[] {
   const scoped = squadId ? tasks.filter(t => t.assignee?.type === 'squad' && t.assignee.id === squadId) : tasks
@@ -33,21 +37,47 @@ export function filterTasks(tasks: Task[], view: TaskView, me: string, mentioned
     case 'mine':
       return scoped.filter(t => (t.assignee?.type === 'human' && t.assignee.id === me) || squadTasks.has(t.id))
     case 'todo':
-      return scoped.filter(t => (t.assignee?.type === 'human' && t.assignee.id === me && !finished(t)) || (t.status === 'review' && t.createdBy === me) || mentioned.has(t.id) || squadTasks.get(t.id)?.waiting)
+      return scoped.filter(t => (t.assignee?.type === 'human' && t.assignee.id === me && inProgress(t)) || (t.status === 'review' && t.createdBy === me) || mentioned.has(t.id) || squadTasks.get(t.id)?.waiting)
     default:
       return scoped
   }
 }
 
 /**
- * Whether the caller may end the task, by confirming it or cancelling it: its creator or a
- * workspace administrator, as the server's `canCloseTask` decides. Doing the work does not grant it.
+ * Whether the caller may end the task, by confirming it or cancelling it, or send it back from
+ * 待验收 for rework: its creator or a workspace administrator, as the server's `canCloseTask`
+ * decides. Doing the work does not grant it.
  */
 export const canCloseTask = (task: Task, me: string, role: string | undefined): boolean =>
   isWorkspaceAdministrator(role) || task.createdBy === me
 
 /** Why the caller cannot end the task, named after who can. */
 export const closeRefusal = (task: Task, action: string): string => `只有创建人 ${task.createdByName} 或工作区管理员能${action}。`
+
+/** Whether moving from one status to another is the closer's decision: ending it, or sending it back for rework. */
+export const needsCloser = (from: string, to: string): boolean => isTaskFinished(to) || (from === 'review' && to === 'pending')
+
+/**
+ * Whether the caller may edit, reassign or split the task, as the server's `CanManageTask` decides:
+ * whoever may end it, and whoever does the work now (the person it is assigned to, or a member of
+ * its squad). An Agent's task has nobody doing it, so only its creator and administrators manage it.
+ */
+export const canManageTask = (task: Task, me: string, role: string | undefined, inSquad = false): boolean =>
+  canCloseTask(task, me, role) || (task.assignee?.type === 'human' && task.assignee.id === me) || (task.assignee?.type === 'squad' && inSquad)
+
+/** Why the caller cannot edit, reassign or split the task, named after who can. */
+export function manageRefusal(task: Task, action: string): string {
+  const doer = task.assignee?.type === 'human' ? `、负责人 ${task.assignee.displayName} ` : task.assignee?.type === 'squad' ? `、小队 ${task.assignee.displayName} 的队员` : ' '
+  return `只有创建人 ${task.createdByName}${doer}或工作区管理员能${action}。`
+}
+
+/** Whether the caller may stop the task's live run: whoever started it, and whoever may end the task. */
+export const canStopRun = (task: Task, me: string, role: string | undefined): boolean =>
+  !!task.activeRun && (task.activeRun.startedBy === me || canCloseTask(task, me, role))
+
+/** Why the caller cannot stop the task's live run, named after who can. */
+export const stopRefusal = (task: Task): string =>
+  `只有发起人 ${task.activeRun?.startedByName ?? ''}、创建人 ${task.createdByName} 或工作区管理员能停止这次运行。`
 
 /** The filter value of a task's assignee; unassigned work has its own. */
 export const UNASSIGNED = 'none'
@@ -75,8 +105,8 @@ export function assigneeChoices(tasks: Task[]): AssigneeChoice[] {
   return [...choices.values()].sort((a, b) => CHOICE_ORDER.indexOf(a.type) - CHOICE_ORDER.indexOf(b.type) || a.label.localeCompare(b.label, 'zh-CN'))
 }
 
-/** Whether 「拆分」 applies: a big requirement still open, not a subtask. */
-export const canDecompose = (task: Task): boolean => !task.parentId && !isTaskFinished(task.status)
+/** Whether 「拆分」 applies: a big requirement still being worked (待处理 or 进行中), not a subtask. */
+export const canDecompose = (task: Task): boolean => !task.parentId && (task.status === 'pending' || task.status === 'running')
 
 /**
  * A card's family line, by task id: a subtask names the requirement it was split from, and a
@@ -109,7 +139,7 @@ export function boardDraggable(task: Task): { ok: boolean; reason: string } {
  * Whether dropping the card on the column `to` is a move a person may make, and why not. The board
  * offers exactly the task's own buttons (the server's `CanTransitionTask`), so 待验收 is never
  * skipped; an Agent task reaches 进行中 only by starting its run, never by hand. `canClose` is
- * whether the caller may end this task, so a person who cannot confirm it sees why at the column.
+ * whether the caller may end this task or send it back, so a person who cannot sees why at the column.
  */
 export function boardMove(task: Task, to: string, canClose = true): { ok: boolean; reason: string } {
   const pickable = boardDraggable(task)
@@ -120,7 +150,7 @@ export function boardMove(task: Task, to: string, canClose = true): { ok: boolea
   if (!taskActions(task.status).some(a => a.status === to)) {
     return { ok: false, reason: `「${taskStatusLabel(task.status)}」不能直接拖到「${taskStatusLabel(to)}」：按「待处理 → 进行中 → 待验收 → 已完成」逐步推进。` }
   }
-  if (isTaskFinished(to) && !canClose) return { ok: false, reason: closeRefusal(task, to === 'done' ? '确认完成' : '取消任务') }
+  if (needsCloser(task.status, to) && !canClose) return { ok: false, reason: closeRefusal(task, to === 'done' ? '确认完成' : to === 'pending' ? '退回待处理' : '取消任务') }
   return { ok: true, reason: '' }
 }
 

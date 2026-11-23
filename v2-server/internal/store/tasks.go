@@ -35,6 +35,12 @@ var (
 	ErrInvalidAssignee = errors.New("invalid task assignee")
 	// ErrInvalidProject reports a project that does not belong to this workspace.
 	ErrInvalidProject = errors.New("unknown task project")
+	// ErrWorkflowActive reports a manual status move while a workflow is handling the task: the
+	// workflow's settlement owns the status until it ends.
+	ErrWorkflowActive = errors.New("task workflow active")
+	// ErrTaskClosed reports a change to a task that is done or cancelled: a finished task is
+	// read-only.
+	ErrTaskClosed = errors.New("task closed")
 )
 
 // TaskAssignee is one typed reference. Identifier carries the plugin identity for agents, in the
@@ -104,21 +110,22 @@ func CanTransitionTask(from, to string) bool {
 	case TaskRunning:
 		return to == TaskReview || to == TaskCancelled
 	case TaskReview:
-		return to == TaskDone || to == TaskCancelled
+		return to == TaskDone || to == TaskCancelled || to == TaskPending
 	}
 	return false
 }
 
-// canCloseTask reports whether the caller may end the task, by confirming it done or cancelling it.
-// That is the decision of whoever asked for the work or a workspace administrator; doing the work
-// does not grant it.
+// canCloseTask reports whether the caller may end the task, by confirming it done or cancelling it,
+// or send it back from 待验收 for rework. That is the decision of whoever asked for the work or a
+// workspace administrator; doing the work does not grant it.
 func canCloseTask(a Access, task Task) bool {
 	return a.Owner() || task.CreatedBy == a.UserID
 }
 
 // CanRunTransitionTask reports the moves a task's Agent run makes: starting or following up a run
 // puts the task in 进行中, a finished turn hands it to 待验收, and a stopped or interrupted turn
-// returns it to 待处理. A person still cannot make the last two moves by hand.
+// returns it to 待处理. A person cannot make the last two moves by hand; sending a task back from
+// 待验收 to 待处理 is the person's own move (CanTransitionTask), which a run never makes.
 func CanRunTransitionTask(from, to string) bool {
 	switch from {
 	case TaskPending, TaskReview:
@@ -333,11 +340,17 @@ func (s *Store) CreateTask(ctx context.Context, tenant, user string, in TaskInpu
 }
 
 // UpdateTask replaces the title, description and project under a version check. The status and
-// assignee have their own writes so a stale form cannot silently undo them.
-func (s *Store) UpdateTask(ctx context.Context, tenant, id string, in TaskInput) (Task, error) {
+// assignee have their own writes so a stale form cannot silently undo them. Only CanManageTask may
+// edit, and a finished task is read-only.
+func (s *Store) UpdateTask(ctx context.Context, a Access, id string, in TaskInput) (Task, error) {
 	var out Task
+	tenant := a.TenantID
 	e := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if _, e := lockTask(ctx, tx, tenant, id, in.Version); e != nil {
+		task, e := lockTask(ctx, tx, tenant, id, in.Version)
+		if e != nil {
+			return e
+		}
+		if e := requireManage(ctx, tx, a, task); e != nil {
 			return e
 		}
 		if e := requireProject(ctx, tx, tenant, in.ProjectID); e != nil {
@@ -349,7 +362,7 @@ func (s *Store) UpdateTask(ctx context.Context, tenant, id string, in TaskInput)
 			id, in.Title, in.Description, in.ProjectID); e != nil {
 			return fmt.Errorf("update task: %w", e)
 		}
-		task, e := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` `+taskJoins+` WHERE t.id = $1`, id))
+		task, e = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` `+taskJoins+` WHERE t.id = $1`, id))
 		out = task
 		return e
 	})
@@ -358,8 +371,9 @@ func (s *Store) UpdateTask(ctx context.Context, tenant, id string, in TaskInput)
 
 // SetTaskStatus moves a task by hand under a version check. Only the lifecycle's legal moves are
 // accepted, so 待验收 cannot be skipped and a finished task cannot silently reopen. Ending the task
-// is limited by canCloseTask; anyone else gets ErrForbidden. While an Agent turn runs the run owns
-// the status, and a manual move returns ErrRunActive.
+// and sending it back from 待验收 are limited by canCloseTask; anyone else gets ErrForbidden. While an Agent turn runs the run owns
+// the status, and a manual move returns ErrRunActive; while a workflow handles the task it returns
+// ErrWorkflowActive, so the page can say which of the two to wait for.
 func (s *Store) SetTaskStatus(ctx context.Context, a Access, id, status string, version int64) (Task, error) {
 	var out Task
 	e := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -367,7 +381,7 @@ func (s *Store) SetTaskStatus(ctx context.Context, a Access, id, status string, 
 		if e != nil {
 			return e
 		}
-		if status == TaskDone || status == TaskCancelled {
+		if status == TaskDone || status == TaskCancelled || (task.Status == TaskReview && status == TaskPending) {
 			if !canCloseTask(a, task) {
 				return ErrForbidden
 			}
@@ -377,7 +391,7 @@ func (s *Store) SetTaskStatus(ctx context.Context, a Access, id, status string, 
 			return err
 		}
 		if handling {
-			return ErrRunActive
+			return ErrWorkflowActive
 		}
 		if task.ActiveRun != nil && task.ActiveRun.State == TaskRunRunning {
 			return ErrRunActive
@@ -417,13 +431,22 @@ func (s *Store) TransitionTaskStatus(ctx context.Context, tenant, id, from, to s
 
 // SetTaskAssignee replaces or clears the typed assignee under a version check. Assigning a squad
 // puts the task in front of every member; none of them is picked for it. A new assignee is
-// notified unless actor, the person assigning, is them; re-sending the same assignee is not new.
-func (s *Store) SetTaskAssignee(ctx context.Context, tenant, id, actor string, ref *TaskAssigneeRef, version int64) (Task, error) {
+// notified unless the person assigning is them; re-sending the same assignee is not new. Only
+// CanManageTask may reassign, judged against the current assignee; a finished task is read-only,
+// and while an Agent turn runs the run keeps its assignee (ErrRunActive).
+func (s *Store) SetTaskAssignee(ctx context.Context, a Access, id string, ref *TaskAssigneeRef, version int64) (Task, error) {
 	var out Task
+	tenant, actor := a.TenantID, a.UserID
 	e := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		before, e := lockTask(ctx, tx, tenant, id, version)
 		if e != nil {
 			return e
+		}
+		if e := requireManage(ctx, tx, a, before); e != nil {
+			return e
+		}
+		if before.ActiveRun != nil && before.ActiveRun.State == TaskRunRunning {
+			return ErrRunActive
 		}
 		var kind, assignee string
 		if ref != nil {
@@ -452,4 +475,19 @@ type WorkflowTaskSource struct {
 	RunID       string     `json:"runId"`
 	Name        string     `json:"name"`
 	SubmittedAt *time.Time `json:"submittedAt"`
+}
+
+// requireManage refuses a caller CanManageTask does not admit, then a finished task.
+func requireManage(ctx context.Context, tx pgx.Tx, a Access, task Task) error {
+	ok, e := canManageTaskTx(ctx, tx, a, task)
+	if e != nil {
+		return e
+	}
+	if !ok {
+		return ErrForbidden
+	}
+	if TaskFinished(task) {
+		return ErrTaskClosed
+	}
+	return nil
 }
