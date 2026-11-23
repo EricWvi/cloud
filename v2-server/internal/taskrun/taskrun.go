@@ -410,8 +410,8 @@ func (h *Host) followUp(ctx context.Context, scope execution.Scope, task store.T
 
 // Stop stops a live run. A running turn is cancelled; when its session outlives the stop (the
 // Node kept it), the run stays live and idle, awaiting a follow-up. A run whose session ended
-// with the stop, and an idle run, is ended. Any member can stop a run; it spends nobody's
-// identity.
+// with the stop, and an idle run, is ended. Whoever started the run, the task's creator and the
+// workspace owner may stop it (store.CanStopTaskRun); anyone else gets store.ErrForbidden.
 //
 // A Stop sent while a turn ran asks to stop that turn: if the turn has ended by the time this
 // Stop holds the task's lock (another member's stop kept the session, or the turn finished), it
@@ -423,12 +423,20 @@ func (h *Host) Stop(ctx context.Context, scope execution.Scope, taskID, runID st
 		h.stopRead()
 	}
 	defer h.lock(taskID)()
-	if _, e := h.store.Task(ctx, scope.TenantID, taskID); e != nil {
+	task, e := h.store.Task(ctx, scope.TenantID, taskID)
+	if e != nil {
 		return store.TaskRun{}, e
 	}
 	run, e := h.store.TaskRun(ctx, scope.TenantID, taskID, runID)
 	if e != nil {
 		return run, e
+	}
+	a, e := h.store.TenantAccess(ctx, scope.TenantID, scope.UserID)
+	if e != nil {
+		return run, e
+	}
+	if !store.CanStopTaskRun(a, task, run) {
+		return run, store.ErrForbidden
 	}
 	if !run.Live() || run.SessionID == "" {
 		return run, ErrNoLiveRun

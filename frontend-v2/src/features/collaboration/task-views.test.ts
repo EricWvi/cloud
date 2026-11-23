@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Task } from './tasks-api/generated'
-import { agentReach, assigneeChoices, assigneeKey, boardDraggable, boardMove, canCloseTask, canDecompose, familyLabels, filterTasks, runsAgent, viewOf } from './task-views'
+import { agentReach, assigneeChoices, assigneeKey, boardDraggable, boardMove, canCloseTask, canDecompose, canManageTask, canStopRun, familyLabels, filterTasks, manageRefusal, runsAgent, stopRefusal, viewOf } from './task-views'
 
 const task = (overrides: Partial<Task>): Task => ({
   id: 'task', tenantId: 'tenant', title: '任务', description: '', projectId: 'project', assignee: null, status: 'pending',
@@ -120,6 +120,39 @@ describe('who may send the Agent a turn', () => {
     expect(boardMove(assigned, 'cancelled', false).reason).toBe('只有创建人 陈默 或工作区管理员能取消任务。')
     // Handing the work to 待验收 stays with whoever does it.
     expect(boardMove({ ...assigned, status: 'running' }, 'review', false).ok).toBe(true)
+    // Sending it back for rework is the creator's call, like confirming it.
+    expect(boardMove(assigned, 'pending', true).ok).toBe(true)
+    expect(boardMove(assigned, 'pending', false).reason).toBe('只有创建人 陈默 或工作区管理员能退回待处理。')
+  })
+
+  it('leaves editing, reassigning and splitting to the creator, an owner and whoever does the work', () => {
+    const toPerson = task({ createdBy: 'lead', createdByName: '陈默', assignee: { type: 'human', id: 'doer', displayName: '鲍勃' } })
+    expect(canManageTask(toPerson, 'lead', 'member')).toBe(true)
+    expect(canManageTask(toPerson, 'doer', 'member')).toBe(true)
+    expect(canManageTask(toPerson, 'boss', 'owner')).toBe(true)
+    expect(canManageTask(toPerson, 'bystander', 'member')).toBe(false)
+    expect(manageRefusal(toPerson, '改派')).toBe('只有创建人 陈默、负责人 鲍勃 或工作区管理员能改派。')
+
+    const toSquad = task({ createdBy: 'lead', createdByName: '陈默', assignee: { type: 'squad', id: 'squad-1', displayName: '产品小队' } })
+    expect(canManageTask(toSquad, 'mate', 'member', true)).toBe(true)
+    expect(canManageTask(toSquad, 'bystander', 'member', false)).toBe(false)
+    expect(manageRefusal(toSquad, '编辑')).toBe('只有创建人 陈默、小队 产品小队 的队员或工作区管理员能编辑。')
+
+    // An Agent's task has nobody doing it: running it stays open, managing it does not.
+    const toAgent = task({ createdBy: 'lead', createdByName: '陈默', assignee: agent })
+    expect(runsAgent(toAgent, 'bystander')).toBe(true)
+    expect(canManageTask(toAgent, 'bystander', 'member')).toBe(false)
+    expect(manageRefusal(toAgent, '拆分')).toBe('只有创建人 陈默 或工作区管理员能拆分。')
+  })
+
+  it('leaves stopping a run to whoever started it, the creator and an owner', () => {
+    const live = task({ createdBy: 'lead', createdByName: '陈默', assignee: agent, status: 'running', activeRun: { ...running, startedBy: 'starter', startedByName: '鲍勃' } })
+    expect(canStopRun(live, 'starter', 'member')).toBe(true)
+    expect(canStopRun(live, 'lead', 'member')).toBe(true)
+    expect(canStopRun(live, 'boss', 'owner')).toBe(true)
+    expect(canStopRun(live, 'bystander', 'member')).toBe(false)
+    expect(canStopRun({ ...live, activeRun: null }, 'lead', 'member')).toBe(false)
+    expect(stopRefusal(live)).toBe('只有发起人 鲍勃、创建人 陈默 或工作区管理员能停止这次运行。')
   })
 
   it('lists who holds work, people first, with unassigned last', () => {
@@ -139,5 +172,7 @@ describe('who may send the Agent a turn', () => {
     expect(canDecompose(parent)).toBe(true)
     expect(canDecompose(task({ parentId: 'parent' }))).toBe(false)
     expect(canDecompose(task({ status: 'done' }))).toBe(false)
+    expect(canDecompose(task({ status: 'running' }))).toBe(true)
+    expect(canDecompose(task({ status: 'review' }))).toBe(false)
   })
 })

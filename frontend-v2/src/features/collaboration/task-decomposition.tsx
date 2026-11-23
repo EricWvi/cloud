@@ -96,9 +96,11 @@ export function DecomposeDialog({ tenantId, task, onClose, onStarted }: {
 /**
  * The task's family on its page: for a big requirement, its latest decomposition and the subtasks
  * it wrote; for a subtask, the requirement it came from. The subtasks fold away, and start folded
- * when `folded` says the page needs the room; a person's own choice then holds.
+ * when `folded` says the page needs the room; a person's own choice then holds. A failed
+ * decomposition offers 「重新拆分」 only while the task may be split (`onRetry` given); when the
+ * caller may not split it, `retryRefusal` says who can and the button stays disabled.
  */
-export function TaskFamily({ tenantId, task, latest, folded = false, onRetry }: { tenantId: string; task: Task; latest?: TaskDecomposition; folded?: boolean; onRetry: () => void }) {
+export function TaskFamily({ tenantId, task, latest, folded = false, onRetry, retryRefusal = '' }: { tenantId: string; task: Task; latest?: TaskDecomposition; folded?: boolean; onRetry?: () => void; retryRefusal?: string }) {
   const list = useTaskList(tenantId)
   const [picked, setPicked] = useState<boolean>()
   const open = picked ?? !folded
@@ -113,7 +115,7 @@ export function TaskFamily({ tenantId, task, latest, folded = false, onRetry }: 
   if (!latest && subtasks.length === 0) return null
   return <section className="mc-family" aria-label="拆分">
     <div className="mc-family-head">
-      {latest && <DecompositionStatus decomposition={latest} onRetry={onRetry} />}
+      {latest && <DecompositionStatus decomposition={latest} onRetry={onRetry} refusal={retryRefusal} />}
       {subtasks.length > 0 && <button type="button" className="mc-family-toggle" aria-expanded={open} onClick={() => setPicked(!open)}>
         {open ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}{open ? '收起子任务' : '展开子任务'}
       </button>}
@@ -128,7 +130,7 @@ export function TaskFamily({ tenantId, task, latest, folded = false, onRetry }: 
   </section>
 }
 
-function DecompositionStatus({ decomposition: d, onRetry }: { decomposition: TaskDecomposition; onRetry: () => void }) {
+function DecompositionStatus({ decomposition: d, onRetry, refusal }: { decomposition: TaskDecomposition; onRetry?: () => void; refusal: string }) {
   switch (d.status) {
     case 'running':
       return <p className="mc-family-status" role="status"><LoaderCircle className="mc-spin" size={14} aria-hidden="true" />
@@ -138,7 +140,7 @@ function DecompositionStatus({ decomposition: d, onRetry }: { decomposition: Tas
     default:
       return <div className="mc-family-status failed" role="alert"><CircleAlert size={14} aria-hidden="true" />
         <span>拆分失败：{d.failure || '工作流没有给出子任务。'}</span>
-        <Button type="button" variant="outline" size="sm" onClick={onRetry}>重新拆分</Button>
+        {onRetry && <Button type="button" variant="outline" size="sm" disabled={!!refusal} title={refusal || undefined} onClick={onRetry}>重新拆分</Button>}
       </div>
   }
 }

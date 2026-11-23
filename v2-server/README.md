@@ -272,13 +272,13 @@ Agent 成员只引用 `v2_space_agents` 里由系统预装、可执行且观测�
 | `GET /api/v2/tenants/{tid}/tasks` | 列出工作区全部任务，最近变更在前 |
 | `POST /api/v2/tenants/{tid}/tasks` | 创建任务，返回 201，初始状态 `pending`、version 为 1；不接受调用方给 version |
 | `GET /api/v2/tenants/{tid}/tasks/{taskid}` | 任务详情 |
-| `PUT /api/v2/tenants/{tid}/tasks/{taskid}` | 携带 version 修改标题、描述与所属项目 |
-| `POST /api/v2/tenants/{tid}/tasks/{taskid}/status` | 携带 version 按生命周期推进状态；确认完成和取消只限任务创建人和工作区 owner，其他人 `403 forbidden` |
-| `PUT /api/v2/tenants/{tid}/tasks/{taskid}/assignment` | 携带 version 指派或清除指派人，显式 `null` 表示清除 |
+| `PUT /api/v2/tenants/{tid}/tasks/{taskid}` | 携带 version 修改标题、描述与所属项目；只限创建人、工作区 owner 和当前负责人，其他人 `403 forbidden`；已结束的任务 409 `task_closed` |
+| `POST /api/v2/tenants/{tid}/tasks/{taskid}/status` | 携带 version 按生命周期推进状态；确认完成、取消和把待验收退回待处理只限任务创建人和工作区 owner，其他人 `403 forbidden` |
+| `PUT /api/v2/tenants/{tid}/tasks/{taskid}/assignment` | 携带 version 指派或清除指派人，显式 `null` 表示清除；只限创建人、工作区 owner 和改派前的当前负责人，其他人 `403 forbidden`；已结束的任务 409 `task_closed`，Agent 正在执行一轮时 409 `run_active` |
 | `GET /api/v2/tenants/{tid}/tasks/{taskid}/timeline` | 任务的运行与评论，各按时间先后 |
 | `GET /api/v2/tenants/{tid}/tasks/{taskid}/executors` | 能运行这个任务的执行器：指派给 Agent 时是该 Agent 的执行器（执行目录里 `agentId` 等于该 Agent 插件标识的条目）；指派给人时，只有负责人本人能读，返回他能用的全部执行器，别人是 409 `not_assignee`；指派给小队或未指派是 409 `not_agent_task` |
 | `POST /api/v2/tenants/{tid}/tasks/{taskid}/runs` | 必须带 `Idempotency-Key`；`{executorId?, note?}` 用调用者身份开一次新运行，返回 201。见下文「任务运行」 |
-| `POST /api/v2/tenants/{tid}/tasks/{taskid}/runs/{rid}/stop` | 结束一次活着的运行：正在执行的一轮先取消，空闲的会话直接结束；任何成员都可以停 |
+| `POST /api/v2/tenants/{tid}/tasks/{taskid}/runs/{rid}/stop` | 结束一次活着的运行：正在执行的一轮先取消，空闲的会话直接结束；只限运行发起人、任务创建人和工作区 owner，其他人 `403 forbidden` |
 | `GET /api/v2/tenants/{tid}/tasks/{taskid}/runs/{rid}/events` | 运行会话的 SSE，形状与对话事件流相同；工作区任何成员都能读 |
 | `POST /api/v2/tenants/{tid}/tasks/{taskid}/comments` | 必须带 `Idempotency-Key`；`{body, mentions?, toAgent?, executorId?, workflow?}` 记一条评论，`toAgent` 同时发给 Agent；`workflow` 按发布工作流的 Start 表单校验输入后以评论人身份启动运行并在评论上返回 `workflowRun` 摘要 |
 | `GET /api/v2/tenants/{tid}/decomposition-workflows` | 拆分选择器专用目录，返回工作流摘要及服务端判定的 `canDecompose`、`decompositionBlockedReason`；独立候选契约 [`decomposition-workflows.openapi.json`](decomposition-workflows.openapi.json) |
@@ -295,14 +295,22 @@ Agent 成员只引用 `v2_space_agents` 里由系统预装、可执行且观测�
 `invalid_assignee`，只有显式 `null` 才清除，避免客户端缺陷悄悄解除指派。
 
 状态为 `pending → running → review → done`，`cancelled` 可从任一未终结状态到达，`done` 与 `cancelled`
-终结且不能重开；跳过验收是 400 `invalid_transition`，不是版本冲突。同一函数
+终结且不能重开；验收不通过时可以把 `review` 退回 `pending` 返工。跳过验收是 400 `invalid_transition`，不是版本冲突。同一函数
 [`store.CanTransitionTask`](internal/store/tasks.go) 供人工推进和执行服务共用，执行服务经
 `TransitionTaskStatus(ctx, tenant, id, from, to)` 在运行开始与结束时移动任务，`from` 防止过期运行覆盖人工修改。
 运行按 [`store.CanRunTransitionTask`](internal/store/tasks.go) 移动任务：开始或追问进入 `running`（从 `pending`
-或 `review`），一轮结束（成功或失败）进入 `review`，被停止或中断回到 `pending`；后两种人不能手动做。
+或 `review`），一轮结束（成功或失败）进入 `review`，被停止或中断回到 `pending`；人不能手动从 `running` 进入这两种状态。
+从 `review` 退回 `pending` 是人工操作，运行不会这样移动任务。
 Agent 正在执行一轮时，人工推进返回 409 `run_active`。
 
-当前工作区任意成员都可读写、指派与推进任务：v2 没有任务级归属，谁来改由版本号防止互相覆盖。
+工作区任何成员都能读任务。谁能改，由 [`store/task_access.go`](internal/store/task_access.go) 判定：
+
+- 确认完成、取消、把待验收退回待处理：任务创建人和工作区 owner（`canCloseTask`）。做事的人不行。
+- 编辑、改派、拆分：上面这些人，加上当前负责人。派给人的任务是负责人本人，派给小队的是小队现任队员。Agent 任务没有人类负责人，只有创建人和 owner 能做（`CanManageTask`）。改派按改派前的负责人算。
+- 停止运行：运行发起人，加上创建人和 owner（`CanStopTaskRun`）。
+- 推进到进行中、提交验收：任何成员都能做。用 Agent 处理仍按下文「任务运行」，Agent 任务对所有成员开放。
+
+不允许的操作返回 `403 forbidden`；已结束的任务只读，编辑、改派返回 409 `task_closed`。同时修改由版本号防止互相覆盖。
 过期 version 返回 409 `version_conflict`，缺 version 返回 428 `version_required`；跨租户的任务与项目
 一律按不存在处理（404 或 400 `invalid_project`）。请求大小限制 64 KiB，拒绝未知字段与多余的 JSON 值。
 附件不提供。
@@ -321,7 +329,7 @@ Agent 正在执行一轮时，人工推进返回 409 `run_active`。
 - **回合交付**：完成或执行失败的回合，在交付为 `delivered` 或 `empty` 后进入待验收。交付失败或停止回到待处理，交付失败的原因保存在交付记录中。交付期间任务仍为进行中，人工推进返回 409 `run_active`。
 - **重启**：进程启动前结束上一个进程留下的活运行，正在执行或交付的任务回到 `pending`。启动补交付只保存原工作目录的内容，不重放回合。
 - **派给人的任务**：负责人本人可以用自己选的 Agent 处理，执行器就决定了 Agent。只有负责人能开运行（包括重新执行和 `toAgent` 评论开的新运行），
-  别人是 409 `not_assignee`；别人仍能看过程、停止。跑完、停止对任务状态的推进与 Agent 任务相同。
+  别人是 409 `not_assignee`；别人仍能看过程，但只有发起人、任务创建人和工作区 owner 能停止。跑完、停止对任务状态的推进与 Agent 任务相同。
 - **执行器**：`executorId` 必须是上面 `executors` 列出的执行器，否则 400 `invalid_executor`；不填时选目录中的第一项，目录为空时不启动执行。
 - **列表**：任务带 `activeRun`（活着的运行的发起人、执行器与 `running`/`idle`），列表不用逐个读时间线就能显示谁在干活。
 
@@ -450,7 +458,7 @@ Task ownership and status policy are Cloud v2 owner decisions, since Desktop tas
 
 - **一次拆分 = 一次工作流运行**：用点「拆分」的人的身份运行工作流的已发布版本，输入是任务标题和描述，项目是任务的项目。
   运行和普通运行一样出现在工作流的运行历史里。同一任务同时只有一次进行中的拆分（409 `decomposition_active`）；
-  已结束的任务（409 `task_closed`）和子任务（409 `subtask_not_decomposable`）不能拆；工作流不存在或没有发布版本是 400 `invalid_workflow`，已发布但缺少拆分输出的工作流是 400 `decomposition_output_required`，在创建运行前拒绝。运行固定使用通过检查的快照，检查后重新发布不会替换它。
+  只有创建人、工作区 owner 和当前负责人能拆，其他人 `403 forbidden`；只拆待处理、进行中的任务，待验收是 409 `task_in_review`，已结束的任务是 409 `task_closed`；子任务（409 `subtask_not_decomposable`）不能拆；工作流不存在或没有发布版本是 400 `invalid_workflow`，已发布但缺少拆分输出的工作流是 400 `decomposition_output_required`，在创建运行前拒绝。运行固定使用通过检查的快照，检查后重新发布不会替换它。
 - **输出要求 / Output requirement**：发布快照的 `output` 节点必须声明名为 `tasks` 的输出；其类型只能是 `array`、`array[object]`、`string`（JSON 编码的数组）或未声明类型 / `any`，其他类型（包括 `array[string]` 等元素不是对象的数组）不能用于拆分，在创建运行前拒绝。运行固定使用通过检查的快照，即使期间发布了别的版本。服务在 `GET …/decomposition-workflows` 的每个摘要里返回 `canDecompose` 和 `decompositionBlockedReason`，选择器据此把不符合的工作流放进禁用分组，不重复实现规则；判定按已发布快照 ID 缓存在内存里（已发布快照不可变，最多 1024 条，满了淘汰最早的），只有未缓存的快照才读取和解析图。运行后的解析失败也会附上这项要求。
   The `output` node of the published snapshot must declare an output named `tasks`; its type can only be `array`, `array[object]`, `string` (a JSON-encoded array), or undeclared / `any`. Any other type (including arrays whose elements are not objects, such as `array[string]`) cannot be used for decomposition and is rejected before a run is created. The run uses the snapshot that passed the check, even if another version is published meanwhile. The server returns `canDecompose` and `decompositionBlockedReason` in every summary of `GET …/decomposition-workflows`, and the picker uses them to put non-conforming workflows in a disabled group without re-implementing the rule; verdicts are cached in memory by published snapshot ID (published snapshots are immutable; at most 1024 entries, the oldest is evicted when full), and only snapshots not yet cached have their graph read and parsed. Parsing failures after a run also carry this requirement.
 - **目录开销 / Catalog cost**：判定一个未缓存的快照要读出整张图并完整解析一次（[`decomposition_catalog.go`](internal/server/decomposition_catalog.go)）。实测 5 MiB 的图：读取一行约分配 13 MiB（pgx 行缓冲加字符串拷贝），`workflow.ParseGraph` 约 26 MiB（UTF-8 / 转义校验前的 `[]byte` 拷贝 5 MiB，`json.Decoder` 缓冲增长和解码后的值约 21 MiB），`NewPool` 可忽略，单个约 25 ms。这些是分配总量，解析完即可回收，常驻的只有判定结果。重启后缓存为空，20 个这样的工作流让首次请求分配约 740 MiB、耗时约 470 ms，但峰值堆约 60 MiB；之后的请求只查一次 ID（约 1 ms）。并发请求同一快照时共用一次读取和解析，整个进程同时最多解析 `maxConcurrentVerdictParses = 2` 个快照，其余排队，所以 K 个成员同时打开选择器的开销和一个人打开相同（K=5 时约 730 MiB 分配、峰值约 60 MiB），最坏峰值约为 2 × 单图解析开销，不随并发数增长。共用的判定脱离发起请求的生命周期运行，但不超过服务进程的生命周期：最长 30 秒，服务关闭时立即停止，结果写入缓存供等待者使用；先关掉选择器的请求只是不再等待。判定中途 panic 只让这次请求返回 500 `internal`（记录一次日志和调用栈，不写缓存），不会让进程崩溃；数据库出错同样返回 500，也不会被记成“不可拆分”。缓存最多 `maxDecompositionVerdicts = 65536` 条（每条约 100 字节，满了约 6.5 MiB），满了淘汰最早写入的。每次请求都按固定顺序遍历一个工作区的工作流，所以一旦所有被打开过选择器的工作区的已发布快照合计超过这个上限，淘汰总是先删掉下一次要用的条目，命中率会直接降到 0：之后每次打开选择器都要重新读取、解析全部图，代价回到上面的首次请求开销。上限因此设得远高于演示部署的规模，而不是贴近它。

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Task } from './tasks-api/generated'
 import {
   assigneeKindLabel, assigneeLabel, isTaskFinished, MAX_TASK_TITLE, projectLabel, taskActions,
-  boardMoveMessageFor, decompositionMessageFor, taskMessageFor, taskRunMessageFor, taskStatusLabel, validateTask,
+  boardMoveMessageFor, decompositionMessageFor, stopMessageFor, taskMessageFor, taskRunMessageFor, taskStatusLabel, validateTask,
 } from './task-model'
 
 const task = (overrides: Partial<Task> = {}): Task => ({
@@ -21,7 +21,7 @@ describe('task status', () => {
   it('moves one step at a time and never reopens a finished task', () => {
     expect(taskActions('pending')).toEqual([{ status: 'running', label: '开始处理' }, { status: 'cancelled', label: '取消任务' }])
     expect(taskActions('running').map(action => action.status)).toEqual(['review', 'cancelled'])
-    expect(taskActions('review').map(action => action.status)).toEqual(['done', 'cancelled'])
+    expect(taskActions('review').map(action => action.status)).toEqual(['done', 'pending', 'cancelled'])
     expect(taskActions('done')).toEqual([])
     expect(taskActions('cancelled')).toEqual([])
     expect(isTaskFinished('done')).toBe(true)
@@ -72,6 +72,15 @@ describe('task errors', () => {
     expect(taskMessageFor(http(400, 'invalid_project'))).toBe('所选项目不在当前工作区，请重新选择。')
   })
 
+  it('names who may change a task, and that a finished one is read-only', () => {
+    expect(taskMessageFor(http(403, 'forbidden'))).toBe('只有创建人、负责人或工作区管理员能修改这个任务。')
+    expect(taskMessageFor(http(409, 'task_closed'))).toBe('任务已结束，只能查看，不能再修改。')
+    expect(taskMessageFor(http(409, 'run_active'))).toBe('Agent 正在执行，等这一轮结束或先停止，再改派。')
+    expect(taskMessageFor(http(409, 'version_conflict'))).toBe('任务已被其他人修改，请关闭后重新打开。')
+    expect(stopMessageFor(http(403, 'forbidden'))).toBe('只有运行发起人、任务创建人或工作区管理员能停止这次运行。')
+    expect(stopMessageFor(http(409, 'no_live_run'))).toBe('这次运行已经结束了。')
+  })
+
   it('falls back for anything else', () => {
     expect(taskMessageFor(new Error('boom'))).toBe('操作失败，请重试。')
   })
@@ -81,7 +90,7 @@ describe('task errors', () => {
     expect(boardMoveMessageFor(http(409, 'workflow_active'))).toBe('工作流正在处理这个任务，结束后任务会自动推进，之后再改状态。')
     expect(boardMoveMessageFor(http(409, 'version_conflict'))).toBe('任务刚被其他人改过，看板已刷新，请再拖一次。')
     expect(boardMoveMessageFor(http(400, 'invalid_transition'))).toContain('待处理 → 进行中 → 待验收 → 已完成')
-    expect(boardMoveMessageFor(http(403, 'forbidden'))).toBe('只有任务创建人或工作区管理员能确认完成或取消任务。')
+    expect(boardMoveMessageFor(http(403, 'forbidden'))).toBe('只有任务创建人或工作区管理员能确认完成、退回或取消任务。')
     expect(taskRunMessageFor(http(400, 'workflow_role_not_found'))).toBe('工作流引用的角色在工作区角色目录里不存在，请先在设置的角色页新建同名角色再启动。')
   })
 })
@@ -99,5 +108,10 @@ describe('decomposition refusals', () => {
     expect(decompositionMessageFor(fault('decomposition_output_required'))).toBe('所选工作流的输出不满足拆分要求，请修改后重新发布。')
     expect(decompositionMessageFor(fault('decomposition_output_required', { message: 7 }))).toBe('所选工作流的输出不满足拆分要求，请修改后重新发布。')
     expect(decompositionMessageFor(fault('invalid_workflow'))).toBe('所选工作流不存在或还没有发布，请重新选择。')
+  })
+
+  it('says why a task cannot be split now', () => {
+    expect(decompositionMessageFor(fault('task_in_review'))).toBe('任务在待验收，不能拆分；退回待处理后再拆。')
+    expect(decompositionMessageFor({ isAxiosError: true, response: { status: 403, data: { code: 'forbidden', requestId: 'r' } } })).toBe('只有创建人、负责人或工作区管理员能拆分这个任务。')
   })
 })

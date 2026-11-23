@@ -40,6 +40,8 @@ func taskDecompositionFault(w http.ResponseWriter, op string, e error) {
 		faultWithParams(w, http.StatusBadRequest, "decomposition_output_required", map[string]string{"message": taskdecomp.OutputRequirement})
 	case errors.Is(e, taskdecomp.ErrTaskClosed):
 		fault(w, http.StatusConflict, "task_closed")
+	case errors.Is(e, taskdecomp.ErrTaskInReview):
+		fault(w, http.StatusConflict, "task_in_review")
 	case errors.Is(e, taskdecomp.ErrSubtask):
 		fault(w, http.StatusConflict, "subtask_not_decomposable")
 	case taskFault(w, e):
@@ -64,7 +66,7 @@ func (h *handler) listTaskDecompositions(w http.ResponseWriter, r *http.Request,
 // startTaskDecomposition runs a published workflow over the task; its `tasks` output becomes the
 // task's subtasks once the run succeeds.
 func (h *handler) startTaskDecomposition(w http.ResponseWriter, r *http.Request, a access) {
-	host, tenant, id, ok := h.taskDecompositionScope(w, r, a)
+	host, _, id, ok := h.taskDecompositionScope(w, r, a)
 	if !ok {
 		return
 	}
@@ -82,7 +84,7 @@ func (h *handler) startTaskDecomposition(w http.ResponseWriter, r *http.Request,
 		fault(w, http.StatusBadRequest, "invalid_workflow")
 		return
 	}
-	d, e := host.Start(r.Context(), tenant, a.UserID, id, in.WorkflowID, key)
+	d, e := host.Start(r.Context(), a.Access, id, in.WorkflowID, key)
 	if e != nil {
 		taskDecompositionFault(w, "start task decomposition", e)
 		return

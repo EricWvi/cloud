@@ -155,7 +155,7 @@ const output = `{"tasks":[{"title":"登录页","description":"邮箱登录，错
 func TestDecompositionWritesSubtasksOnce(t *testing.T) {
 	f := newFixture(t)
 	parent := f.task(t, "账号体系")
-	d, e := f.host.Start(f.ctx, f.tenant, f.owner, parent.ID, f.workflow, "key-1")
+	d, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), parent.ID, f.workflow, "key-1")
 	if e != nil || d.Status != store.DecompositionRunning || d.WorkflowName != "需求拆分" || d.StartedBy != f.owner {
 		t.Fatalf("start = %+v %v", d, e)
 	}
@@ -165,10 +165,10 @@ func TestDecompositionWritesSubtasksOnce(t *testing.T) {
 		t.Fatalf("run = %+v %v", run, e)
 	}
 	// The same key is the same decomposition; another one waits for this to end.
-	if again, e := f.host.Start(f.ctx, f.tenant, f.owner, parent.ID, f.workflow, "key-1"); e != nil || again.ID != d.ID {
+	if again, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), parent.ID, f.workflow, "key-1"); e != nil || again.ID != d.ID {
 		t.Fatalf("same key = %+v %v", again, e)
 	}
-	if _, e := f.host.Start(f.ctx, f.tenant, f.owner, parent.ID, f.workflow, "key-2"); !errors.Is(e, store.ErrDecompositionActive) {
+	if _, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), parent.ID, f.workflow, "key-2"); !errors.Is(e, store.ErrDecompositionActive) {
 		t.Fatalf("second = %v", e)
 	}
 
@@ -201,15 +201,54 @@ func TestDecompositionWritesSubtasksOnce(t *testing.T) {
 	}
 
 	// A subtask is not split again, and a finished task is not split at all.
-	if _, e := f.host.Start(f.ctx, f.tenant, f.owner, subs[0].ID, f.workflow, "key-3"); !errors.Is(e, taskdecomp.ErrSubtask) {
+	if _, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), subs[0].ID, f.workflow, "key-3"); !errors.Is(e, taskdecomp.ErrSubtask) {
 		t.Fatalf("subtask = %v", e)
 	}
 	closed := f.task(t, "已取消的需求")
 	if _, e := f.store.SetTaskStatus(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), closed.ID, store.TaskCancelled, closed.Version); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := f.host.Start(f.ctx, f.tenant, f.owner, closed.ID, f.workflow, "key-4"); !errors.Is(e, taskdecomp.ErrTaskClosed) {
+	if _, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), closed.ID, f.workflow, "key-4"); !errors.Is(e, taskdecomp.ErrTaskClosed) {
 		t.Fatalf("closed = %v", e)
+	}
+	// A task in 待验收 is not split either: it is split only while still being worked.
+	reviewed := f.task(t, "待验收的需求")
+	for _, status := range []string{store.TaskRunning, store.TaskReview} {
+		var e error
+		if reviewed, e = f.store.SetTaskStatus(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), reviewed.ID, status, reviewed.Version); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), reviewed.ID, f.workflow, "key-5"); !errors.Is(e, taskdecomp.ErrTaskInReview) {
+		t.Fatalf("in review = %v", e)
+	}
+}
+
+// Only the task's creator, the workspace owner and whoever does the work may split it.
+func TestDecompositionNeedsCreatorOwnerOrAssignee(t *testing.T) {
+	f := newFixture(t)
+	member := func(name string) string {
+		t.Helper()
+		u, e := f.store.SessionUser(f.ctx, storetest.SignIn(t, f.store, name, name, store.RoleMember))
+		if e != nil {
+			t.Fatal(e)
+		}
+		return u.ID
+	}
+	doer, bystander := member("doer"), member("bystander")
+	task, e := f.store.CreateTask(f.ctx, f.tenant, f.owner, store.TaskInput{Title: "注册流程", ProjectID: f.project,
+		Assignee: &store.TaskAssigneeRef{Type: store.AssigneeHuman, ID: doer}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, bystander), task.ID, f.workflow, "by-bystander"); !errors.Is(e, store.ErrForbidden) {
+		t.Fatalf("bystander split = %v", e)
+	}
+	if list, _ := f.host.List(f.ctx, f.tenant, task.ID); len(list) != 0 {
+		t.Fatalf("a refused split left a decomposition: %+v", list)
+	}
+	if _, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, doer), task.ID, f.workflow, "by-doer"); e != nil {
+		t.Fatalf("assignee split = %v", e)
 	}
 }
 
@@ -226,7 +265,7 @@ func TestDecompositionFailuresAreVisible(t *testing.T) {
 	}
 	for i, c := range cases {
 		parent := f.task(t, c.name)
-		d, e := f.host.Start(f.ctx, f.tenant, f.owner, parent.ID, f.workflow, "key")
+		d, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), parent.ID, f.workflow, "key")
 		if e != nil {
 			t.Fatalf("%s: %v", c.name, e)
 		}
@@ -239,7 +278,7 @@ func TestDecompositionFailuresAreVisible(t *testing.T) {
 			t.Fatalf("%s wrote %d subtasks", c.name, len(subs))
 		}
 		// A failure frees the task for another try.
-		if _, e := f.host.Start(f.ctx, f.tenant, f.owner, parent.ID, f.workflow, "retry"); e != nil {
+		if _, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), parent.ID, f.workflow, "retry"); e != nil {
 			t.Fatalf("%s retry = %v", c.name, e)
 		}
 	}
@@ -253,7 +292,7 @@ func TestDecompositionStartRefusals(t *testing.T) {
 		t.Fatal(e)
 	}
 	for _, id := range []string{draft.ID, "00000000-0000-4000-8000-000000000999"} {
-		if _, e := f.host.Start(f.ctx, f.tenant, f.owner, parent.ID, id, "k-"+id); !errors.Is(e, taskdecomp.ErrInvalidWorkflow) {
+		if _, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), parent.ID, id, "k-"+id); !errors.Is(e, taskdecomp.ErrInvalidWorkflow) {
 			t.Fatalf("workflow %s = %v", id, e)
 		}
 	}
@@ -269,7 +308,7 @@ func TestDecompositionStartRefusals(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e := f.host.Start(f.ctx, f.tenant, f.owner, parent.ID, incompatible.ID, "incompatible"); !errors.Is(e, taskdecomp.ErrWorkflowOutputRequired) {
+	if _, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), parent.ID, incompatible.ID, "incompatible"); !errors.Is(e, taskdecomp.ErrWorkflowOutputRequired) {
 		t.Fatalf("incompatible workflow = %v", e)
 	}
 	after, e := f.store.WorkflowRuns(f.ctx, f.tenant, "", "")
@@ -282,7 +321,7 @@ func TestDecompositionStartRefusals(t *testing.T) {
 
 	// A run the workflow host refuses fails the decomposition at once, with the reason.
 	f.runs.refuse = errors.New("没有可用的 Agent")
-	d, e := f.host.Start(f.ctx, f.tenant, f.owner, parent.ID, f.workflow, "refused")
+	d, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), parent.ID, f.workflow, "refused")
 	if e != nil || d.Status != store.DecompositionFailed || !strings.Contains(d.Failure, "没有可用的 Agent") {
 		t.Fatalf("refused = %+v %v", d, e)
 	}
@@ -291,11 +330,11 @@ func TestDecompositionStartRefusals(t *testing.T) {
 func TestRecoverEndsWhatTheLastProcessLeft(t *testing.T) {
 	f := newFixture(t)
 	finished, stuck := f.task(t, "跑完了"), f.task(t, "卡住了")
-	a, e := f.host.Start(f.ctx, f.tenant, f.owner, finished.ID, f.workflow, "a")
+	a, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), finished.ID, f.workflow, "a")
 	if e != nil {
 		t.Fatal(e)
 	}
-	b, e := f.host.Start(f.ctx, f.tenant, f.owner, stuck.ID, f.workflow, "b")
+	b, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), stuck.ID, f.workflow, "b")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -341,7 +380,7 @@ func (c cancelFails) CancelWorkflowRun(context.Context, string, string) (store.W
 func TestRecoverStopsWhenARunCannotBeCancelled(t *testing.T) {
 	f := newFixture(t)
 	stuck := f.task(t, "取消失败")
-	d, e := f.host.Start(f.ctx, f.tenant, f.owner, stuck.ID, f.workflow, "a")
+	d, e := f.host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), stuck.ID, f.workflow, "a")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -414,7 +453,7 @@ func TestStartFreezesCheckedSnapshot(t *testing.T) {
 	}
 	host := taskdecomp.New(republishingStore{Store: f.store, t: t}, f.runs, nil)
 	t.Cleanup(host.Close)
-	d, err := host.Start(f.ctx, f.tenant, f.owner, task.ID, f.workflow, "snapshot-race")
+	d, err := host.Start(f.ctx, storetest.Access(t, f.store, f.tenant, f.owner), task.ID, f.workflow, "snapshot-race")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -82,7 +82,7 @@ func TestFormSubmissionCreatesTasksAndReusesAcrossRuns(t *testing.T) {
 			if err != nil || len(current.WorkflowSources) != 2 {
 				t.Fatalf("missing report associations: %+v %v", current, err)
 			}
-			if _, err := f.s.UpdateTask(ctx, f.scope.TenantID, current.ID, store.TaskInput{Title: current.Title, Description: "Edited task text", ProjectID: current.ProjectID, Version: current.Version}); err != nil {
+			if _, err := f.s.UpdateTask(ctx, storetest.Access(t, f.s, f.scope.TenantID, f.scope.UserID), current.ID, store.TaskInput{Title: current.Title, Description: "Edited task text", ProjectID: current.ProjectID, Version: current.Version}); err != nil {
 				t.Fatal(err)
 			}
 			current, err = f.s.Task(ctx, f.scope.TenantID, current.ID)
