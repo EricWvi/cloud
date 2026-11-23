@@ -350,6 +350,37 @@ it('shows per-project delivery results on the skill row and detail panel', async
   expect(blockOf('项目 B')).toHaveTextContent(/下发中/)
 })
 
+it('explains a waiting delivery with how to unblock it', async () => {
+  installMarketplaceBackend({
+    catalog: [writing],
+    selections: [marketplaceSelection(writing)],
+    progress: [
+      {
+        namespace: 'demo',
+        identifier: 'writing-kit',
+        results: [
+          {
+            projectId: 'project-a',
+            name: '项目 A',
+            state: 'waiting',
+            installedVersion: '',
+            failure: '',
+          },
+        ],
+      },
+    ],
+  })
+  const user = userEvent.setup()
+  renderSettingsPage(<SkillsPage />)
+  const row = await screen.findByRole('article', { name: 'writing-guide' })
+  await user.click(within(row).getByRole('button', { name: '查看技能 writing-guide' }))
+  const dialog = await screen.findByRole('dialog')
+  expect(within(dialog).getByText('项目 A')).toBeInTheDocument()
+  expect(
+    within(dialog).getByText(/项目里有未结束的对话时会一直等待/),
+  ).toBeInTheDocument()
+})
+
 it('marks a failed delivery and shows the failure reason', async () => {
   installMarketplaceBackend({
     catalog: [writing],
