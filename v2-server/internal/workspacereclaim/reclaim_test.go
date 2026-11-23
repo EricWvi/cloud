@@ -1309,3 +1309,229 @@ func TestReclaimIgnoresStaleRefLocks(t *testing.T) {
 		})
 	}
 }
+
+// Nested Git directories containing symlinks or objects/info/alternates can reach state outside
+// the digest's plain-byte guarantees, so preview marks them not discardable, discard returns
+// ErrDiscardUnverifiable, and an earlier preview taken before a symlink swap fails with
+// ErrDeletionPreviewStale.
+func TestDiscardIsRefusedWhenNestedGitUsesSymlinksOrAlternates(t *testing.T) {
+	initLib := func(t *testing.T) string {
+		t.Helper()
+		lib := t.TempDir()
+		write(t, lib, "lib.txt", "lib\n")
+		git(t, lib, "init", "-q", ".")
+		git(t, lib, "add", ".")
+		git(t, lib, "commit", "-qm", "lib")
+		return lib
+	}
+	endAndPreview := func(t *testing.T, f *fixture, c st.ChatCheckout) (*chat.Service, wr.Verdict) {
+		t.Helper()
+		ctx := context.Background()
+		c.End(t, f.s)
+		if err := f.s.EndChatSession(ctx, c.SessionID, store.EndStopped, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		svc := chat.New(f.s, &executiontest.Stub{}, &executiontest.Stub{}, chat.Options{Reclaims: f.r})
+		v, err := svc.DeletionPreview(ctx, f.scope, c.ConversationID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return svc, v
+	}
+
+	t.Run("symlinked shared git state", func(t *testing.T) {
+		f := newFixture(t)
+		c := f.chat(t, st.TurnDelivered)
+		write(t, c.Path, ".gitignore", "*.log\nstore.git/\nwt/\n")
+		lib := initLib(t)
+		shared := filepath.Join(c.Path, "store.git")
+		git(t, c.Path, "clone", "-q", "--bare", lib, shared)
+		wt := filepath.Join(c.Path, "wt")
+		if err := os.MkdirAll(filepath.Join(wt, ".git"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		head, err := os.ReadFile(filepath.Join(shared, "HEAD"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		write(t, wt, ".git/HEAD", string(head))
+		write(t, wt, ".git/config", "[core]\n\tbare = false\n\tlogallrefupdates = true\n")
+		for _, e := range []string{"refs", "packed-refs", "objects", "logs"} {
+			if err := os.Symlink(filepath.Join("..", "..", "store.git", e), filepath.Join(wt, ".git", e)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := git(t, wt, "rev-parse", "HEAD"); got == "" {
+			t.Fatal("the nested worktree does not resolve HEAD through the links")
+		}
+		svc, seen := endAndPreview(t, f, c)
+		if seen.Workspace != wr.WorkspaceUndelivered || seen.Reason != wr.ReasonGitState || seen.Discardable {
+			t.Fatalf("preview = %+v", seen)
+		}
+		// New work added via another worktree of the shared store remains readable from wt.
+		tmp := filepath.Join(t.TempDir(), "tmp")
+		git(t, shared, "worktree", "add", "-q", "-b", "only-here", tmp)
+		write(t, tmp, "new.txt", "the only copy\n")
+		git(t, tmp, "add", "new.txt")
+		git(t, tmp, "commit", "-qm", "new work")
+		git(t, shared, "worktree", "remove", "--force", tmp)
+		if got := git(t, wt, "show", "only-here:new.txt"); got != "the only copy" {
+			t.Fatalf("new work not readable from wt: %q", got)
+		}
+		if _, err := svc.Delete(context.Background(), f.scope, c.ConversationID, store.ReclaimDiscard, seen.Revision); !errors.Is(err, chat.ErrDiscardUnverifiable) {
+			t.Fatalf("discard = %v, want ErrDiscardUnverifiable", err)
+		}
+		if _, err := f.s.ChatConversation(context.Background(), f.scope.TenantID, f.scope.UserID, c.ConversationID); err != nil {
+			t.Fatalf("conversation missing after refused discard: %v", err)
+		}
+		if got := git(t, wt, "show", "only-here:new.txt"); got != "the only copy" {
+			t.Fatalf("shared git work lost after refused discard: %q", got)
+		}
+
+		// Default reclaim keeps the directory as git_state without removing wt or store.git.
+		f2 := newFixture(t)
+		c2 := f2.chat(t, st.TurnDelivered)
+		write(t, c2.Path, ".gitignore", "*.log\nstore.git/\nwt/\n")
+		shared2 := filepath.Join(c2.Path, "store.git")
+		git(t, c2.Path, "clone", "-q", "--bare", lib, shared2)
+		wt2 := filepath.Join(c2.Path, "wt")
+		if err := os.MkdirAll(filepath.Join(wt2, ".git"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		write(t, wt2, ".git/HEAD", string(head))
+		write(t, wt2, ".git/config", "[core]\n\tbare = false\n\tlogallrefupdates = true\n")
+		for _, e := range []string{"refs", "packed-refs", "objects", "logs"} {
+			if err := os.Symlink(filepath.Join("..", "..", "store.git", e), filepath.Join(wt2, ".git", e)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		f2.deleteChat(t, c2, store.ReclaimRecoverable)
+		if got := f2.run(t, c2); got != (wr.Outcome{Workspace: wr.OutcomeKept, Reason: wr.ReasonGitState}) || !exists(t, wt2) || !exists(t, shared2) {
+			t.Fatalf("default reclaim = %+v, wt=%v shared=%v", got, exists(t, wt2), exists(t, shared2))
+		}
+	})
+
+	t.Run("symlinked nested index", func(t *testing.T) {
+		f := newFixture(t)
+		c := f.chat(t, st.TurnDelivered)
+		write(t, c.Path, ".gitignore", "*.log\nextra/\nwt/\n")
+		wt := filepath.Join(c.Path, "wt")
+		write(t, wt, "lib.txt", "lib\n")
+		git(t, wt, "init", "-q", ".")
+		git(t, wt, "add", "lib.txt")
+		git(t, wt, "commit", "-qm", "lib")
+		write(t, wt, "lib.txt", "staged\n")
+		git(t, wt, "add", "lib.txt")
+		extraIndex := filepath.Join(c.Path, "extra", "index")
+		if err := os.MkdirAll(filepath.Dir(extraIndex), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(filepath.Join(wt, ".git", "index"), extraIndex); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join("..", "..", "extra", "index"), filepath.Join(wt, ".git", "index")); err != nil {
+			t.Fatal(err)
+		}
+		if status := git(t, wt, "status", "--short"); !strings.Contains(status, "lib.txt") {
+			t.Fatalf("unexpected git status through symlinked index: %q", status)
+		}
+		svc, seen := endAndPreview(t, f, c)
+		if seen.Workspace != wr.WorkspaceUndelivered || seen.Reason != wr.ReasonGitState || seen.Discardable {
+			t.Fatalf("preview = %+v", seen)
+		}
+		if _, err := svc.Delete(context.Background(), f.scope, c.ConversationID, store.ReclaimDiscard, seen.Revision); !errors.Is(err, chat.ErrDiscardUnverifiable) {
+			t.Fatalf("discard = %v, want ErrDiscardUnverifiable", err)
+		}
+		if _, err := f.s.ChatConversation(context.Background(), f.scope.TenantID, f.scope.UserID, c.ConversationID); err != nil || !exists(t, wt) {
+			t.Fatalf("conversation or wt missing after refused discard: %v", err)
+		}
+	})
+
+	t.Run("nested alternates", func(t *testing.T) {
+		f := newFixture(t)
+		c := f.chat(t, st.TurnDelivered)
+		write(t, c.Path, ".gitignore", "*.log\nstore.git/\nwt/\n")
+		lib := initLib(t)
+		shared := filepath.Join(c.Path, "store.git")
+		git(t, c.Path, "clone", "-q", "--bare", lib, shared)
+		wt := filepath.Join(c.Path, "wt")
+		write(t, wt, "lib.txt", "lib\n")
+		git(t, wt, "init", "-q", ".")
+		git(t, wt, "add", "lib.txt")
+		git(t, wt, "commit", "-qm", "lib")
+		write(t, wt, ".git/objects/info/alternates", "../../../store.git/objects\n")
+		svc, seen := endAndPreview(t, f, c)
+		if seen.Workspace != wr.WorkspaceUndelivered || seen.Reason != wr.ReasonGitState || seen.Discardable {
+			t.Fatalf("preview = %+v", seen)
+		}
+		if _, err := svc.Delete(context.Background(), f.scope, c.ConversationID, store.ReclaimDiscard, seen.Revision); !errors.Is(err, chat.ErrDiscardUnverifiable) {
+			t.Fatalf("discard = %v, want ErrDiscardUnverifiable", err)
+		}
+		if _, err := f.s.ChatConversation(context.Background(), f.scope.TenantID, f.scope.UserID, c.ConversationID); err != nil || !exists(t, wt) {
+			t.Fatalf("conversation or wt missing after refused discard: %v", err)
+		}
+	})
+
+	t.Run("symlink swapped in after preview", func(t *testing.T) {
+		f := newFixture(t)
+		c := f.chat(t, st.TurnDelivered)
+		write(t, c.Path, ".gitignore", "*.log\nstore.git/\nwt/\n")
+		lib := initLib(t)
+		shared := filepath.Join(c.Path, "store.git")
+		git(t, c.Path, "clone", "-q", "--bare", lib, shared)
+		wt := filepath.Join(c.Path, "wt")
+		write(t, wt, "lib.txt", "lib\n")
+		git(t, wt, "init", "-q", ".")
+		git(t, wt, "add", "lib.txt")
+		git(t, wt, "commit", "-qm", "lib")
+		svc, seen := endAndPreview(t, f, c)
+		if seen.Workspace != wr.WorkspaceUndelivered || seen.Reason != wr.ReasonGitState || !seen.Discardable {
+			t.Fatalf("initial preview = %+v", seen)
+		}
+		// Swap wt/.git/refs for a symlink into store.git after preview.
+		if err := os.RemoveAll(filepath.Join(wt, ".git", "refs")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join("..", "..", "store.git", "refs"), filepath.Join(wt, ".git", "refs")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := svc.Delete(context.Background(), f.scope, c.ConversationID, store.ReclaimDiscard, seen.Revision); !errors.Is(err, chat.ErrDeletionPreviewStale) {
+			t.Fatalf("discard with pre-swap revision = %v, want ErrDeletionPreviewStale", err)
+		}
+		now, err := svc.DeletionPreview(context.Background(), f.scope, c.ConversationID)
+		if err != nil || now.Discardable {
+			t.Fatalf("post-swap preview = %+v, %v", now, err)
+		}
+		if _, err := svc.Delete(context.Background(), f.scope, c.ConversationID, store.ReclaimDiscard, now.Revision); !errors.Is(err, chat.ErrDiscardUnverifiable) {
+			t.Fatalf("discard with post-swap revision = %v, want ErrDiscardUnverifiable", err)
+		}
+		if _, err := f.s.ChatConversation(context.Background(), f.scope.TenantID, f.scope.UserID, c.ConversationID); err != nil || !exists(t, wt) {
+			t.Fatalf("conversation or wt missing after refused discard: %v", err)
+		}
+	})
+}
+
+// A working-tree symlink inside a nested repository stays discardable when the nested .git
+// directory itself holds no symlinks or alternates.
+func TestDiscardStillAllowsWorkingTreeSymlinksInNestedRepository(t *testing.T) {
+	f := newFixture(t)
+	c := f.chat(t, st.TurnDelivered)
+	sub := nestedRepository(t, c.Path, "lib\n")
+	if err := os.Symlink("lib.txt", filepath.Join(sub, "alias.txt")); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	c.End(t, f.s)
+	if err := f.s.EndChatSession(ctx, c.SessionID, store.EndStopped, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	svc := chat.New(f.s, &executiontest.Stub{}, &executiontest.Stub{}, chat.Options{Reclaims: f.r})
+	seen, err := svc.DeletionPreview(ctx, f.scope, c.ConversationID)
+	if err != nil || seen.Workspace != wr.WorkspaceUndelivered || seen.Reason != wr.ReasonGitState || !seen.Discardable {
+		t.Fatalf("preview = %+v, %v", seen, err)
+	}
+	got, err := svc.Delete(ctx, f.scope, c.ConversationID, store.ReclaimDiscard, seen.Revision)
+	if err != nil || got.Workspace != wr.OutcomeReclaimed || exists(t, c.Path) {
+		t.Fatalf("discard = %+v, %v, exists=%v", got, err, exists(t, c.Path))
+	}
+}
