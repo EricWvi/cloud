@@ -45,6 +45,7 @@ HTTP 错误码由适配层映射；诊断措辞不承诺逐字匹配 desktop。
 | `config_test.go` | Start / 全局声明、Agent 策略和 schema、Condition / Output 历史格式、Aggregator 拓扑及类型 |
 | `container_test.go` | Loop 轮次上限、携带值与可见性；Iteration 归属、输入 / 收集类型及边界 |
 | `loop_references_test.go` | Loop 外只读命名输出、循环体内只读循环变量、轮次 Start 无变量；选择器、模板与聚合候选都指向引用节点 |
+| `loop_declarations_internal_test.go` | 发布期静态类型表不声明 `{loop}.output`，只声明命名输出 |
 | `testdata/spare-chain.json`、`testdata/iteration.json` | 改编自 desktop `execution_document/tests.rs` |
 | `testdata/loop.json` | 改编自 desktop `loop_graph/tests.rs` |
 | `condition_test.go` | Condition 的 case 顺序、空 case、and/or、各运算符、比较值模板与失败（改编自 desktop `condition.rs`） |
