@@ -256,10 +256,12 @@ const maxNestedEntries = 100000
 //
 // complete reports that every such byte was bound. It is false, and stays false, when anything
 // could not be: a byte or entry limit, a special file, a read that failed, a pointer leading out
-// of the checkout or not resolving. A discard is then refused, since the revision cannot prove the
-// person saw what would be deleted. Files are read without Git and without following links: an
-// Lstat must show a regular file, the open is O_NOFOLLOW|O_NONBLOCK and an fstat must confirm the
-// same file, so nothing can block on a FIFO or a device.
+// of the checkout or not resolving, or any symlink or objects/info/alternates inside a nested Git
+// directory (including .git/modules entries and resolved Git directories). A discard is then
+// refused, since the revision cannot prove the person saw what would be deleted. Files are read
+// without Git and without following links: an Lstat must show a regular file, the open is
+// O_NOFOLLOW|O_NONBLOCK and an fstat must confirm the same file, so nothing can block on a FIFO
+// or a device.
 func (s *DeliveryFS) gitIdentity(ctx context.Context, st *staged, g GitFindings) (identity string, complete bool, err error) {
 	h := sha256.New()
 	d := &digester{ctx: ctx, h: h, bytes: s.maxObjects, complete: true}
@@ -299,8 +301,10 @@ func (s *DeliveryFS) gitIdentity(ctx context.Context, st *staged, g GitFindings)
 		return "", false, err
 	}
 	// digested lists the subtrees already bound, so a Git directory several repositories share
-	// (or one inside a repository's own subtree) is read once.
+	// (or one inside a repository's own subtree) is read once. checkedGitDirs tracks the Git
+	// directories already verified to contain no symlinks, special files, or alternates.
 	var digested []string
+	var checkedGitDirs []string
 	for _, repo := range g.Repositories {
 		if err := ctx.Err(); err != nil {
 			return "", false, err
@@ -317,11 +321,16 @@ func (s *DeliveryFS) gitIdentity(ctx context.Context, st *staged, g GitFindings)
 				d.incomplete("open modules", err)
 				continue
 			}
-			d.tree(modules, name)
+			if _, err := modules.Lstat(path.Join(name, "commondir")); err == nil || !errors.Is(err, fs.ErrNotExist) {
+				d.incomplete("commondir inside nested module", err)
+			}
+			d.gitTree(modules, name)
 			modules.Close()
 			if real, err := filepath.EvalSymlinks(filepath.Join(layout.CommonDir(), "modules", name)); err == nil {
-				if rel, err := filepath.Rel(realRoot, real); err == nil && filepath.IsLocal(rel) {
-					digested = append(digested, filepath.ToSlash(rel))
+				if rel, err := filepath.Rel(realRoot, real); err == nil && filepath.IsLocal(rel) && rel != "." {
+					rel = filepath.ToSlash(rel)
+					digested = append(digested, rel)
+					checkedGitDirs = append(checkedGitDirs, rel)
 				}
 			}
 			continue
@@ -331,7 +340,9 @@ func (s *DeliveryFS) gitIdentity(ctx context.Context, st *staged, g GitFindings)
 		// The repository's Git directories may lie elsewhere: a gitfile or a link points at them,
 		// and a .git directory may name a shared one in commondir. Bound only when they are inside
 		// the checkout (and so deleted with it), each once; outside, or not resolving, a discard
-		// could not show what it drops.
+		// could not show what it drops. Symlinks and alternates inside nested Git directories are
+		// rejected instead of followed, so shared Git state outside .git cannot be hidden behind
+		// an ignored link.
 		if _, err := root.Lstat(path.Join(repo, ".git")); err != nil {
 			continue
 		}
@@ -347,17 +358,24 @@ func (s *DeliveryFS) gitIdentity(ctx context.Context, st *staged, g GitFindings)
 				continue
 			}
 			rel, err := filepath.Rel(realRoot, real)
-			if err != nil || !filepath.IsLocal(rel) {
+			if err != nil || !filepath.IsLocal(rel) || rel == "." {
 				d.incomplete("nested Git directory outside the checkout", nil)
 				continue
 			}
 			rel = filepath.ToSlash(rel)
-			if within(rel, digested) {
+			if !within(rel, digested) {
+				fmt.Fprintf(h, "points at %s\x00", rel)
+				d.gitTree(root, rel)
+				digested = append(digested, rel)
+				checkedGitDirs = append(checkedGitDirs, rel)
 				continue
 			}
-			fmt.Fprintf(h, "points at %s\x00", rel)
-			d.tree(root, rel)
-			digested = append(digested, rel)
+			if !within(rel, checkedGitDirs) {
+				d.checkGitDir(root, rel)
+				checkedGitDirs = append(checkedGitDirs, rel)
+				continue
+			}
+			d.rejectAlternates(root, rel)
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -438,9 +456,33 @@ func (d *digester) file(r *os.Root, name string) {
 // tree writes every entry below dir (dir itself included, .git directories included): regular
 // files by content, links by target, directories by name. Any other kind of entry cannot be bound.
 func (d *digester) tree(r *os.Root, dir string) {
+	d.walkTree(r, dir, true, "")
+}
+
+// gitTree writes every entry below a nested Git directory by content and fails closed when any
+// symlink, special file, or objects/info/alternates is encountered inside it.
+func (d *digester) gitTree(r *os.Root, dir string) {
+	dir = path.Clean(dir)
+	info, err := r.Lstat(dir)
+	if err != nil {
+		d.incomplete(dir, err)
+		return
+	}
+	if !info.IsDir() {
+		d.incomplete(dir+" is not a directory", nil)
+		return
+	}
+	d.walkTree(r, dir, false, path.Join(dir, "objects/info/alternates"))
+}
+
+func (d *digester) walkTree(r *os.Root, dir string, allowSymlinks bool, alternates string) {
 	if _, err := r.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
-		fmt.Fprintf(d.h, "missing %s\x00", dir)
-		return // a gitlink with no working tree here
+		if allowSymlinks {
+			fmt.Fprintf(d.h, "missing %s\x00", dir)
+			return // a gitlink with no working tree here
+		}
+		d.incomplete(dir, err)
+		return
 	}
 	err := fs.WalkDir(r.FS(), dir, func(p string, e fs.DirEntry, err error) error {
 		if err != nil {
@@ -453,10 +495,18 @@ func (d *digester) tree(r *os.Root, dir string) {
 			d.incomplete("too many entries", nil)
 			return fs.SkipAll
 		}
+		if alternates != "" && p == alternates {
+			d.incomplete(p+" uses alternates in a nested Git directory", nil)
+			return fs.SkipAll
+		}
 		switch t := e.Type(); {
 		case t.IsDir():
 			fmt.Fprintf(d.h, "dir %s\x00", p)
 		case t&fs.ModeSymlink != 0:
+			if !allowSymlinks {
+				d.incomplete(p+" is a symlink in a nested Git directory", nil)
+				return fs.SkipAll
+			}
 			target, err := r.Readlink(p)
 			if err != nil {
 				return err
@@ -474,6 +524,63 @@ func (d *digester) tree(r *os.Root, dir string) {
 	})
 	if err != nil {
 		d.incomplete(dir, err)
+	}
+}
+
+// checkGitDir verifies that an already-digested nested Git directory (for example a .git
+// subdirectory walked via tree(root, repo)) contains no symlinks, special files, or
+// objects/info/alternates.
+func (d *digester) checkGitDir(r *os.Root, dir string) {
+	if !d.complete {
+		return
+	}
+	dir = path.Clean(dir)
+	info, err := r.Lstat(dir)
+	if err != nil {
+		d.incomplete(dir, err)
+		return
+	}
+	if !info.IsDir() {
+		d.incomplete(dir+" is not a directory", nil)
+		return
+	}
+	alternates := path.Join(dir, "objects/info/alternates")
+	checked := 0
+	err = fs.WalkDir(r.FS(), dir, func(p string, e fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := d.ctx.Err(); err != nil {
+			return err
+		}
+		if checked++; checked > maxNestedEntries {
+			d.incomplete("too many entries", nil)
+			return fs.SkipAll
+		}
+		if p == alternates {
+			d.incomplete(p+" uses alternates in a nested Git directory", nil)
+			return fs.SkipAll
+		}
+		t := e.Type()
+		switch {
+		case t&fs.ModeSymlink != 0:
+			d.incomplete(p+" is a symlink in a nested Git directory", nil)
+			return fs.SkipAll
+		case !t.IsDir() && !t.IsRegular():
+			d.incomplete(p+" is a special file", nil)
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		d.incomplete(dir, err)
+	}
+}
+
+func (d *digester) rejectAlternates(r *os.Root, dir string) {
+	p := path.Join(path.Clean(dir), "objects/info/alternates")
+	if _, err := r.Lstat(p); err == nil || !errors.Is(err, fs.ErrNotExist) {
+		d.incomplete(p+" uses alternates in a nested Git directory", err)
 	}
 }
 
