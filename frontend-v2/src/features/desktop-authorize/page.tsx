@@ -1,11 +1,10 @@
-import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router'
 import { OraMark } from '@/components/ora-mark'
 import { Button } from '@/components/ui/button'
 import { useUser } from '@/app/auth/user'
 import { SignOutButton } from '@/app/auth/sign-out-button'
-import { approveDesktopLogin, type DesktopApproval } from '@/lib/auth-api'
+import { approveDesktopLogin, denyDesktopLogin, type DesktopApproval } from '@/lib/auth-api'
 import { codeOf } from '@/lib/api-client'
 import { navigation } from './navigation'
 
@@ -29,17 +28,24 @@ export default function DesktopAuthorizePage() {
   const [params] = useSearchParams()
   const user = useUser()
   const approval = approvalFrom(params)
-  const [declined, setDeclined] = useState(false)
   const approve = useMutation({
     mutationFn: () => approveDesktopLogin(approval!),
     onSuccess: (redirectUrl) => navigation.assign(redirectUrl),
   })
+  // 「取消」 also goes back to the desktop, with access_denied, so it stops waiting at once.
+  const deny = useMutation({
+    mutationFn: () => denyDesktopLogin(approval!),
+    onSuccess: (redirectUrl) => navigation.assign(redirectUrl),
+  })
+  const busy = approve.isPending || deny.isPending
 
   let body
   if (!approval) {
     body = <p role="alert" className="text-sm text-destructive">登录链接不完整，请回到 Ora desktop 重新点「登录」。</p>
-  } else if (declined) {
-    body = <p>已取消。可以关闭这个页面，回到 Ora desktop。</p>
+  } else if (deny.isSuccess) {
+    body = <p>已取消，正在通知 Ora desktop…</p>
+  } else if (deny.isError) {
+    body = <p>已取消。没能通知 Ora desktop，可以关闭这个页面，在 desktop 上取消这次登录。</p>
   } else if (approve.isSuccess) {
     body = <p>正在回到 Ora desktop…</p>
   } else {
@@ -47,8 +53,8 @@ export default function DesktopAuthorizePage() {
       <p>允许 Ora desktop 以「{user.displayName}」的身份登录？</p>
       <p className="text-muted-foreground">desktop 将以你的身份访问这里的团队和数据，直到你在 desktop 上退出登录。</p>
       <div className="flex gap-2">
-        <Button disabled={approve.isPending} onClick={() => approve.mutate()}>允许</Button>
-        <Button variant="outline" disabled={approve.isPending} onClick={() => setDeclined(true)}>取消</Button>
+        <Button disabled={busy} onClick={() => approve.mutate()}>允许</Button>
+        <Button variant="outline" disabled={busy} onClick={() => deny.mutate()}>取消</Button>
       </div>
       {approve.isError && <p role="alert" className="text-sm text-destructive">{failure(codeOf(approve.error))}</p>}
     </>

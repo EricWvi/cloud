@@ -35,3 +35,10 @@ export interface DesktopApproval {
  */
 export const approveDesktopLogin = (approval: DesktopApproval) =>
   http.post<{ redirectUrl: string }>('/auth/desktop/approve', approval).then((r) => r.data.redirectUrl)
+
+/**
+ * Declines an Ora desktop login. The answer is the desktop's loopback address carrying
+ * error=access_denied, so the desktop stops waiting as soon as the browser gets there.
+ */
+export const denyDesktopLogin = ({ redirectUri, state }: DesktopApproval) =>
+  http.post<{ redirectUrl: string }>('/auth/desktop/deny', { redirectUri, state }).then((r) => r.data.redirectUrl)

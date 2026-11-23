@@ -294,6 +294,36 @@ func TestDesktopApprovalNeedsTheWebSession(t *testing.T) {
 	}
 }
 
+// 「取消」 sends the browser back to the desktop with access_denied; it checks
+// the address like approval, so it never becomes a redirect to an arbitrary place.
+func TestDesktopDenialReturnsToTheLoopback(t *testing.T) {
+	f := newDesktopFixture(t)
+	_, cookie := f.account("alice")
+	token := f.login(cookie)
+	deny := func(c creds, redirect, state string) (int, map[string]any) {
+		return f.call("POST", "/auth/desktop/deny", c, map[string]string{"redirectUri": redirect, "state": state})
+	}
+	web := creds{cookie: cookie, origin: f.srv.URL}
+	status, out := deny(web, loopback, "s1")
+	if status != 200 || out["redirectUrl"] != loopback+"?error=access_denied&state=s1" {
+		t.Fatalf("deny = %d %v", status, out)
+	}
+	for _, redirect := range []string{"https://evil.example/cb", "http://localhost:53682/callback", "http://127.0.0.1:53682/cb#"} {
+		if status, out := deny(web, redirect, "s1"); status != 400 || out["code"] != "invalid_redirect_uri" {
+			t.Errorf("%s = %d %v", redirect, status, out)
+		}
+	}
+	if status, out := deny(web, loopback, ""); status != 400 || out["code"] != "invalid_state" {
+		t.Errorf("empty state = %d %v", status, out)
+	}
+	if status, out := deny(creds{}, loopback, "s1"); status != 401 || out["code"] != "unauthenticated" {
+		t.Errorf("no session = %d %v", status, out)
+	}
+	if status, out := deny(creds{bearer: token}, loopback, "s1"); status != 403 || out["code"] != "web_session_required" {
+		t.Errorf("bearer = %d %v", status, out)
+	}
+}
+
 // A6 D6 step 5: with an Authorization header, only the header decides who the caller is.
 func TestBearerHeaderAloneDecidesTheCaller(t *testing.T) {
 	f := newDesktopFixture(t)

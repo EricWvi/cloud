@@ -143,13 +143,46 @@ func (h *handler) approveDesktop(w http.ResponseWriter, r *http.Request, u store
 		fault(w, http.StatusBadRequest, "invalid_code_challenge")
 		return
 	}
-	if in.State == "" || len(in.State) > maxDesktopState || strings.ContainsFunc(in.State, func(r rune) bool { return r < 0x21 || r == 0x7f }) {
+	if !desktopState(in.State) {
 		fault(w, http.StatusBadRequest, "invalid_state")
 		return
 	}
 	code := h.desktopCodes.add(desktopCode{userID: u.ID, challenge: in.CodeChallenge, redirectURI: in.RedirectURI, expires: time.Now().Add(desktopCodeTTL)}, time.Now())
 	q := url.Values{"code": {code}, "state": {in.State}}
 	writeJSON(w, http.StatusOK, map[string]string{"redirectUrl": in.RedirectURI + "?" + q.Encode()})
+}
+
+// denyDesktop is the 「取消」 on /desktop/authorize. It sends the browser back to the same loopback
+// address with error=access_denied, so the desktop ends its sign-in at once instead of waiting for
+// its timeout. It checks the address and state like approveDesktop, so this server never redirects
+// a browser anywhere but a loopback listener, and it issues nothing.
+func (h *handler) denyDesktop(w http.ResponseWriter, r *http.Request, _ store.User) {
+	if r.Header.Get("Authorization") != "" {
+		fault(w, http.StatusForbidden, "web_session_required")
+		return
+	}
+	var in struct {
+		RedirectURI string `json:"redirectUri"`
+		State       string `json:"state"`
+	}
+	if !decodeStrict(w, r, &in) {
+		return
+	}
+	if !loopbackRedirect(in.RedirectURI) {
+		fault(w, http.StatusBadRequest, "invalid_redirect_uri")
+		return
+	}
+	if !desktopState(in.State) {
+		fault(w, http.StatusBadRequest, "invalid_state")
+		return
+	}
+	q := url.Values{"error": {"access_denied"}, "state": {in.State}}
+	writeJSON(w, http.StatusOK, map[string]string{"redirectUrl": in.RedirectURI + "?" + q.Encode()})
+}
+
+// desktopState reports a state the desktop could have sent: present, bounded and printable.
+func desktopState(state string) bool {
+	return state != "" && len(state) <= maxDesktopState && !strings.ContainsFunc(state, func(r rune) bool { return r < 0x21 || r == 0x7f })
 }
 
 // desktopToken exchanges a code for a desktop token. The code is spent by the first attempt; it

@@ -157,6 +157,7 @@ func newRouter(h *handler) *router {
 	rt.public("POST /auth/logout", h.logout)
 	rt.public("GET /auth/callback/{provider}", h.callback)
 	rt.session("POST /auth/desktop/approve", h.approveDesktop)
+	rt.session("POST /auth/desktop/deny", h.denyDesktop)
 	rt.public("POST /auth/desktop/token", h.desktopToken)
 	rt.public("POST /auth/desktop/logout", h.desktopLogout)
 	rt.session("GET /api/v1/me", h.me)

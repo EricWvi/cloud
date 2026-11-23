@@ -67,6 +67,67 @@
         }
       }
     },
+    "/auth/desktop/deny": {
+      "post": {
+        "operationId": "denyDesktopLogin",
+        "tags": [
+          "desktop-login"
+        ],
+        "description": "Declines a desktop login: answers the loopback redirect URI with error=access_denied and the desktop's state, so the desktop ends its sign-in at once. Issues nothing. Requires the web session cookie and a same-origin Origin; a bearer token is refused.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DesktopDenial"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Where to send the browser: the loopback redirect URI with error=access_denied and state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DesktopApproved"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_json, invalid_redirect_uri (as for approve), invalid_state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "origin_mismatch, or web_session_required when called with a bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/auth/desktop/token": {
       "post": {
         "operationId": "exchangeDesktopCode",
@@ -188,6 +249,25 @@
         "properties": {
           "redirectUrl": {
             "type": "string"
+          }
+        }
+      },
+      "DesktopDenial": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "redirectUri",
+          "state"
+        ],
+        "properties": {
+          "redirectUri": {
+            "type": "string",
+            "example": "http://127.0.0.1:53682/callback"
+          },
+          "state": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
           }
         }
       },

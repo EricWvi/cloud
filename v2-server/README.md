@@ -114,7 +114,7 @@ seed 在 [`demo/`](demo/README.md)：`env.go` 是上表和重置、准备本地 
 | `POST /auth/login` | Gateway | 邮箱登录：`email` 必须是预置文件或 owner 邀请过的账号，否则 `403 email_not_invited`，不会自动建用户；成功后设置会话 Cookie（`ora_session`，`V2_PUBLIC_URL` 为 https 时 `__Host-ora_session`），`authorizationUrl` 即 `returnTo`（只接受站内路径）。`V2_LOGIN` 没开的方式返回 `400 unknown_provider`；`Origin` 是别的站点时 `403 origin_mismatch`。只凭邮箱就能登录等于谁都能冒充谁，**仅用于演示环境** |
 | `GET /auth/callback/{provider}` | Gateway | 跳转式登录（`huawei-idaas`）回来的地址：核对登录尝试 Cookie（https 下为 `__Host-ora_login`、`Path=/`，防止兄弟子域种入别人的尝试；http 下为只发往这个路径的 `ora_login`）里的登录尝试（内存里，10 分钟、只能用一次；最多 10000 条，满了挤掉最早的，所以灌满它只会让别人未完成的登录重来，不会拒绝新登录）和 `state`，向提供方换取身份，按 `source`+`subject`（IDaaS 为 `huawei-corp`+`uuid`）找或建账号、刷新显示名，签会话后 303 回到发起登录时的 `returnTo`。失败一律 303 到 `/?login_error=failed\|unavailable\|disabled`，日志只记步骤和对方错误码。`POST /auth/login` 对跳转式方式返回提供方的登录地址，`returnTo` 不出现在其中；回调地址只由 `V2_PUBLIC_URL` 得出 |
 | `POST /auth/logout` | Gateway | 吊销会话，`204`；`Origin` 是别的站点时 `403 origin_mismatch` |
-| `POST /auth/desktop/approve`、`POST /auth/desktop/token`、`POST /auth/desktop/logout` | 契约之外 | desktop 登录，见下文「desktop 登录」 |
+| `POST /auth/desktop/approve`、`POST /auth/desktop/deny`、`POST /auth/desktop/token`、`POST /auth/desktop/logout` | 契约之外 | desktop 登录，见下文「desktop 登录」 |
 | `GET /api/v1/me` | 契约 | 当前用户；无会话 `401 unauthenticated`。契约禁止额外字段，当前用户的角色从 `GET /api/v1/me/tenants` 的 `role` 读取 |
 | `GET /api/v1/me/tenants` | 契约 | 当前用户所在租户，一页返回全部，`nextCursor` 为空 |
 | `GET /api/v1/tenants/{tid}/members` | 契约 | 当前用户所在工作区成员，一页返回全部，按显示名排序；非成员与非法租户 id 都是 `404 not_found` |
@@ -161,12 +161,13 @@ seed 在 [`demo/`](demo/README.md)：`env.go` 是上表和重置、准备本地 
 Ora desktop 经系统浏览器和本机回环地址登录（A6 D6，RFC 8252），接口由独立候选契约 [`desktop-login.openapi.json`](desktop-login.openapi.json) 描述，A6 写明路径以正式契约为准：
 
 1. desktop 在 `127.0.0.1`（或 `[::1]`）的系统分配端口上监听，生成 `state` 和 PKCE verifier，用系统浏览器打开 `/desktop/authorize?redirect_uri=http://127.0.0.1:<端口>/<路径>&state=…&code_challenge=…&code_challenge_method=S256`。
-2. 这一页要求网页会话（没有就先按 `V2_LOGIN` 登录，登录后回到这一页），显示「允许 Ora desktop 以 <显示名> 的身份登录？」。用户点「允许」才调 `POST /auth/desktop/approve`。
+2. 这一页要求网页会话（没有就先按 `V2_LOGIN` 登录，登录后回到这一页），显示「允许 Ora desktop 以 <显示名> 的身份登录？」。用户点「允许」才调 `POST /auth/desktop/approve`；点「取消」调 `POST /auth/desktop/deny`，浏览器带着 `error=access_denied` 回到回环地址，desktop 立即结束这次登录。
 3. 浏览器被送回回环地址，带上一次性授权码和 `state`；desktop 用授权码、verifier 和同一个回调地址调 `POST /auth/desktop/token` 换到令牌。
 
 | 路由 | 行为 |
 |---|---|
 | `POST /auth/desktop/approve` | 只接受网页会话：带 `Authorization` 头 `403 web_session_required`（desktop 不能用令牌给自己再签令牌），`Origin` 不符 `403 origin_mismatch`。`redirectUri` 只能是 `http://127.0.0.1:<端口>/<路径>` 或 `http://[::1]:<端口>/<路径>`，不带查询串和 fragment，否则 `400 invalid_redirect_uri`（不收 `localhost`：它要经过 DNS 和 hosts 解析）；`codeChallengeMethod` 必须是 `S256`、`codeChallenge` 是 43 个 base64url 字符，否则 `400 invalid_code_challenge`；`state` 必填、不超过 512 字节。返回 `{redirectUrl}`：回调地址加上 `code` 和 `state` |
+| `POST /auth/desktop/deny` | 和 approve 一样只接受网页会话、同样校验 `redirectUri` 和 `state`（body 只有这两项），不签发任何东西；返回 `{redirectUrl}`：回调地址加上 `error=access_denied` 和 `state` |
 | `POST /auth/desktop/token` | 公开，凭授权码：`{code, codeVerifier, redirectUri}`。授权码只在进程内存，2 分钟有效，第一次兑换不论成败都会用掉；verifier 的 S256 与批准时的 challenge 一致、`redirectUri` 与批准时完全相同，才签令牌。授权码不存在、过期、用过，verifier 或回调不符，或账号在批准后被停用，一律 `400 invalid_grant`。成功 `{token, user: {id, displayName}}`，`Cache-Control: no-store` |
 | `POST /auth/desktop/logout` | 吊销本请求 `Bearer` 头里的这一个令牌，`204`；令牌已不存在也是 `204`。没有合法的 `Bearer` 头 `401`。网页会话和其他设备的令牌不受影响 |
 

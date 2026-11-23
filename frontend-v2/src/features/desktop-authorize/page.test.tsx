@@ -48,12 +48,35 @@ describe('desktop authorize', () => {
     })
   })
 
-  it('cancels without asking the server', async () => {
-    const seen = fakeBackend((c) => (c.url === '/api/v1/me' ? { status: 200, data: demoUser } : undefined))
+  it('cancels by sending the browser back to the desktop with access_denied', async () => {
+    const posted: string[] = []
+    const seen = fakeBackend((c) => {
+      if (c.url === '/api/v1/me') return { status: 200, data: demoUser }
+      if (c.url === '/auth/desktop/deny') {
+        posted.push(String(c.data))
+        return { status: 200, data: { redirectUrl: 'http://127.0.0.1:53682/callback?error=access_denied&state=st-1' } }
+      }
+      return undefined
+    })
+    const assign = vi.spyOn(navigation, 'assign').mockImplementation(() => {})
     renderAt(`/desktop/authorize?${query}`)
     await userEvent.click(await screen.findByRole('button', { name: '取消' }))
-    expect(screen.getByText(/已取消/)).toBeInTheDocument()
+    await waitFor(() => expect(assign).toHaveBeenCalledWith('http://127.0.0.1:53682/callback?error=access_denied&state=st-1'))
+    expect(JSON.parse(posted[0])).toEqual({ redirectUri: 'http://127.0.0.1:53682/callback', state: 'st-1' })
     expect(seen).not.toContain('POST /auth/desktop/approve')
+  })
+
+  it('still shows the cancellation when the server refuses to send the browser back', async () => {
+    fakeBackend((c) => {
+      if (c.url === '/api/v1/me') return { status: 200, data: demoUser }
+      if (c.url === '/auth/desktop/deny') return { status: 400, data: { code: 'invalid_redirect_uri', params: {}, requestId: 'r' } }
+      return undefined
+    })
+    const assign = vi.spyOn(navigation, 'assign').mockImplementation(() => {})
+    renderAt(`/desktop/authorize?${query}`)
+    await userEvent.click(await screen.findByRole('button', { name: '取消' }))
+    expect(await screen.findByText(/已取消。没能通知/)).toBeInTheDocument()
+    expect(assign).not.toHaveBeenCalled()
   })
 
   it('refuses a link the server rejects and does not navigate', async () => {
