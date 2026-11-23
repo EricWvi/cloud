@@ -471,6 +471,24 @@ it('explains a failed split and offers to split again', async () => {
   expect(within(dialog).getByRole('button', { name: '开始拆分' })).toBeDisabled()
 })
 
+it('offers to split again after a failure only while the caller may split the task', async () => {
+  workspace.role = 'member'
+  const failed = { items: [decomposition({ status: 'failed', failure: '工作流的输出里没有 tasks 数组。' })] }
+  vi.mocked(api.listTaskDecompositions).mockResolvedValue(failed)
+  // Someone else's requirement, assigned to someone else: the button stays, disabled, and says who can.
+  vi.mocked(api.getTask).mockResolvedValue({ ...requirement, createdBy: 'user-lead', createdByName: '陈默', assignee: { type: 'human', id: 'user-doer', displayName: '鲍勃' } })
+  const { unmount } = renderPage()
+  const retry = await screen.findByRole('button', { name: '重新拆分' })
+  expect(retry).toBeDisabled()
+  expect(retry).toHaveAttribute('title', '只有创建人 陈默、负责人 鲍勃 或工作区管理员能拆分。')
+  unmount()
+  // A requirement in 待验收 is not split at all, so the failure offers no retry.
+  vi.mocked(api.getTask).mockResolvedValue({ ...requirement, status: 'review' })
+  renderPage()
+  expect(await screen.findByRole('alert')).toHaveTextContent('拆分失败')
+  expect(screen.queryByRole('button', { name: '重新拆分' })).not.toBeInTheDocument()
+})
+
 it('names the requirement a subtask came from and offers no split', async () => {
   vi.mocked(api.getTask).mockResolvedValue(task({ id: 'task-1', parentId: 'parent-1' }))
   vi.mocked(api.listTasks).mockResolvedValue({ nextCursor: '', items: [task({ id: 'parent-1', title: '账号体系' })] })

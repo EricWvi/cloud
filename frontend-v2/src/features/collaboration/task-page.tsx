@@ -262,7 +262,8 @@ export default function TaskPage() {
     <div className={workspaceShown ? 'mc-task-body wide' : 'mc-task-body'}>
       <section className="mc-task-main-col" aria-label="运行与讨论">
         {task.description && <p className="mc-description">{task.description}</p>}
-        <TaskFamily tenantId={tenantId} task={task} latest={decompositions.latest} folded={!!openedWorkflow} onRetry={() => setDecomposing(true)} />
+        <TaskFamily tenantId={tenantId} task={task} latest={decompositions.latest} folded={!!openedWorkflow}
+          onRetry={canDecompose(task) ? () => setDecomposing(true) : undefined} retryRefusal={canManage ? '' : manageRefusal(task, '拆分')} />
         <div className="mc-tabs" role="tablist" aria-label="任务内容">
           <button type="button" role="tab" aria-selected={tab === 'runs'} onClick={() => showTab('runs')}>Agent 运行 <b>{runs.length}</b></button>
           <button type="button" role="tab" aria-selected={tab === 'workflows'} onClick={() => showWorkflows()}>工作流 <b>{workflowRuns.length}</b></button>
