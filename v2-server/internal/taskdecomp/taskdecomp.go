@@ -127,6 +127,9 @@ func (h *Host) lock(taskID string) func() {
 // store.CanManageTask may split a task (store.ErrForbidden otherwise).
 func (h *Host) Start(ctx context.Context, a store.Access, taskID, workflowID, key string) (store.TaskDecomposition, error) {
 	tenant, user := a.TenantID, a.UserID
+	// Read and judge the task under its lock, so a start that waited on another sees the task as
+	// that one left it.
+	defer h.lock(taskID)()
 	task, e := h.store.Task(ctx, tenant, taskID)
 	if e != nil {
 		return store.TaskDecomposition{}, e
@@ -137,7 +140,6 @@ func (h *Host) Start(ctx context.Context, a store.Access, taskID, workflowID, ke
 		}
 		return store.TaskDecomposition{}, e
 	}
-	defer h.lock(taskID)()
 	if d, e := h.store.TaskDecompositionByKey(ctx, tenant, taskID, user, key); e == nil {
 		return d, nil
 	} else if !errors.Is(e, store.ErrNotFound) {

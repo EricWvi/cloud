@@ -95,8 +95,14 @@ func (c *taskClient) doHeaders(method, path string, body any, headers map[string
 
 func (c *taskClient) login() {
 	c.t.Helper()
-	if status, body := c.do("POST", "/auth/login", map[string]string{"provider": "email", "email": storetest.Email("squad-demo")}); status != 200 {
-		c.t.Fatalf("login = %d %v", status, body)
+	c.loginAs("squad-demo")
+}
+
+// loginAs signs in as the user storetest created for subject.
+func (c *taskClient) loginAs(subject string) {
+	c.t.Helper()
+	if status, body := c.do("POST", "/auth/login", map[string]string{"provider": "email", "email": storetest.Email(subject)}); status != 200 {
+		c.t.Fatalf("login as %s = %d %v", subject, status, body)
 	}
 }
 

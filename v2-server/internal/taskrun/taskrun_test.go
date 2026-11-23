@@ -713,9 +713,40 @@ func TestAPersonRunsTheAgentTheyPickOnTheirOwnTask(t *testing.T) {
 	f.port.finish(t, run.LastTurnID, execution.StatusCompleted)
 	f.await(t, task.ID, store.TaskReview)
 
-	// Anyone may still stop the run: it spends nobody's identity.
+	// The task's creator may still stop the run, though they could not start it.
 	if _, e := f.host.Stop(f.ctx, f.owner, task.ID, run.ID); e != nil {
-		t.Fatalf("stop by another person = %v", e)
+		t.Fatalf("stop by the creator = %v", e)
+	}
+}
+
+// Each of the three who may stop a run may do so on their own standing: whoever started it, the
+// task's creator without being the owner, and the owner without having created it.
+func TestStopIsForTheStarterTheCreatorAndTheOwner(t *testing.T) {
+	f := newFixture(t)
+	starter, e := f.store.SessionUser(f.ctx, storetest.SignIn(t, f.store, "task-starter", "卡萝", store.RoleMember))
+	if e != nil {
+		t.Fatal(e)
+	}
+	as := execution.Scope{TenantID: f.tenant, UserID: starter.ID}
+	// The member creates the Agent task; neither the starter nor the owner created it.
+	task, e := f.store.CreateTask(f.ctx, f.tenant, f.member.UserID, store.TaskInput{Title: "修复登录页", ProjectID: f.project,
+		Assignee: &store.TaskAssigneeRef{Type: store.AssigneeAgent, ID: f.agents[opencode]}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	for i, stopper := range []struct {
+		name  string
+		scope execution.Scope
+	}{{"the starter", as}, {"the creator", f.member}, {"the owner", f.owner}} {
+		run, e := f.host.Start(f.ctx, as, task.ID, fmt.Sprintf("start-%d", i), taskrun.StartInput{})
+		if e != nil {
+			t.Fatalf("start before %s stops = %v", stopper.name, e)
+		}
+		stopped, e := f.host.Stop(f.ctx, stopper.scope, task.ID, run.ID)
+		if e != nil || stopped.State != store.TaskRunEnded || stopped.EndReason != store.TaskRunStopped {
+			t.Fatalf("stop by %s = %+v %v", stopper.name, stopped, e)
+		}
+		f.await(t, task.ID, store.TaskPending)
 	}
 }
 
