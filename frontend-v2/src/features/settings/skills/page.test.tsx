@@ -377,8 +377,38 @@ it('explains a waiting delivery with how to unblock it', async () => {
   const dialog = await screen.findByRole('dialog')
   expect(within(dialog).getByText('项目 A')).toBeInTheDocument()
   expect(
-    within(dialog).getByText(/项目里有未结束的对话时会一直等待/),
+    within(dialog).getByText(/对话（即使已经回答完）以及正在运行的任务或工作流都会占用运行时/),
   ).toBeInTheDocument()
+  expect(within(dialog).queryByText(/结束这些对话/)).not.toBeInTheDocument()
+})
+
+it('does not show the waiting hint for a delivered project', async () => {
+  installMarketplaceBackend({
+    catalog: [writing],
+    selections: [marketplaceSelection(writing)],
+    progress: [
+      {
+        namespace: 'demo',
+        identifier: 'writing-kit',
+        results: [
+          {
+            projectId: 'project-a',
+            name: '项目 A',
+            state: 'installed',
+            installedVersion: '1.0.0',
+            failure: '',
+          },
+        ],
+      },
+    ],
+  })
+  const user = userEvent.setup()
+  renderSettingsPage(<SkillsPage />)
+  const row = await screen.findByRole('article', { name: 'writing-guide' })
+  await user.click(within(row).getByRole('button', { name: '查看技能 writing-guide' }))
+  const dialog = await screen.findByRole('dialog')
+  expect(within(dialog).getByText('项目 A')).toBeInTheDocument()
+  expect(within(dialog).queryByText(/占用运行时/)).not.toBeInTheDocument()
 })
 
 it('marks a failed delivery and shows the failure reason', async () => {
