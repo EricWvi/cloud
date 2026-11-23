@@ -24,7 +24,8 @@ func (s *scope) validateDeclarations(globals map[string]string) error {
 			for name, typ := range n.inputs {
 				declare(n, name, typ)
 			}
-		case "condition", "iteration", "aggregator":
+		// A Loop publishes only its named outputs (below), never an `output`.
+		case "condition", "iteration", "aggregator", "loop":
 		default:
 			declare(n, "output", "string")
 		}

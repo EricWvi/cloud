@@ -1,7 +1,5 @@
 package workflow
 
-import "strings"
-
 type scope struct {
 	id           string
 	nodes        []*node
@@ -52,6 +50,11 @@ func buildScopes(d *document) (map[string]*scope, error) {
 	}
 	globals, err := validateGlobals(d.raw, len(loops) != 0)
 	if err != nil {
+		return nil, err
+	}
+	// Before scope typing, so a stale Loop reference names its consumer instead of surfacing
+	// as an undeclared aggregator candidate.
+	if err := validateLoopReferences(d); err != nil {
 		return nil, err
 	}
 	for _, e := range d.edges {
@@ -112,20 +115,10 @@ func buildScopes(d *document) (map[string]*scope, error) {
 			}
 		}
 		for _, text := range n.templates {
-			for {
-				_, after, found := strings.Cut(text, "{{#")
-				if !found {
-					break
+			for _, parts := range templateSelectors(text) {
+				if d.unused[parts[0]] {
+					return nil, invalid("unused_reference", n.id, "template", "template references unused node "+parts[0])
 				}
-				selected, rest, closed := strings.Cut(after, "#}}")
-				if !closed {
-					break
-				} // Malformed templates are diagnosed at execution, as on desktop.
-				producer, _, qualified := strings.Cut(selected, ".")
-				if qualified && d.unused[producer] {
-					return nil, invalid("unused_reference", n.id, "template", "template references unused node "+producer)
-				}
-				text = rest
 			}
 		}
 	}
