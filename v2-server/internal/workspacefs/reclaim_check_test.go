@@ -617,9 +617,30 @@ func TestInspectReclaimMarksSymlinksAndAlternatesInNestedGitIncomplete(t *testin
 				if err := os.RemoveAll(filepath.Join(wt, "mod")); err != nil {
 					t.Fatal(err)
 				}
-				deliveryWrite(t, wt, ".git/modules/mod/objects/info/alternates", "../../../../store.git/objects\n")
+				const target = "../../../../../store.git/objects"
+				if _, err := os.Stat(filepath.Join(wt, ".git/modules/mod/objects", target)); err != nil {
+					t.Fatalf("the shared object store is not reachable through the alternates: %v", err)
+				}
+				deliveryWrite(t, wt, ".git/modules/mod/objects/info/alternates", target+"\n")
 			},
 			wantRepo: "wt",
+		},
+		"Git directory named like an alternates file stays complete": {
+			setup: func(t *testing.T, root string) {
+				deliveryWrite(t, root, ".gitignore", "*.log\nwt/\n")
+				// git init --separate-git-dir puts the metadata where an alternates file would sit;
+				// that is a Git directory, not a pointer at objects elsewhere.
+				wt := filepath.Join(root, "wt")
+				deliveryWrite(t, wt, "lib.go", "package lib\n")
+				if err := os.MkdirAll(filepath.Join(wt, "cache", "objects", "info"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				deliveryGit(t, wt, "init", "-q", "--separate-git-dir", "cache/objects/info/alternates", ".")
+				deliveryGit(t, wt, "add", ".")
+				deliveryGit(t, wt, "commit", "-qm", "lib")
+			},
+			wantComplete: true,
+			wantRepo:     "wt",
 		},
 		"nested Git directory resolving to the checkout root": {
 			setup: func(t *testing.T, root string) {

@@ -1490,7 +1490,11 @@ func TestDiscardIsRefusedWhenNestedGitUsesSymlinksOrAlternates(t *testing.T) {
 		if err := os.RemoveAll(filepath.Join(wt, "mod")); err != nil {
 			t.Fatal(err)
 		}
-		write(t, wt, ".git/modules/mod/objects/info/alternates", "../../../../store.git/objects\n")
+		const target = "../../../../../store.git/objects"
+		if _, err := os.Stat(filepath.Join(wt, ".git/modules/mod/objects", target)); err != nil {
+			t.Fatalf("the shared object store is not reachable through the alternates: %v", err)
+		}
+		write(t, wt, ".git/modules/mod/objects/info/alternates", target+"\n")
 		svc, seen := endAndPreview(t, f, c)
 		if seen.Workspace != wr.WorkspaceUndelivered || seen.Reason != wr.ReasonGitState || seen.Discardable {
 			t.Fatalf("preview = %+v", seen)

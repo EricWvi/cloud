@@ -250,6 +250,11 @@ func (s *DeliveryFS) gitState(ctx context.Context, st *staged, target string) (G
 // delivery's object limit. Beyond either the digest is incomplete.
 const maxNestedEntries = 100000
 
+// alternatesSuffix names the file a repository uses to keep its objects elsewhere. One at any
+// depth inside a Git directory cannot be bound; a Git directory that happens to be called like
+// one is fine, which is why the path before it must also lie inside the Git directories.
+const alternatesSuffix = "/objects/info/alternates"
+
 // gitIdentity digests the actual bytes of everything Git-related that a discard would delete and
 // no delivery carries: the checkout repository's refs (name, target, peeled target), HEAD, stash
 // reflog entries and index; and for every nested repository its whole subtree (working tree and
@@ -466,7 +471,8 @@ func (d *digester) file(r *os.Root, name string) {
 
 // repoTree writes a nested repository: its working tree by content and links by target, and the
 // Git directories inside it (gitDirs, relative to the checkout root) strictly, all in one pass.
-// One walk binds the whole repository, so the entry budget counts each entry once.
+// So the Git metadata inside this subtree is validated by the walk that hashes it, instead of
+// being scanned again afterwards.
 func (d *digester) repoTree(r *os.Root, dir string, gitDirs []string) {
 	d.walkTree(r, dir, gitDirs, true)
 }
@@ -511,11 +517,11 @@ func (d *digester) walkTree(r *os.Root, dir string, strict []string, allowMissin
 			d.incomplete("too many entries", nil)
 			return fs.SkipAll
 		}
-		inGit := strict != nil && within(p, strict)
-		if inGit && strings.HasSuffix(p, "/objects/info/alternates") {
+		if parent, ok := strings.CutSuffix(p, alternatesSuffix); ok && within(parent, strict) {
 			d.incomplete(p+" uses alternates in a nested Git directory", nil)
 			return fs.SkipAll
 		}
+		inGit := strict != nil && within(p, strict)
 		switch t := e.Type(); {
 		case t.IsDir():
 			fmt.Fprintf(d.h, "dir %s\x00", p)
@@ -562,7 +568,6 @@ func (d *digester) checkGitDir(r *os.Root, dir string) {
 		return
 	}
 	// A Git directory's alternates may sit at any depth (a deinitialized submodule keeps its own).
-	const alternatesSuffix = "/objects/info/alternates"
 	checked := 0
 	err = fs.WalkDir(r.FS(), dir, func(p string, e fs.DirEntry, err error) error {
 		if err != nil {
@@ -575,7 +580,7 @@ func (d *digester) checkGitDir(r *os.Root, dir string) {
 			d.incomplete("too many entries", nil)
 			return fs.SkipAll
 		}
-		if strings.HasSuffix(p, alternatesSuffix) {
+		if parent, ok := strings.CutSuffix(p, alternatesSuffix); ok && within(parent, []string{dir}) {
 			d.incomplete(p+" uses alternates in a nested Git directory", nil)
 			return fs.SkipAll
 		}
