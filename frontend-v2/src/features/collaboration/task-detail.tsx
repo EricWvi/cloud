@@ -5,7 +5,7 @@ import type { SquadSummary } from '@/lib/squads-api/generated'
 import { formatTime } from './task-model'
 import { TaskAssigneePicker } from '@/components/task-assignee-picker'
 import { assigneeKindLabel, assigneeLabel, isTaskFinished, taskActions } from './task-model'
-import { closeRefusal, runsAgent } from './task-views'
+import { closeRefusal, manageRefusal, needsCloser, runsAgent, stopRefusal } from './task-views'
 import type { Task, TaskAssigneeRef, TaskExecutor, TaskStatusProperty } from './tasks-api/generated'
 
 /** The run controls' state, decided by the page from the task and its timeline. */
@@ -26,14 +26,18 @@ export interface RunControls {
  * One task's facts and the moves on it: who owns it, running its Agent, and the manual status
  * moves. While the Agent runs a turn, the run owns the status, so manual moves wait for it.
  */
-export function TaskDetailView({ task, me, inSquad, canClose, projectName, squads, busy, workflowActive = false, error, run, onWorkflow, onStatus, onAssign }: {
+export function TaskDetailView({ task, me, inSquad, canClose, canManage, canStop, projectName, squads, busy, workflowActive = false, error, run, onWorkflow, onStatus, onAssign }: {
   task: Task
   /** The caller's user id: a person's task runs an Agent only for that person. */
   me: string
   /** The caller is a member of the squad that owns the task. */
   inSquad: boolean
-  /** The caller may end the task: confirm it or cancel it. */
+  /** The caller may end the task (confirm or cancel it) or send it back from 待验收. */
   canClose: boolean
+  /** The caller may edit, reassign or split the task. */
+  canManage: boolean
+  /** The caller may stop the task's live run. */
+  canStop: boolean
   /** The project's display name, resolved from the workspace list. */
   projectName: string
   /** Live squads the task may be reassigned to. */
@@ -70,8 +74,12 @@ export function TaskDetailView({ task, me, inSquad, canClose, projectName, squad
 
     <section className="mc-section" aria-label="指派">
       <h3><Users size={14} />指派对象</h3>
-      <TaskAssigneePicker tenantId={task.tenantId} squads={squads} value={task.assignee} disabled={busy || running} onAssign={onAssign} />
+      <TaskAssigneePicker tenantId={task.tenantId} squads={squads} value={task.assignee} disabled={busy || running || finished || !canManage} onAssign={onAssign} />
       <p className="mc-note">当前：{assigneeLabel(task)}{task.assignee && `（${assigneeKindLabel(task)}）`}。{task.assignee?.type === 'squad' && '每个队员都会收到，任一队员都能评论和用 Agent 处理。'}</p>
+      {finished
+        ? <p className="mc-note">任务已结束，不能再改派。</p>
+        : !canManage ? <p className="mc-note">{manageRefusal(task, '改派')}</p>
+        : running && <p className="mc-note">Agent 正在执行，等这一轮结束或先停止，再改派。</p>}
     </section>
 
     {runsAgent(task, me, inSquad) && <section className="mc-section" aria-label="执行">
@@ -89,9 +97,7 @@ export function TaskDetailView({ task, me, inSquad, canClose, projectName, squad
               {run.hasRuns ? <RotateCcw data-icon="inline-start" /> : <CirclePlay data-icon="inline-start" />}
               {run.starting ? '正在启动…' : run.hasRuns ? '重新执行' : personal ? '用 Agent 处理' : '开始处理'}
             </Button>
-            {task.activeRun && <Button type="button" size="sm" variant="outline" disabled={run.stopping} onClick={run.onStop}>
-              <CircleStop data-icon="inline-start" />{running ? '停止' : '结束会话'}
-            </Button>}
+            {task.activeRun && <StopButton running={running} stopping={run.stopping} refusal={canStop ? '' : stopRefusal(task)} onStop={run.onStop} />}
           </div>
           <p className="mc-note">
             {running
@@ -103,6 +109,14 @@ export function TaskDetailView({ task, me, inSquad, canClose, projectName, squad
                   : '用你的身份运行这个 Agent；跑完任务自动进入待验收，全团队都能看到过程。'}
           </p>
         </>}
+    </section>}
+
+    {!runsAgent(task, me, inSquad) && task.activeRun && <section className="mc-section" aria-label="执行">
+      <h3><Bot size={14} />执行</h3>
+      <p className="mc-note">{running ? `${task.activeRun.startedByName} 发起的运行正在执行。` : `${task.activeRun.startedByName} 的会话在等追问。`}</p>
+      {canStop
+        ? <div className="mc-actions"><StopButton running={running} stopping={run.stopping} refusal="" onStop={run.onStop} /></div>
+        : <p className="mc-note">{stopRefusal(task)}</p>}
     </section>}
 
     {onWorkflow && <section className="mc-section" aria-label="工作流处理">
@@ -121,13 +135,21 @@ export function TaskDetailView({ task, me, inSquad, canClose, projectName, squad
           ? <p className="mc-empty-line">运行正在执行，结束后再推进。</p>
           : <>
             <div className="mc-actions">{actions.map(action => {
-              const refused = isTaskFinished(action.status) && !canClose
-              return <Button key={action.status} type="button" size="sm" variant={action.status === 'cancelled' ? 'outline' : 'default'} disabled={busy || refused} title={refused ? closeRefusal(task, action.label) : undefined} onClick={() => onStatus(action.status)}>{action.label}</Button>
+              const refused = needsCloser(task.status, action.status) && !canClose
+              return <Button key={action.status} type="button" size="sm" variant={action.status === 'done' || !needsCloser(task.status, action.status) ? 'default' : 'outline'} disabled={busy || refused} title={refused ? closeRefusal(task, action.label) : undefined} onClick={() => onStatus(action.status)}>{action.label}</Button>
             })}</div>
-            {!canClose && <p className="mc-note">{task.status === 'review' ? `等待 ${task.createdByName} 验收。${closeRefusal(task, '确认完成或取消任务')}` : closeRefusal(task, '取消任务')}</p>}
+            {!canClose && <p className="mc-note">{task.status === 'review' ? `等待 ${task.createdByName} 验收。${closeRefusal(task, '确认完成、退回或取消任务')}` : closeRefusal(task, '取消任务')}</p>}
+            {canClose && task.status === 'review' && <p className="mc-note">不满意可以退回待处理，让负责人返工。</p>}
           </>}
     </section>
 
     {error && <p role="alert" className="mc-error">{error}</p>}
   </div>
+}
+
+/** Stops the live run's turn, or ends its idle session; refused callers see who can. */
+function StopButton({ running, stopping, refusal, onStop }: { running: boolean; stopping: boolean; refusal: string; onStop: () => void }) {
+  return <Button type="button" size="sm" variant="outline" disabled={stopping || !!refusal} title={refusal || undefined} onClick={onStop}>
+    <CircleStop data-icon="inline-start" />{running ? '停止' : '结束会话'}
+  </Button>
 }

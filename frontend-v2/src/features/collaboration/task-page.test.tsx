@@ -491,13 +491,49 @@ it('opens the linked historical run instead of the newest run',async()=>{
 
 const handedToMe = (status: Task['status']) => task({ status, createdBy: 'user-lead', createdByName: '陈默', assignee: { type: 'human', id: 'user-me', displayName: '演示用户' } })
 
-it('keeps 确认完成 and 取消任务 from an assignee, and says who decides', async () => {
+it('keeps 确认完成, 退回待处理 and 取消任务 from an assignee, and says who decides', async () => {
   workspace.role = 'member'
   vi.mocked(api.getTask).mockResolvedValue(handedToMe('review'))
   renderPage()
   expect(await screen.findByRole('button', { name: '确认完成' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '退回待处理' })).toBeDisabled()
   expect(screen.getByRole('button', { name: '取消任务' })).toBeDisabled()
-  expect(screen.getByText('等待 陈默 验收。只有创建人 陈默 或工作区管理员能确认完成或取消任务。')).toBeInTheDocument()
+  expect(screen.getByText('等待 陈默 验收。只有创建人 陈默 或工作区管理员能确认完成、退回或取消任务。')).toBeInTheDocument()
+  // Editing stays with whoever does the work.
+  expect(screen.getByRole('button', { name: '编辑' })).toBeEnabled()
+})
+
+it('lets the creator send work in 待验收 back for rework', async () => {
+  workspace.role = 'member'
+  const askedByMe = (status: Task['status']) => task({ status, createdBy: 'user-me', createdByName: '演示用户', assignee: { type: 'human', id: 'user-doer', displayName: '鲍勃' } })
+  vi.mocked(api.getTask).mockResolvedValue(askedByMe('review'))
+  vi.mocked(api.setTaskStatus).mockResolvedValue(askedByMe('pending'))
+  renderPage()
+  await userEvent.click(await screen.findByRole('button', { name: '退回待处理' }))
+  await waitFor(() => expect(api.setTaskStatus).toHaveBeenCalledWith('tenant', 'task-1', { status: 'pending', version: 1 }))
+})
+
+it('keeps editing, reassigning and stopping from a member with no part in the task, and says who can', async () => {
+  workspace.role = 'member'
+  vi.mocked(api.getTask).mockResolvedValue(task({ status: 'running', createdBy: 'user-lead', createdByName: '陈默',
+    assignee: { type: 'human', id: 'user-doer', displayName: '鲍勃' },
+    activeRun: { id: 'run-1', state: 'running', startedBy: 'user-doer', startedByName: '鲍勃', executorName: 'Claude Code / Sonnet' } }))
+  renderPage()
+  const edit = await screen.findByRole('button', { name: '编辑' })
+  expect(edit).toBeDisabled()
+  expect(edit).toHaveAttribute('title', '只有创建人 陈默、负责人 鲍勃 或工作区管理员能编辑。')
+  expect(screen.getByText('只有创建人 陈默、负责人 鲍勃 或工作区管理员能改派。')).toBeInTheDocument()
+  expect(screen.getByText('只有发起人 鲍勃、创建人 陈默 或工作区管理员能停止这次运行。')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument()
+})
+
+it('lets the creator stop a run on work assigned to someone else', async () => {
+  workspace.role = 'member'
+  vi.mocked(api.getTask).mockResolvedValue(task({ status: 'running', createdBy: 'user-me', createdByName: '演示用户',
+    assignee: { type: 'human', id: 'user-doer', displayName: '鲍勃' },
+    activeRun: { id: 'run-1', state: 'running', startedBy: 'user-doer', startedByName: '鲍勃', executorName: 'Claude Code / Sonnet' } }))
+  renderPage()
+  expect(await screen.findByRole('button', { name: '停止' })).toBeEnabled()
 })
 
 it('leaves an assignee the moves that are theirs', async () => {

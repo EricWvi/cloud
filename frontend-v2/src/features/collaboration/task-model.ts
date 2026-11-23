@@ -34,14 +34,14 @@ export interface TaskAction {
 const ACTIONS: Record<TaskStatus, TaskAction[]> = {
   pending: [{ status: 'running', label: '开始处理' }, { status: 'cancelled', label: '取消任务' }],
   running: [{ status: 'review', label: '提交验收' }, { status: 'cancelled', label: '取消任务' }],
-  review: [{ status: 'done', label: '确认完成' }, { status: 'cancelled', label: '取消任务' }],
+  review: [{ status: 'done', label: '确认完成' }, { status: 'pending', label: '退回待处理' }, { status: 'cancelled', label: '取消任务' }],
   done: [],
   cancelled: [],
 }
 
 /**
  * The moves a person may make by hand. This mirrors the server's `CanTransitionTask`: review is
- * never skipped, and a finished task never reopens.
+ * never skipped, a finished task never reopens, and 待验收 may go back to 待处理 for rework.
  */
 export const taskActions = (status: string): TaskAction[] => ACTIONS[status as TaskStatus] ?? []
 
@@ -74,9 +74,13 @@ export function validateTask(title: string, description: string): Record<string,
  * the same wording everywhere: close the panel and reopen it to read the current task.
  */
 export function taskMessageFor(error: unknown): string {
+  switch (codeOf(error)) {
+    case 'task_closed': return '任务已结束，只能查看，不能再修改。'
+    case 'run_active': return 'Agent 正在执行，等这一轮结束或先停止，再改派。'
+  }
   switch (statusOf(error)) {
     case 401: return '登录已过期，请重新登录。'
-    case 403: return '你不是这个工作区的成员。'
+    case 403: return '只有创建人、负责人或工作区管理员能修改这个任务。'
     case 404: return '任务不存在或你已无权查看。'
     case 409: return '任务已被其他人修改，请关闭后重新打开。'
     case 428: return '缺少版本号，请关闭后重新打开任务。'
@@ -129,8 +133,8 @@ export function taskRunMessageFor(error: unknown): string {
 
 /** A refused manual move: the run's own reason when it owns the status, else the task's. */
 export function taskMoveMessageFor(error: unknown): string {
-  // Only ending a task answers 403 here: a caller outside the workspace gets 404.
-  if (statusOf(error) === 403) return '只有任务创建人或工作区管理员能确认完成或取消任务。'
+  // Only ending a task or sending it back answers 403 here: a caller outside the workspace gets 404.
+  if (statusOf(error) === 403) return '只有任务创建人或工作区管理员能确认完成、退回或取消任务。'
   const message = taskRunMessageFor(error)
   return message === '操作失败，请重试。' ? taskMessageFor(error) : message
 }
@@ -142,6 +146,12 @@ export function taskMoveMessageFor(error: unknown): string {
 export function boardMoveMessageFor(error: unknown): string {
   if (statusOf(error) === 409 && codeOf(error) !== 'run_active' && codeOf(error) !== 'workflow_active') return '任务刚被其他人改过，看板已刷新，请再拖一次。'
   return taskMoveMessageFor(error)
+}
+
+/** A refused stop: only whoever started the run, the task's creator and administrators may stop it. */
+export function stopMessageFor(error: unknown): string {
+  if (statusOf(error) === 403) return '只有运行发起人、任务创建人或工作区管理员能停止这次运行。'
+  return taskRunMessageFor(error)
 }
 
 /** The workflow the demo seeds for 「拆分」; the dialog picks it when the workspace has it. */
@@ -165,9 +175,11 @@ export function decompositionMessageFor(error: unknown): string {
     case 'decomposition_output_required': return serverMessageOf(error) ?? '所选工作流的输出不满足拆分要求，请修改后重新发布。'
     case 'task_closed': return '任务已结束，不能再拆分。'
     case 'subtask_not_decomposable': return '子任务不能再拆分。'
+    case 'task_in_review': return '任务在待验收，不能拆分；退回待处理后再拆。'
     case 'invalid_project': return '任务所属项目不可用。'
     case 'workflow_run_host_unavailable': return '工作流执行服务不可用，请稍后重试。'
   }
+  if (statusOf(error) === 403) return '只有创建人、负责人或工作区管理员能拆分这个任务。'
   return statusOf(error) === 404 ? '任务不存在或你已无权查看。' : '拆分没有启动，请重试。'
 }
 

@@ -22,12 +22,12 @@ import { TaskForm, type TaskDraft } from './task-form'
 import { TaskWorkflowDialog } from './task-workflow-dialog'
 import { TaskWorkflows } from './task-workflows'
 import { statusOf } from '@/lib/api-client'
-import { projectLabel, taskMessageFor, taskMoveMessageFor, taskRunMessageFor, taskStatusLabel } from './task-model'
+import { isTaskFinished, projectLabel, stopMessageFor, taskMessageFor, taskMoveMessageFor, taskRunMessageFor, taskStatusLabel } from './task-model'
 import {
   createTaskComment, getTask, getTaskTimeline, listTaskExecutors, setTaskAssignee, setTaskStatus, startTaskRun, stopTaskRun, updateTask,
   type Task, type TaskAssigneeRef, type TaskComment, type TaskStatusProperty,
 } from './tasks-api/generated'
-import { canCloseTask, canDecompose, runsAgent } from './task-views'
+import { canCloseTask, canDecompose, canManageTask, canStopRun, manageRefusal, runsAgent } from './task-views'
 import { useDecompositions, useMySquadTasks, useWorkspace } from './workspace'
 
 /** Fresh idempotency key for one submission: a retry of the same click reuses it. */
@@ -211,7 +211,7 @@ export default function TaskPage() {
   const stop = useMutation({
     mutationFn: (runId: string) => stopTaskRun(tenantId, taskId, runId),
     onSuccess: async () => { setError(''); await refresh() },
-    onError: e => setError(taskRunMessageFor(e)),
+    onError: e => setError(stopMessageFor(e)),
   })
   const commentKeyRef = useRef<{ signature: string; key: string } | null>(null)
   const comment = useMutation({
@@ -242,16 +242,18 @@ export default function TaskPage() {
     </div>
   }
   const projectList = projects.data?.items ?? []
+  const canManage = canManageTask(task, me.id, role, inSquad)
+  const editRefusal = isTaskFinished(task.status) ? '任务已结束，只能查看。' : canManage ? '' : manageRefusal(task, '编辑')
   return <div className="mc-task-page">
     <header className="mc-task-bar">
       <Link to="/collaboration" className="mc-back" aria-label="返回任务列表"><ChevronLeft size={16} /></Link>
       <span className={`mc-status ${task.status}`}>{taskStatusLabel(task.status)}</span>
       <h2>{task.title}</h2>
-      {canDecompose(task) && <Button type="button" variant="outline" size="sm" onClick={() => setDecomposing(true)} disabled={splitting}
-        title={splitting ? '正在拆分，跑完后才能再拆' : '用工作流把这个任务拆成子任务'}><ListTree data-icon="inline-start" />{splitting ? '拆分中…' : '拆分'}</Button>}
+      {canDecompose(task) && <Button type="button" variant="outline" size="sm" onClick={() => setDecomposing(true)} disabled={splitting || !canManage}
+        title={!canManage ? manageRefusal(task, '拆分') : splitting ? '正在拆分，跑完后才能再拆' : '用工作流把这个任务拆成子任务'}><ListTree data-icon="inline-start" />{splitting ? '拆分中…' : '拆分'}</Button>}
       {(newestRun || selected) && <Button type="button" variant={workspaceShown ? 'secondary' : 'outline'} size="sm" aria-pressed={workspaceShown} onClick={toggleWorkspace}
         title="查看这次运行改了哪些文件"><PanelRight data-icon="inline-start" />工作区</Button>}
-      <Button type="button" variant="outline" size="sm" onClick={() => { setError(''); setEditing(true) }} disabled={save.isPending}><Pencil data-icon="inline-start" />编辑</Button>
+      <Button type="button" variant="outline" size="sm" onClick={() => { setError(''); setEditing(true) }} disabled={save.isPending || !!editRefusal} title={editRefusal || undefined}><Pencil data-icon="inline-start" />编辑</Button>
     </header>
     <WorkspaceNavigationProvider value={workspaceSource ? workspace.navigation : null}>
     <TaskWorkspace panel={workspaceShown && <WorkspacePanel key={workflowRunId ?? agentRunId} source={workspaceSource!}
@@ -291,7 +293,7 @@ export default function TaskPage() {
           }} />}
       </section>
       {!workspaceShown && <aside className="mc-task-side-col" aria-label="任务属性">
-        <TaskDetailView task={task} me={me.id} inSquad={inSquad} canClose={canCloseTask(task, me.id, role)} projectName={projectLabel(projectList, task.projectId)} squads={squads.data?.items ?? []}
+        <TaskDetailView task={task} me={me.id} inSquad={inSquad} canClose={canCloseTask(task, me.id, role)} canManage={canManage} canStop={canStopRun(task, me.id, role)} projectName={projectLabel(projectList, task.projectId)} squads={squads.data?.items ?? []}
           busy={move.isPending || assign.isPending} workflowActive={handlingLive} error={error}
           run={{
             executors: executorList, executorId, onExecutor: setExecutorId, hasRuns: runs.length > 0,
