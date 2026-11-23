@@ -125,13 +125,16 @@ export function IterationNodeFrame({
           : expandedHeight,
       }}
     >
+      {/* The frame ports sit on the header's edges, and the header is raised (z-20) above
+          the region and its members; the ports must stack above it, or the header swallows
+          the pointer and a drag from the port never starts a connection. */}
       <Handle
         type="target"
         position={Position.Left}
         data-workflow-input={id}
         aria-label={t("settings.workflow.connectTo", { name: data.title })}
         className={cn(
-          "workflow-port workflow-port-input !size-2.5 !border-0 !bg-transparent",
+          "workflow-port workflow-port-input z-30 !size-2.5 !border-0 !bg-transparent",
           isInputCandidate && "workflow-port-candidate",
         )}
         style={{ top: WORKFLOW_ITERATION_HEADER_HEIGHT / 2 }}
@@ -142,7 +145,7 @@ export function IterationNodeFrame({
         data-workflow-output={id}
         aria-label={t("settings.workflow.connectFrom", { name: data.title })}
         className={cn(
-          "workflow-port workflow-port-output !size-2.5 !border-0 !bg-transparent",
+          "workflow-port workflow-port-output z-30 !size-2.5 !border-0 !bg-transparent",
           isOutputCandidate && "workflow-port-candidate",
         )}
         style={{ top: WORKFLOW_ITERATION_HEADER_HEIGHT / 2 }}
