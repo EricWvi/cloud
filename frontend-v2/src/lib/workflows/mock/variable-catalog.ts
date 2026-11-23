@@ -57,7 +57,12 @@ function arrayElementType(valueType: string): string {
  * `loopConfig.outputs` and never a `{loop}.output`: outer consumers see those named outputs;
  * body members see the carried loop variables, their in-body upstream products, and every
  * variable visible to the Loop itself (its upstream, e.g. `start.input`). A body's round
- * Start assigns nothing, so it contributes no variables.
+ * Start assigns nothing, so it contributes no variables. An Aggregator inside a body is the
+ * exception: publication types it against the body's own declarations, so it sees only
+ * globals and its in-body upstream products.
+ *
+ * Loop membership is `data.containerId` (the backend refuses a Loop member without it);
+ * Iteration membership is `parentId`.
  */
 export function deriveWorkflowVariableCatalog(
   nodes: Array<Node<WorkflowNodeData, "workflow">>,
@@ -65,19 +70,31 @@ export function deriveWorkflowVariableCatalog(
   consumerNodeId?: string,
   globalVariables: WorkflowGlobalVariable[] = DEFAULT_WORKFLOW_GLOBAL_VARIABLES,
 ): WorkflowVariableCatalogEntry[] {
-  // Container membership: Iteration members by `parentId` (as the frozen graph persists it),
-  // Loop members by `data.containerId` with `parentId` as the legacy fallback.
   const kindById = new Map(nodes.map((node) => [node.id, node.data.kind]));
   const owningContainerOf = (nodeId: string): string | null => {
     const member = nodes.find((node) => node.id === nodeId);
-    const owner = member?.data.containerId ?? member?.parentId;
-    const kind = owner === undefined ? undefined : kindById.get(owner);
-    return kind === "iteration" || kind === "loop" ? owner! : null;
+    if (member === undefined) {
+      return null;
+    }
+    const loopId = member.data.containerId;
+    if (loopId !== undefined) {
+      return kindById.get(loopId) === "loop" ? loopId : null;
+    }
+    const parent = member.parentId;
+    return parent !== undefined && kindById.get(parent) === "iteration"
+      ? parent
+      : null;
   };
   const consumerOwner =
     consumerNodeId === undefined ? null : owningContainerOf(consumerNodeId);
+  const consumerIsAggregator =
+    consumerNodeId !== undefined &&
+    kindById.get(consumerNodeId) === "aggregator";
+  // The Loop whose round pool the consumer reads: loop variables and the Loop's upstream.
   const consumerLoopId =
-    consumerOwner !== null && kindById.get(consumerOwner) === "loop"
+    consumerOwner !== null &&
+    kindById.get(consumerOwner) === "loop" &&
+    !consumerIsAggregator
       ? consumerOwner
       : null;
 
@@ -108,7 +125,9 @@ export function deriveWorkflowVariableCatalog(
         continue;
       }
       // A Loop's round Start only marks the body entry; the engine never assigns its
-      // `input` or declared fields, so offering them would fail every run.
+      // `input` or declared fields, so offering them would fail every run. Like the backend,
+      // any Start carrying `containerId` is a round Start, even when the caller passes only
+      // the body (the Loop panel does).
       if (node.data.containerId !== undefined) {
         continue;
       }

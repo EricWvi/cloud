@@ -381,3 +381,60 @@ describe("deriveWorkflowVariableCatalog loop scope rules", () => {
     ]);
   });
 });
+
+describe("deriveWorkflowVariableCatalog loop body aggregators and membership", () => {
+  const group = createMockWorkflowLoopGroup({
+    sequence: 1,
+    position: { x: 0, y: 0 },
+    locale: "zh-CN",
+  });
+  const [loop, roundStart, loopAgent] = group.nodes as [
+    Node<WorkflowNodeData, "workflow">,
+    Node<WorkflowNodeData, "workflow">,
+    Node<WorkflowNodeData, "workflow">,
+  ];
+  const start = node("start", { kind: "start", title: "Start", description: "" });
+  const aggregator = node(
+    "agg",
+    {
+      kind: "aggregator",
+      title: "Agg",
+      description: "",
+      containerId: loop.id,
+      aggregatorConfig: { variables: [] },
+    },
+    loop.id,
+  );
+  const edges: Edge[] = [
+    { id: "s-l", source: "start", target: loop.id },
+    ...group.edges,
+    { id: "a-g", source: loopAgent.id, target: "agg" },
+  ];
+
+  it("offers a body aggregator only globals and in-body products, as publication types it", () => {
+    const visible = deriveWorkflowVariableCatalog(
+      [start, loop, roundStart, loopAgent, aggregator],
+      edges,
+      "agg",
+      [{ name: "sys.workflow_id", valueType: "string" }],
+    ).map((entry) => entry.selector.join("."));
+    expect(visible).toEqual(["sys.workflow_id", `${loopAgent.id}.output`]);
+  });
+
+  it("treats a node as a Loop member by containerId, not by parentId alone", () => {
+    // A parentId-only child of a Loop is refused by the backend; the catalog does not treat
+    // it as a body member either, so it gets no loop variables.
+    const stray = node(
+      "stray",
+      { kind: "agent", title: "Stray", description: "" },
+      loop.id,
+    );
+    const visible = deriveWorkflowVariableCatalog(
+      [start, loop, roundStart, loopAgent, stray],
+      [...edges, { id: "a-s", source: loopAgent.id, target: "stray" }],
+      "stray",
+      [],
+    ).map((entry) => entry.selector.join("."));
+    expect(visible).not.toContain(`${loop.id}.value`);
+  });
+});
