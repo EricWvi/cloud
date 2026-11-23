@@ -52,6 +52,17 @@ function arrayElementType(valueType: string): string {
  * `item`/`index` round bindings plus their in-region upstream products, but never the
  * iteration's own exposed results; outer consumers see the three exposed variables
  * (`output`, `entries`, `failed_count`) whose types stay fixed across error strategies.
+ *
+ * Loops follow the same shape, matching the engine, which publishes only a Loop's named
+ * `loopConfig.outputs` and never a `{loop}.output`: outer consumers see those named outputs;
+ * body members see the carried loop variables, their in-body upstream products, and every
+ * variable visible to the Loop itself (its upstream, e.g. `start.input`). A body's round
+ * Start assigns nothing, so it contributes no variables. An Aggregator inside a body is the
+ * exception: publication types it against the body's own declarations, so it sees only
+ * globals and its in-body upstream products.
+ *
+ * Loop membership is `data.containerId` (the backend refuses a Loop member without it);
+ * Iteration membership is `parentId`.
  */
 export function deriveWorkflowVariableCatalog(
   nodes: Array<Node<WorkflowNodeData, "workflow">>,
@@ -59,10 +70,46 @@ export function deriveWorkflowVariableCatalog(
   consumerNodeId?: string,
   globalVariables: WorkflowGlobalVariable[] = DEFAULT_WORKFLOW_GLOBAL_VARIABLES,
 ): WorkflowVariableCatalogEntry[] {
-  const visibleProducerIds =
-    consumerNodeId === undefined
-      ? new Set(nodes.map((node) => node.id))
-      : collectVisibleProducerIds(nodes, edges, consumerNodeId);
+  const kindById = new Map(nodes.map((node) => [node.id, node.data.kind]));
+  const owningContainerOf = (nodeId: string): string | null => {
+    const member = nodes.find((node) => node.id === nodeId);
+    if (member === undefined) {
+      return null;
+    }
+    const loopId = member.data.containerId;
+    if (loopId !== undefined) {
+      return kindById.get(loopId) === "loop" ? loopId : null;
+    }
+    const parent = member.parentId;
+    return parent !== undefined && kindById.get(parent) === "iteration"
+      ? parent
+      : null;
+  };
+  const consumerOwner =
+    consumerNodeId === undefined ? null : owningContainerOf(consumerNodeId);
+  const consumerIsAggregator =
+    consumerNodeId !== undefined &&
+    kindById.get(consumerNodeId) === "aggregator";
+  // The Loop whose round pool the consumer reads: loop variables and the Loop's upstream.
+  const consumerLoopId =
+    consumerOwner !== null &&
+    kindById.get(consumerOwner) === "loop" &&
+    !consumerIsAggregator
+      ? consumerOwner
+      : null;
+
+  let visibleProducerIds: Set<string>;
+  if (consumerNodeId === undefined) {
+    visibleProducerIds = new Set(nodes.map((node) => node.id));
+  } else {
+    visibleProducerIds = collectVisibleProducerIds(nodes, edges, consumerNodeId);
+    // A Loop body has no edge from outside: its round pool inherits what the Loop sees.
+    if (consumerLoopId !== null) {
+      for (const id of collectVisibleProducerIds(nodes, edges, consumerLoopId)) {
+        visibleProducerIds.add(id);
+      }
+    }
+  }
   const entries = globalVariables.flatMap(globalVariableCatalogEntry);
 
   // Aggregator outputs are typed by their candidate selectors (backend parse rule: all
@@ -72,20 +119,16 @@ export function deriveWorkflowVariableCatalog(
     globalVariables,
   );
 
-  // Iteration membership: `parentId` containment, as the frozen graph persists it.
-  const iterationIds = new Set(
-    nodes
-      .filter((node) => node.data.kind === "iteration")
-      .map((node) => node.id),
-  );
-  const owningIterationOf = (nodeId: string): string | null => {
-    const parent = nodes.find((node) => node.id === nodeId)?.parentId;
-    return parent !== undefined && iterationIds.has(parent) ? parent : null;
-  };
-
   for (const node of nodes) {
     if (node.data.kind === "start") {
       if (!visibleProducerIds.has(node.id) || node.id === consumerNodeId) {
+        continue;
+      }
+      // A Loop's round Start only marks the body entry; the engine never assigns its
+      // `input` or declared fields, so offering them would fail every run. Like the backend,
+      // any Start carrying `containerId` is a round Start, even when the caller passes only
+      // the body (the Loop panel does).
+      if (node.data.containerId !== undefined) {
         continue;
       }
       // `start.input` is the initial prompt value. It is always declared, even before a run
@@ -112,14 +155,22 @@ export function deriveWorkflowVariableCatalog(
       );
       continue;
     }
+    if (node.data.kind === "loop") {
+      appendLoopVariables(
+        entries,
+        node,
+        consumerNodeId,
+        consumerLoopId,
+        visibleProducerIds,
+      );
+      continue;
+    }
     if (!visibleProducerIds.has(node.id) || node.id === consumerNodeId) {
       continue;
     }
-    // A region member's products stay region-visible only: the consumer sees them when it
-    // shares the same region, never from outside.
-    const consumerOwner =
-      consumerNodeId === undefined ? null : owningIterationOf(consumerNodeId);
-    const producerOwner = owningIterationOf(node.id);
+    // A container member's products stay container-visible only: the consumer sees them
+    // when it shares the same container, never from outside.
+    const producerOwner = owningContainerOf(node.id);
     if (
       producerOwner !== null &&
       consumerOwner !== producerOwner &&
@@ -167,12 +218,40 @@ export function deriveWorkflowVariableCatalog(
       case "tool":
       case "junction":
       case "human":
-      case "loop":
       case "subflow":
         break;
     }
   }
   return entries;
+}
+
+/**
+ * Adds one Loop's variables by consumer scope: carried loop variables for its body members,
+ * named outputs for visible outer consumers. Named outputs are typed `any`, as the backend
+ * declares them, so aggregator candidate typing agrees with publication.
+ */
+function appendLoopVariables(
+  entries: WorkflowVariableCatalogEntry[],
+  node: Node<WorkflowNodeData, "workflow">,
+  consumerNodeId: string | undefined,
+  consumerLoopId: string | null,
+  visibleProducerIds: Set<string>,
+): void {
+  const config = node.data.loopConfig;
+  if (consumerLoopId === node.id) {
+    for (const variable of config?.variables ?? []) {
+      entries.push(nodeVariable(node, variable.name, variable.valueType));
+    }
+    return;
+  }
+  if (!visibleProducerIds.has(node.id) || node.id === consumerNodeId) {
+    return;
+  }
+  for (const output of config?.outputs ?? []) {
+    if (output.name.trim() !== "") {
+      entries.push(nodeVariable(node, output.name, "any"));
+    }
+  }
 }
 
 /** Adds one iteration node's round bindings and exposed results by consumer scope. */
@@ -368,6 +447,10 @@ function selectorDeclaredType(
   }
   if (owner.data.kind === "aggregator") {
     return aggregatorOutputTypes.get(nodeId) ?? "any";
+  }
+  if (owner.data.kind === "loop") {
+    // The backend declares named Loop outputs as `any`; `{loop}.output` does not exist.
+    return "any";
   }
   if (owner.data.kind === "iteration") {
     const config = owner.data.iterationConfig;

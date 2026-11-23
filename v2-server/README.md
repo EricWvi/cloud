@@ -620,9 +620,11 @@ not execute these kinds: `crates/application/src/workflow_run/engine/node_type.r
 
 写操作按定义行加锁串行：发布在同一事务里读草稿、校验并冻结，避免校验过的图和冻结的图不是同一份。请求体限制 6 MiB、拒绝未知字段；响应错误沿用 Cloud 的 `{code, params, requestId}`，领域错误码与 desktop 一致（如 `workflow_name_conflict`、`workflow_version_already_exists`、`workflow_cannot_delete_active_version`、`workflow_run_graph_parse`）。`workflow_name_conflict` 只用于手动创建或重命名工作流；工作流插件导入遇到同名定义会自动改名，不返回该错误。
 
+发布被图校验拒绝时，`400 workflow_run_graph_parse` 的 `params` 带上领域给出的 `nodeId`、`field` 和 `reason`（领域能定位时才有前两项；`reason` 是关于提交文档的英文诊断，不含主机或数据库细节），编辑器据此在发布对话框里点名被拒的节点。
+
 图规则不属于 HTTP 层：`server.Options.AnalyzeWorkflow` 提供草稿分析，`Options.ValidateWorkflow` 提供发布前的可执行性校验，两者由工作流领域注入；未注入时定义读写照常，分析和发布返回 `503 workflow_domain_unavailable`，不会把未校验的文档伪装成可运行版本。
 
-与 desktop 的明确差异：v2 以租户代替 desktop 的单一 `local` 命名空间，`namespace` 恒为 `local`；重名改为由数据库唯一索引拒绝并映射为 409（desktop 并发重名可能返回 500）；发布校验放在事务内（desktop 存在校验与冻结之间的 TOCTOU）；软删记录 `deleted_at`（desktop 丢弃快照删除时间）；版本列表在同一毫秒内用 id 兜底排序；名称唯一性用 PostgreSQL `lower()`，比 desktop 的 ASCII `NOCASE` 范围更宽。
+与 desktop 的明确差异：v2 以租户代替 desktop 的单一 `local` 命名空间，`namespace` 恒为 `local`；重名改为由数据库唯一索引拒绝并映射为 409（desktop 并发重名可能返回 500）；发布校验放在事务内（desktop 存在校验与冻结之间的 TOCTOU）；软删记录 `deleted_at`（desktop 丢弃快照删除时间）；版本列表在同一毫秒内用 id 兜底排序；名称唯一性用 PostgreSQL `lower()`，比 desktop 的 ASCII `NOCASE` 范围更宽；发布另外拒绝引擎永远不会赋值的 Loop 引用（`invalid_loop_reference`）：Loop 外引用它的命名输出以外的变量（如旧图里的 `{loop}.output`），循环体内引用 Loop 的循环变量以外的变量，或引用轮次 Start 的变量；Loop 自己的配置同样检查（`initial` 读 Loop 开始前的变量池，`feedback`、`until`、`outputs` 读本轮变量池），循环体内的变量聚合器只能选循环体内产生的变量或全局变量。名字恰好以 Loop 或轮次 Start 的 ID 开头的全局变量按全局变量解析，不受影响。desktop 接受这类图，运行到该节点才以变量未赋值失败。
 
 ### 工作流运行历史
 

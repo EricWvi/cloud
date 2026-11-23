@@ -122,9 +122,79 @@ describe("workflow page", () => {
     await user.click(within(dialog).getByRole("button", { name: "发布" }));
 
     expect(
-      await screen.findByText("服务端暂时不能检查和发布工作流，草稿已保存。"),
+      await within(dialog).findByText("发布失败：服务端暂时不能检查和发布工作流，草稿已保存。"),
     ).toBeInTheDocument();
     expect(screen.getByText("暂未发布")).toBeInTheDocument();
+  });
+
+  it("keeps the publish dialog open on a graph refusal and names the refused node", async () => {
+    const user = userEvent.setup();
+    await renderPage();
+    await createWorkflow(user, "旧引用");
+    await screen.findByDisplayValue("旧引用");
+    const workflowId = server.backend.list().workflows.find((w) => w.name === "旧引用")!.id;
+    const graph = JSON.parse(server.backend.get({ workflowId }).draft.graph) as {
+      nodes: { id: string; data: { title: string } }[];
+    };
+    const [first] = graph.nodes;
+    server.refuse = {
+      match: /POST .*\/publish$/,
+      status: 400,
+      data: {
+        code: "workflow_run_graph_parse",
+        params: { nodeId: first!.id, field: "selector", reason: "Loop loop-1 publishes only its named outputs (result)" },
+        requestId: "r",
+      },
+    };
+
+    await user.click(await screen.findByRole("button", { name: "发布" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "发布工作流" });
+    await user.click(within(dialog).getByRole("button", { name: "发布" }));
+
+    expect(
+      await within(dialog).findByText(
+        `发布被拒绝：节点「${first!.data.title}」的变量引用没有通过发布校验，草稿已保存。`,
+      ),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText("Loop loop-1 publishes only its named outputs (result)")).toBeInTheDocument();
+    expect(screen.getByRole("alertdialog", { name: "发布工作流" })).toBeInTheDocument();
+    expect(screen.getByText("暂未发布")).toBeInTheDocument();
+  });
+
+  it("publishes once and keeps the dialog until a pending publish settles", async () => {
+    const user = userEvent.setup();
+    await renderPage();
+    await createWorkflow(user, "慢发布");
+    await screen.findByDisplayValue("慢发布");
+    let release!: () => void;
+    server.hold = { match: /POST .*\/publish$/, until: new Promise((resolve) => (release = resolve)) };
+    server.refuse = {
+      match: /POST .*\/publish$/,
+      status: 409,
+      data: { code: "workflow_version_already_exists", params: {}, requestId: "r" },
+    };
+
+    await user.click(await screen.findByRole("button", { name: "发布" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "发布工作流" });
+    const version = within(dialog).getByRole("textbox");
+    await user.type(version, "v1");
+    await user.click(within(dialog).getByRole("button", { name: "发布" }));
+    // A second submit while the first is in flight, by Enter so a disabled button cannot hide it.
+    fireEvent.keyDown(version, { key: "Enter" });
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "取消" })).toBeDisabled());
+    expect(within(dialog).getByRole("button", { name: "发布" })).toBeDisabled();
+    // Escape from inside the dialog, where it would otherwise dismiss it.
+    await user.click(version);
+    await user.keyboard("{Escape}");
+    // Base UI keeps a closing popup mounted for its exit, marking it `data-closed`.
+    expect(dialog).toHaveAttribute("data-open");
+    expect(dialog).not.toHaveAttribute("data-closed");
+
+    release();
+    expect(await within(dialog).findByText("发布失败：该工作流版本已存在。")).toBeInTheDocument();
+    expect(dialog).toHaveAttribute("data-open");
+    expect(server.seen.filter((request) => /POST .*\/publish$/.test(request))).toHaveLength(1);
+    expect(within(dialog).getByRole("button", { name: "取消" })).toBeEnabled();
   });
 
   it("offers once to import the workflows this browser kept", async () => {

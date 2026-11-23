@@ -213,7 +213,14 @@ func workflowFault(w http.ResponseWriter, err error, op, draftSource string) {
 	case errors.Is(err, store.ErrWorkflowActiveRuns):
 		fault(w, http.StatusBadRequest, "workflow_active_runs")
 	case errors.Is(err, store.ErrWorkflowDocumentInvalid):
-		fault(w, http.StatusBadRequest, "workflow_run_graph_parse")
+		// The domain's refusal names the node and field when it knows them; the HTTP layer
+		// reads them through this method instead of importing the domain package.
+		var refusal interface{ FaultParams() map[string]any }
+		if errors.As(err, &refusal) {
+			faultWithParams(w, http.StatusBadRequest, "workflow_run_graph_parse", refusal.FaultParams())
+		} else {
+			fault(w, http.StatusBadRequest, "workflow_run_graph_parse")
+		}
 	case errors.Is(err, errWorkflowDomainUnavailable):
 		fault(w, http.StatusServiceUnavailable, "workflow_domain_unavailable")
 	default:

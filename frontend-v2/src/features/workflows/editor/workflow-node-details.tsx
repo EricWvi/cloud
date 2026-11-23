@@ -1023,8 +1023,9 @@ function LoopNodeDetails({
 }: WorkflowNodeDetailsLayoutProps) {
   const { t } = useTranslation();
   const loopConfig = node.data.loopConfig;
+  // Loop membership is `data.containerId`, as in the variable catalog and the backend.
   const childNodes = graphNodes.filter(
-    (candidate) => candidate.parentId === node.id,
+    (candidate) => candidate.data.containerId === node.id,
   );
   const conditionCatalog: WorkflowVariableCatalogEntry[] = [
     ...variableCatalog.filter((entry) => entry.sourceNodeId !== node.id),

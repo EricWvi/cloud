@@ -130,7 +130,11 @@ func validateCondition(c reader, n *node, loop bool) {
 			n.bindings = append(n.bindings, parts)
 		}
 		if text, ok := rule.value["value"].(string); ok {
-			n.templates = append(n.templates, text)
+			field := "cases"
+			if loop {
+				field = "loopConfig.until"
+			}
+			n.templates = append(n.templates, templateRef{text: text, field: field})
 		}
 	}
 }

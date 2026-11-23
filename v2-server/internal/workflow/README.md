@@ -19,6 +19,9 @@ err = workflow.ValidateWorkflow(graph)
 `ValidateWorkflow` 继续检查可达图的节点配置、DAG、Start 和全局声明、Aggregator / Iteration 派生类型、
 Loop 配置及作用域，以及对被排除节点的变量引用。备用节点配置不参与检查，但无效身份、边和归属不能被过滤隐藏。
 已知的历史 `prompt` / `tool` 类型沿用 desktop 的可解析行为；解析通过不代表运行时支持这些节点。
+另外，`ValidateWorkflow` 比 desktop 多拒绝一类引擎永远不会赋值的 Loop 引用（`invalid_loop_reference`，指向引用它的节点）：
+Loop 外（含 Loop 自己的 `initial`）只能读命名输出（没有 `{loop}.output`），循环体内和 Loop 的 `feedback`、`until`、`outputs` 只能读本 Loop 的循环变量，
+轮次 Start 不提供变量，循环体内的 Aggregator 只能选循环体内产生的变量（与 `validateDeclarations` 的循环体类型表一致）。错误的 `field` 指出引用所在的配置项，如 `agentConfig.prompt`、`cases`、`loopConfig.until`。
 
 发布边界对应 `WorkflowGraph::parse`，启动边界另外调用 `validate_executable_graph`。
 例如缺少 Start 的平面图、未指定本机可用执行器的 Agent 仍可能通过发布校验。
@@ -26,6 +29,7 @@ Loop 配置及作用域，以及对被排除节点的变量引用。备用节点
 
 装配层将 `Analysis` 映射成 HTTP 传输类型，`ValidateWorkflow` 可直接作为回调传入。
 失败返回 `*ValidationError`，包含领域分类 `Code`、可选的 `NodeID`、`Field` 和 `Reason`。
+`FaultParams` 把后三项交给 HTTP 层作为 `workflow_run_graph_parse` 的 `params`，HTTP 层不必导入本包。
 HTTP 错误码由适配层映射；诊断措辞不承诺逐字匹配 desktop。
 
 ## 行为依据与测试
@@ -41,6 +45,8 @@ HTTP 错误码由适配层映射；诊断措辞不承诺逐字匹配 desktop。
 | `document_test.go` | 编排投影、无效结构、未知类型、备用节点重新接入、无效引用、发布与启动校验边界 |
 | `config_test.go` | Start / 全局声明、Agent 策略和 schema、Condition / Output 历史格式、Aggregator 拓扑及类型 |
 | `container_test.go` | Loop 轮次上限、携带值与可见性；Iteration 归属、输入 / 收集类型及边界 |
+| `loop_references_test.go` | Loop 外只读命名输出、循环体内只读循环变量、轮次 Start 无变量；Loop 自身的 `initial` / `feedback` / `until` / `outputs`、循环体内聚合器、同名全局变量；错误指向引用节点和字段 |
+| `loop_declarations_internal_test.go` | 发布期静态类型表不声明 `{loop}.output`，只声明命名输出 |
 | `testdata/spare-chain.json`、`testdata/iteration.json` | 改编自 desktop `execution_document/tests.rs` |
 | `testdata/loop.json` | 改编自 desktop `loop_graph/tests.rs` |
 | `condition_test.go` | Condition 的 case 顺序、空 case、and/or、各运算符、比较值模板与失败（改编自 desktop `condition.rs`） |
