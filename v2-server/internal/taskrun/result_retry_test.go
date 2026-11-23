@@ -28,6 +28,11 @@ type resultStore struct {
 	endRun      func(context.Context, string, string) error
 }
 
+// TenantAccess admits the caller as the workspace owner, so a Stop reaches the path under test.
+func (s resultStore) TenantAccess(_ context.Context, tenant, user string) (store.Access, error) {
+	return store.Access{TenantID: tenant, UserID: user, Role: store.RoleOwner}, nil
+}
+
 func (s resultStore) Task(ctx context.Context, tenant, id string) (store.Task, error) {
 	return s.task(ctx, tenant, id)
 }

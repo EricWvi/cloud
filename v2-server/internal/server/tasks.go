@@ -19,9 +19,9 @@ type taskStore interface {
 	Tasks(context.Context, string) ([]store.Task, error)
 	Task(context.Context, string, string) (store.Task, error)
 	CreateTask(context.Context, string, string, store.TaskInput) (store.Task, error)
-	UpdateTask(context.Context, string, string, store.TaskInput) (store.Task, error)
+	UpdateTask(context.Context, store.Access, string, store.TaskInput) (store.Task, error)
 	SetTaskStatus(context.Context, store.Access, string, string, int64) (store.Task, error)
-	SetTaskAssignee(context.Context, string, string, string, *store.TaskAssigneeRef, int64) (store.Task, error)
+	SetTaskAssignee(context.Context, store.Access, string, *store.TaskAssigneeRef, int64) (store.Task, error)
 }
 
 // taskUUID matches the ids this server mints for tasks; anything else cannot exist.
@@ -72,6 +72,8 @@ func taskFault(w http.ResponseWriter, e error) bool {
 		fault(w, http.StatusConflict, "run_active")
 	case errors.Is(e, store.ErrWorkflowActive):
 		fault(w, http.StatusConflict, "workflow_active")
+	case errors.Is(e, store.ErrTaskClosed):
+		fault(w, http.StatusConflict, "task_closed")
 	case errors.Is(e, store.ErrInvalidProject):
 		fault(w, http.StatusBadRequest, "invalid_project")
 	case errors.Is(e, store.ErrInvalidAssignee), errors.Is(e, store.ErrUserUnavailable),
@@ -200,7 +202,7 @@ func (h *handler) getTask(w http.ResponseWriter, r *http.Request, a access) {
 }
 
 func (h *handler) updateTask(w http.ResponseWriter, r *http.Request, a access) {
-	s, tenant, id, ok := h.taskScope(w, r, a)
+	s, _, id, ok := h.taskScope(w, r, a)
 	if !ok {
 		return
 	}
@@ -222,7 +224,7 @@ func (h *handler) updateTask(w http.ResponseWriter, r *http.Request, a access) {
 		ProjectID:   req.ProjectID,
 		Version:     req.Version,
 	}
-	task, e := s.UpdateTask(r.Context(), tenant, id, in)
+	task, e := s.UpdateTask(r.Context(), a.Access, id, in)
 	if e != nil {
 		if taskFault(w, e) {
 			return
@@ -266,7 +268,7 @@ func (h *handler) setTaskStatus(w http.ResponseWriter, r *http.Request, a access
 // setTaskAssignee replaces or clears the assignee. An explicit null clears it; a missing field is
 // a malformed request, so a client bug cannot silently unassign work.
 func (h *handler) setTaskAssignee(w http.ResponseWriter, r *http.Request, a access) {
-	s, tenant, id, ok := h.taskScope(w, r, a)
+	s, _, id, ok := h.taskScope(w, r, a)
 	if !ok {
 		return
 	}
@@ -291,7 +293,7 @@ func (h *handler) setTaskAssignee(w http.ResponseWriter, r *http.Request, a acce
 		}
 		ref = validAssigneeRef(&in)
 	}
-	task, e := s.SetTaskAssignee(r.Context(), tenant, id, a.UserID, ref, req.Version)
+	task, e := s.SetTaskAssignee(r.Context(), a.Access, id, ref, req.Version)
 	if e != nil {
 		if taskFault(w, e) {
 			return

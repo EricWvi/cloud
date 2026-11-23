@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/wanglongan587/cloud/v2-server/internal/store"
+	"github.com/wanglongan587/cloud/v2-server/internal/store/storetest"
 	"github.com/wanglongan587/cloud/v2-server/internal/taskworkflow"
 )
 
@@ -35,12 +36,12 @@ func TestTaskWorkflowEditsPreserveSettlement(t *testing.T) {
 			}
 			switch tc.edit {
 			case "describe":
-				if _, err := f.store.UpdateTask(f.ctx, f.tenant, task.ID, store.TaskInput{Title: cur.Title, Description: "clarified while it runs", ProjectID: cur.ProjectID, Version: cur.Version}); err != nil {
+				if _, err := f.store.UpdateTask(f.ctx, storetest.Access(t, f.store, f.tenant, user), task.ID, store.TaskInput{Title: cur.Title, Description: "clarified while it runs", ProjectID: cur.ProjectID, Version: cur.Version}); err != nil {
 					t.Fatalf("edit refused: %v", err)
 				}
 			case "reassign":
 				other := f.login(t, "other", "member")
-				if _, err := f.store.SetTaskAssignee(f.ctx, f.tenant, task.ID, "", &store.TaskAssigneeRef{Type: "human", ID: other}, cur.Version); err != nil {
+				if _, err := f.store.SetTaskAssignee(f.ctx, storetest.Access(t, f.store, f.tenant, user), task.ID, &store.TaskAssigneeRef{Type: "human", ID: other}, cur.Version); err != nil {
 					t.Fatalf("reassign refused: %v", err)
 				}
 			}
@@ -63,7 +64,7 @@ func TestTaskWorkflowEditsPreserveSettlement(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			if _, e = f.store.UpdateTask(f.ctx, f.tenant, agentTask.ID, store.TaskInput{Title: running.Title, Description: "clarified", ProjectID: running.ProjectID, Version: running.Version}); e != nil {
+			if _, e = f.store.UpdateTask(f.ctx, storetest.Access(t, f.store, f.tenant, user), agentTask.ID, store.TaskInput{Title: running.Title, Description: "clarified", ProjectID: running.ProjectID, Version: running.Version}); e != nil {
 				t.Fatal(e)
 			}
 			agentResult, e := f.store.TransitionTaskStatus(f.ctx, f.tenant, agentTask.ID, "running", tc.want)
@@ -92,7 +93,7 @@ func TestTaskWorkflowEditDuringPrepare(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				_, err = f.store.UpdateTask(ctx, f.tenant, task.ID, store.TaskInput{Title: cur.Title, Description: "edited", ProjectID: cur.ProjectID, Version: cur.Version})
+				_, err = f.store.UpdateTask(ctx, storetest.Access(t, f.store, f.tenant, user), task.ID, store.TaskInput{Title: cur.Title, Description: "edited", ProjectID: cur.ProjectID, Version: cur.Version})
 				if err != nil {
 					return err
 				}

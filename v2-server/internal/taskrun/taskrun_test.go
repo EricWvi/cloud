@@ -406,19 +406,28 @@ func TestOnlyTheStarterFollowsUp(t *testing.T) {
 func TestStopEndsTheRunAndReturnsTheTask(t *testing.T) {
 	f := newFixture(t)
 	task := f.task(t, opencode)
-	run, e := f.host.Start(f.ctx, f.owner, task.ID, "start", taskrun.StartInput{})
+	run, e := f.host.Start(f.ctx, f.member, task.ID, "start", taskrun.StartInput{})
 	if e != nil {
 		t.Fatal(e)
 	}
-	// Any member can stop it; the session is still read and cancelled under the starter's scope.
-	stopped, e := f.host.Stop(f.ctx, f.member, task.ID, run.ID)
+	// A member who neither started the run nor created the task cannot stop it.
+	token := storetest.SignIn(t, f.store, "task-bystander", "卡萝", store.RoleMember)
+	bystander, e := f.store.SessionUser(f.ctx, token)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e := f.host.Stop(f.ctx, execution.Scope{TenantID: f.tenant, UserID: bystander.ID}, task.ID, run.ID); !errors.Is(e, store.ErrForbidden) {
+		t.Fatalf("bystander stop = %v, want forbidden", e)
+	}
+	// The task's creator can; the session is still read and cancelled under the starter's scope.
+	stopped, e := f.host.Stop(f.ctx, f.owner, task.ID, run.ID)
 	if e != nil || stopped.State != store.TaskRunEnded || stopped.EndReason != store.TaskRunStopped || stopped.LastResult != "cancelled" {
 		t.Fatalf("stopped = %+v %v", stopped, e)
 	}
 	if got := f.await(t, task.ID, store.TaskPending); got.ActiveRun != nil {
 		t.Fatalf("task after stop = %+v", got)
 	}
-	if _, e := f.host.Stop(f.ctx, f.member, task.ID, run.ID); !errors.Is(e, taskrun.ErrNoLiveRun) {
+	if _, e := f.host.Stop(f.ctx, f.owner, task.ID, run.ID); !errors.Is(e, taskrun.ErrNoLiveRun) {
 		t.Fatalf("second stop = %v", e)
 	}
 }
@@ -430,18 +439,18 @@ func TestStopKeepsTheRunWhenItsSessionOutlivesTheTurn(t *testing.T) {
 	f := newFixture(t)
 	f.port.keepOnCancel = true
 	task := f.task(t, opencode)
-	run, e := f.host.Start(f.ctx, f.owner, task.ID, "start", taskrun.StartInput{})
+	run, e := f.host.Start(f.ctx, f.member, task.ID, "start", taskrun.StartInput{})
 	if e != nil {
 		t.Fatal(e)
 	}
-	stopped, e := f.host.Stop(f.ctx, f.member, task.ID, run.ID)
+	stopped, e := f.host.Stop(f.ctx, f.owner, task.ID, run.ID)
 	if e != nil || !stopped.Live() || stopped.TurnActive() || stopped.EndReason != "" || stopped.LastResult != "cancelled" {
 		t.Fatalf("stopped = %+v %v", stopped, e)
 	}
 	if got := f.await(t, task.ID, store.TaskPending); got.ActiveRun == nil || got.ActiveRun.ID != run.ID {
 		t.Fatalf("task after a kept stop = %+v", got)
 	}
-	follow, e := f.host.Comment(f.ctx, f.owner, task.ID, "follow", taskrun.CommentInput{Body: "继续", ToAgent: true})
+	follow, e := f.host.Comment(f.ctx, f.member, task.ID, "follow", taskrun.CommentInput{Body: "继续", ToAgent: true})
 	if e != nil || follow.RunID != run.ID {
 		t.Fatalf("follow-up after the stop = %+v %v", follow, e)
 	}
@@ -452,19 +461,19 @@ func TestStopKeepsTheRunWhenItsSessionOutlivesTheTurn(t *testing.T) {
 	// Stopping the run's idle session ends it.
 	f.port.finish(t, again.LastTurnID, execution.StatusCompleted)
 	f.await(t, task.ID, store.TaskReview)
-	if ended, e := f.host.Stop(f.ctx, f.member, task.ID, run.ID); e != nil || ended.State != store.TaskRunEnded || ended.EndReason != store.TaskRunStopped {
+	if ended, e := f.host.Stop(f.ctx, f.owner, task.ID, run.ID); e != nil || ended.State != store.TaskRunEnded || ended.EndReason != store.TaskRunStopped {
 		t.Fatalf("stop of the idle run = %+v %v", ended, e)
 	}
 }
 
-// Two members stop the same running turn at once and the session outlives the stop: the second
+// Two stops of the same running turn arrive at once and the session outlives the stop: the second
 // Stop finds the turn it was sent for already stopped and leaves the idle run alone, instead of
 // ending it as a Stop of the idle run would.
 func TestConcurrentStopsOfAKeptTurnKeepTheRun(t *testing.T) {
 	f := newFixture(t)
 	f.port.keepOnCancel = true
 	task := f.task(t, opencode)
-	run, e := f.host.Start(f.ctx, f.owner, task.ID, "start", taskrun.StartInput{})
+	run, e := f.host.Start(f.ctx, f.member, task.ID, "start", taskrun.StartInput{})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -474,7 +483,7 @@ func TestConcurrentStopsOfAKeptTurnKeepTheRun(t *testing.T) {
 	stopped := make(chan error, 2)
 	for range 2 {
 		go func() {
-			_, e := f.host.Stop(f.ctx, f.member, task.ID, run.ID)
+			_, e := f.host.Stop(f.ctx, f.owner, task.ID, run.ID)
 			stopped <- e
 		}()
 	}
@@ -498,7 +507,7 @@ func TestALateStopDoesNotStopTheNextTurn(t *testing.T) {
 	f := newFixture(t)
 	f.port.keepOnCancel = true
 	task := f.task(t, opencode)
-	run, e := f.host.Start(f.ctx, f.owner, task.ID, "start", taskrun.StartInput{})
+	run, e := f.host.Start(f.ctx, f.member, task.ID, "start", taskrun.StartInput{})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -512,14 +521,14 @@ func TestALateStopDoesNotStopTheNextTurn(t *testing.T) {
 	})
 	late := make(chan error, 1)
 	go func() {
-		_, e := f.host.Stop(f.ctx, f.member, task.ID, run.ID)
+		_, e := f.host.Stop(f.ctx, f.owner, task.ID, run.ID)
 		late <- e
 	}()
 	<-seen
-	if _, e := f.host.Stop(f.ctx, f.member, task.ID, run.ID); e != nil {
+	if _, e := f.host.Stop(f.ctx, f.owner, task.ID, run.ID); e != nil {
 		t.Fatal(e)
 	}
-	follow, e := f.host.Comment(f.ctx, f.owner, task.ID, "follow", taskrun.CommentInput{Body: "继续", ToAgent: true})
+	follow, e := f.host.Comment(f.ctx, f.member, task.ID, "follow", taskrun.CommentInput{Body: "继续", ToAgent: true})
 	if e != nil || follow.RunID != run.ID {
 		t.Fatalf("follow-up after the kept stop = %+v %v", follow, e)
 	}

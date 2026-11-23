@@ -38,6 +38,9 @@ var (
 	ErrTaskClosed = errors.New("task closed")
 	// ErrSubtask reports a decomposition of a subtask: only one level exists.
 	ErrSubtask = errors.New("subtask cannot be decomposed")
+	// ErrTaskInReview reports a decomposition of a task in 待验收: a task is split only while it is
+	// still being worked (待处理 or 进行中).
+	ErrTaskInReview = errors.New("task in review")
 )
 
 // Limits on what a run's output may become: the task routes' title and description limits, and a
@@ -51,6 +54,7 @@ const (
 // Store is the persistence a Host needs; *store.Store implements it.
 type Store interface {
 	Task(ctx context.Context, tenant, id string) (store.Task, error)
+	InSquad(ctx context.Context, tenant, squad, user string) (bool, error)
 	PublishedWorkflowSnapshot(ctx context.Context, tenant, workflowID string) (store.WorkflowSnapshot, error)
 	CreateWorkflowRun(ctx context.Context, tenant, workflowID, snapshotID string, in store.WorkflowRunInput) (store.WorkflowRun, error)
 	CancelWorkflowRun(ctx context.Context, tenant, runID string) (store.WorkflowRun, error)
@@ -119,10 +123,18 @@ func (h *Host) lock(taskID string) func() {
 // Start runs the workflow over the task as the caller and returns the running decomposition. The
 // same key returns the decomposition it already started. A published snapshot that fails
 // CanDecompose is rejected before any run is created. A run the workflow host refuses to start
-// fails the decomposition at once, with the reason, rather than leaving it running.
-func (h *Host) Start(ctx context.Context, tenant, user, taskID, workflowID, key string) (store.TaskDecomposition, error) {
+// fails the decomposition at once, with the reason, rather than leaving it running. Only
+// store.CanManageTask may split a task (store.ErrForbidden otherwise).
+func (h *Host) Start(ctx context.Context, a store.Access, taskID, workflowID, key string) (store.TaskDecomposition, error) {
+	tenant, user := a.TenantID, a.UserID
 	task, e := h.store.Task(ctx, tenant, taskID)
 	if e != nil {
+		return store.TaskDecomposition{}, e
+	}
+	if ok, e := store.CanManageTask(ctx, a, task, h.store.InSquad); e != nil || !ok {
+		if e == nil {
+			e = store.ErrForbidden
+		}
 		return store.TaskDecomposition{}, e
 	}
 	defer h.lock(taskID)()
@@ -132,8 +144,10 @@ func (h *Host) Start(ctx context.Context, tenant, user, taskID, workflowID, key 
 		return d, e
 	}
 	switch {
-	case task.Status == store.TaskDone || task.Status == store.TaskCancelled:
+	case store.TaskFinished(task):
 		return store.TaskDecomposition{}, ErrTaskClosed
+	case task.Status == store.TaskReview:
+		return store.TaskDecomposition{}, ErrTaskInReview
 	case task.ParentID != nil:
 		return store.TaskDecomposition{}, ErrSubtask
 	}
