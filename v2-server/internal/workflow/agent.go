@@ -13,7 +13,7 @@ func validateAgent(c reader, n *node) {
 		n.interactive = c.boolean("interactive")
 	}
 	validateCompletion(c)
-	n.templates = append(n.templates, c.str("prompt"))
+	n.templates = append(n.templates, templateRef{text: c.str("prompt"), field: "agentConfig.prompt"})
 	for _, skill := range c.elements("skills") {
 		skill.str("skillId")
 		if skill.value["enabled"] != nil {

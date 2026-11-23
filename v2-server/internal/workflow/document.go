@@ -16,7 +16,7 @@ type node struct {
 	container       bool
 	raw, data       object
 	selectors       [][]string
-	templates       []string
+	templates       []templateRef
 	bindings        [][]string // Condition/Output bindings, subject to Loop visibility.
 	aggregator      [][]string
 	iterator        []string
@@ -27,6 +27,11 @@ type node struct {
 	structured      bool
 	interactive     bool
 }
+
+// templateRef is one authored `{{#node.variable#}}` template and the data field it came from,
+// so a refusal can point the author at the prompt, the branch condition or the Loop's end
+// condition rather than at a generic "template".
+type templateRef struct{ text, field string }
 
 type edge struct {
 	source, target string
