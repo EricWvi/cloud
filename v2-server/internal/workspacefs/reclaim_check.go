@@ -72,8 +72,11 @@ type ReclaimInspection struct {
 	// GitIdentity digests the actual Git state behind Git (stash entries, ref targets, HEAD,
 	// nested repositories), so a revision changes when that state does even if the counts do not.
 	GitIdentity string
-	// GitIdentityComplete is false when a nested repository was too large to digest in full: the
-	// identity then cannot vouch for what discarding the checkout would drop.
+	// GitIdentityComplete is false when the identity could not bind every byte a discard would
+	// delete: a size or entry limit, a special file, a failed read, a pointer leading outside the
+	// checkout or not resolving, or a symlink, special file, or objects/info/alternates inside a
+	// nested Git directory. The identity then cannot vouch for what discarding the checkout would
+	// drop, so a discard is refused.
 	GitIdentityComplete bool
 	// Ignored reports files the ignore rules (.gitignore and .git/info/exclude) leave out of
 	// every delivery, not counting the skills Ora materialized.
@@ -247,6 +250,11 @@ func (s *DeliveryFS) gitState(ctx context.Context, st *staged, target string) (G
 // delivery's object limit. Beyond either the digest is incomplete.
 const maxNestedEntries = 100000
 
+// alternatesSuffix names the file a repository uses to keep its objects elsewhere. One at any
+// depth inside a Git directory cannot be bound; a Git directory that happens to be called like
+// one is fine, which is why the path before it must also lie inside the Git directories.
+const alternatesSuffix = "/objects/info/alternates"
+
 // gitIdentity digests the actual bytes of everything Git-related that a discard would delete and
 // no delivery carries: the checkout repository's refs (name, target, peeled target), HEAD, stash
 // reflog entries and index; and for every nested repository its whole subtree (working tree and
@@ -256,8 +264,9 @@ const maxNestedEntries = 100000
 //
 // complete reports that every such byte was bound. It is false, and stays false, when anything
 // could not be: a byte or entry limit, a special file, a read that failed, a pointer leading out
-// of the checkout or not resolving, or any symlink or objects/info/alternates inside a nested Git
-// directory (including .git/modules entries and resolved Git directories). A discard is then
+// of the checkout or not resolving, or any symlink, special file, or objects/info/alternates at
+// any depth inside a nested Git directory (including .git/modules entries and resolved Git
+// directories). A discard is then
 // refused, since the revision cannot prove the person saw what would be deleted. Files are read
 // without Git and without following links: an Lstat must show a regular file, the open is
 // O_NOFOLLOW|O_NONBLOCK and an fstat must confirm the same file, so nothing can block on a FIFO
@@ -335,34 +344,41 @@ func (s *DeliveryFS) gitIdentity(ctx context.Context, st *staged, g GitFindings)
 			}
 			continue
 		}
-		d.tree(root, repo)
+		// Resolve the repository's Git directories before walking it: a gitfile or a link points at
+		// them, and a .git directory may name a shared one in commondir. They are bound once, by the
+		// same walk that covers the repository's subtree when they lie inside it; elsewhere in the
+		// checkout they are bound on their own. Either way they are read strictly, since symlinks or
+		// alternates inside them would hide Git state that a discard drops. Outside the checkout, or
+		// not resolving, a discard could not show what it drops.
+		var inside, elsewhere []string
+		if _, err := root.Lstat(path.Join(repo, ".git")); err == nil {
+			if layout, err := gitexclude.Resolve(filepath.Join(st.root, filepath.FromSlash(repo))); err != nil {
+				d.incomplete("resolve nested .git", err)
+			} else {
+				for _, dir := range []string{layout.GitDir(), layout.CommonDir()} {
+					real, err := filepath.EvalSymlinks(dir)
+					if err != nil {
+						d.incomplete("resolve nested Git directory", err)
+						continue
+					}
+					rel, err := filepath.Rel(realRoot, real)
+					if err != nil || !filepath.IsLocal(rel) || rel == "." {
+						d.incomplete("nested Git directory outside the checkout", nil)
+						continue
+					}
+					rel = filepath.ToSlash(rel)
+					if within(rel, []string{repo}) {
+						inside = append(inside, rel)
+					} else {
+						elsewhere = append(elsewhere, rel)
+					}
+				}
+			}
+		}
+		d.repoTree(root, repo, inside)
 		digested = append(digested, repo)
-		// The repository's Git directories may lie elsewhere: a gitfile or a link points at them,
-		// and a .git directory may name a shared one in commondir. Bound only when they are inside
-		// the checkout (and so deleted with it), each once; outside, or not resolving, a discard
-		// could not show what it drops. Symlinks and alternates inside nested Git directories are
-		// rejected instead of followed, so shared Git state outside .git cannot be hidden behind
-		// an ignored link.
-		if _, err := root.Lstat(path.Join(repo, ".git")); err != nil {
-			continue
-		}
-		layout, err := gitexclude.Resolve(filepath.Join(st.root, filepath.FromSlash(repo)))
-		if err != nil {
-			d.incomplete("resolve nested .git", err)
-			continue
-		}
-		for _, dir := range []string{layout.GitDir(), layout.CommonDir()} {
-			real, err := filepath.EvalSymlinks(dir)
-			if err != nil {
-				d.incomplete("resolve nested Git directory", err)
-				continue
-			}
-			rel, err := filepath.Rel(realRoot, real)
-			if err != nil || !filepath.IsLocal(rel) || rel == "." {
-				d.incomplete("nested Git directory outside the checkout", nil)
-				continue
-			}
-			rel = filepath.ToSlash(rel)
+		checkedGitDirs = append(checkedGitDirs, inside...)
+		for _, rel := range elsewhere {
 			if !within(rel, digested) {
 				fmt.Fprintf(h, "points at %s\x00", rel)
 				d.gitTree(root, rel)
@@ -453,10 +469,12 @@ func (d *digester) file(r *os.Root, name string) {
 	d.bytes -= n
 }
 
-// tree writes every entry below dir (dir itself included, .git directories included): regular
-// files by content, links by target, directories by name. Any other kind of entry cannot be bound.
-func (d *digester) tree(r *os.Root, dir string) {
-	d.walkTree(r, dir, true, "")
+// repoTree writes a nested repository: its working tree by content and links by target, and the
+// Git directories inside it (gitDirs, relative to the checkout root) strictly, all in one pass.
+// So the Git metadata inside this subtree is validated by the walk that hashes it, instead of
+// being scanned again afterwards.
+func (d *digester) repoTree(r *os.Root, dir string, gitDirs []string) {
+	d.walkTree(r, dir, gitDirs, true)
 }
 
 // gitTree writes every entry below a nested Git directory by content and fails closed when any
@@ -472,12 +490,16 @@ func (d *digester) gitTree(r *os.Root, dir string) {
 		d.incomplete(dir+" is not a directory", nil)
 		return
 	}
-	d.walkTree(r, dir, false, path.Join(dir, "objects/info/alternates"))
+	d.walkTree(r, dir, []string{dir}, false)
 }
 
-func (d *digester) walkTree(r *os.Root, dir string, allowSymlinks bool, alternates string) {
+// walkTree writes every entry below dir. Inside the directories in strict (which include dir
+// itself when it is a Git directory) a delivery cannot carry what Git reads there, so a symlink or
+// special file, and an objects/info/alternates at any depth, make the digest incomplete instead of
+// being followed. allowMissing writes a marker for a gitlink that has no working tree here.
+func (d *digester) walkTree(r *os.Root, dir string, strict []string, allowMissing bool) {
 	if _, err := r.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
-		if allowSymlinks {
+		if allowMissing {
 			fmt.Fprintf(d.h, "missing %s\x00", dir)
 			return // a gitlink with no working tree here
 		}
@@ -495,15 +517,16 @@ func (d *digester) walkTree(r *os.Root, dir string, allowSymlinks bool, alternat
 			d.incomplete("too many entries", nil)
 			return fs.SkipAll
 		}
-		if alternates != "" && p == alternates {
+		if parent, ok := strings.CutSuffix(p, alternatesSuffix); ok && within(parent, strict) {
 			d.incomplete(p+" uses alternates in a nested Git directory", nil)
 			return fs.SkipAll
 		}
+		inGit := strict != nil && within(p, strict)
 		switch t := e.Type(); {
 		case t.IsDir():
 			fmt.Fprintf(d.h, "dir %s\x00", p)
 		case t&fs.ModeSymlink != 0:
-			if !allowSymlinks {
+			if inGit {
 				d.incomplete(p+" is a symlink in a nested Git directory", nil)
 				return fs.SkipAll
 			}
@@ -544,7 +567,7 @@ func (d *digester) checkGitDir(r *os.Root, dir string) {
 		d.incomplete(dir+" is not a directory", nil)
 		return
 	}
-	alternates := path.Join(dir, "objects/info/alternates")
+	// A Git directory's alternates may sit at any depth (a deinitialized submodule keeps its own).
 	checked := 0
 	err = fs.WalkDir(r.FS(), dir, func(p string, e fs.DirEntry, err error) error {
 		if err != nil {
@@ -557,7 +580,7 @@ func (d *digester) checkGitDir(r *os.Root, dir string) {
 			d.incomplete("too many entries", nil)
 			return fs.SkipAll
 		}
-		if p == alternates {
+		if parent, ok := strings.CutSuffix(p, alternatesSuffix); ok && within(parent, []string{dir}) {
 			d.incomplete(p+" uses alternates in a nested Git directory", nil)
 			return fs.SkipAll
 		}

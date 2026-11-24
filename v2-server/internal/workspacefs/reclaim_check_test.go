@@ -600,6 +600,77 @@ func TestInspectReclaimMarksSymlinksAndAlternatesInNestedGitIncomplete(t *testin
 			},
 			wantRepo: "wt",
 		},
+		"alternates deeper inside a nested Git directory": {
+			setup: func(t *testing.T, root string) {
+				deliveryWrite(t, root, ".gitignore", "*.log\nstore.git/\nwt/\n")
+				lib := initLib(t)
+				shared := filepath.Join(root, "store.git")
+				deliveryGit(t, root, "clone", "-q", "--bare", lib, shared)
+				wt := filepath.Join(root, "wt")
+				deliveryWrite(t, wt, "lib.go", "package lib\n")
+				deliveryGit(t, wt, "init", "-q", ".")
+				deliveryGit(t, wt, "add", ".")
+				deliveryGit(t, wt, "commit", "-qm", "lib")
+				deliveryGit(t, wt, "-c", "protocol.file.allow=always", "submodule", "add", "-q", lib, "mod")
+				deliveryGit(t, wt, "commit", "-qm", "submodule")
+				// Deinit: the submodule has no working tree, but its Git directory stays.
+				if err := os.RemoveAll(filepath.Join(wt, "mod")); err != nil {
+					t.Fatal(err)
+				}
+				const target = "../../../../../store.git/objects"
+				if _, err := os.Stat(filepath.Join(wt, ".git/modules/mod/objects", target)); err != nil {
+					t.Fatalf("the shared object store is not reachable through the alternates: %v", err)
+				}
+				deliveryWrite(t, wt, ".git/modules/mod/objects/info/alternates", target+"\n")
+			},
+			wantRepo: "wt",
+		},
+		"Git directory named like an alternates file stays complete": {
+			setup: func(t *testing.T, root string) {
+				deliveryWrite(t, root, ".gitignore", "*.log\nwt/\n")
+				// git init --separate-git-dir puts the metadata where an alternates file would sit;
+				// that is a Git directory, not a pointer at objects elsewhere.
+				wt := filepath.Join(root, "wt")
+				deliveryWrite(t, wt, "lib.go", "package lib\n")
+				if err := os.MkdirAll(filepath.Join(wt, "cache", "objects", "info"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				deliveryGit(t, wt, "init", "-q", "--separate-git-dir", "cache/objects/info/alternates", ".")
+				deliveryGit(t, wt, "add", ".")
+				deliveryGit(t, wt, "commit", "-qm", "lib")
+			},
+			wantComplete: true,
+			wantRepo:     "wt",
+		},
+		"nested Git directory resolving to the checkout root": {
+			setup: func(t *testing.T, root string) {
+				deliveryWrite(t, root, ".gitignore", "*.log\nwt/\n")
+				wt := filepath.Join(root, "wt")
+				deliveryWrite(t, wt, "lib.go", "package lib\n")
+				deliveryGit(t, wt, "init", "-q", ".")
+				deliveryGit(t, wt, "add", ".")
+				deliveryGit(t, wt, "commit", "-qm", "lib")
+				if err := os.RemoveAll(filepath.Join(wt, ".git")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("..", filepath.Join(wt, ".git")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantRepo: "wt",
+		},
+		"alternates inside .git/modules entry": {
+			setup: func(t *testing.T, root string) {
+				deliveryWrite(t, root, ".gitignore", "*.log\nstore.git/\n")
+				lib := initLib(t)
+				shared := filepath.Join(root, "store.git")
+				deliveryGit(t, root, "clone", "-q", "--bare", lib, shared)
+				deliveryGit(t, root, "-c", "protocol.file.allow=always", "submodule", "add", "-q", lib, "mod")
+				deliveryGit(t, root, "commit", "-qm", "submodule")
+				deliveryWrite(t, root, ".git/modules/mod/objects/info/alternates", "../../../../store.git/objects\n")
+			},
+			wantRepo: ".git/modules/mod",
+		},
 		"working tree symlink stays complete": {
 			setup: func(t *testing.T, root string) {
 				sub := filepath.Join(root, "vendor", "lib")

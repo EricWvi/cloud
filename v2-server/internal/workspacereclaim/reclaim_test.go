@@ -1472,6 +1472,41 @@ func TestDiscardIsRefusedWhenNestedGitUsesSymlinksOrAlternates(t *testing.T) {
 		}
 	})
 
+	t.Run("alternates behind a deinitialized submodule", func(t *testing.T) {
+		f := newFixture(t)
+		c := f.chat(t, st.TurnDelivered)
+		write(t, c.Path, ".gitignore", "*.log\nstore.git/\nwt/\n")
+		lib := initLib(t)
+		shared := filepath.Join(c.Path, "store.git")
+		git(t, c.Path, "clone", "-q", "--bare", lib, shared)
+		wt := filepath.Join(c.Path, "wt")
+		write(t, wt, "lib.txt", "lib\n")
+		git(t, wt, "init", "-q", ".")
+		git(t, wt, "add", "lib.txt")
+		git(t, wt, "commit", "-qm", "lib")
+		git(t, wt, "-c", "protocol.file.allow=always", "submodule", "add", "-q", lib, "mod")
+		git(t, wt, "commit", "-qm", "submodule")
+		// Deinit leaves .git/modules/mod in place without a working tree for it.
+		if err := os.RemoveAll(filepath.Join(wt, "mod")); err != nil {
+			t.Fatal(err)
+		}
+		const target = "../../../../../store.git/objects"
+		if _, err := os.Stat(filepath.Join(wt, ".git/modules/mod/objects", target)); err != nil {
+			t.Fatalf("the shared object store is not reachable through the alternates: %v", err)
+		}
+		write(t, wt, ".git/modules/mod/objects/info/alternates", target+"\n")
+		svc, seen := endAndPreview(t, f, c)
+		if seen.Workspace != wr.WorkspaceUndelivered || seen.Reason != wr.ReasonGitState || seen.Discardable {
+			t.Fatalf("preview = %+v", seen)
+		}
+		if _, err := svc.Delete(context.Background(), f.scope, c.ConversationID, store.ReclaimDiscard, seen.Revision); !errors.Is(err, chat.ErrDiscardUnverifiable) {
+			t.Fatalf("discard = %v, want ErrDiscardUnverifiable", err)
+		}
+		if _, err := f.s.ChatConversation(context.Background(), f.scope.TenantID, f.scope.UserID, c.ConversationID); err != nil || !exists(t, wt) {
+			t.Fatalf("conversation or wt missing after refused discard: %v", err)
+		}
+	})
+
 	t.Run("symlink swapped in after preview", func(t *testing.T) {
 		f := newFixture(t)
 		c := f.chat(t, st.TurnDelivered)
